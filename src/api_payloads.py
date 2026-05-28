@@ -31,13 +31,13 @@ from .strategy_models import (
     strategy_signal_rows_from_prepared,
     weights_from_strategy_rows,
 )
-from .user_dual_momentum import (
-    UserDualMomentumConfig,
+from .defensive_momentum import (
+    DefensiveMomentumConfig,
     compute_composite_scores,
     compute_market_regime,
     compute_price_features,
     decide_target_weights,
-    get_daily_bars as get_user_dual_daily_bars,
+    get_daily_bars as get_defensive_daily_bars,
     get_intraday_bars,
 )
 from .universe import load_tradable_names, resolve_project_path
@@ -150,7 +150,6 @@ def status_payload() -> dict[str, Any]:
             "target_annual_vol": config.target_annual_vol,
             "cash_buffer": config.cash_buffer,
         },
-        "logs": _file_info(config.log_file),
     }
 
 
@@ -428,8 +427,8 @@ def strategy_signals_payload(strategy: str = "momentum_social") -> dict[str, Any
             ],
         }
 
-    if strategy == "user_dual_momentum":
-        return _user_dual_momentum_signals_payload()
+    if strategy == "defensive_momentum":
+        return _defensive_momentum_signals_payload()
 
     if strategy != "momentum_social":
         bars_by_symbol, _social_by_symbol = _latest_signal_bars(strategy)
@@ -531,7 +530,7 @@ def strategy_signals_payload(strategy: str = "momentum_social") -> dict[str, Any
     }
 
 
-def _user_dual_momentum_sentiment_from_records(
+def _defensive_momentum_sentiment_from_records(
     symbols: list[str],
     records: list[dict[str, Any]],
     lookback_minutes: int,
@@ -573,8 +572,8 @@ def _user_dual_momentum_sentiment_from_records(
     return symbol_sentiment, float(market_sentiment), metadata, sorted(providers)
 
 
-def _user_dual_momentum_reason(row: dict[str, Any], weight: float, regime: str) -> str:
-    if weight > 0 and str(row.get("symbol")) in {"BIL", "SHY", "BND", "AGG", "IUSB", "IEF", "TLT"}:
+def _defensive_momentum_reason(row: dict[str, Any], weight: float, regime: str) -> str:
+    if weight > 0 and str(row.get("symbol")) in {"BIL", "SHY", "SPTS", "IEF", "GOVT", "AGG", "BND", "IUSB", "STIP", "TLT", "GLD"}:
         return "Defensive rotation"
     if weight > 0:
         return "Risk-on rank"
@@ -587,15 +586,15 @@ def _user_dual_momentum_reason(row: dict[str, Any], weight: float, regime: str) 
     return "Below rank cutoff"
 
 
-def _user_dual_momentum_signals_payload() -> dict[str, Any]:
-    config = get_config(strategy_id="user_dual_momentum")
-    strategy_config = UserDualMomentumConfig.from_runtime_config(config)
+def _defensive_momentum_signals_payload() -> dict[str, Any]:
+    config = get_config(strategy_id="defensive_momentum")
+    strategy_config = DefensiveMomentumConfig.from_runtime_config(config)
     symbols = strategy_config.symbols
     data_client = create_data_client(config)
     intraday_bars = get_intraday_bars(symbols, strategy_config.required_intraday_bars, config, data_client)
-    daily_bars = get_user_dual_daily_bars(symbols, strategy_config.daily_abs_momentum_lookback_days, config, data_client)
+    daily_bars = get_defensive_daily_bars(symbols, strategy_config.daily_abs_momentum_lookback_days, config, data_client)
     sentiment_records = fetch_latest_news_sentiment(symbols, config)
-    sentiment, market_sentiment, sentiment_meta, providers = _user_dual_momentum_sentiment_from_records(
+    sentiment, market_sentiment, sentiment_meta, providers = _defensive_momentum_sentiment_from_records(
         symbols,
         sentiment_records,
         strategy_config.sentiment_lookback_minutes,
@@ -630,12 +629,12 @@ def _user_dual_momentum_signals_payload() -> dict[str, Any]:
                 "realized_vol": _json_number(row.get("realized_volatility")),
                 "trend_ok": int(bool(row.get("daily_trend_ok"))),
                 "target_weight": _json_number(weight),
-                "reason": _user_dual_momentum_reason(row, weight, regime),
+                "reason": _defensive_momentum_reason(row, weight, regime),
             }
         )
     leaders.sort(key=lambda item: (item["side"] != "LONG", -float(item.get("target_weight") or 0.0), -float(item.get("score") or 0.0)))
     return {
-        "strategy": "user_dual_momentum",
+        "strategy": "defensive_momentum",
         "wired": True,
         "updated_at": pd.Timestamp.now(tz="UTC").isoformat(),
         "summary": [
@@ -645,16 +644,6 @@ def _user_dual_momentum_signals_payload() -> dict[str, Any]:
         ],
         "leaders": leaders,
     }
-
-
-def logs_payload(lines: int = 200) -> dict[str, Any]:
-    config = get_config()
-    log_path = resolve_project_path(config.log_file)
-    if not log_path.exists():
-        return {"lines": []}
-
-    content = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    return {"lines": [_redact(line) for line in content[-lines:]]}
 
 
 def refresh_social_payload(body: dict[str, Any]) -> dict[str, Any]:
@@ -720,7 +709,6 @@ def _load_backtest_cache(path: str = BACKTEST_CACHE_PATH) -> dict[str, Any]:
         cache = load_state(
             BACKTEST_CACHE_STATE_KEY,
             {"version": BACKTEST_CACHE_VERSION, "items": {}},
-            legacy_path=BACKTEST_CACHE_PATH,
         )
         if cache.get("version") == BACKTEST_CACHE_VERSION and isinstance(cache.get("items"), dict):
             return cache

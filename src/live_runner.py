@@ -9,15 +9,16 @@ from .alpaca_client import (
     get_account_equity,
     get_positions,
     get_latest_price,
+    is_market_open,
 )
 from .data import fetch_daily_bars
-from .logging_utils import configure_logging, log_signals, log_portfolio, log_orders
+from .logging_utils import configure_logging, log_signals, log_portfolio, log_orders, log_position_changes
 from .orders import sync_positions_to_targets
 from .portfolio import compute_target_weights
 from .signals import compute_signals_for_universe
 from .social import load_social_trends_csv
 from .strategy_models import STRATEGY_LABELS, strategy_signal_rows, weights_from_strategy_rows
-from .user_dual_momentum import UserDualMomentumConfig, build_user_dual_momentum_targets
+from .defensive_momentum import DefensiveMomentumConfig, build_defensive_momentum_targets
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,7 @@ def run_once(account_id: str | None = None) -> None:
         if account_id
         else get_config(strategy_id=strategy)
     )
-    configure_logging(config.log_file)
+    configure_logging()
 
     logger.info(
         "Starting live runner for account %s with trading endpoint %s",
@@ -87,6 +88,10 @@ def run_once(account_id: str | None = None) -> None:
     logger.info("Active strategy: %s", STRATEGY_LABELS.get(strategy, strategy))
 
     trading_client = create_trading_client(config)
+    if not is_market_open(trading_client):
+        logger.warning("Market is closed according to Alpaca clock. Exiting without sending orders.")
+        return
+
     data_client = create_data_client(config)
 
     account_equity = get_account_equity(trading_client)
@@ -95,9 +100,9 @@ def run_once(account_id: str | None = None) -> None:
         logger.info("Algorithm sizing equity capped at %.2f from account equity %.2f", equity, account_equity)
     current_positions = get_positions(trading_client)
 
-    user_dual_config = UserDualMomentumConfig.from_runtime_config(config)
-    if strategy == "user_dual_momentum":
-        price_symbols = sorted(set(user_dual_config.symbols) | set(current_positions))
+    defensive_config = DefensiveMomentumConfig.from_runtime_config(config)
+    if strategy == "defensive_momentum":
+        price_symbols = sorted(set(defensive_config.symbols) | set(current_positions))
     else:
         price_symbols = sorted(set(config.symbols) | set(current_positions))
     latest_quotes = fetch_latest_market_quotes(price_symbols, config, data_client=data_client)
@@ -110,22 +115,22 @@ def run_once(account_id: str | None = None) -> None:
             else get_latest_price(symbol, data_client, data_feed=config.alpaca_data_feed)
         )
 
-    if strategy == "user_dual_momentum":
+    if strategy == "defensive_momentum":
         if "paper-api.alpaca.markets" not in str(config.alpaca_base_url):
             logger.warning(
-                "Intraday Social Dual Momentum is restricted to Alpaca paper trading by default. "
+                "Defensive Momentum is restricted to Alpaca paper trading by default. "
                 "Configured endpoint %s is not paper; exiting without orders.",
                 config.alpaca_base_url,
             )
             return
-        target_weights, signals, metadata = build_user_dual_momentum_targets(
+        target_weights, signals, metadata = build_defensive_momentum_targets(
             config,
             data_client,
             current_positions,
             latest_prices,
             equity,
         )
-        logger.info("Intraday Social Dual Momentum metadata: %s", metadata)
+        logger.info("Defensive Momentum metadata: %s", metadata)
         log_signals(signals, latest_prices)
         log_portfolio(target_weights, equity)
         order_results = sync_positions_to_targets(
@@ -135,10 +140,11 @@ def run_once(account_id: str | None = None) -> None:
             target_weights,
             equity,
             cash_buffer=0.0,
-            min_trade_dollars=user_dual_config.per_trade_value_min,
+            min_trade_dollars=defensive_config.per_trade_value_min,
             rebalance_threshold=0.0,
         )
         log_orders(order_results)
+        log_position_changes(order_results)
         return
 
     bars_by_symbol = fetch_daily_bars(
@@ -199,6 +205,7 @@ def run_once(account_id: str | None = None) -> None:
         rebalance_threshold=config.rebalance_threshold,
     )
     log_orders(order_results)
+    log_position_changes(order_results)
 
 
 def main() -> None:

@@ -24,15 +24,6 @@ def test_sanitize_dca_plan_keeps_only_universe_symbols() -> None:
     assert [item["symbol"] for item in sanitized["sell"]["items"]] == ["QQQ", "SPY"]
 
 
-def test_sanitize_dca_plan_accepts_legacy_accumulate_bucket() -> None:
-    plan = {"accumulate": {"items": [{"symbol": "SPY", "amount": 25}]}}
-
-    sanitized = sanitize_dca_plan(plan, UNIVERSE)
-
-    assert sanitized["buy"]["items"] == [{"symbol": "SPY", "amount": 25.0}]
-    assert "accumulate" not in sanitized
-
-
 def test_allocation_preview_uses_exact_item_amounts() -> None:
     plan = sanitize_dca_plan(
         {
@@ -100,7 +91,7 @@ def test_sanitize_dca_plan_preserves_schedule_pattern() -> None:
 
 
 def test_save_and_load_dca_plan_uses_yaml_section(tmp_path) -> None:
-    config_path = tmp_path / "trading_bot.yaml"
+    config_path = tmp_path / "dca_bot.yaml"
 
     saved = save_dca_plan(
         {

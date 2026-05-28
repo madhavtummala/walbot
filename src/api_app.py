@@ -15,7 +15,6 @@ from .api_payloads import (
     backtest_payload,
     controls_payload,
     dca_payload,
-    logs_payload,
     recommend_universe_payload,
     refresh_social_payload,
     save_controls_payload,
@@ -121,11 +120,6 @@ def social(limit: int = Query(default=250, ge=1, le=5000)) -> dict[str, Any]:
 @app.get("/api/strategy-signals")
 def strategy_signals(strategy: str = Query(default="momentum_social", max_length=80)) -> dict[str, Any]:
     return strategy_signals_payload(strategy=strategy)
-
-
-@app.get("/api/logs")
-def logs(lines: int = Query(default=200, ge=1, le=5000)) -> dict[str, Any]:
-    return logs_payload(lines=lines)
 
 
 @app.post("/api/refresh-social")

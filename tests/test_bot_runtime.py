@@ -37,6 +37,24 @@ def test_algorithm_bucket_key_uses_refresh_window() -> None:
     assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 23, 9, 0), 30) is None
 
 
+def test_algorithm_bucket_key_anchors_to_market_open_for_hourly_runs() -> None:
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 0), 60) == (
+        "algorithm:2026-05-22T08:30-05:00"
+    )
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 30), 60) == (
+        "algorithm:2026-05-22T09:30-05:00"
+    )
+
+
+def test_algorithm_bucket_key_waits_for_jitter_offset(monkeypatch) -> None:
+    monkeypatch.setattr(bot_runtime, "_algorithm_jitter_offset_minutes", lambda *_args: 4)
+
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 8, 33), 60, 5) is None
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 8, 34), 60, 5) == (
+        "algorithm:2026-05-22T08:30-05:00"
+    )
+
+
 def test_options_enabled_requires_strategy_and_kill_switch_off(monkeypatch) -> None:
     class Config:
         kill_switch = False

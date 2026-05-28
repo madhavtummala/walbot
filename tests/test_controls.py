@@ -21,7 +21,7 @@ def test_sanitize_controls_defaults_and_bools() -> None:
 
 
 def test_save_and_load_controls(tmp_path) -> None:
-    controls_path = tmp_path / "controls.yaml"
+    controls_path = tmp_path / "algorithm_bot.yaml"
 
     saved = save_controls(
         {"algorithm_enabled": False, "options_trading_enabled": True, "active_strategy": "breakout"},
@@ -31,10 +31,9 @@ def test_save_and_load_controls(tmp_path) -> None:
     assert saved == load_controls(path=str(controls_path))
     assert saved["active_strategy"] == "breakout"
     saved_yaml = controls_path.read_text(encoding="utf-8")
-    assert "algorithmic_trading:" in saved_yaml
-    assert "equities:" in saved_yaml
-    assert "options:" in saved_yaml
-    assert "trading_controls:" not in saved_yaml
+    assert "algorithm_bot:" in saved_yaml
+    assert "options_bot:" in saved_yaml
+    assert "algorithmic_trading:" not in saved_yaml
 
 
 def test_save_and_load_controls_uses_split_bot_files(tmp_path, monkeypatch) -> None:
@@ -63,7 +62,7 @@ def test_save_and_load_controls_uses_split_bot_files(tmp_path, monkeypatch) -> N
     assert "algorithmic_trading:" not in algorithm_bot_path.read_text(encoding="utf-8")
 
 
-def test_old_algorithm_enabled_state_still_loads() -> None:
+def test_flat_api_controls_are_normalized() -> None:
     controls = sanitize_controls({"algorithm_enabled": True, "active_strategy": "breakout"})
 
     assert controls["algorithm_enabled"] is True
@@ -86,13 +85,16 @@ def test_new_equities_and_options_sections_load() -> None:
     assert controls["options_trading_account_id"] == "paper-options"
 
 
-def test_load_controls_reads_direct_yaml_mapping(tmp_path) -> None:
-    controls_path = tmp_path / "controls.yaml"
+def test_load_controls_reads_structured_bot_yaml(tmp_path) -> None:
+    controls_path = tmp_path / "algorithm_bot.yaml"
     controls_path.write_text(
         """
-active_strategy: none
-algorithm_enabled: false
-options_trading_enabled: false
+algorithm_bot:
+  enabled: false
+  strategy: none
+options_bot:
+  enabled: false
+  strategy: none
 """,
         encoding="utf-8",
     )

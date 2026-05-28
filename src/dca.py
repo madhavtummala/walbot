@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-from .config import load_dca_config, load_raw_config, save_dca_config
+from .config import load_dca_config, save_dca_config
 
 DCA_PLAN_SECTION = "dca_plan"
 DCA_MAX_ITEM_AMOUNT = 50.0
@@ -31,7 +31,6 @@ DEFAULT_DCA_PLAN: dict[str, Any] = {
 
 FREQUENCIES = {"daily", "weekly", "biweekly", "monthly"}
 BUCKETS = ("buy", "sell")
-LEGACY_BUCKETS = {"accumulate": "buy"}
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
@@ -58,14 +57,11 @@ def sanitize_dca_plan(plan: dict[str, Any] | None, universe_rows: list[dict[str,
     """Normalize a DCA plan and keep only symbols present in the configured universe."""
     raw_plan = deepcopy(DEFAULT_DCA_PLAN)
     if plan:
-        ignored_bucket_keys = set(BUCKETS) | set(LEGACY_BUCKETS)
+        ignored_bucket_keys = set(BUCKETS)
         raw_plan.update({key: value for key, value in plan.items() if key not in ignored_bucket_keys})
         for bucket in BUCKETS:
             if isinstance(plan.get(bucket), dict):
                 raw_plan[bucket].update(plan[bucket])
-        for old_bucket, new_bucket in LEGACY_BUCKETS.items():
-            if isinstance(plan.get(old_bucket), dict):
-                raw_plan[new_bucket].update(plan[old_bucket])
 
     universe = _universe_lookup(universe_rows)
     sanitized = {
@@ -82,16 +78,15 @@ def sanitize_dca_plan(plan: dict[str, Any] | None, universe_rows: list[dict[str,
     for bucket in BUCKETS:
         bucket_plan = raw_plan.get(bucket, {})
         raw_items = bucket_plan.get("items", [])
-        fallback_amounts = _legacy_item_amounts(raw_items, _as_float(bucket_plan.get("amount"), default=0.0))
         assigned_symbols: set[str] = set()
         items: list[dict[str, Any]] = []
-        for index, item in enumerate(raw_items):
+        for item in raw_items:
             symbol = str(item.get("symbol", "")).strip().upper()
             if not symbol or symbol not in universe or symbol in assigned_symbols:
                 continue
             assigned_symbols.add(symbol)
             amount = min(
-                _as_float(item.get("amount"), default=fallback_amounts.get(index, 0.0)),
+                _as_float(item.get("amount"), default=0.0),
                 sanitized["max_item_amount"],
                 DCA_MAX_ITEM_AMOUNT,
             )
@@ -115,34 +110,22 @@ def _raw_plan_from_config(raw_config: dict[str, Any]) -> dict[str, Any]:
         section = bot_section.get(DCA_PLAN_SECTION)
         if isinstance(section, dict):
             return section
-        if any(key in bot_section for key in DEFAULT_DCA_PLAN):
-            return bot_section
-    section = raw_config.get(DCA_PLAN_SECTION)
-    if isinstance(section, dict):
-        return section
-    if any(key in raw_config for key in DEFAULT_DCA_PLAN):
-        return raw_config
     return DEFAULT_DCA_PLAN
 
 
 def load_dca_plan(universe_rows: list[dict[str, Any]], path: str | None = None) -> dict[str, Any]:
     raw_config = load_dca_config(path)
-    if not raw_config:
-        raw_config = load_raw_config()
     return sanitize_dca_plan(_raw_plan_from_config(raw_config), universe_rows)
 
 
 def save_dca_plan(plan: dict[str, Any], universe_rows: list[dict[str, Any]], path: str | None = None) -> dict[str, Any]:
     sanitized = sanitize_dca_plan(plan, universe_rows)
     raw_config = load_dca_config(path)
-    if path is None:
-        dca_bot = raw_config.setdefault("dca_bot", {})
-        if not isinstance(dca_bot, dict):
-            dca_bot = {}
-            raw_config["dca_bot"] = dca_bot
-        dca_bot[DCA_PLAN_SECTION] = sanitized
-    else:
-        raw_config[DCA_PLAN_SECTION] = sanitized
+    dca_bot = raw_config.setdefault("dca_bot", {})
+    if not isinstance(dca_bot, dict):
+        dca_bot = {}
+        raw_config["dca_bot"] = dca_bot
+    dca_bot[DCA_PLAN_SECTION] = sanitized
     save_dca_config(raw_config, path)
     return sanitized
 
@@ -180,15 +163,3 @@ def allocation_preview(plan: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
     return rows
-
-
-def _legacy_item_amounts(items: list[dict[str, Any]], bucket_amount: float) -> dict[int, float]:
-    if not items or bucket_amount <= 0:
-        return {}
-    if any("amount" in item for item in items):
-        return {}
-    total_priority = sum(range(1, len(items) + 1))
-    return {
-        index: bucket_amount * ((len(items) - index) / total_priority)
-        for index in range(len(items))
-    }

@@ -47,7 +47,6 @@ ALGORITHM_EQUITY_CAP = 0.0
 KILL_SWITCH = False
 ALPACA_BASE_URL = "https://paper-api.alpaca.markets"
 HISTORY_EXTRA_BUFFER_DAYS = 250
-LOG_FILE = "logs/trading.log"
 TRADABLES_CSV = "data/tradable_etfs.csv"
 ALPACA_DATA_FEED = "iex"
 ALPHA_VANTAGE_NEWS_CSV = "data/social_trends.csv"
@@ -55,11 +54,9 @@ ALPHA_VANTAGE_NEWS_LOOKBACK_DAYS = 30
 ALPHA_VANTAGE_NEWS_LIMIT = 50
 ALPHA_VANTAGE_MAX_SYMBOLS = 20
 ALPHA_VANTAGE_REQUEST_DELAY_SECONDS = 0.0
-CONFIG_FILE = "config/trading_bot.yaml"
 ACCOUNTS_FILE = "config/accounts.yaml"
 CONNECTORS_FILE = "config/connectors.yaml"
 ALGORITHMS_FILE = "config/algorithms.yaml"
-DCA_CONFIG_FILE = "config/dca.yaml"
 ALGORITHM_BOT_FILE = "config/algorithm_bot.yaml"
 OPTIONS_BOT_FILE = "config/options_bot.yaml"
 DCA_BOT_FILE = "config/dca_bot.yaml"
@@ -71,6 +68,7 @@ NEWS_SENTIMENT_CACHE_TTL_SECONDS = 1800
 ALGORITHM_CHECK_SECONDS = 60
 DCA_CHECK_SECONDS = 300
 ALGORITHM_MARKET_DATA_REFRESH_MINUTES = 30
+ALGORITHM_RUN_JITTER_MINUTES = 0
 OPTIONS_SWING_DTE_MIN = 30
 OPTIONS_SWING_DTE_MAX = 60
 OPTIONS_SWING_MIN_DELTA = 0.35
@@ -87,29 +85,7 @@ ALGORITHM_IDS = {
     "breakout",
     "risk_parity",
     "dual_momentum",
-    "user_dual_momentum",
-}
-ALGORITHM_KNOB_KEYS = {
-    "momentum_lookback_days",
-    "short_momentum_lookback_days",
-    "long_ma_days",
-    "volume_lookback_days",
-    "social_lookback_days",
-    "max_weight_per_symbol",
-    "max_portfolio_exposure",
-    "max_longs",
-    "min_composite_score",
-    "price_momentum_weight",
-    "social_momentum_weight",
-    "volume_momentum_weight",
-    "target_annual_vol",
-    "cash_buffer",
-    "min_trade_dollars",
-    "rebalance_threshold",
-    "transaction_cost_bps",
-    "backtest_starting_equity",
-    "algorithm_equity_cap",
-    "history_extra_buffer_days",
+    "defensive_momentum",
 }
 
 
@@ -117,7 +93,7 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _resolve_path(path: str | None, default: str = CONFIG_FILE) -> Path:
+def _resolve_path(path: str | None, default: str = ALGORITHM_BOT_FILE) -> Path:
     if not path:
         return _project_root() / default
     candidate = Path(path)
@@ -135,14 +111,6 @@ def _load_yaml_file(config_path: Path) -> dict[str, Any]:
     return loaded
 
 
-def _load_yaml_config(path: str | None = None) -> dict[str, Any]:
-    return _load_yaml_file(config_file_path(path))
-
-
-def config_file_path(path: str | None = None) -> Path:
-    return _resolve_path(path or os.getenv("TRADING_CONFIG_FILE", CONFIG_FILE))
-
-
 def accounts_file_path(path: str | None = None) -> Path:
     return _resolve_path(path or os.getenv("TRADING_ACCOUNTS_FILE", ACCOUNTS_FILE), ACCOUNTS_FILE)
 
@@ -154,17 +122,15 @@ def connectors_file_path(path: str | None = None) -> Path:
 def _sibling_config_path(path: str | None, env_name: str, default: str) -> Path:
     if path or os.getenv(env_name):
         return _resolve_path(path or os.getenv(env_name), default)
-    if os.getenv("TRADING_CONFIG_FILE"):
-        return config_file_path().with_name(Path(default).name)
     return _resolve_path(default)
 
 
 def algorithms_file_path(path: str | None = None) -> Path:
-    return _sibling_config_path(path, "TRADING_ALGORITHM_BOT_FILE", ALGORITHM_BOT_FILE)
-
-
-def legacy_algorithms_file_path(path: str | None = None) -> Path:
     return _sibling_config_path(path, "TRADING_ALGORITHMS_FILE", ALGORITHMS_FILE)
+
+
+def algorithm_bot_file_path(path: str | None = None) -> Path:
+    return _sibling_config_path(path, "TRADING_ALGORITHM_BOT_FILE", ALGORITHM_BOT_FILE)
 
 
 def options_bot_file_path(path: str | None = None) -> Path:
@@ -175,16 +141,8 @@ def dca_config_file_path(path: str | None = None) -> Path:
     return _sibling_config_path(path, "TRADING_DCA_BOT_FILE", DCA_BOT_FILE)
 
 
-def legacy_dca_config_file_path(path: str | None = None) -> Path:
-    return _sibling_config_path(path, "TRADING_DCA_CONFIG_FILE", DCA_CONFIG_FILE)
-
-
 def universe_file_path(path: str | None = None) -> Path:
     return _sibling_config_path(path, "TRADING_UNIVERSE_FILE", UNIVERSE_FILE)
-
-
-def load_raw_config(path: str | None = None) -> dict[str, Any]:
-    return _load_yaml_config(path)
 
 
 def load_accounts_config(path: str | None = None) -> dict[str, Any]:
@@ -196,8 +154,11 @@ def load_connectors_config(path: str | None = None) -> dict[str, Any]:
 
 
 def load_algorithms_config(path: str | None = None) -> dict[str, Any]:
-    config = _load_yaml_file(algorithms_file_path(path))
-    return config or _load_yaml_file(legacy_algorithms_file_path(path))
+    return _load_yaml_file(algorithms_file_path(path))
+
+
+def load_algorithm_bot_config(path: str | None = None) -> dict[str, Any]:
+    return _load_yaml_file(algorithm_bot_file_path(path))
 
 
 def load_options_bot_config(path: str | None = None) -> dict[str, Any]:
@@ -205,23 +166,11 @@ def load_options_bot_config(path: str | None = None) -> dict[str, Any]:
 
 
 def load_dca_config(path: str | None = None) -> dict[str, Any]:
-    config = _load_yaml_file(dca_config_file_path(path))
-    return config or _load_yaml_file(legacy_dca_config_file_path(path))
+    return _load_yaml_file(dca_config_file_path(path))
 
 
 def load_universe_config(path: str | None = None) -> dict[str, Any]:
     return _load_yaml_file(universe_file_path(path))
-
-
-def save_raw_config(config: dict[str, Any], path: str | None = None) -> Path:
-    config_path = config_file_path(path)
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    if yaml is not None:
-        content = yaml.safe_dump(config, sort_keys=False)
-    else:
-        content = _dump_simple_yaml(config)
-    config_path.write_text(content, encoding="utf-8")
-    return config_path
 
 
 def _save_yaml_config(config: dict[str, Any], config_path: Path) -> Path:
@@ -239,6 +188,10 @@ def save_dca_config(config: dict[str, Any], path: str | None = None) -> Path:
 
 
 def save_algorithm_bot_config(config: dict[str, Any], path: str | None = None) -> Path:
+    return _save_yaml_config(config, algorithm_bot_file_path(path))
+
+
+def save_algorithms_config(config: dict[str, Any], path: str | None = None) -> Path:
     return _save_yaml_config(config, algorithms_file_path(path))
 
 
@@ -252,16 +205,10 @@ def save_universe_config(config: dict[str, Any], path: str | None = None) -> Pat
 
 def save_universe_symbols(symbols: list[str], path: str | None = None) -> Path:
     raw_config = load_universe_config(path)
-    if not raw_config:
-        raw_config = {"tradable_universe": _section(load_raw_config(path), "tradable_universe")}
     universe = raw_config.setdefault("tradable_universe", {})
     if not isinstance(universe, dict):
         universe = {}
         raw_config["tradable_universe"] = universe
-    if "master_list" not in universe and "tradables_csv" not in universe:
-        old_universe = _section(load_raw_config(path), "tradable_universe")
-        if old_universe.get("master_list") or old_universe.get("tradables_csv"):
-            universe["master_list"] = old_universe.get("master_list") or old_universe.get("tradables_csv")
     universe["symbols"] = [str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()]
     return save_universe_config(raw_config, path)
 
@@ -295,7 +242,8 @@ def _parse_simple_yaml(content: str) -> dict[str, Any]:
             continue
         indent = len(line) - len(line.lstrip(" "))
         stripped = line.strip()
-        while stack and indent <= stack[-1]["indent"]:
+        is_list_item = stripped.startswith("-")
+        while stack and (indent < stack[-1]["indent"] or (indent == stack[-1]["indent"] and not is_list_item)):
             stack.pop()
         if stripped.startswith("- "):
             entry = stack[-1]
@@ -507,29 +455,17 @@ def _as_list(value: Any, default: list[str]) -> list[str]:
     return list(default)
 
 
-def _algorithm_sections(raw_config: dict[str, Any], raw_algorithms_config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def _algorithm_sections(raw_algorithms_config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     sections: dict[str, dict[str, Any]] = {}
-    sections.update(_section(raw_config, "algorithms"))
-
     if raw_algorithms_config:
         external = _section(raw_algorithms_config, "algorithms") or raw_algorithms_config
         sections.update(
             {
-                key: value
+                str(key): value
                 for key, value in external.items()
                 if isinstance(value, dict) and key not in {"algorithm_bot", "runtime"}
             }
         )
-
-    for strategy_id in ALGORITHM_IDS:
-        section = _section(raw_config, strategy_id)
-        if section:
-            sections.setdefault(strategy_id, {}).update(section)
-
-    root_algorithm = {key: raw_config[key] for key in ALGORITHM_KNOB_KEYS if key in raw_config}
-    if root_algorithm:
-        sections.setdefault("momentum_social", {}).update(root_algorithm)
-
     return sections
 
 
@@ -564,7 +500,6 @@ class Config:
     alpaca_base_url: str = ALPACA_BASE_URL
     alpaca_data_feed: str = ALPACA_DATA_FEED
     history_extra_buffer_days: int = HISTORY_EXTRA_BUFFER_DAYS
-    log_file: str = LOG_FILE
     social_trends_csv: str = ALPHA_VANTAGE_NEWS_CSV
     tradables_csv: str = TRADABLES_CSV
     alpha_vantage_api_key: str = ""
@@ -583,6 +518,7 @@ class Config:
     algorithm_check_seconds: int = ALGORITHM_CHECK_SECONDS
     dca_check_seconds: int = DCA_CHECK_SECONDS
     algorithm_market_data_refresh_minutes: int = ALGORITHM_MARKET_DATA_REFRESH_MINUTES
+    algorithm_run_jitter_minutes: int = ALGORITHM_RUN_JITTER_MINUTES
     options_swing_dte_min: int = OPTIONS_SWING_DTE_MIN
     options_swing_dte_max: int = OPTIONS_SWING_DTE_MAX
     options_swing_min_delta: float = OPTIONS_SWING_MIN_DELTA
@@ -595,10 +531,9 @@ class Config:
 
 
 def get_config(account_id: str | None = None, strategy_id: str | None = None) -> Config:
-    raw_config = _load_yaml_config()
+    raw_algorithm_bot_config = load_algorithm_bot_config()
     raw_accounts_config = load_accounts_config()
-    legacy_accounts = {"accounts": raw_config.get("accounts", {})} if raw_config.get("accounts") else {}
-    default_account_id, account_items = _normalize_accounts_config(raw_accounts_config or legacy_accounts)
+    default_account_id, account_items = _normalize_accounts_config(raw_accounts_config)
     if not default_account_id:
         default_account_id = os.getenv("TRADING_ACCOUNT_ID") or "default"
     selected_account_id = str(account_id or os.getenv("TRADING_ACCOUNT_ID") or default_account_id)
@@ -608,28 +543,29 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
         account_config = _section(account_items, selected_account_id)
 
     raw_universe_config = load_universe_config()
-    universe = _section(raw_universe_config, "tradable_universe") or _section(raw_config, "tradable_universe")
-    raw_algorithm_bot_config = load_algorithms_config()
-    legacy_algorithm = _section(raw_config, "algorithm")
-    algorithm_configs = _algorithm_sections(raw_config, raw_algorithm_bot_config)
-    selected_strategy_id = str(strategy_id or "momentum_social")
-    algorithm = {**legacy_algorithm, **_section(algorithm_configs, selected_strategy_id)}
+    universe = _section(raw_universe_config, "tradable_universe")
+    raw_algorithms_config = load_algorithms_config()
+    algorithm_configs = _algorithm_sections(raw_algorithms_config)
+    selected_strategy_id = str(strategy_id or "momentum_social").strip().lower()
+    algorithm = _section(algorithm_configs, selected_strategy_id)
     raw_dca_bot_config = load_dca_config()
     algorithm_bot = _section(raw_algorithm_bot_config, "algorithm_bot")
     dca_bot = _section(raw_dca_bot_config, "dca_bot")
     runtime = {
-        **_section(raw_config, "runtime"),
         **_section(raw_algorithm_bot_config, "runtime"),
-        **{key: value for key, value in algorithm_bot.items() if key in {"algorithm_check_seconds", "algorithm_market_data_refresh_minutes"}},
+        **{
+            key: value
+            for key, value in algorithm_bot.items()
+            if key in {"algorithm_check_seconds", "algorithm_market_data_refresh_minutes", "algorithm_run_jitter_minutes"}
+        },
         **{key: value for key, value in dca_bot.items() if key in {"dca_check_seconds"}},
     }
     raw_options_bot_config = load_options_bot_config()
-    options = _section(raw_options_bot_config, "options") or _section(raw_config, "options")
-    social = _section(raw_config, "social")
-    alpha_vantage = _section(raw_config, "alpha_vantage")
+    options = _section(raw_options_bot_config, "options")
+    social = _section(raw_algorithm_bot_config, "social")
+    alpha_vantage = _section(raw_algorithm_bot_config, "alpha_vantage")
     raw_connectors_config = load_connectors_config()
-    legacy_data_sources = {"data_sources": raw_config.get("data_sources", {})} if raw_config.get("data_sources") else {}
-    data_sources = _normalize_data_sources(raw_connectors_config or legacy_data_sources)
+    data_sources = _normalize_data_sources(raw_connectors_config)
     market_sources = _section(data_sources, "market_data")
     news_sources = _section(data_sources, "news_sentiment")
 
@@ -702,7 +638,6 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
         alpaca_base_url=base_url,
         alpaca_data_feed=str(_config_value(account_config, "data_feed", "ALPACA_DATA_FEED", ALPACA_DATA_FEED)),
         history_extra_buffer_days=_as_int(_config_value(algorithm, "history_extra_buffer_days", "HISTORY_EXTRA_BUFFER_DAYS", HISTORY_EXTRA_BUFFER_DAYS), HISTORY_EXTRA_BUFFER_DAYS),
-        log_file=str(_config_value(runtime, "log_file", "LOG_FILE", LOG_FILE)),
         social_trends_csv=social_trends_csv,
         tradables_csv=tradables_csv,
         alpha_vantage_api_key=alpha_vantage_api_key,
@@ -746,6 +681,15 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
                 ALGORITHM_MARKET_DATA_REFRESH_MINUTES,
             ),
             ALGORITHM_MARKET_DATA_REFRESH_MINUTES,
+        ),
+        algorithm_run_jitter_minutes=_as_int(
+            _config_value(
+                runtime,
+                "algorithm_run_jitter_minutes",
+                "ALGORITHM_RUN_JITTER_MINUTES",
+                ALGORITHM_RUN_JITTER_MINUTES,
+            ),
+            ALGORITHM_RUN_JITTER_MINUTES,
         ),
         options_swing_dte_min=_as_int(_config_value(options, "swing_dte_min", "OPTIONS_SWING_DTE_MIN", OPTIONS_SWING_DTE_MIN), OPTIONS_SWING_DTE_MIN),
         options_swing_dte_max=_as_int(_config_value(options, "swing_dte_max", "OPTIONS_SWING_DTE_MAX", OPTIONS_SWING_DTE_MAX), OPTIONS_SWING_DTE_MAX),

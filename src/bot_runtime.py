@@ -3,16 +3,18 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from hashlib import sha256
 from math import floor
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from .alpaca_client import create_data_client, create_trading_client, get_latest_price, submit_market_order
+from .alpaca_client import create_data_client, create_trading_client, get_latest_price, is_market_open, submit_market_order
 from .config import get_config
 from .controls import load_controls
 from .dca import allocation_preview, load_dca_plan
 from .live_runner import run_once
+from .logging_utils import log_position_changes
 
 logger = logging.getLogger(__name__)
 MARKET_TZ = ZoneInfo("America/Chicago")
@@ -168,10 +170,16 @@ def _run_dca(account_id: str | None) -> None:
     plan = load_dca_plan(universe_payload()["rows"])
     preview = allocation_preview(plan)
     if not preview:
+        log_position_changes([])
         return
 
     trading_client = create_trading_client(config)
+    if not is_market_open(trading_client):
+        logger.warning("Market is closed according to Alpaca clock. Exiting DCA runtime without sending orders.")
+        return
+
     data_client = create_data_client(config)
+    order_results: list[dict[str, Any]] = []
     for row in preview:
         symbol = str(row["symbol"])
         side = str(row["action"])
@@ -181,7 +189,17 @@ def _run_dca(account_id: str | None) -> None:
             logger.info("Skipping DCA %s for %s because notional is below one share", side, symbol)
             continue
         logger.info("Submitting DCA %s order for %s qty=%s", side, symbol, quantity)
-        submit_market_order(trading_client, symbol, side, quantity)
+        order = submit_market_order(trading_client, symbol, side, quantity)
+        order_results.append(
+            {
+                "symbol": symbol,
+                "action": side,
+                "quantity": quantity,
+                "notional": float(row["notional"]),
+                "order_id": getattr(order, "id", "unknown"),
+            }
+        )
+    log_position_changes(order_results)
 
 
 def _cron_field_matches(field: str, value: int, *, min_value: int, max_value: int) -> bool:
@@ -253,21 +271,37 @@ def _is_regular_market_hours(now: datetime) -> bool:
     return MARKET_OPEN_MINUTE <= minute_of_day < MARKET_CLOSE_MINUTE
 
 
-def _algorithm_bucket_key(now: datetime, refresh_minutes: int) -> str | None:
+def _algorithm_jitter_offset_minutes(bucket: datetime, refresh_minutes: int, jitter_minutes: int) -> int:
+    jitter_minutes = max(int(jitter_minutes or 0), 0)
+    if jitter_minutes <= 0:
+        return 0
+    seed = f"{bucket.date().isoformat()}:{bucket.hour:02d}:{bucket.minute:02d}:{refresh_minutes}".encode("utf-8")
+    return int.from_bytes(sha256(seed).digest()[:4], "big") % (jitter_minutes + 1)
+
+
+def _algorithm_bucket_key(now: datetime, refresh_minutes: int, jitter_minutes: int = 0) -> str | None:
     if not _is_regular_market_hours(now):
         return None
     refresh_minutes = max(int(refresh_minutes or 30), 1)
     local_now = now.astimezone(MARKET_TZ) if now.tzinfo else now.replace(tzinfo=MARKET_TZ)
     minute_of_day = (local_now.hour * 60) + local_now.minute
-    bucket_minute = (minute_of_day // refresh_minutes) * refresh_minutes
+    bucket_minute = MARKET_OPEN_MINUTE + (((minute_of_day - MARKET_OPEN_MINUTE) // refresh_minutes) * refresh_minutes)
     bucket_hour, bucket_minute = divmod(bucket_minute, 60)
     bucket = local_now.replace(hour=bucket_hour, minute=bucket_minute, second=0, microsecond=0)
+    jitter_offset = _algorithm_jitter_offset_minutes(bucket, refresh_minutes, jitter_minutes)
+    scheduled = bucket + timedelta(minutes=jitter_offset)
+    if local_now < scheduled:
+        return None
     return f"algorithm:{bucket.isoformat(timespec='minutes')}"
 
 
 def _algorithm_run_key() -> str | None:
     config = get_config()
-    return _algorithm_bucket_key(datetime.now(MARKET_TZ), config.algorithm_market_data_refresh_minutes)
+    return _algorithm_bucket_key(
+        datetime.now(MARKET_TZ),
+        config.algorithm_market_data_refresh_minutes,
+        config.algorithm_run_jitter_minutes,
+    )
 
 
 def _options_run_key() -> str | None:

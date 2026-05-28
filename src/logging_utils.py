@@ -1,14 +1,10 @@
 from __future__ import annotations
 import logging
-import os
-from pathlib import Path
+from typing import Any
 
 
-def configure_logging(log_file: str = "logs/trading.log") -> None:
-    """Configure root logging to the console and a rotating file."""
-    log_dir = Path(log_file).parent
-    log_dir.mkdir(parents=True, exist_ok=True)
-
+def configure_logging() -> None:
+    """Configure root logging to the console."""
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
 
@@ -22,10 +18,35 @@ def configure_logging(log_file: str = "logs/trading.log") -> None:
     console_handler.setFormatter(formatter)
     logger.handlers = [console_handler]
 
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+
+def log_position_changes(order_results: list[dict[str, Any]]) -> None:
+    logger = logging.getLogger(__name__)
+    submitted_orders = [
+        order
+        for order in order_results
+        if int(order.get("quantity") or 0) > 0
+        and str(order.get("action") or "").lower() not in {"hold", "skip"}
+        and order.get("order_id")
+    ]
+    if not submitted_orders:
+        logger.warning("No position changes were submitted.")
+        return
+
+    logger.warning("Position changes submitted: %s order(s)", len(submitted_orders))
+    for order in submitted_orders:
+        details = [
+            f"{str(order.get('action')).upper()}",
+            str(order.get("symbol")),
+            f"qty={order.get('quantity')}",
+        ]
+        if order.get("current_shares") is not None and order.get("target_shares") is not None:
+            details.append(f"current={order.get('current_shares')}")
+            details.append(f"target={order.get('target_shares')}")
+        if order.get("trade_dollars") is not None:
+            details.append(f"trade_dollars={float(order.get('trade_dollars') or 0.0):.2f}")
+        if order.get("limit_price") is not None:
+            details.append(f"limit={float(order.get('limit_price') or 0.0):.2f}")
+        logger.warning("  %s order_id=%s", " ".join(details), order.get("order_id"))
 
 
 def log_signals(signals: dict[str, dict[str, float | int]], prices: dict[str, float]) -> None:

@@ -9,7 +9,6 @@ __pycache__
 !.env.example
 data/*
 !data/tradable_etfs.csv
-logs/
 *.sqlite
 *.sqlite-*
 tests/

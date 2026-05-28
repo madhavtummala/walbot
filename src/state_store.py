@@ -31,22 +31,7 @@ def _connect(db_path: str = STATE_DB_PATH) -> sqlite3.Connection:
     return connection
 
 
-def _read_legacy_json(path: str) -> Any | None:
-    legacy_path = resolve_project_path(path)
-    if not legacy_path.exists():
-        return None
-    content = legacy_path.read_text(encoding="utf-8")
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        try:
-            payload, _ = json.JSONDecoder().raw_decode(content)
-            return payload
-        except json.JSONDecodeError:
-            return None
-
-
-def load_state(key: str, default: Any, legacy_path: str | None = None, db_path: str = STATE_DB_PATH) -> Any:
+def load_state(key: str, default: Any, db_path: str = STATE_DB_PATH) -> Any:
     with _connect(db_path) as connection:
         row = connection.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
         if row:
@@ -55,11 +40,6 @@ def load_state(key: str, default: Any, legacy_path: str | None = None, db_path: 
             except json.JSONDecodeError:
                 return default
 
-    if legacy_path:
-        legacy_value = _read_legacy_json(legacy_path)
-        if legacy_value is not None:
-            save_state(key, legacy_value, db_path=db_path)
-            return legacy_value
     return default
 
 

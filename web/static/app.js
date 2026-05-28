@@ -73,9 +73,9 @@ const STRATEGIES = [
     signals: ["6-month return", "12-month return", "Relative rank", "Absolute momentum hurdle", "Volatility filter"],
   },
   {
-    key: "user_dual_momentum",
-    name: "Intraday Social Dual Momentum",
-    status: "User",
+    key: "defensive_momentum",
+    name: "Defensive Momentum",
+    status: "Live",
     horizon: "Intraday",
     risk: "Medium",
     logic: "Ranks the curated ETF universe with 30-minute momentum, daily absolute trend, and recent sentiment; regime rules rotate between risk-on and defensive sleeves.",
@@ -1234,7 +1234,7 @@ async function loadSignals(strategyKey) {
 }
 
 function formatSignalDetail(strategyKey, row) {
-  if (strategyKey === "user_dual_momentum") {
+  if (strategyKey === "defensive_momentum") {
     const providers = Array.isArray(row.sentiment_providers) && row.sentiment_providers.length
       ? row.sentiment_providers.join(", ")
       : "none";

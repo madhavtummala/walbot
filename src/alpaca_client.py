@@ -60,6 +60,15 @@ def get_positions(trading_client: TradingClient) -> dict[str, int]:
     return parsed
 
 
+def is_market_open(trading_client: TradingClient) -> bool:
+    try:
+        clock = trading_client.get_clock()
+    except Exception as exc:
+        logger.warning("Unable to confirm market clock; treating market as closed: %s", exc)
+        return False
+    return bool(getattr(clock, "is_open", False))
+
+
 def _iter_bars(bars, symbol: str | None = None):
     if hasattr(bars, "data"):
         if symbol is not None:

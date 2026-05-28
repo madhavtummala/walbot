@@ -48,6 +48,7 @@ def test_live_runner_uses_selected_template_strategy(monkeypatch) -> None:
         lambda: {"algorithm_enabled": True, "active_strategy": "risk_parity"},
     )
     monkeypatch.setattr(live_runner, "create_trading_client", lambda config: object())
+    monkeypatch.setattr(live_runner, "is_market_open", lambda client: True)
     monkeypatch.setattr(live_runner, "create_data_client", lambda config: object())
     monkeypatch.setattr(live_runner, "get_account_equity", lambda client: 1_000.0)
     monkeypatch.setattr(live_runner, "get_positions", lambda client: {})
@@ -72,3 +73,22 @@ def test_live_runner_uses_selected_template_strategy(monkeypatch) -> None:
     assert captured["signals"]["AAA"]["signal"] == 1
     assert captured["weights"]["AAA"] == 0.5
     assert captured["orders_weights"]["AAA"] == 0.5
+
+
+def test_live_runner_exits_when_market_clock_is_closed(monkeypatch) -> None:
+    called = {"data_client": False}
+
+    monkeypatch.setattr(live_runner, "configure_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(live_runner, "get_config", lambda **_kwargs: Config(kill_switch=False))
+    monkeypatch.setattr(
+        live_runner,
+        "load_controls",
+        lambda: {"algorithm_enabled": True, "active_strategy": "momentum_social"},
+    )
+    monkeypatch.setattr(live_runner, "create_trading_client", lambda config: object())
+    monkeypatch.setattr(live_runner, "is_market_open", lambda client: False)
+    monkeypatch.setattr(live_runner, "create_data_client", lambda config: called.__setitem__("data_client", True))
+
+    live_runner.run_once()
+
+    assert not called["data_client"]

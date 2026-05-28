@@ -13,13 +13,13 @@ STRATEGY_LABELS = {
     "breakout": "Breakout",
     "risk_parity": "Risk Parity",
     "dual_momentum": "Dual Momentum",
-    "user_dual_momentum": "Intraday Social Dual Momentum",
+    "defensive_momentum": "Defensive Momentum",
 }
 
-USER_DUAL_MOMENTUM_DEFENSIVE_SYMBOLS = {"BIL", "SHY", "BND", "AGG", "IUSB", "IEF", "TLT"}
-USER_DUAL_MOMENTUM_DEFENSIVE_ORDER = ("BIL", "SHY", "AGG", "BND", "IUSB", "IEF", "TLT")
-USER_DUAL_MOMENTUM_RISK_ON_LIMIT = 5
-USER_DUAL_MOMENTUM_DEFENSIVE_LIMIT = 3
+DEFENSIVE_MOMENTUM_DEFENSIVE_SYMBOLS = {"BIL", "SHY", "SPTS", "IEF", "GOVT", "AGG", "BND", "IUSB", "STIP", "TLT", "GLD"}
+DEFENSIVE_MOMENTUM_DEFENSIVE_ORDER = ("BIL", "SHY", "SPTS", "IEF", "GOVT", "AGG", "BND", "IUSB", "STIP", "TLT", "GLD")
+DEFENSIVE_MOMENTUM_RISK_ON_LIMIT = 5
+DEFENSIVE_MOMENTUM_DEFENSIVE_LIMIT = 3
 
 
 def json_number(value: Any) -> float | None:
@@ -116,12 +116,12 @@ def strategy_row_from_prepared(strategy: str, symbol: str, work: pd.DataFrame) -
             side, reason = "LONG", "Positive absolute and relative momentum"
         elif score < -0.02 and ret_126 < 0:
             side, reason = "SHORT", "Negative absolute momentum"
-    elif strategy == "user_dual_momentum":
+    elif strategy == "defensive_momentum":
         momentum_score = (0.70 * ret_252) + (0.30 * ret_63)
         risk_adjusted_score = momentum_score / vol_252
         score = risk_adjusted_score
         side = "FLAT"
-        if symbol in USER_DUAL_MOMENTUM_DEFENSIVE_SYMBOLS:
+        if symbol in DEFENSIVE_MOMENTUM_DEFENSIVE_SYMBOLS:
             reason = "Defensive candidate for risk-off rotation"
         else:
             reason = "Waiting for absolute and relative momentum confirmation"
@@ -140,7 +140,7 @@ def strategy_row_from_prepared(strategy: str, symbol: str, work: pd.DataFrame) -
         "risk_adjusted_score": risk_adjusted_score,
         "cash_hurdle": cash_hurdle,
         "absolute_ok": absolute_ok,
-        "realized_vol": vol_252 if strategy == "user_dual_momentum" else vol,
+        "realized_vol": vol_252 if strategy == "defensive_momentum" else vol,
         "sma_50": sma_50,
         "sma_long": sma_200,
         "z_20": z_20,
@@ -149,8 +149,8 @@ def strategy_row_from_prepared(strategy: str, symbol: str, work: pd.DataFrame) -
     }
 
 
-def _user_dual_momentum_flat_reason(row: dict[str, Any], cash_hurdle: float) -> str:
-    if str(row["symbol"]) in USER_DUAL_MOMENTUM_DEFENSIVE_SYMBOLS:
+def _defensive_momentum_flat_reason(row: dict[str, Any], cash_hurdle: float) -> str:
+    if str(row["symbol"]) in DEFENSIVE_MOMENTUM_DEFENSIVE_SYMBOLS:
         return "Defensive sleeve inactive while risk-on momentum is healthy"
     if _finite(row.get("ret_252")) <= 0:
         return "12-month return is below zero"
@@ -161,7 +161,7 @@ def _user_dual_momentum_flat_reason(row: dict[str, Any], cash_hurdle: float) -> 
     return "Outside current dual-momentum selection"
 
 
-def _rank_user_dual_momentum_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _rank_defensive_momentum_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows = [dict(row) for row in rows]
     bil_row = next((row for row in rows if str(row["symbol"]) == "BIL"), None)
     cash_hurdle = max(0.0, _finite(bil_row.get("ret_252") if bil_row else None))
@@ -169,13 +169,13 @@ def _rank_user_dual_momentum_rows(rows: list[dict[str, Any]]) -> list[dict[str, 
     for row in rows:
         row["cash_hurdle"] = cash_hurdle
         row["absolute_ok"] = int(
-            str(row["symbol"]) not in USER_DUAL_MOMENTUM_DEFENSIVE_SYMBOLS
+            str(row["symbol"]) not in DEFENSIVE_MOMENTUM_DEFENSIVE_SYMBOLS
             and _finite(row.get("ret_252")) > cash_hurdle
             and _finite(row.get("momentum_score")) > 0
         )
         row["side"] = "FLAT"
         row["signal"] = 0
-        row["reason"] = _user_dual_momentum_flat_reason(row, cash_hurdle)
+        row["reason"] = _defensive_momentum_flat_reason(row, cash_hurdle)
 
     risk_on = [
         row
@@ -188,7 +188,7 @@ def _rank_user_dual_momentum_rows(rows: list[dict[str, Any]]) -> list[dict[str, 
     )
 
     if risk_on:
-        selected_symbols = {row["symbol"] for row in risk_on[:USER_DUAL_MOMENTUM_RISK_ON_LIMIT]}
+        selected_symbols = {row["symbol"] for row in risk_on[:DEFENSIVE_MOMENTUM_RISK_ON_LIMIT]}
         for row in rows:
             if row["symbol"] in selected_symbols:
                 row["side"] = "LONG"
@@ -199,13 +199,13 @@ def _rank_user_dual_momentum_rows(rows: list[dict[str, Any]]) -> list[dict[str, 
     available_defensive = {
         str(row["symbol"]): row
         for row in rows
-        if str(row["symbol"]) in USER_DUAL_MOMENTUM_DEFENSIVE_SYMBOLS
+        if str(row["symbol"]) in DEFENSIVE_MOMENTUM_DEFENSIVE_SYMBOLS
     }
     selected_defensive = [
         available_defensive[symbol]
-        for symbol in USER_DUAL_MOMENTUM_DEFENSIVE_ORDER
+        for symbol in DEFENSIVE_MOMENTUM_DEFENSIVE_ORDER
         if symbol in available_defensive
-    ][:USER_DUAL_MOMENTUM_DEFENSIVE_LIMIT]
+    ][:DEFENSIVE_MOMENTUM_DEFENSIVE_LIMIT]
 
     for row in selected_defensive:
         row["side"] = "LONG"
@@ -216,8 +216,8 @@ def _rank_user_dual_momentum_rows(rows: list[dict[str, Any]]) -> list[dict[str, 
         rows,
         key=lambda item: (
             item["signal"] != 1,
-            USER_DUAL_MOMENTUM_DEFENSIVE_ORDER.index(item["symbol"])
-            if item["symbol"] in USER_DUAL_MOMENTUM_DEFENSIVE_ORDER
+            DEFENSIVE_MOMENTUM_DEFENSIVE_ORDER.index(item["symbol"])
+            if item["symbol"] in DEFENSIVE_MOMENTUM_DEFENSIVE_ORDER
             else 99,
             -_finite(item.get("score")),
         ),
@@ -254,8 +254,8 @@ def _rank_strategy_rows(strategy: str, rows: list[dict[str, Any]]) -> list[dict[
                 row["side"] = "FLAT"
                 row["signal"] = 0
                 row["reason"] = "Outside current dual-momentum selection"
-    if strategy == "user_dual_momentum":
-        return _rank_user_dual_momentum_rows(rows)
+    if strategy == "defensive_momentum":
+        return _rank_defensive_momentum_rows(rows)
     return sorted(rows, key=lambda item: (item["signal"] != 1, item["signal"] == 0, -abs(item.get("score", 0.0))))
 
 

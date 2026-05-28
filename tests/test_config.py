@@ -4,25 +4,37 @@ from src.config import get_config
 
 
 def test_get_config_reads_yaml_accounts_and_knobs(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "trading_bot.yaml"
+    algorithm_bot_path = tmp_path / "algorithm_bot.yaml"
+    algorithms_path = tmp_path / "algorithms.yaml"
+    universe_path = tmp_path / "universe.yaml"
     accounts_path = tmp_path / "accounts.yaml"
     connectors_path = tmp_path / "connectors.yaml"
-    config_path.write_text(
+    algorithm_bot_path.write_text(
+        """
+runtime:
+  kill_switch: true
+  algorithm_check_seconds: 45
+social:
+  trends_csv: data/custom_social.csv
+""",
+        encoding="utf-8",
+    )
+    algorithms_path.write_text(
+        """
+algorithms:
+  momentum_social:
+    momentum_lookback_days: 42
+    max_longs: 3
+""",
+        encoding="utf-8",
+    )
+    universe_path.write_text(
         """
 tradable_universe:
   master_list: missing_tradables.csv
   symbols:
     - AAA
     - BBB
-algorithms:
-  momentum_social:
-    momentum_lookback_days: 42
-    max_longs: 3
-runtime:
-  kill_switch: true
-  algorithm_check_seconds: 45
-social:
-  trends_csv: data/custom_social.csv
 """,
         encoding="utf-8",
     )
@@ -61,7 +73,9 @@ data_sources:
 """,
         encoding="utf-8",
     )
-    monkeypatch.setenv("TRADING_CONFIG_FILE", str(config_path))
+    monkeypatch.setenv("TRADING_ALGORITHM_BOT_FILE", str(algorithm_bot_path))
+    monkeypatch.setenv("TRADING_ALGORITHMS_FILE", str(algorithms_path))
+    monkeypatch.setenv("TRADING_UNIVERSE_FILE", str(universe_path))
     monkeypatch.setenv("TRADING_ACCOUNTS_FILE", str(accounts_path))
     monkeypatch.setenv("TRADING_CONNECTORS_FILE", str(connectors_path))
     monkeypatch.delenv("KILL_SWITCH", raising=False)
@@ -91,10 +105,10 @@ data_sources:
 
 
 def test_get_config_uses_empty_external_account_and_connector_files(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "trading_bot.yaml"
+    universe_path = tmp_path / "universe.yaml"
     accounts_path = tmp_path / "accounts.yaml"
     connectors_path = tmp_path / "connectors.yaml"
-    config_path.write_text(
+    universe_path.write_text(
         """
 tradable_universe:
   symbols:
@@ -115,7 +129,7 @@ data_sources:
 """,
         encoding="utf-8",
     )
-    monkeypatch.setenv("TRADING_CONFIG_FILE", str(config_path))
+    monkeypatch.setenv("TRADING_UNIVERSE_FILE", str(universe_path))
     monkeypatch.setenv("TRADING_ACCOUNTS_FILE", str(accounts_path))
     monkeypatch.setenv("TRADING_CONNECTORS_FILE", str(connectors_path))
     monkeypatch.delenv("SYMBOLS", raising=False)
@@ -129,10 +143,10 @@ data_sources:
 
 
 def test_get_config_prefers_explicit_provider_order_when_present(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "trading_bot.yaml"
+    universe_path = tmp_path / "universe.yaml"
     accounts_path = tmp_path / "accounts.yaml"
     connectors_path = tmp_path / "connectors.yaml"
-    config_path.write_text(
+    universe_path.write_text(
         """
 tradable_universe:
   symbols:
@@ -157,7 +171,7 @@ data_sources:
 """,
         encoding="utf-8",
     )
-    monkeypatch.setenv("TRADING_CONFIG_FILE", str(config_path))
+    monkeypatch.setenv("TRADING_UNIVERSE_FILE", str(universe_path))
     monkeypatch.setenv("TRADING_ACCOUNTS_FILE", str(accounts_path))
     monkeypatch.setenv("TRADING_CONNECTORS_FILE", str(connectors_path))
     monkeypatch.delenv("SYMBOLS", raising=False)
@@ -169,25 +183,26 @@ data_sources:
 
 
 def test_get_config_reads_split_bot_and_universe_files(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "trading_bot.yaml"
     algorithm_bot_path = tmp_path / "algorithm_bot.yaml"
+    algorithms_path = tmp_path / "algorithms.yaml"
     options_bot_path = tmp_path / "options_bot.yaml"
     dca_bot_path = tmp_path / "dca_bot.yaml"
     universe_path = tmp_path / "universe.yaml"
     accounts_path = tmp_path / "accounts.yaml"
     connectors_path = tmp_path / "connectors.yaml"
-    config_path.write_text(
+    algorithm_bot_path.write_text(
         """
 runtime:
   kill_switch: false
-""",
-        encoding="utf-8",
-    )
-    algorithm_bot_path.write_text(
-        """
 algorithm_bot:
   algorithm_check_seconds: 30
   algorithm_market_data_refresh_minutes: 10
+  algorithm_run_jitter_minutes: 3
+""",
+        encoding="utf-8",
+    )
+    algorithms_path.write_text(
+        """
 algorithms:
   dual_momentum:
     momentum_lookback_days: 126
@@ -222,8 +237,8 @@ tradable_universe:
     )
     accounts_path.write_text("accounts: []\n", encoding="utf-8")
     connectors_path.write_text("data_sources: {}\n", encoding="utf-8")
-    monkeypatch.setenv("TRADING_CONFIG_FILE", str(config_path))
     monkeypatch.setenv("TRADING_ALGORITHM_BOT_FILE", str(algorithm_bot_path))
+    monkeypatch.setenv("TRADING_ALGORITHMS_FILE", str(algorithms_path))
     monkeypatch.setenv("TRADING_OPTIONS_BOT_FILE", str(options_bot_path))
     monkeypatch.setenv("TRADING_DCA_BOT_FILE", str(dca_bot_path))
     monkeypatch.setenv("TRADING_UNIVERSE_FILE", str(universe_path))
@@ -238,5 +253,6 @@ tradable_universe:
     assert config.max_longs == 4
     assert config.algorithm_check_seconds == 30
     assert config.algorithm_market_data_refresh_minutes == 10
+    assert config.algorithm_run_jitter_minutes == 3
     assert config.dca_check_seconds == 90
     assert config.options_swing_dte_min == 35

@@ -71,29 +71,21 @@ def test_universe_payload_returns_configured_rows() -> None:
 
 def test_apply_universe_payload_writes_approved_subset(tmp_path, monkeypatch) -> None:
     tradables_csv = tmp_path / "tradables.csv"
-    config_yaml = tmp_path / "trading_bot.yaml"
+    universe_yaml = tmp_path / "universe.yaml"
     tradables_csv.write_text(
         "Ticker,Name\nSPY,SPDR S&P 500 ETF Trust\nQQQ,Invesco QQQ Trust\nGLD,SPDR Gold Trust\n",
         encoding="utf-8",
     )
-    config_yaml.write_text(
+    universe_yaml.write_text(
         f"""
-accounts:
-  default: paper
-  items:
-    paper:
-      label: Paper
 tradable_universe:
   master_list: {tradables_csv}
   symbols:
     - SPY
-algorithms:
-  momentum_social:
-    momentum_lookback_days: 63
 """,
         encoding="utf-8",
     )
-    monkeypatch.setenv("TRADING_CONFIG_FILE", str(config_yaml))
+    monkeypatch.setenv("TRADING_UNIVERSE_FILE", str(universe_yaml))
     monkeypatch.delenv("TRADABLES_CSV", raising=False)
 
     payload = api_payloads.apply_universe_payload(
@@ -115,20 +107,17 @@ algorithms:
 
 
 def test_apply_universe_payload_accepts_symbols_without_master_csv(tmp_path, monkeypatch) -> None:
-    config_yaml = tmp_path / "trading_bot.yaml"
-    config_yaml.write_text(
+    universe_yaml = tmp_path / "universe.yaml"
+    universe_yaml.write_text(
         """
 tradable_universe:
   master_list: missing_tradables.csv
   symbols:
     - SPY
-algorithms:
-  momentum_social:
-    momentum_lookback_days: 63
 """,
         encoding="utf-8",
     )
-    monkeypatch.setenv("TRADING_CONFIG_FILE", str(config_yaml))
+    monkeypatch.setenv("TRADING_UNIVERSE_FILE", str(universe_yaml))
     monkeypatch.delenv("TRADABLES_CSV", raising=False)
 
     payload = api_payloads.apply_universe_payload({"symbols": ["AAA", "BBB", "CCC"]})
@@ -138,29 +127,21 @@ algorithms:
 
 def test_recommend_universe_payload_scores_fresh_candidates(tmp_path, monkeypatch) -> None:
     tradables_csv = tmp_path / "tradables.csv"
-    config_yaml = tmp_path / "trading_bot.yaml"
+    universe_yaml = tmp_path / "universe.yaml"
     tradables_csv.write_text(
         "Ticker,Name\nSPY,SPDR S&P 500 ETF Trust\nQQQ,Invesco QQQ Trust\nIBIT,iShares Bitcoin Trust\nGLD,SPDR Gold Trust\nTLT,iShares 20+ Year Treasury Bond ETF\n",
         encoding="utf-8",
     )
-    config_yaml.write_text(
+    universe_yaml.write_text(
         f"""
-accounts:
-  default: paper
-  items:
-    paper:
-      label: Paper
 tradable_universe:
   master_list: {tradables_csv}
   symbols:
     - SPY
-algorithms:
-  momentum_social:
-    momentum_lookback_days: 63
 """,
         encoding="utf-8",
     )
-    monkeypatch.setenv("TRADING_CONFIG_FILE", str(config_yaml))
+    monkeypatch.setenv("TRADING_UNIVERSE_FILE", str(universe_yaml))
     monkeypatch.delenv("TRADABLES_CSV", raising=False)
     monkeypatch.setattr(api_payloads, "create_data_client", lambda config: object())
 
@@ -422,7 +403,7 @@ def test_none_strategy_signals_summarize_dca_plan(monkeypatch) -> None:
     assert payload["summary"][0]["value"] == "DCA"
 
 
-def test_user_dual_momentum_signals_include_inactive_universe_rows(monkeypatch) -> None:
+def test_defensive_momentum_signals_include_inactive_universe_rows(monkeypatch) -> None:
     monkeypatch.setattr(api_payloads, "create_data_client", lambda config: object())
 
     def intraday(symbol: str) -> pd.DataFrame:
@@ -434,7 +415,7 @@ def test_user_dual_momentum_signals_include_inactive_universe_rows(monkeypatch) 
         return _strategy_bars([100 + index * step for index in range(40)])
 
     monkeypatch.setattr(api_payloads, "get_intraday_bars", lambda symbols, *_args, **_kwargs: {symbol: intraday(symbol) for symbol in symbols})
-    monkeypatch.setattr(api_payloads, "get_user_dual_daily_bars", lambda symbols, *_args, **_kwargs: {symbol: daily(symbol) for symbol in symbols})
+    monkeypatch.setattr(api_payloads, "get_defensive_daily_bars", lambda symbols, *_args, **_kwargs: {symbol: daily(symbol) for symbol in symbols})
     monkeypatch.setattr(
         api_payloads,
         "fetch_latest_news_sentiment",
@@ -444,17 +425,17 @@ def test_user_dual_momentum_signals_include_inactive_universe_rows(monkeypatch) 
         ],
     )
 
-    payload = strategy_signals_payload("user_dual_momentum")
+    payload = strategy_signals_payload("defensive_momentum")
 
     by_symbol = {row["symbol"]: row for row in payload["leaders"]}
-    assert {"VTI", "XBI", "BIL"} <= set(by_symbol)
+    assert {"VTI", "ACWI", "BIL"} <= set(by_symbol)
     assert by_symbol["VTI"]["side"] == "LONG"
-    assert by_symbol["XBI"]["side"] == "FLAT"
+    assert by_symbol["ACWI"]["side"] == "FLAT"
     assert by_symbol["VTI"]["sentiment_providers"] == ["stocktwits"]
     assert by_symbol["VTI"]["sentiment_records"] == 1
     assert payload["summary"][0]["value"] == "RISK ON"
-    assert by_symbol["XBI"]["target_weight"] == 0.0
-    assert by_symbol["XBI"]["reason"]
+    assert by_symbol["ACWI"]["target_weight"] == 0.0
+    assert by_symbol["ACWI"]["reason"]
 
 
 def test_momentum_social_signals_include_all_tracked_universe_rows(monkeypatch) -> None:

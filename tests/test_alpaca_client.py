@@ -7,6 +7,7 @@ from src.alpaca_client import (
     get_historical_daily_bars,
     get_historical_intraday_bars,
     get_latest_price,
+    is_market_open,
     submit_option_limit_order,
 )
 from src.config import Config
@@ -82,6 +83,22 @@ def test_create_trading_client_uses_configured_endpoint_without_paper_mode(monke
 
     assert captured["paper"] is False
     assert captured["url_override"] == "https://paper-api.alpaca.markets"
+
+
+def test_is_market_open_reads_alpaca_clock() -> None:
+    class FakeTradingClient:
+        def get_clock(self):
+            return type("Clock", (), {"is_open": True})()
+
+    assert is_market_open(FakeTradingClient())
+
+
+def test_is_market_open_fails_closed() -> None:
+    class FakeTradingClient:
+        def get_clock(self):
+            raise RuntimeError("clock unavailable")
+
+    assert not is_market_open(FakeTradingClient())
 
 
 def test_submit_option_limit_order_uses_buy_to_open_intent() -> None:

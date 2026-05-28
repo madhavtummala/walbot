@@ -73,6 +73,7 @@ def test_run_options_once_submits_buy_to_open(monkeypatch) -> None:
     )
     monkeypatch.setattr(options_trader, "get_config", lambda account_id=None, strategy_id=None: Config(account_id=account_id or "paper"))
     monkeypatch.setattr(options_trader, "create_trading_client", lambda config: object())
+    monkeypatch.setattr(options_trader, "is_market_open", lambda client: True)
     monkeypatch.setattr(options_trader, "create_data_client", lambda config: object())
     monkeypatch.setattr(options_trader, "create_option_data_client", lambda config: object())
     monkeypatch.setattr(options_trader, "get_account_equity", lambda client: 10_000.0)
@@ -109,3 +110,25 @@ def test_run_options_once_submits_buy_to_open(monkeypatch) -> None:
 
     assert submitted == [("SPY260116C00100000", "buy", 1, 2.1, "buy_to_open")]
     assert results[0]["order_id"] == "option-order-1"
+
+
+def test_run_options_once_exits_when_market_clock_is_closed(monkeypatch) -> None:
+    called = {"data_client": False}
+
+    monkeypatch.setattr(
+        options_trader,
+        "load_controls",
+        lambda: {
+            "options_trading_enabled": True,
+            "options_strategy": "options_swing_dual_momentum",
+            "options_trading_account_id": "paper-options",
+            "trading_account_id": "paper",
+        },
+    )
+    monkeypatch.setattr(options_trader, "get_config", lambda account_id=None, strategy_id=None: Config(account_id=account_id or "paper"))
+    monkeypatch.setattr(options_trader, "create_trading_client", lambda config: object())
+    monkeypatch.setattr(options_trader, "is_market_open", lambda client: False)
+    monkeypatch.setattr(options_trader, "create_data_client", lambda config: called.__setitem__("data_client", True))
+
+    assert options_trader.run_options_once() == []
+    assert not called["data_client"]

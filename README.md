@@ -12,12 +12,13 @@ The default container command starts the web app:
 uvicorn src.api_app:app --host 0.0.0.0 --port 8000
 ```
 
-The image intentionally does not include your secrets, SQLite state, logs, or generated social data. Provide those at runtime:
+The image intentionally does not include your secrets, SQLite state, or generated social data. Provide those at runtime:
 
-- `/config` - mounted writable YAML config: `trading_bot.yaml`, `accounts.yaml`, `connectors.yaml`, `algorithm_bot.yaml`, `options_bot.yaml`, `dca_bot.yaml`, and `universe.yaml`
+- `/config` - mounted writable YAML config: `algorithm_bot.yaml`, `algorithms.yaml`, `accounts.yaml`, `connectors.yaml`, `options_bot.yaml`, `dca_bot.yaml`, and `universe.yaml`
 - `/data` - mounted writable app state, SQLite DB, cached backtests, and optional social trend CSV
-- `/logs` - mounted writable logs
 - environment variables or `.env` - runtime paths and non-secret toggles
+
+Logs go to stdout/stderr by default, so use `docker compose logs -f trading-bot`, `docker logs -f trading-bot`, or Portainer's container logs.
 
 ## Runtime Files
 
@@ -26,27 +27,26 @@ Create this layout on the machine that will run the app:
 ```text
 runtime/
   config/
-    trading_bot.yaml
+    algorithm_bot.yaml
+    algorithms.yaml
     accounts.yaml
     connectors.yaml
-    algorithm_bot.yaml
     options_bot.yaml
     dca_bot.yaml
     universe.yaml
   data/
-  logs/
 .env
 ```
 
 Starter examples are in `deploy/examples/`:
 
 ```bash
-mkdir -p runtime/config runtime/data runtime/logs
+mkdir -p runtime/config runtime/data
 cp deploy/examples/env.example .env
-cp deploy/examples/trading_bot.yaml runtime/config/trading_bot.yaml
+cp deploy/examples/algorithm_bot.yaml runtime/config/algorithm_bot.yaml
+cp deploy/examples/algorithms.yaml runtime/config/algorithms.yaml
 cp deploy/examples/accounts.yaml runtime/config/accounts.yaml
 cp deploy/examples/connectors.yaml runtime/config/connectors.yaml
-cp deploy/examples/algorithm_bot.yaml runtime/config/algorithm_bot.yaml
 cp deploy/examples/options_bot.yaml runtime/config/options_bot.yaml
 cp deploy/examples/dca_bot.yaml runtime/config/dca_bot.yaml
 cp deploy/examples/universe.yaml runtime/config/universe.yaml
@@ -64,29 +64,28 @@ The provided Docker setup uses these container paths:
 
 ```bash
 STATE_DB_PATH=/data/trading_bot.sqlite
-TRADING_CONFIG_FILE=/config/trading_bot.yaml
 TRADING_ACCOUNTS_FILE=/config/accounts.yaml
 TRADING_CONNECTORS_FILE=/config/connectors.yaml
 TRADING_ALGORITHM_BOT_FILE=/config/algorithm_bot.yaml
+TRADING_ALGORITHMS_FILE=/config/algorithms.yaml
 TRADING_OPTIONS_BOT_FILE=/config/options_bot.yaml
 TRADING_DCA_BOT_FILE=/config/dca_bot.yaml
 TRADING_UNIVERSE_FILE=/config/universe.yaml
 TRADABLES_CSV=/app/data/tradable_etfs.csv
 ALPHA_VANTAGE_NEWS_CSV=/data/social_trends.csv
-LOG_FILE=/logs/trading.log
 CORS_ALLOW_ORIGINS=*
 ```
 
-Do not commit `.env`, `runtime/`, `config/`, `data/*.sqlite`, logs, or generated social/backtest files. They are ignored by `.gitignore`.
+Do not commit `.env`, `runtime/`, `config/`, `data/*.sqlite`, or generated social/backtest files. They are ignored by `.gitignore`.
 
-The master tradables file is bundled inside the image at `/app/data/tradable_etfs.csv`. The smaller deployment universe lives in `universe.yaml` under `tradable_universe.symbols`, and dashboard universe refreshes write back to that YAML file. Algorithm controls and strategy knobs live in `algorithm_bot.yaml`; options controls and strategy knobs live in `options_bot.yaml`; DCA scheduling and planning lives in `dca_bot.yaml`; account keys live in `accounts.yaml`; connector keys live in `connectors.yaml`. Social trends are app-managed/generated data in `/data/social_trends.csv`; users are not expected to provide them as ground truth.
+The master tradables file is bundled inside the image at `/app/data/tradable_etfs.csv`. The smaller deployment universe lives in `universe.yaml` under `tradable_universe.symbols`, and dashboard universe refreshes write back to that YAML file. Algorithm bot controls live in `algorithm_bot.yaml`; per-strategy algorithm knobs live in `algorithms.yaml`; options controls and strategy knobs live in `options_bot.yaml`; DCA scheduling and planning lives in `dca_bot.yaml`; account keys live in `accounts.yaml`; connector keys live in `connectors.yaml`. Social trends are app-managed/generated data in `/data/social_trends.csv`; users are not expected to provide them as ground truth.
 
-## Run Locally With Docker Compose
+## Run With Docker Compose
 
-Build and start:
+Start the published image:
 
 ```bash
-docker compose up --build -d
+docker compose up -d
 ```
 
 Open:
@@ -107,21 +106,18 @@ Stop:
 docker compose down
 ```
 
-## Build The Image Manually
+## Test A Local Image
+
+Build the image:
 
 ```bash
 docker build -t trading-bot:local .
 ```
 
-Run it:
+Run that local image with the same Compose file:
 
 ```bash
-docker run --rm -p 8000:8000 \
-  --env-file .env \
-  -v "$PWD/runtime/config:/config" \
-  -v "$PWD/runtime/data:/data" \
-  -v "$PWD/runtime/logs:/logs" \
-  trading-bot:local
+TRADING_BOT_IMAGE=trading-bot:local TRADING_BOT_PULL_POLICY=never docker compose up -d
 ```
 
 ## Publish To GitHub Container Registry
@@ -155,7 +151,7 @@ The token needs permission to read packages.
 On your server:
 
 ```bash
-mkdir -p trading-bot/runtime/config trading-bot/runtime/data trading-bot/runtime/logs
+mkdir -p trading-bot/runtime/config trading-bot/runtime/data
 cd trading-bot
 ```
 
@@ -163,36 +159,21 @@ Create `.env` using `deploy/examples/env.example` as a template, or paste the sa
 
 ```bash
 nano .env
-nano runtime/config/trading_bot.yaml
+nano runtime/config/algorithm_bot.yaml
+nano runtime/config/algorithms.yaml
 ```
 
-Run the published image:
+Copy `docker-compose.yml` to the server or paste it into an OMV/Portainer stack. Then start the published image:
 
 ```bash
-docker run -d --name trading-bot \
-  --restart unless-stopped \
-  -p 8000:8000 \
-  --env-file .env \
-  -v "$PWD/runtime/config:/config" \
-  -v "$PWD/runtime/data:/data" \
-  -v "$PWD/runtime/logs:/logs" \
-  ghcr.io/<owner>/<repo>:latest
+docker compose up -d
 ```
 
 Upgrade later:
 
 ```bash
-docker pull ghcr.io/<owner>/<repo>:latest
-docker stop trading-bot
-docker rm trading-bot
-docker run -d --name trading-bot \
-  --restart unless-stopped \
-  -p 8000:8000 \
-  --env-file .env \
-  -v "$PWD/runtime/config:/config" \
-  -v "$PWD/runtime/data:/data" \
-  -v "$PWD/runtime/logs:/logs" \
-  ghcr.io/<owner>/<repo>:latest
+docker compose pull
+docker compose up -d
 ```
 
 Your app state survives upgrades because it lives in `runtime/data`, not inside the image.
@@ -206,19 +187,17 @@ docker run --rm \
   --env-file .env \
   -v "$PWD/runtime/config:/config" \
   -v "$PWD/runtime/data:/data" \
-  -v "$PWD/runtime/logs:/logs" \
   ghcr.io/<owner>/<repo>:latest \
   python -m src.backtest
 ```
 
-Run the trading worker once, for manual testing or legacy scheduled operation:
+Run the trading worker once for manual testing:
 
 ```bash
 docker run --rm \
   --env-file .env \
   -v "$PWD/runtime/config:/config" \
   -v "$PWD/runtime/data:/data" \
-  -v "$PWD/runtime/logs:/logs" \
   ghcr.io/<owner>/<repo>:latest \
   python -m src.live_runner
 ```
@@ -227,16 +206,9 @@ For normal use, leave the dashboard running and use the DCA, Algorithm, or Optio
 
 ## Configuration Reference
 
-Config file paths:
+Common runtime overrides:
 
 ```bash
-TRADING_CONFIG_FILE=/config/trading_bot.yaml
-TRADING_ACCOUNTS_FILE=/config/accounts.yaml
-TRADING_CONNECTORS_FILE=/config/connectors.yaml
-TRADING_ALGORITHM_BOT_FILE=/config/algorithm_bot.yaml
-TRADING_OPTIONS_BOT_FILE=/config/options_bot.yaml
-TRADING_DCA_BOT_FILE=/config/dca_bot.yaml
-TRADING_UNIVERSE_FILE=/config/universe.yaml
 KILL_SWITCH=false
 CORS_ALLOW_ORIGINS=*
 ```
@@ -247,7 +219,7 @@ For a public or reverse-proxied deployment, set `CORS_ALLOW_ORIGINS` to the exac
 
 YAML config:
 
-`trading_bot.yaml` contains global runtime settings such as `kill_switch` and `log_file`. `algorithm_bot.yaml` contains the algorithm bot power state, selected equity strategy, trading account id, refresh cadence, and nested knobs for each server-side algorithm. `options_bot.yaml` contains the options bot power state, selected options strategy, options account id, and options strategy knobs. `dca_bot.yaml` contains DCA scheduling and the DCA plan. `universe.yaml` contains `tradable_universe.symbols` and optional `master_list`. `accounts.yaml` contains brokerage accounts with direct `api_key` / `api_secret` values. `connectors.yaml` contains market/news providers and direct connector API keys; fallback order follows the order of entries under each `providers` mapping unless you add an explicit `provider_order`. `TRADABLES_CSV` still overrides the master-list path from the environment if set.
+`algorithm_bot.yaml` contains global runtime settings such as `kill_switch` plus the algorithm bot power state, selected equity strategy, trading account id, refresh cadence, and optional cadence jitter. `algorithms.yaml` contains only the nested knobs for each server-side algorithm. `options_bot.yaml` contains the options bot power state, selected options strategy, options account id, and options strategy knobs. `dca_bot.yaml` contains DCA scheduling and the DCA plan. `universe.yaml` contains `tradable_universe.symbols` and optional `master_list`. `accounts.yaml` contains brokerage accounts with direct `api_key` / `api_secret` values. `connectors.yaml` contains market/news providers and direct connector API keys; fallback order follows the order of entries under each `providers` mapping unless you add an explicit `provider_order`. `TRADABLES_CSV` still overrides the master-list path from the environment if set.
 
 By default, `accounts.yaml` and `connectors.yaml` are empty arrays, so the container expects you to mount filled versions. Raw provider responses, short-lived cache entries, and provider limit state are stored in the SQLite DB under `STATE_DB_PATH`.
 
@@ -280,7 +252,6 @@ Persistence:
 
 ```bash
 STATE_DB_PATH=/data/trading_bot.sqlite
-LOG_FILE=/logs/trading.log
 ```
 
 ## Non-Docker Development
@@ -290,22 +261,21 @@ Install dependencies:
 ```bash
 python -m venv .venv
 . .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
 
 Create `.env` in the project root. For local non-Docker development, paths may stay relative:
 
 ```bash
-TRADING_CONFIG_FILE=config/trading_bot.yaml
 TRADING_ACCOUNTS_FILE=config/accounts.yaml
 TRADING_CONNECTORS_FILE=config/connectors.yaml
 TRADING_ALGORITHM_BOT_FILE=config/algorithm_bot.yaml
+TRADING_ALGORITHMS_FILE=config/algorithms.yaml
 TRADING_OPTIONS_BOT_FILE=config/options_bot.yaml
 TRADING_DCA_BOT_FILE=config/dca_bot.yaml
 TRADING_UNIVERSE_FILE=config/universe.yaml
 STATE_DB_PATH=data/trading_bot.sqlite
 ALPHA_VANTAGE_NEWS_CSV=data/social_trends.csv
-LOG_FILE=logs/trading.log
 ```
 
 Run the dashboard:

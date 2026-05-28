@@ -7,7 +7,7 @@ from typing import Any, Iterable
 import pandas as pd
 
 from .backtest import calculate_performance_metrics
-from .strategy_models import USER_DUAL_MOMENTUM_DEFENSIVE_ORDER, USER_DUAL_MOMENTUM_DEFENSIVE_SYMBOLS, prepared_strategy_frame
+from .strategy_models import DEFENSIVE_MOMENTUM_DEFENSIVE_ORDER, DEFENSIVE_MOMENTUM_DEFENSIVE_SYMBOLS, prepared_strategy_frame
 
 
 @dataclass(frozen=True)
@@ -89,7 +89,7 @@ def _weights_for_date(
     risk_on = [
         (symbol, values)
         for symbol, values in scores.items()
-        if symbol not in USER_DUAL_MOMENTUM_DEFENSIVE_SYMBOLS
+        if symbol not in DEFENSIVE_MOMENTUM_DEFENSIVE_SYMBOLS
         and values["long_return"] > cash_hurdle
         and values["score"] > 0
     ]
@@ -97,7 +97,7 @@ def _weights_for_date(
     selected = [symbol for symbol, _values in risk_on[: max(int(config.risk_on_limit), 1)]]
 
     if not selected:
-        defensive = [symbol for symbol in USER_DUAL_MOMENTUM_DEFENSIVE_ORDER if symbol in frames]
+        defensive = [symbol for symbol in DEFENSIVE_MOMENTUM_DEFENSIVE_ORDER if symbol in frames]
         selected = defensive[: max(int(config.defensive_limit), 0)]
 
     weights = {symbol: 0.0 for symbol in frames}

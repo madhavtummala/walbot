@@ -3,8 +3,8 @@ from __future__ import annotations
 import pandas as pd
 
 from src.config import Config
-from src.user_dual_momentum import (
-    UserDualMomentumConfig,
+from src.defensive_momentum import (
+    DefensiveMomentumConfig,
     apply_risk_guards,
     compute_composite_scores,
     compute_market_regime,
@@ -43,7 +43,7 @@ def _daily(prices: list[float]) -> pd.DataFrame:
 
 
 def test_price_features_use_intraday_and_daily_momentum() -> None:
-    config = UserDualMomentumConfig(daily_abs_momentum_lookback_days=2)
+    config = DefensiveMomentumConfig(daily_abs_momentum_lookback_days=2)
 
     features = compute_price_features("SPY", _intraday([100, 101, 103, 106, 110, 115, 121]), _daily([100, 101, 103, 106, 110]), config)
 
@@ -55,7 +55,7 @@ def test_price_features_use_intraday_and_daily_momentum() -> None:
 
 
 def test_regime_and_weights_select_risk_on_leaders() -> None:
-    config = UserDualMomentumConfig(
+    config = DefensiveMomentumConfig(
         risk_on_universe=["SPY", "QQQ"],
         defensive_universe=["TLT"],
         max_risk_on_positions=1,
@@ -78,7 +78,7 @@ def test_regime_and_weights_select_risk_on_leaders() -> None:
 
 
 def test_cautious_regime_can_mix_strong_risk_on_and_defensive() -> None:
-    config = UserDualMomentumConfig(
+    config = DefensiveMomentumConfig(
         risk_on_universe=["QQQ"],
         defensive_universe=["TLT", "SHY"],
         cautious_min_risk_on_score=1.0,
@@ -101,8 +101,8 @@ def test_cautious_regime_can_mix_strong_risk_on_and_defensive() -> None:
 
 
 def test_risk_guards_scale_high_volatility_and_preserve_small_drifts(monkeypatch) -> None:
-    monkeypatch.setattr("src.user_dual_momentum.intraday_kill_switch_triggered", lambda *_args, **_kwargs: False)
-    config = UserDualMomentumConfig(max_intraday_volatility=0.02, high_volatility_weight_scale=0.5, per_trade_value_min=100.0)
+    monkeypatch.setattr("src.defensive_momentum.intraday_kill_switch_triggered", lambda *_args, **_kwargs: False)
+    config = DefensiveMomentumConfig(max_intraday_volatility=0.02, high_volatility_weight_scale=0.5, per_trade_value_min=100.0)
     scores = {
         "QQQ": {"realized_volatility": 0.03},
         "TLT": {"realized_volatility": 0.01},
@@ -115,7 +115,7 @@ def test_risk_guards_scale_high_volatility_and_preserve_small_drifts(monkeypatch
 
 
 def test_sentiment_snapshot_defaults_missing_records_to_neutral(monkeypatch) -> None:
-    monkeypatch.setattr("src.user_dual_momentum.fetch_latest_news_sentiment", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("src.defensive_momentum.fetch_latest_news_sentiment", lambda *_args, **_kwargs: [])
 
     symbol_sentiment, market_sentiment = get_sentiment_snapshot(["SPY", "QQQ"], 60, Config())
 
@@ -132,7 +132,7 @@ def test_sentiment_snapshot_combines_configured_providers(monkeypatch) -> None:
         sentiment = 0.6 if provider == "marketaux" else -0.2
         return [{"symbol": "SPY", "timestamp": pd.Timestamp.now(tz="UTC").isoformat(), "sentiment": sentiment}]
 
-    monkeypatch.setattr("src.user_dual_momentum.fetch_latest_news_sentiment", fake_fetch)
+    monkeypatch.setattr("src.defensive_momentum.fetch_latest_news_sentiment", fake_fetch)
 
     symbol_sentiment, market_sentiment = get_sentiment_snapshot(
         ["SPY"],

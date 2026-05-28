@@ -1,3 +1,0 @@
-runtime:
-  kill_switch: false
-  log_file: /logs/trading.log

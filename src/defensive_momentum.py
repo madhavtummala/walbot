@@ -16,15 +16,19 @@ from .state_store import load_state, save_state
 
 logger = logging.getLogger(__name__)
 
-STATE_KEY = "user_dual_momentum_intraday_risk"
+STATE_KEY = "defensive_momentum_intraday_risk"
 
 
 @dataclass(frozen=True)
-class UserDualMomentumConfig:
-    """Configurable knobs for the 30-minute dual momentum + sentiment strategy."""
+class DefensiveMomentumConfig:
+    """Configurable knobs for the intraday defensive momentum + sentiment strategy."""
 
-    risk_on_universe: list[str] = field(default_factory=lambda: ["SPY", "QQQ", "IWM", "XLK", "XLF", "XLY"])
-    defensive_universe: list[str] = field(default_factory=lambda: ["TLT", "IEF", "SHY", "GLD", "XLU"])
+    risk_on_universe: list[str] = field(
+        default_factory=lambda: ["SPY", "QQQ", "VTI", "IWM", "IJH", "IJR", "IEFA", "IEMG", "ACWI", "ACWX"]
+    )
+    defensive_universe: list[str] = field(
+        default_factory=lambda: ["BIL", "SHY", "SPTS", "IEF", "GOVT", "AGG", "BND", "IUSB", "STIP", "TLT", "GLD"]
+    )
     regime_symbol: str = "SPY"
     price_lookback_short_bars: int = 1
     price_lookback_medium_bars: int = 6
@@ -52,10 +56,10 @@ class UserDualMomentumConfig:
     intraday_drawdown_limit: float = -0.02
 
     @classmethod
-    def from_runtime_config(cls, config: Any) -> "UserDualMomentumConfig":
+    def from_runtime_config(cls, config: Any) -> "DefensiveMomentumConfig":
         raw = {}
         if isinstance(getattr(config, "algorithm_configs", None), dict):
-            raw = config.algorithm_configs.get("user_dual_momentum", {}) or {}
+            raw = config.algorithm_configs.get("defensive_momentum", {}) or {}
         if not isinstance(raw, dict):
             raw = {}
 
@@ -138,7 +142,7 @@ def compute_price_features(
     symbol: str,
     intraday_bars: pd.DataFrame,
     daily_bars: pd.DataFrame,
-    config: UserDualMomentumConfig,
+    config: DefensiveMomentumConfig,
 ) -> dict[str, Any]:
     """Calculate multi-horizon momentum, absolute trend, and intraday volatility."""
     intraday = intraday_bars.copy() if isinstance(intraday_bars, pd.DataFrame) else pd.DataFrame()
@@ -178,7 +182,7 @@ def zscores_by_feature(features_by_symbol: dict[str, dict[str, Any]], keys: list
 def compute_composite_scores(
     features_by_symbol: dict[str, dict[str, Any]],
     sentiment_scores: dict[str, float],
-    config: UserDualMomentumConfig,
+    config: DefensiveMomentumConfig,
 ) -> dict[str, dict[str, Any]]:
     """Combine z-scored price momentum and normalized sentiment into one score."""
     zscores = zscores_by_feature(features_by_symbol, ["short_return", "medium_return", "daily_return"])
@@ -199,7 +203,7 @@ def compute_composite_scores(
 def compute_market_regime(
     spy_price_features: dict[str, Any],
     market_sentiment: float,
-    config: UserDualMomentumConfig,
+    config: DefensiveMomentumConfig,
 ) -> tuple[str, dict[str, float]]:
     """Classify the current market as RISK_ON, RISK_OFF, or CAUTIOUS."""
     daily_return = float(spy_price_features.get("daily_return", 0.0))
@@ -286,7 +290,7 @@ def get_sentiment_snapshot(
 def decide_target_weights(
     scores_by_symbol: dict[str, dict[str, Any]],
     regime: str,
-    config: UserDualMomentumConfig,
+    config: DefensiveMomentumConfig,
 ) -> dict[str, float]:
     """Apply dual momentum ranking and regime rules to produce target weights."""
     weights = {symbol: 0.0 for symbol in config.symbols}
@@ -334,11 +338,11 @@ def apply_risk_guards(
     scores_by_symbol: dict[str, dict[str, Any]],
     current_weights: dict[str, float],
     equity: float,
-    config: UserDualMomentumConfig,
+    config: DefensiveMomentumConfig,
 ) -> dict[str, float]:
     """Apply position caps, volatility filters, turnover threshold, and drawdown kill-switch."""
     if intraday_kill_switch_triggered(equity, config):
-        logger.warning("Intraday Social Dual Momentum kill-switch active; target weights set to zero")
+        logger.warning("Defensive Momentum kill-switch active; target weights set to zero")
         return {symbol: 0.0 for symbol in target_weights}
 
     guarded: dict[str, float] = {}
@@ -358,7 +362,7 @@ def apply_risk_guards(
     return guarded
 
 
-def intraday_kill_switch_triggered(equity: float, config: UserDualMomentumConfig) -> bool:
+def intraday_kill_switch_triggered(equity: float, config: DefensiveMomentumConfig) -> bool:
     """Track account equity from the first run of the day and stop entries after a drawdown breach."""
     today = date.today().isoformat()
     state = load_state(STATE_KEY, {})
@@ -409,7 +413,7 @@ def rows_from_scores(
     return rows
 
 
-def build_user_dual_momentum_targets(
+def build_defensive_momentum_targets(
     runtime_config: Any,
     data_client: Any,
     current_positions: dict[str, int],
@@ -417,7 +421,7 @@ def build_user_dual_momentum_targets(
     equity: float,
 ) -> tuple[dict[str, float], dict[str, dict[str, float | int]], dict[str, Any]]:
     """Run the full 30-minute strategy decision loop and return weights plus signal logs."""
-    strategy_config = UserDualMomentumConfig.from_runtime_config(runtime_config)
+    strategy_config = DefensiveMomentumConfig.from_runtime_config(runtime_config)
     symbols = strategy_config.symbols
     intraday_bars = get_intraday_bars(symbols, strategy_config.required_intraday_bars, runtime_config, data_client)
     daily_bars = get_daily_bars(symbols, strategy_config.daily_abs_momentum_lookback_days, runtime_config, data_client)
@@ -453,7 +457,7 @@ def build_user_dual_momentum_targets(
         "raw_target_weights": raw_weights,
     }
     logger.info(
-        "Intraday Social Dual Momentum decision regime=%s inputs=%s targets=%s",
+        "Defensive Momentum decision regime=%s inputs=%s targets=%s",
         regime,
         regime_inputs,
         target_weights,

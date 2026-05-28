@@ -16,10 +16,12 @@ from .alpaca_client import (
     get_option_contracts,
     get_option_latest_quotes,
     get_positions,
+    is_market_open,
     submit_option_limit_order,
 )
 from .config import Config, get_config
 from .controls import load_controls
+from .logging_utils import log_position_changes
 from .strategy_models import strategy_signal_rows
 
 logger = logging.getLogger(__name__)
@@ -257,6 +259,10 @@ def run_options_once(account_id: str | None = None) -> list[dict[str, Any]]:
         return []
 
     trading_client = create_trading_client(config)
+    if not is_market_open(trading_client):
+        logger.warning("Market is closed according to Alpaca clock. Exiting options runner without orders.")
+        return []
+
     data_client = create_data_client(config)
     option_data_client = create_option_data_client(config)
     account_equity = get_account_equity(trading_client)
@@ -306,4 +312,5 @@ def run_options_once(account_id: str | None = None) -> list[dict[str, Any]]:
             }
         )
 
+    log_position_changes(results)
     return results

@@ -1,27 +1,14 @@
 services:
   trading-bot:
-    build: .
-    image: trading-bot:local
-    env_file:
-      - .env
+    image: ${TRADING_BOT_IMAGE:-ghcr.io/madhavtummala/robotrade:latest}
+    container_name: trading-bot
+    pull_policy: ${TRADING_BOT_PULL_POLICY:-always}
     environment:
-      PORT: "8000"
-      TRADING_CONFIG_FILE: /config/trading_bot.yaml
-      TRADING_ACCOUNTS_FILE: /config/accounts.yaml
-      TRADING_CONNECTORS_FILE: /config/connectors.yaml
-      TRADING_ALGORITHM_BOT_FILE: /config/algorithm_bot.yaml
-      TRADING_OPTIONS_BOT_FILE: /config/options_bot.yaml
-      TRADING_DCA_BOT_FILE: /config/dca_bot.yaml
-      TRADING_UNIVERSE_FILE: /config/universe.yaml
-      STATE_DB_PATH: /data/trading_bot.sqlite
-      TRADABLES_CSV: /app/data/tradable_etfs.csv
-      ALPHA_VANTAGE_NEWS_CSV: /data/social_trends.csv
-      LOG_FILE: /logs/trading.log
+      KILL_SWITCH: ${KILL_SWITCH:-true}
       CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-*}
     ports:
-      - "8000:8000"
+      - "${TRADING_BOT_PORT:-8000}:8000"
     volumes:
-      - ./runtime/config:/config
-      - ./runtime/data:/data
-      - ./runtime/logs:/logs
+      - ${TRADING_BOT_RUNTIME:-./runtime}/config:/config
+      - ${TRADING_BOT_RUNTIME:-./runtime}/data:/data
     restart: unless-stopped
