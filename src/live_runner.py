@@ -18,7 +18,7 @@ from .portfolio import compute_target_weights
 from .signals import compute_signals_for_universe
 from .social import load_social_trends_csv
 from .strategy_models import STRATEGY_LABELS, strategy_signal_rows, weights_from_strategy_rows
-from .defensive_momentum import DefensiveMomentumConfig, build_defensive_momentum_targets
+from .fast_momentum import DefensiveMomentumConfig, build_defensive_momentum_targets
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +101,7 @@ def run_once(account_id: str | None = None) -> None:
     current_positions = get_positions(trading_client)
 
     defensive_config = DefensiveMomentumConfig.from_runtime_config(config)
-    if strategy == "defensive_momentum":
+    if strategy == "fast_momentum":
         price_symbols = sorted(set(defensive_config.symbols) | set(current_positions))
     else:
         price_symbols = sorted(set(config.symbols) | set(current_positions))
@@ -115,10 +115,10 @@ def run_once(account_id: str | None = None) -> None:
             else get_latest_price(symbol, data_client, data_feed=config.alpaca_data_feed)
         )
 
-    if strategy == "defensive_momentum":
+    if strategy == "fast_momentum":
         if "paper-api.alpaca.markets" not in str(config.alpaca_base_url):
             logger.warning(
-                "Defensive Momentum is restricted to Alpaca paper trading by default. "
+                "Fast Momentum is restricted to Alpaca paper trading by default. "
                 "Configured endpoint %s is not paper; exiting without orders.",
                 config.alpaca_base_url,
             )
@@ -130,7 +130,7 @@ def run_once(account_id: str | None = None) -> None:
             latest_prices,
             equity,
         )
-        logger.info("Defensive Momentum metadata: %s", metadata)
+        logger.info("Fast Momentum metadata: %s", metadata)
         log_signals(signals, latest_prices)
         log_portfolio(target_weights, equity)
         order_results = sync_positions_to_targets(

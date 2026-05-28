@@ -59,7 +59,7 @@ class DefensiveMomentumConfig:
     def from_runtime_config(cls, config: Any) -> "DefensiveMomentumConfig":
         raw = {}
         if isinstance(getattr(config, "algorithm_configs", None), dict):
-            raw = config.algorithm_configs.get("defensive_momentum", {}) or {}
+            raw = config.algorithm_configs.get("fast_momentum", {}) or {}
         if not isinstance(raw, dict):
             raw = {}
 
@@ -342,7 +342,7 @@ def apply_risk_guards(
 ) -> dict[str, float]:
     """Apply position caps, volatility filters, turnover threshold, and drawdown kill-switch."""
     if intraday_kill_switch_triggered(equity, config):
-        logger.warning("Defensive Momentum kill-switch active; target weights set to zero")
+        logger.warning("Fast Momentum kill-switch active; target weights set to zero")
         return {symbol: 0.0 for symbol in target_weights}
 
     guarded: dict[str, float] = {}
@@ -457,7 +457,7 @@ def build_defensive_momentum_targets(
         "raw_target_weights": raw_weights,
     }
     logger.info(
-        "Defensive Momentum decision regime=%s inputs=%s targets=%s",
+        "Fast Momentum decision regime=%s inputs=%s targets=%s",
         regime,
         regime_inputs,
         target_weights,

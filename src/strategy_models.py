@@ -13,7 +13,7 @@ STRATEGY_LABELS = {
     "breakout": "Breakout",
     "risk_parity": "Risk Parity",
     "dual_momentum": "Dual Momentum",
-    "defensive_momentum": "Defensive Momentum",
+    "fast_momentum": "Fast Momentum",
 }
 
 DEFENSIVE_MOMENTUM_DEFENSIVE_SYMBOLS = {"BIL", "SHY", "SPTS", "IEF", "GOVT", "AGG", "BND", "IUSB", "STIP", "TLT", "GLD"}
@@ -116,7 +116,7 @@ def strategy_row_from_prepared(strategy: str, symbol: str, work: pd.DataFrame) -
             side, reason = "LONG", "Positive absolute and relative momentum"
         elif score < -0.02 and ret_126 < 0:
             side, reason = "SHORT", "Negative absolute momentum"
-    elif strategy == "defensive_momentum":
+    elif strategy == "fast_momentum":
         momentum_score = (0.70 * ret_252) + (0.30 * ret_63)
         risk_adjusted_score = momentum_score / vol_252
         score = risk_adjusted_score
@@ -140,7 +140,7 @@ def strategy_row_from_prepared(strategy: str, symbol: str, work: pd.DataFrame) -
         "risk_adjusted_score": risk_adjusted_score,
         "cash_hurdle": cash_hurdle,
         "absolute_ok": absolute_ok,
-        "realized_vol": vol_252 if strategy == "defensive_momentum" else vol,
+        "realized_vol": vol_252 if strategy == "fast_momentum" else vol,
         "sma_50": sma_50,
         "sma_long": sma_200,
         "z_20": z_20,
@@ -254,7 +254,7 @@ def _rank_strategy_rows(strategy: str, rows: list[dict[str, Any]]) -> list[dict[
                 row["side"] = "FLAT"
                 row["signal"] = 0
                 row["reason"] = "Outside current dual-momentum selection"
-    if strategy == "defensive_momentum":
+    if strategy == "fast_momentum":
         return _rank_defensive_momentum_rows(rows)
     return sorted(rows, key=lambda item: (item["signal"] != 1, item["signal"] == 0, -abs(item.get("score", 0.0))))
 

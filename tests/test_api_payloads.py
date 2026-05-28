@@ -425,7 +425,7 @@ def test_defensive_momentum_signals_include_inactive_universe_rows(monkeypatch) 
         ],
     )
 
-    payload = strategy_signals_payload("defensive_momentum")
+    payload = strategy_signals_payload("fast_momentum")
 
     by_symbol = {row["symbol"]: row for row in payload["leaders"]}
     assert {"VTI", "ACWI", "BIL"} <= set(by_symbol)

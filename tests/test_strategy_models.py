@@ -22,7 +22,7 @@ def _trend_bars(start: float, end: float, periods: int = 320) -> pd.DataFrame:
 
 def test_defensive_momentum_selects_risk_on_symbols_above_bil_hurdle() -> None:
     rows = strategy_signal_rows(
-        "defensive_momentum",
+        "fast_momentum",
         {
             "SPY": _trend_bars(100, 125),
             "XBI": _trend_bars(100, 180),
@@ -41,7 +41,7 @@ def test_defensive_momentum_selects_risk_on_symbols_above_bil_hurdle() -> None:
 
 def test_defensive_momentum_rotates_to_defensive_when_risk_on_fails() -> None:
     rows = strategy_signal_rows(
-        "defensive_momentum",
+        "fast_momentum",
         {
             "SPY": _trend_bars(100, 98),
             "XBI": _trend_bars(100, 92),
@@ -61,7 +61,7 @@ def test_defensive_momentum_rotates_to_defensive_when_risk_on_fails() -> None:
 
 def test_defensive_momentum_goes_to_cash_without_defensive_symbols() -> None:
     rows = strategy_signal_rows(
-        "defensive_momentum",
+        "fast_momentum",
         {
             "VTI": _trend_bars(100, 98),
             "VXUS": _trend_bars(100, 97),

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from src.config import Config
-from src.defensive_momentum import (
+from src.fast_momentum import (
     DefensiveMomentumConfig,
     apply_risk_guards,
     compute_composite_scores,
@@ -101,7 +101,7 @@ def test_cautious_regime_can_mix_strong_risk_on_and_defensive() -> None:
 
 
 def test_risk_guards_scale_high_volatility_and_preserve_small_drifts(monkeypatch) -> None:
-    monkeypatch.setattr("src.defensive_momentum.intraday_kill_switch_triggered", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr("src.fast_momentum.intraday_kill_switch_triggered", lambda *_args, **_kwargs: False)
     config = DefensiveMomentumConfig(max_intraday_volatility=0.02, high_volatility_weight_scale=0.5, per_trade_value_min=100.0)
     scores = {
         "QQQ": {"realized_volatility": 0.03},
@@ -115,7 +115,7 @@ def test_risk_guards_scale_high_volatility_and_preserve_small_drifts(monkeypatch
 
 
 def test_sentiment_snapshot_defaults_missing_records_to_neutral(monkeypatch) -> None:
-    monkeypatch.setattr("src.defensive_momentum.fetch_latest_news_sentiment", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("src.fast_momentum.fetch_latest_news_sentiment", lambda *_args, **_kwargs: [])
 
     symbol_sentiment, market_sentiment = get_sentiment_snapshot(["SPY", "QQQ"], 60, Config())
 
@@ -132,7 +132,7 @@ def test_sentiment_snapshot_combines_configured_providers(monkeypatch) -> None:
         sentiment = 0.6 if provider == "marketaux" else -0.2
         return [{"symbol": "SPY", "timestamp": pd.Timestamp.now(tz="UTC").isoformat(), "sentiment": sentiment}]
 
-    monkeypatch.setattr("src.defensive_momentum.fetch_latest_news_sentiment", fake_fetch)
+    monkeypatch.setattr("src.fast_momentum.fetch_latest_news_sentiment", fake_fetch)
 
     symbol_sentiment, market_sentiment = get_sentiment_snapshot(
         ["SPY"],

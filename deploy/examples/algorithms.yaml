@@ -87,7 +87,7 @@ algorithms:
     backtest_starting_equity: 10000.0
     algorithm_equity_cap: 0.0
     history_extra_buffer_days: 250
-  defensive_momentum:
+  fast_momentum:
     risk_on_universe:
     - SPY
     - QQQ

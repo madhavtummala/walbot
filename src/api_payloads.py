@@ -31,7 +31,7 @@ from .strategy_models import (
     strategy_signal_rows_from_prepared,
     weights_from_strategy_rows,
 )
-from .defensive_momentum import (
+from .fast_momentum import (
     DefensiveMomentumConfig,
     compute_composite_scores,
     compute_market_regime,
@@ -427,7 +427,7 @@ def strategy_signals_payload(strategy: str = "momentum_social") -> dict[str, Any
             ],
         }
 
-    if strategy == "defensive_momentum":
+    if strategy == "fast_momentum":
         return _defensive_momentum_signals_payload()
 
     if strategy != "momentum_social":
@@ -587,7 +587,7 @@ def _defensive_momentum_reason(row: dict[str, Any], weight: float, regime: str) 
 
 
 def _defensive_momentum_signals_payload() -> dict[str, Any]:
-    config = get_config(strategy_id="defensive_momentum")
+    config = get_config(strategy_id="fast_momentum")
     strategy_config = DefensiveMomentumConfig.from_runtime_config(config)
     symbols = strategy_config.symbols
     data_client = create_data_client(config)
@@ -634,7 +634,7 @@ def _defensive_momentum_signals_payload() -> dict[str, Any]:
         )
     leaders.sort(key=lambda item: (item["side"] != "LONG", -float(item.get("target_weight") or 0.0), -float(item.get("score") or 0.0)))
     return {
-        "strategy": "defensive_momentum",
+        "strategy": "fast_momentum",
         "wired": True,
         "updated_at": pd.Timestamp.now(tz="UTC").isoformat(),
         "summary": [

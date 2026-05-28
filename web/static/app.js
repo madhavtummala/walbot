@@ -73,8 +73,8 @@ const STRATEGIES = [
     signals: ["6-month return", "12-month return", "Relative rank", "Absolute momentum hurdle", "Volatility filter"],
   },
   {
-    key: "defensive_momentum",
-    name: "Defensive Momentum",
+    key: "fast_momentum",
+    name: "Fast Momentum",
     status: "Live",
     horizon: "Intraday",
     risk: "Medium",
@@ -1234,7 +1234,7 @@ async function loadSignals(strategyKey) {
 }
 
 function formatSignalDetail(strategyKey, row) {
-  if (strategyKey === "defensive_momentum") {
+  if (strategyKey === "fast_momentum") {
     const providers = Array.isArray(row.sentiment_providers) && row.sentiment_providers.length
       ? row.sentiment_providers.join(", ")
       : "none";

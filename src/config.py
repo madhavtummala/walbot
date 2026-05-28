@@ -85,7 +85,7 @@ ALGORITHM_IDS = {
     "breakout",
     "risk_parity",
     "dual_momentum",
-    "defensive_momentum",
+    "fast_momentum",
 }
 
 
