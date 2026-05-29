@@ -17,3 +17,11 @@ data_sources:
       stocktwits:
         username: replace_me
         password: replace_me
+notifications:
+  providers:
+    telegram:
+      enabled: true
+      bot_token: replace_me
+      chat_id: replace_me
+      api_root: https://api.telegram.org
+      timeout_seconds: 5

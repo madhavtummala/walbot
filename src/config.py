@@ -86,6 +86,7 @@ ALGORITHM_IDS = {
     "risk_parity",
     "dual_momentum",
     "fast_momentum",
+    "invest_spy",
 }
 
 

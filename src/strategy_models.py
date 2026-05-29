@@ -5,6 +5,7 @@ from typing import Any
 
 import pandas as pd
 
+from .signals import compute_social_trend_score
 
 STRATEGY_LABELS = {
     "momentum_social": "Momentum + Social",
@@ -14,6 +15,7 @@ STRATEGY_LABELS = {
     "risk_parity": "Risk Parity",
     "dual_momentum": "Dual Momentum",
     "fast_momentum": "Fast Momentum",
+    "invest_spy": "Invest SPY",
 }
 
 DEFENSIVE_MOMENTUM_DEFENSIVE_SYMBOLS = {"BIL", "SHY", "SPTS", "IEF", "GOVT", "AGG", "BND", "IUSB", "STIP", "TLT", "GLD"}
@@ -62,7 +64,15 @@ def prepared_strategy_frame(df: pd.DataFrame) -> pd.DataFrame:
     return work
 
 
-def strategy_row_from_prepared(strategy: str, symbol: str, work: pd.DataFrame) -> dict[str, Any]:
+def strategy_row_from_prepared(
+    strategy: str,
+    symbol: str,
+    work: pd.DataFrame,
+    social_df: pd.DataFrame | None = None,
+    *,
+    social_lookback_days: int = 30,
+    social_weight: float = 0.0,
+) -> dict[str, Any]:
     if work.empty:
         return {"symbol": symbol, "side": "FLAT", "signal": 0, "score": 0.0, "target_weight": 0.0}
     row = work.iloc[-1]
@@ -87,6 +97,10 @@ def strategy_row_from_prepared(strategy: str, symbol: str, work: pd.DataFrame) -
     cash_hurdle = None
     absolute_ok = None
     reason = "No active setup"
+    social = compute_social_trend_score(social_df, social_lookback_days) if strategy == "dual_momentum" else {
+        "social_score": 0.0,
+        "sentiment": 0.0,
+    }
     if strategy == "trend_following":
         score = (0.55 * ret_63) + (0.30 * ret_126) + (0.15 * ((close / sma_200 - 1) if sma_200 else 0))
         if close > sma_50 > sma_200 and ret_63 > 0:
@@ -111,11 +125,15 @@ def strategy_row_from_prepared(strategy: str, symbol: str, work: pd.DataFrame) -
         score = 1 / vol
         side, reason = "LONG", "Low volatility sleeve selected for risk-balanced exposure"
     elif strategy == "dual_momentum":
-        score = 0.6 * ret_126 + 0.4 * ret_252
+        price_score = 0.6 * ret_126 + 0.4 * ret_252
+        sentiment_tilt = max(0.0, min(float(social_weight or 0.0), 0.5)) * _finite(social.get("social_score"))
+        score = price_score + sentiment_tilt
         if score > 0 and ret_126 > 0:
             side, reason = "LONG", "Positive absolute and relative momentum"
         elif score < -0.02 and ret_126 < 0:
             side, reason = "SHORT", "Negative absolute momentum"
+        if abs(sentiment_tilt) > 1e-9:
+            reason = f"{reason}; sentiment tilt {sentiment_tilt:+.2f}"
     elif strategy == "fast_momentum":
         momentum_score = (0.70 * ret_252) + (0.30 * ret_63)
         risk_adjusted_score = momentum_score / vol_252
@@ -132,6 +150,9 @@ def strategy_row_from_prepared(strategy: str, symbol: str, work: pd.DataFrame) -
         "signal": 1 if side == "LONG" else -1 if side == "SHORT" else 0,
         "score": score,
         "close": close,
+        "price_score": (0.6 * ret_126 + 0.4 * ret_252) if strategy == "dual_momentum" else None,
+        "social_score": _finite(social.get("social_score")),
+        "sentiment": _finite(social.get("sentiment")),
         "ret_short": ret_21,
         "ret_N": ret_63,
         "ret_126": ret_126,
@@ -224,8 +245,23 @@ def _rank_defensive_momentum_rows(rows: list[dict[str, Any]]) -> list[dict[str, 
     )
 
 
-def strategy_row(strategy: str, symbol: str, df: pd.DataFrame) -> dict[str, Any]:
-    return strategy_row_from_prepared(strategy, symbol, prepared_strategy_frame(df))
+def strategy_row(
+    strategy: str,
+    symbol: str,
+    df: pd.DataFrame,
+    social_df: pd.DataFrame | None = None,
+    *,
+    social_lookback_days: int = 30,
+    social_weight: float = 0.0,
+) -> dict[str, Any]:
+    return strategy_row_from_prepared(
+        strategy,
+        symbol,
+        prepared_strategy_frame(df),
+        social_df,
+        social_lookback_days=social_lookback_days,
+        social_weight=social_weight,
+    )
 
 
 def _rank_strategy_rows(strategy: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -259,13 +295,47 @@ def _rank_strategy_rows(strategy: str, rows: list[dict[str, Any]]) -> list[dict[
     return sorted(rows, key=lambda item: (item["signal"] != 1, item["signal"] == 0, -abs(item.get("score", 0.0))))
 
 
-def strategy_signal_rows(strategy: str, bars_by_symbol: dict[str, pd.DataFrame]) -> list[dict[str, Any]]:
-    rows = [strategy_row(strategy, symbol, df) for symbol, df in bars_by_symbol.items()]
+def strategy_signal_rows(
+    strategy: str,
+    bars_by_symbol: dict[str, pd.DataFrame],
+    social_by_symbol: dict[str, pd.DataFrame] | None = None,
+    *,
+    social_lookback_days: int = 30,
+    social_weight: float = 0.0,
+) -> list[dict[str, Any]]:
+    rows = [
+        strategy_row(
+            strategy,
+            symbol,
+            df,
+            (social_by_symbol or {}).get(symbol),
+            social_lookback_days=social_lookback_days,
+            social_weight=social_weight,
+        )
+        for symbol, df in bars_by_symbol.items()
+    ]
     return _rank_strategy_rows(strategy, rows)
 
 
-def strategy_signal_rows_from_prepared(strategy: str, bars_by_symbol: dict[str, pd.DataFrame]) -> list[dict[str, Any]]:
-    rows = [strategy_row_from_prepared(strategy, symbol, df) for symbol, df in bars_by_symbol.items()]
+def strategy_signal_rows_from_prepared(
+    strategy: str,
+    bars_by_symbol: dict[str, pd.DataFrame],
+    social_by_symbol: dict[str, pd.DataFrame] | None = None,
+    *,
+    social_lookback_days: int = 30,
+    social_weight: float = 0.0,
+) -> list[dict[str, Any]]:
+    rows = [
+        strategy_row_from_prepared(
+            strategy,
+            symbol,
+            df,
+            (social_by_symbol or {}).get(symbol),
+            social_lookback_days=social_lookback_days,
+            social_weight=social_weight,
+        )
+        for symbol, df in bars_by_symbol.items()
+    ]
     return _rank_strategy_rows(strategy, rows)
 
 

@@ -25,10 +25,13 @@ from .api_payloads import (
     universe_payload,
 )
 from .bot_runtime import bot_runtime
+from .logging_utils import configure_logging, demote_uvicorn_access_logs_to_debug
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 WEB_ROOT = PROJECT_ROOT / "web"
+
+demote_uvicorn_access_logs_to_debug()
 
 
 def _cors_origins() -> list[str]:
@@ -46,6 +49,8 @@ class NoCacheStaticFiles(StaticFiles):
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    configure_logging()
+    demote_uvicorn_access_logs_to_debug()
     bot_runtime.start()
     try:
         yield

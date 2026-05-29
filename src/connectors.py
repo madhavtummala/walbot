@@ -187,7 +187,7 @@ def _fetch_alpaca_quotes(symbols: list[str], config: Config, data_client=None) -
         try:
             price = get_latest_price(symbol, client, data_feed=config.alpaca_data_feed)
         except Exception as exc:
-            logger.warning("Alpaca latest price unavailable for %s: %s", symbol, exc)
+            logger.info("Alpaca latest price unavailable for %s: %s", symbol, exc)
             continue
         quote = _normalize_quote("alpaca", symbol, price, {"price": price, "feed": config.alpaca_data_feed})
         if quote:
@@ -258,7 +258,8 @@ def fetch_latest_market_quotes(
             continue
         next_provider = _next_provider_name(providers, index, MARKET_FETCHERS, config, MARKET_CATEGORY, {"alpaca"})
         if provider_is_limited(provider):
-            logger.warning(
+            log = logger.info if next_provider else logger.warning
+            log(
                 "Market data provider %s is marked rate-limited%s",
                 provider,
                 _fallback_suffix(next_provider),
@@ -286,7 +287,8 @@ def fetch_latest_market_quotes(
             else:
                 fresh = MARKET_FETCHERS[provider](missing, config)
         except ProviderRateLimited as exc:
-            logger.warning(
+            log = logger.info if next_provider else logger.warning
+            log(
                 "Market data provider %s hit its rate limit%s: %s",
                 provider,
                 _fallback_suffix(next_provider),
@@ -294,7 +296,8 @@ def fetch_latest_market_quotes(
             )
             continue
         except ProviderUnavailable as exc:
-            logger.warning(
+            log = logger.info if next_provider else logger.warning
+            log(
                 "Market data provider %s failed%s: %s",
                 provider,
                 _fallback_suffix(next_provider),
@@ -302,7 +305,8 @@ def fetch_latest_market_quotes(
             )
             continue
         except Exception as exc:
-            logger.warning(
+            log = logger.info if next_provider else logger.warning
+            log(
                 "Market data provider %s failed%s: %s",
                 provider,
                 _fallback_suffix(next_provider),
@@ -321,7 +325,8 @@ def fetch_latest_market_quotes(
             )
         still_missing = [symbol for symbol in missing if symbol not in fresh]
         if still_missing:
-            logger.warning(
+            log = logger.info if next_provider else logger.warning
+            log(
                 "Market data provider %s returned quotes for %s/%s requested symbols%s",
                 provider,
                 len(fresh),
@@ -523,12 +528,15 @@ def fetch_latest_news_sentiment(
     wanted = [symbol.upper() for symbol in symbols]
     cache_key = _news_cache_key(wanted)
     providers = [item.lower() for item in config.news_sentiment_provider_order]
+    all_records: list[dict[str, Any]] = []
     for index, provider in enumerate(providers):
         if provider not in NEWS_FETCHERS:
+            logger.warning("News/sentiment provider %s is not supported; skipping", provider)
             continue
         next_provider = _next_provider_name(providers, index, NEWS_FETCHERS, config, NEWS_CATEGORY, {"stocktwits"})
         if provider_is_limited(provider):
-            logger.warning(
+            log = logger.info if next_provider else logger.warning
+            log(
                 "News/sentiment provider %s is marked rate-limited%s",
                 provider,
                 _fallback_suffix(next_provider),
@@ -539,11 +547,13 @@ def fetch_latest_news_sentiment(
         if not force_refresh:
             cached = load_cached_payload(NEWS_CATEGORY, provider, cache_key)
             if cached:
-                return [{**record, "cached": True} for record in cached]
+                all_records.extend({**record, "cached": True} for record in cached)
+                continue
         try:
             records = NEWS_FETCHERS[provider](wanted, config)
         except ProviderRateLimited as exc:
-            logger.warning(
+            log = logger.info if next_provider else logger.warning
+            log(
                 "News/sentiment provider %s hit its rate limit%s: %s",
                 provider,
                 _fallback_suffix(next_provider),
@@ -551,7 +561,8 @@ def fetch_latest_news_sentiment(
             )
             continue
         except ProviderUnavailable as exc:
-            logger.warning(
+            log = logger.info if next_provider else logger.warning
+            log(
                 "News/sentiment provider %s failed%s: %s",
                 provider,
                 _fallback_suffix(next_provider),
@@ -559,28 +570,31 @@ def fetch_latest_news_sentiment(
             )
             continue
         except Exception as exc:
-            logger.warning(
+            log = logger.info if next_provider else logger.warning
+            log(
                 "News/sentiment provider %s failed%s: %s",
                 provider,
                 _fallback_suffix(next_provider),
                 exc,
             )
             continue
-        save_cached_payload(
-            NEWS_CATEGORY,
-            provider,
-            cache_key,
-            records,
-            ttl_seconds=config.news_sentiment_cache_ttl_seconds,
-        )
         if records:
-            return records
-        logger.warning(
+            save_cached_payload(
+                NEWS_CATEGORY,
+                provider,
+                cache_key,
+                records,
+                ttl_seconds=config.news_sentiment_cache_ttl_seconds,
+            )
+            all_records.extend(records)
+            continue
+        log = logger.info if next_provider else logger.warning
+        log(
             "News/sentiment provider %s returned no records%s",
             provider,
             _fallback_suffix(next_provider),
         )
-    return []
+    return all_records
 
 
 def news_records_to_social_frames(records: list[dict[str, Any]]) -> dict[str, pd.DataFrame]:

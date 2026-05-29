@@ -173,6 +173,30 @@ def test_controls_payload_returns_persisted_choices() -> None:
     assert {"algorithm", "options", "dca"} <= set(payload["bot"])
 
 
+def test_fast_momentum_reason_uses_configured_defensive_symbols() -> None:
+    row = {"symbol": "XYLD", "macro_trend_ok": True}
+    config = api_payloads.DefensiveMomentumConfig(defensive_universe=["BIL", "XYLD"])
+
+    reason = api_payloads._defensive_momentum_reason(row, 0.25, config)
+
+    assert reason == "Dynamic rank"
+
+
+def test_fast_momentum_reason_describes_risk_on_rank_cutoff() -> None:
+    config = api_payloads.DefensiveMomentumConfig(
+        risk_on_universe=["XSD", "AIQ"],
+        defensive_universe=["BIL", "XYLD"],
+        max_positions=4,
+        min_risk_on_micro_return=0.0,
+    )
+
+    assert api_payloads._defensive_momentum_reason({"symbol": "AIQ", "macro_trend_ok": True}, 0.0, config) == "Outside top 4 rank"
+    assert (
+        api_payloads._defensive_momentum_reason({"symbol": "XSD", "macro_trend_ok": True, "micro_return": -0.001}, 0.0, config)
+        == "Micro trend below risk-on floor"
+    )
+
+
 def test_save_controls_payload_wakes_options_runtime(tmp_path, monkeypatch) -> None:
     woke = {"algorithm": 0, "options": 0}
     monkeypatch.setenv("TRADING_ALGORITHM_BOT_FILE", str(tmp_path / "algorithm_bot.yaml"))
@@ -407,35 +431,36 @@ def test_defensive_momentum_signals_include_inactive_universe_rows(monkeypatch) 
     monkeypatch.setattr(api_payloads, "create_data_client", lambda config: object())
 
     def intraday(symbol: str) -> pd.DataFrame:
-        step = 0.8 if symbol == "VTI" else -0.2 if symbol == "XBI" else 0.05
-        return _strategy_bars([100 + index * step for index in range(20)])
+        step = 0.8 if symbol == "XSD" else -0.2 if symbol == "VXX" else 0.05
+        return _strategy_bars([100 + index * step for index in range(80)])
 
     def daily(symbol: str) -> pd.DataFrame:
-        step = 0.5 if symbol in {"SPY", "VTI"} else -0.2 if symbol == "XBI" else 0.05
-        return _strategy_bars([100 + index * step for index in range(40)])
+        step = 0.5 if symbol in {"SPY", "XSD"} else -0.2 if symbol == "VXX" else 0.05
+        return _strategy_bars([100 + index * step for index in range(220)])
 
     monkeypatch.setattr(api_payloads, "get_intraday_bars", lambda symbols, *_args, **_kwargs: {symbol: intraday(symbol) for symbol in symbols})
     monkeypatch.setattr(api_payloads, "get_defensive_daily_bars", lambda symbols, *_args, **_kwargs: {symbol: daily(symbol) for symbol in symbols})
     monkeypatch.setattr(
         api_payloads,
         "fetch_latest_news_sentiment",
-        lambda symbols, config: [
-            {"symbol": "SPY", "timestamp": pd.Timestamp.now(tz="UTC").isoformat(), "sentiment": 0.5, "provider": "stocktwits"},
-            {"symbol": "VTI", "timestamp": pd.Timestamp.now(tz="UTC").isoformat(), "sentiment": 0.3, "provider": "stocktwits"},
-        ],
+            lambda symbols, config: [
+                {"symbol": "SPY", "timestamp": pd.Timestamp.now(tz="UTC").isoformat(), "sentiment": 0.5, "provider": "stocktwits"},
+                {"symbol": "XSD", "timestamp": pd.Timestamp.now(tz="UTC").isoformat(), "sentiment": 0.3, "provider": "stocktwits"},
+            ],
     )
 
     payload = strategy_signals_payload("fast_momentum")
 
     by_symbol = {row["symbol"]: row for row in payload["leaders"]}
-    assert {"VTI", "ACWI", "BIL"} <= set(by_symbol)
-    assert by_symbol["VTI"]["side"] == "LONG"
-    assert by_symbol["ACWI"]["side"] == "FLAT"
-    assert by_symbol["VTI"]["sentiment_providers"] == ["stocktwits"]
-    assert by_symbol["VTI"]["sentiment_records"] == 1
-    assert payload["summary"][0]["value"] == "RISK ON"
-    assert by_symbol["ACWI"]["target_weight"] == 0.0
-    assert by_symbol["ACWI"]["reason"]
+    assert {"XSD", "BIL"} <= set(by_symbol)
+    assert by_symbol["XSD"]["side"] == "LONG"
+    assert by_symbol["XSD"]["sentiment_providers"] == ["stocktwits"]
+    assert by_symbol["XSD"]["sentiment_records"] == 1
+    assert "score_components" in by_symbol["XSD"]
+    assert by_symbol["XSD"]["sentiment_component"] is not None
+    assert by_symbol["XSD"]["pullback_score"] is not None
+    assert payload["summary"][0]["value"] == "Dynamic rank"
+    assert by_symbol["BIL"]["reason"]
 
 
 def test_momentum_social_signals_include_all_tracked_universe_rows(monkeypatch) -> None:

@@ -217,9 +217,24 @@ CORS_ALLOW_ORIGINS=*
 
 For a public or reverse-proxied deployment, set `CORS_ALLOW_ORIGINS` to the exact dashboard origin, for example `https://trading.example.com`. Leave it as `*` only for trusted local/LAN access.
 
+To receive portfolio-change notifications when submitted orders change positions, add a Telegram provider to `connectors.yaml`:
+
+```yaml
+notifications:
+  providers:
+    telegram:
+      enabled: true
+      bot_token: replace_me
+      chat_id: replace_me
+      api_root: https://api.telegram.org
+      timeout_seconds: 5
+```
+
+If you use an OpenClaw Telegram bot, use that bot's token and chat ID; `api_root` can point at a Telegram-compatible API root if your OpenClaw setup routes Bot API traffic through a proxy.
+
 YAML config:
 
-`algorithm_bot.yaml` contains global runtime settings such as `kill_switch` plus the algorithm bot power state, selected equity strategy, trading account id, refresh cadence, and optional cadence jitter. `algorithms.yaml` contains only the nested knobs for each server-side algorithm. `options_bot.yaml` contains the options bot power state, selected options strategy, options account id, and options strategy knobs. `dca_bot.yaml` contains DCA scheduling and the DCA plan. `universe.yaml` contains `tradable_universe.symbols` and optional `master_list`. `accounts.yaml` contains brokerage accounts with direct `api_key` / `api_secret` values. `connectors.yaml` contains market/news providers and direct connector API keys; fallback order follows the order of entries under each `providers` mapping unless you add an explicit `provider_order`. `TRADABLES_CSV` still overrides the master-list path from the environment if set.
+`algorithm_bot.yaml` contains global runtime settings such as `kill_switch` plus the algorithm bot power state, selected equity strategy, trading account id, refresh cadence, and optional cadence jitter. `algorithms.yaml` contains only the nested knobs for each server-side algorithm. `options_bot.yaml` contains the options bot power state, selected options strategy, options account id, and options strategy knobs. `dca_bot.yaml` contains DCA scheduling and the DCA plan. `universe.yaml` contains `tradable_universe.symbols` and optional `master_list`. `accounts.yaml` contains brokerage accounts with direct `api_key` / `api_secret` values. `connectors.yaml` contains market/news providers, notification providers, and direct connector API keys; fallback order follows the order of entries under each market/news `providers` mapping unless you add an explicit `provider_order`. `TRADABLES_CSV` still overrides the master-list path from the environment if set.
 
 By default, `accounts.yaml` and `connectors.yaml` are empty arrays, so the container expects you to mount filled versions. Raw provider responses, short-lived cache entries, and provider limit state are stored in the SQLite DB under `STATE_DB_PATH`.
 

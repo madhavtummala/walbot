@@ -90,3 +90,28 @@ def test_builtin_dual_momentum_keeps_original_long_short_template() -> None:
     assert by_symbol["XBI"]["side"] == "SHORT"
     assert by_symbol["BIL"]["side"] == "LONG"
     assert by_symbol["SPY"]["score"] == 0.6 * by_symbol["SPY"]["ret_126"] + 0.4 * by_symbol["SPY"]["ret_252"]
+
+
+def test_dual_momentum_can_apply_sentiment_tilt() -> None:
+    social = {
+        "SPY": pd.DataFrame(
+            {
+                "timestamp": pd.to_datetime(["2026-05-28T15:00:00Z"], utc=True),
+                "mentions": [10],
+                "sentiment": [0.5],
+                "social_score": [0.5],
+            }
+        )
+    }
+    rows = strategy_signal_rows(
+        "dual_momentum",
+        {"SPY": _trend_bars(100, 130), "BIL": _trend_bars(100, 104)},
+        social_by_symbol=social,
+        social_weight=0.1,
+    )
+
+    spy = {row["symbol"]: row for row in rows}["SPY"]
+
+    assert round(spy["social_score"], 6) == 0.325
+    assert round(spy["score"] - spy["price_score"], 6) == 0.0325
+    assert "sentiment tilt" in spy["reason"]

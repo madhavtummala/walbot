@@ -46,7 +46,7 @@ def test_market_quote_fetch_falls_back_to_next_provider(monkeypatch, caplog) -> 
     monkeypatch.setattr(connectors, "load_cached_payload", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(connectors, "save_cached_payload", lambda *args, **_kwargs: saved.append(args))
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         quotes = connectors.fetch_latest_market_quotes(["SPY"], config)
 
     assert calls == ["finnhub", "alpha_vantage"]
@@ -128,13 +128,78 @@ def test_news_sentiment_fetch_falls_back_to_stocktwits(monkeypatch, caplog) -> N
     monkeypatch.setattr(connectors, "load_cached_payload", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(connectors, "save_cached_payload", lambda *_args, **_kwargs: None)
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         records = connectors.fetch_latest_news_sentiment(["SPY"], config)
     frames = connectors.news_records_to_social_frames(records)
 
     assert records[0]["provider"] == "stocktwits"
     assert frames["SPY"]["sentiment"].iloc[-1] == 1.0
     assert "News/sentiment provider marketaux hit its rate limit; falling back to stocktwits" in caplog.text
+
+
+def test_news_sentiment_fetch_combines_configured_providers(monkeypatch) -> None:
+    config = Config(
+        news_sentiment_provider_order=["newsapi", "stocktwits"],
+        data_source_configs={
+            "news_sentiment": {
+                "providers": {
+                    "newsapi": {"enabled": True, "api_key": "newsapi-key"},
+                    "stocktwits": {"enabled": True},
+                }
+            }
+        },
+    )
+
+    def newsapi_news(symbols, _config):
+        return [
+            {
+                "timestamp": "2026-05-27T15:00:00+00:00",
+                "symbol": symbols[0],
+                "mentions": 1.0,
+                "sentiment": 0.0,
+                "social_score": 0.0,
+                "provider": "newsapi",
+                "title": "older headline",
+                "url": "",
+                "raw": {},
+            }
+        ]
+
+    def stocktwits_news(symbols, _config):
+        return [
+            {
+                "timestamp": "2026-05-28T15:00:00+00:00",
+                "symbol": symbols[0],
+                "mentions": 42.0,
+                "sentiment": 0.4,
+                "social_score": 0.4,
+                "provider": "stocktwits",
+                "title": "current sentiment",
+                "url": "",
+                "raw": {},
+            }
+        ]
+
+    monkeypatch.setitem(connectors.NEWS_FETCHERS, "newsapi", newsapi_news)
+    monkeypatch.setitem(connectors.NEWS_FETCHERS, "stocktwits", stocktwits_news)
+    monkeypatch.setattr(connectors, "provider_is_limited", lambda _provider: False)
+    monkeypatch.setattr(connectors, "load_cached_payload", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(connectors, "save_cached_payload", lambda *_args, **_kwargs: None)
+
+    records = connectors.fetch_latest_news_sentiment(["SPY"], config)
+
+    assert [record["provider"] for record in records] == ["newsapi", "stocktwits"]
+    assert records[-1]["sentiment"] == 0.4
+
+
+def test_news_sentiment_fetch_logs_unsupported_provider(caplog) -> None:
+    config = Config(news_sentiment_provider_order=["newsapi_ai"])
+
+    with caplog.at_level(logging.WARNING):
+        records = connectors.fetch_latest_news_sentiment(["SPY"], config)
+
+    assert records == []
+    assert "News/sentiment provider newsapi_ai is not supported; skipping" in caplog.text
 
 
 def test_provider_order_does_not_enable_missing_provider_section(monkeypatch) -> None:

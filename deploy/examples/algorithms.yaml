@@ -77,6 +77,8 @@ algorithms:
   dual_momentum:
     momentum_lookback_days: 126
     long_ma_days: 200
+    social_lookback_days: 30
+    social_momentum_weight: 0.1
     max_weight_per_symbol: 0.35
     max_portfolio_exposure: 0.95
     max_longs: 3
@@ -89,7 +91,6 @@ algorithms:
     history_extra_buffer_days: 250
   fast_momentum:
     risk_on_universe:
-    - SPY
     - QQQ
     - VTI
     - IWM
@@ -111,40 +112,73 @@ algorithms:
     - STIP
     - TLT
     - GLD
-    regime_symbol: SPY
-    price_lookback_short_bars: 1
-    price_lookback_medium_bars: 6
-    price_lookback_daily_bars: 13
-    daily_abs_momentum_lookback_days: 20
+    nano_momentum_lookback_bars: 3
+    micro_momentum_lookback_bars: 26
+    meso_trend_lookback_days: 60
+    macro_trend_lookback_days: 180
     sentiment_lookback_minutes: 60
-    max_gross_exposure: 1.0
-    max_single_position_weight: 0.25
-    max_risk_on_positions: 4
-    max_defensive_positions: 2
-    cautious_max_risk_on_exposure: 0.3
-    cautious_min_risk_on_score: 1.0
-    per_trade_value_min: 50.0
-    w_price_short: 0.4
-    w_price_medium: 0.3
-    w_price_daily: 0.2
+    w_price_nano: 0.25
+    w_price_micro: 0.35
+    w_price_meso: 0.2
+    w_price_macro: 0.1
     w_sentiment: 0.1
-    regime_bull_price_threshold: 0.01
-    regime_bear_price_threshold: -0.01
-    regime_sentiment_positive: 0.2
-    regime_sentiment_negative: -0.2
+    w_pullback_uptrend: 0.25
+    pullback_meso_z_threshold: 1.0
+    pullback_nano_z_threshold: -0.5
+    pullback_nano_z_cap: 3.0
+    pullback_min_micro_return: 0.0
+    min_risk_on_score: 0.0
+    min_risk_on_micro_return: 0.0
+    min_defensive_score: 0.0
+    max_positions: 4
+    max_single_position_weight: 0.25
+    max_gross_exposure: 1.0
     volatility_lookback_bars: 13
     max_intraday_volatility: 0.06
     high_volatility_weight_scale: 0.5
     intraday_drawdown_limit: -0.02
-    momentum_lookback_days: 20
-    long_ma_days: 0
-    max_weight_per_symbol: 0.25
-    max_portfolio_exposure: 1.0
-    max_longs: 4
-    cash_buffer: 0.0
-    min_trade_dollars: 50.0
     rebalance_threshold: 0.0
-    transaction_cost_bps: 1.0
-    backtest_starting_equity: 10000.0
+    per_trade_value_min: 50.0
     algorithm_equity_cap: 0.0
-    history_extra_buffer_days: 5
+  invest_spy:
+    spy_symbol: SPY
+    equity_income_universe:
+    - XYLD
+    defensive_universe:
+    - BIL
+    crisis_hedge_universe:
+    - SH
+    - VXX
+    macro_trend_lookback_days: 60
+    micro_momentum_lookback_bars: 3
+    meso_momentum_lookback_bars: 26
+    sentiment_lookback_minutes: 60
+    max_gross_exposure: 1.0
+    max_single_position_weight: 1.0
+    max_defensive_positions: 2
+    max_crisis_hedge_positions: 1
+    flat_equity_income_exposure: 0.5
+    max_crisis_hedge_exposure: 0.15
+    max_crisis_hedge_weight: 0.10
+    growth_macro_return: 0.02
+    growth_meso_return: 0.0
+    pullback_micro_return: -0.005
+    falling_macro_return: 0.0
+    falling_meso_return: -0.01
+    crisis_macro_return: -0.05
+    crisis_meso_return: -0.02
+    crisis_micro_return: -0.01
+    sentiment_positive: 0.10
+    sentiment_negative: -0.20
+    sentiment_crisis: -0.40
+    per_trade_value_min: 50.0
+    w_price_micro: 0.35
+    w_price_meso: 0.40
+    w_price_macro: 0.15
+    w_sentiment: 0.10
+    volatility_lookback_bars: 20
+    max_intraday_volatility: 0.08
+    high_volatility_weight_scale: 0.7
+    intraday_drawdown_limit: -0.03
+    rebalance_threshold: 0.01
+    algorithm_equity_cap: 0.0

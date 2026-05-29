@@ -19,6 +19,7 @@ from .signals import compute_signals_for_universe
 from .social import load_social_trends_csv
 from .strategy_models import STRATEGY_LABELS, strategy_signal_rows, weights_from_strategy_rows
 from .fast_momentum import DefensiveMomentumConfig, build_defensive_momentum_targets
+from .invest_spy import InvestSpyConfig, build_invest_spy_targets
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +49,9 @@ def _template_signal_map(rows: list[dict]) -> dict[str, dict[str, float | int]]:
         str(row["symbol"]): {
             "signal": int(row.get("signal", 0)),
             "score": _as_float(row.get("score")),
-            "price_score": _as_float(row.get("ret_N")),
-            "social_score": 0.0,
+            "price_score": _as_float(row.get("price_score", row.get("ret_N"))),
+            "social_score": _as_float(row.get("social_score")),
+            "sentiment": _as_float(row.get("sentiment")),
             "volume_score": _as_float(row.get("volume_score")),
             "ret_N": _as_float(row.get("ret_N")),
             "sma_long": _as_float(row.get("sma_long")),
@@ -101,8 +103,11 @@ def run_once(account_id: str | None = None) -> None:
     current_positions = get_positions(trading_client)
 
     defensive_config = DefensiveMomentumConfig.from_runtime_config(config)
+    invest_spy_config = InvestSpyConfig.from_runtime_config(config)
     if strategy == "fast_momentum":
         price_symbols = sorted(set(defensive_config.symbols) | set(current_positions))
+    elif strategy == "invest_spy":
+        price_symbols = sorted(set(invest_spy_config.symbols) | set(current_positions))
     else:
         price_symbols = sorted(set(config.symbols) | set(current_positions))
     latest_quotes = fetch_latest_market_quotes(price_symbols, config, data_client=data_client)
@@ -141,7 +146,39 @@ def run_once(account_id: str | None = None) -> None:
             equity,
             cash_buffer=0.0,
             min_trade_dollars=defensive_config.per_trade_value_min,
-            rebalance_threshold=0.0,
+            rebalance_threshold=defensive_config.rebalance_threshold,
+        )
+        log_orders(order_results)
+        log_position_changes(order_results)
+        return
+
+    if strategy == "invest_spy":
+        if "paper-api.alpaca.markets" not in str(config.alpaca_base_url):
+            logger.warning(
+                "Invest SPY is restricted to Alpaca paper trading by default. "
+                "Configured endpoint %s is not paper; exiting without orders.",
+                config.alpaca_base_url,
+            )
+            return
+        target_weights, signals, metadata = build_invest_spy_targets(
+            config,
+            data_client,
+            current_positions,
+            latest_prices,
+            equity,
+        )
+        logger.info("Invest SPY metadata: %s", metadata)
+        log_signals(signals, latest_prices)
+        log_portfolio(target_weights, equity)
+        order_results = sync_positions_to_targets(
+            trading_client,
+            latest_prices,
+            current_positions,
+            target_weights,
+            equity,
+            cash_buffer=0.0,
+            min_trade_dollars=invest_spy_config.per_trade_value_min,
+            rebalance_threshold=invest_spy_config.rebalance_threshold,
         )
         log_orders(order_results)
         log_position_changes(order_results)
@@ -183,7 +220,21 @@ def run_once(account_id: str | None = None) -> None:
             target_annual_vol=config.target_annual_vol,
         )
     else:
-        rows = strategy_signal_rows(strategy, bars_by_symbol)
+        social_by_symbol = None
+        social_weight = 0.0
+        if strategy == "dual_momentum":
+            social_by_symbol = merge_social_frames(
+                load_social_trends_csv(config.social_trends_csv, config.symbols),
+                news_records_to_social_frames(fetch_latest_news_sentiment(config.symbols, config)),
+            )
+            social_weight = config.social_momentum_weight
+        rows = strategy_signal_rows(
+            strategy,
+            bars_by_symbol,
+            social_by_symbol=social_by_symbol,
+            social_lookback_days=config.social_lookback_days,
+            social_weight=social_weight,
+        )
         signals = _template_signal_map(rows)
         target_weights = weights_from_strategy_rows(
             rows,

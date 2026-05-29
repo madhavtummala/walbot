@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 
 import uvicorn
 
@@ -42,7 +43,13 @@ def main() -> None:
     parser.add_argument("--reload", action="store_true")
     args = parser.parse_args()
 
-    uvicorn.run("src.web_app:app", host=args.host, port=args.port, reload=args.reload)
+    uvicorn.run(
+        "src.web_app:app",
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+        log_level=os.getenv("UVICORN_LOG_LEVEL", "warning"),
+    )
 
 
 if __name__ == "__main__":

@@ -28,6 +28,7 @@ def test_sync_positions_sells_positions_missing_from_targets(monkeypatch) -> Non
 
     assert submitted == [("SPY", "sell", 3)]
     assert result[0]["action"] == "sell"
+    assert result[0]["target_weight"] == 0.0
 
 
 def test_sync_positions_submits_sells_before_buys(monkeypatch) -> None:
@@ -39,7 +40,7 @@ def test_sync_positions_submits_sells_before_buys(monkeypatch) -> None:
 
     monkeypatch.setattr(orders, "submit_market_order", fake_submit)
 
-    orders.sync_positions_to_targets(
+    result = orders.sync_positions_to_targets(
         trading_client=object(),
         latest_prices={"AAA": 100.0, "BBB": 100.0},
         current_positions={"AAA": 2},
@@ -51,3 +52,4 @@ def test_sync_positions_submits_sells_before_buys(monkeypatch) -> None:
     )
 
     assert submitted == [("AAA", "sell", 2), ("BBB", "buy", 5)]
+    assert [order["target_weight"] for order in result] == [0.0, 0.5]

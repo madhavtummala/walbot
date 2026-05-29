@@ -23,33 +23,31 @@ STATE_KEY = "defensive_momentum_intraday_risk"
 class DefensiveMomentumConfig:
     """Configurable knobs for the intraday defensive momentum + sentiment strategy."""
 
-    risk_on_universe: list[str] = field(
-        default_factory=lambda: ["SPY", "QQQ", "VTI", "IWM", "IJH", "IJR", "IEFA", "IEMG", "ACWI", "ACWX"]
-    )
-    defensive_universe: list[str] = field(
-        default_factory=lambda: ["BIL", "SHY", "SPTS", "IEF", "GOVT", "AGG", "BND", "IUSB", "STIP", "TLT", "GLD"]
-    )
-    regime_symbol: str = "SPY"
-    price_lookback_short_bars: int = 1
-    price_lookback_medium_bars: int = 6
-    price_lookback_daily_bars: int = 13
-    daily_abs_momentum_lookback_days: int = 20
+    risk_on_universe: list[str] = field(default_factory=lambda: ["QQQ", "VTI", "IWM", "IEMG", "ACWI"])
+    defensive_universe: list[str] = field(default_factory=lambda: ["BIL", "IEF", "AGG", "TLT", "GLD"])
+    nano_momentum_lookback_bars: int = 3
+    micro_momentum_lookback_bars: int = 26
+    meso_trend_lookback_days: int = 60
+    macro_trend_lookback_days: int = 180
     sentiment_lookback_minutes: int = 60
     max_gross_exposure: float = 1.0
     max_single_position_weight: float = 0.25
-    max_risk_on_positions: int = 4
-    max_defensive_positions: int = 2
-    cautious_max_risk_on_exposure: float = 0.30
-    cautious_min_risk_on_score: float = 1.0
+    max_positions: int = 4
+    min_risk_on_score: float = 0.0
+    min_risk_on_micro_return: float = 0.0
+    min_defensive_score: float = 0.0
     per_trade_value_min: float = 50.0
-    w_price_short: float = 0.4
-    w_price_medium: float = 0.3
-    w_price_daily: float = 0.2
+    rebalance_threshold: float = 0.01
+    w_price_nano: float = 0.25
+    w_price_micro: float = 0.35
+    w_price_meso: float = 0.20
+    w_price_macro: float = 0.10
     w_sentiment: float = 0.1
-    regime_bull_price_threshold: float = 0.01
-    regime_bear_price_threshold: float = -0.01
-    regime_sentiment_positive: float = 0.2
-    regime_sentiment_negative: float = -0.2
+    w_pullback_uptrend: float = 0.0
+    pullback_meso_z_threshold: float = 1.0
+    pullback_nano_z_threshold: float = -0.5
+    pullback_nano_z_cap: float = 3.0
+    pullback_min_micro_return: float = 0.0
     volatility_lookback_bars: int = 13
     max_intraday_volatility: float = 0.06
     high_volatility_weight_scale: float = 0.5
@@ -89,27 +87,29 @@ class DefensiveMomentumConfig:
         return cls(
             risk_on_universe=symbols("risk_on_universe", defaults.risk_on_universe),
             defensive_universe=symbols("defensive_universe", defaults.defensive_universe),
-            regime_symbol=str(raw.get("regime_symbol", defaults.regime_symbol)).strip().upper() or defaults.regime_symbol,
-            price_lookback_short_bars=integer("price_lookback_short_bars", defaults.price_lookback_short_bars),
-            price_lookback_medium_bars=integer("price_lookback_medium_bars", defaults.price_lookback_medium_bars),
-            price_lookback_daily_bars=integer("price_lookback_daily_bars", defaults.price_lookback_daily_bars),
-            daily_abs_momentum_lookback_days=integer("daily_abs_momentum_lookback_days", defaults.daily_abs_momentum_lookback_days),
+            nano_momentum_lookback_bars=integer("nano_momentum_lookback_bars", defaults.nano_momentum_lookback_bars),
+            micro_momentum_lookback_bars=integer("micro_momentum_lookback_bars", defaults.micro_momentum_lookback_bars),
+            meso_trend_lookback_days=integer("meso_trend_lookback_days", defaults.meso_trend_lookback_days),
+            macro_trend_lookback_days=integer("macro_trend_lookback_days", defaults.macro_trend_lookback_days),
             sentiment_lookback_minutes=integer("sentiment_lookback_minutes", defaults.sentiment_lookback_minutes),
             max_gross_exposure=number("max_gross_exposure", defaults.max_gross_exposure),
             max_single_position_weight=number("max_single_position_weight", defaults.max_single_position_weight),
-            max_risk_on_positions=integer("max_risk_on_positions", defaults.max_risk_on_positions),
-            max_defensive_positions=integer("max_defensive_positions", defaults.max_defensive_positions),
-            cautious_max_risk_on_exposure=number("cautious_max_risk_on_exposure", defaults.cautious_max_risk_on_exposure),
-            cautious_min_risk_on_score=number("cautious_min_risk_on_score", defaults.cautious_min_risk_on_score),
+            max_positions=integer("max_positions", defaults.max_positions),
+            min_risk_on_score=number("min_risk_on_score", defaults.min_risk_on_score),
+            min_risk_on_micro_return=number("min_risk_on_micro_return", defaults.min_risk_on_micro_return),
+            min_defensive_score=number("min_defensive_score", defaults.min_defensive_score),
             per_trade_value_min=number("per_trade_value_min", getattr(config, "min_trade_dollars", defaults.per_trade_value_min)),
-            w_price_short=number("w_price_short", defaults.w_price_short),
-            w_price_medium=number("w_price_medium", defaults.w_price_medium),
-            w_price_daily=number("w_price_daily", defaults.w_price_daily),
+            rebalance_threshold=number("rebalance_threshold", getattr(config, "rebalance_threshold", defaults.rebalance_threshold)),
+            w_price_nano=number("w_price_nano", defaults.w_price_nano),
+            w_price_micro=number("w_price_micro", defaults.w_price_micro),
+            w_price_meso=number("w_price_meso", defaults.w_price_meso),
+            w_price_macro=number("w_price_macro", defaults.w_price_macro),
             w_sentiment=number("w_sentiment", defaults.w_sentiment),
-            regime_bull_price_threshold=number("regime_bull_price_threshold", defaults.regime_bull_price_threshold),
-            regime_bear_price_threshold=number("regime_bear_price_threshold", defaults.regime_bear_price_threshold),
-            regime_sentiment_positive=number("regime_sentiment_positive", defaults.regime_sentiment_positive),
-            regime_sentiment_negative=number("regime_sentiment_negative", defaults.regime_sentiment_negative),
+            w_pullback_uptrend=number("w_pullback_uptrend", defaults.w_pullback_uptrend),
+            pullback_meso_z_threshold=number("pullback_meso_z_threshold", defaults.pullback_meso_z_threshold),
+            pullback_nano_z_threshold=number("pullback_nano_z_threshold", defaults.pullback_nano_z_threshold),
+            pullback_nano_z_cap=number("pullback_nano_z_cap", defaults.pullback_nano_z_cap),
+            pullback_min_micro_return=number("pullback_min_micro_return", defaults.pullback_min_micro_return),
             volatility_lookback_bars=integer("volatility_lookback_bars", defaults.volatility_lookback_bars),
             max_intraday_volatility=number("max_intraday_volatility", defaults.max_intraday_volatility),
             high_volatility_weight_scale=number("high_volatility_weight_scale", defaults.high_volatility_weight_scale),
@@ -118,16 +118,19 @@ class DefensiveMomentumConfig:
 
     @property
     def symbols(self) -> list[str]:
-        return sorted(set(self.risk_on_universe) | set(self.defensive_universe) | {self.regime_symbol})
+        return sorted(set(self.risk_on_universe) | set(self.defensive_universe))
 
     @property
     def required_intraday_bars(self) -> int:
         return max(
-            self.price_lookback_short_bars,
-            self.price_lookback_medium_bars,
-            self.price_lookback_daily_bars,
+            self.nano_momentum_lookback_bars,
+            self.micro_momentum_lookback_bars,
             self.volatility_lookback_bars,
         ) + 1
+
+    @property
+    def required_daily_bars(self) -> int:
+        return max(self.meso_trend_lookback_days, self.macro_trend_lookback_days)
 
 
 def _return_over(closes: pd.Series, bars: int) -> float:
@@ -150,17 +153,20 @@ def compute_price_features(
     closes = pd.to_numeric(intraday.get("close", pd.Series(dtype=float)), errors="coerce").dropna()
     daily_closes = pd.to_numeric(daily.get("close", pd.Series(dtype=float)), errors="coerce").dropna()
 
-    daily_return = _return_over(daily_closes, config.daily_abs_momentum_lookback_days)
     intraday_returns = closes.pct_change().dropna().tail(config.volatility_lookback_bars)
     realized_volatility = float(intraday_returns.std()) if not intraday_returns.empty else 0.0
+    nano_return = _return_over(closes, config.nano_momentum_lookback_bars)
+    micro_return = _return_over(closes, config.micro_momentum_lookback_bars)
+    meso_return = _return_over(daily_closes, config.meso_trend_lookback_days)
+    macro_return = _return_over(daily_closes, config.macro_trend_lookback_days)
 
     return {
         "symbol": symbol.upper(),
-        "short_return": _return_over(closes, config.price_lookback_short_bars),
-        "medium_return": _return_over(closes, config.price_lookback_medium_bars),
-        "daily_bar_return": _return_over(closes, config.price_lookback_daily_bars),
-        "daily_return": daily_return,
-        "daily_trend_ok": daily_return > 0.0,
+        "nano_return": nano_return,
+        "micro_return": micro_return,
+        "meso_return": meso_return,
+        "macro_return": macro_return,
+        "macro_trend_ok": macro_return > 0.0,
         "realized_volatility": 0.0 if math.isnan(realized_volatility) else realized_volatility,
         "close": float(closes.iloc[-1]) if not closes.empty else 0.0,
     }
@@ -185,36 +191,35 @@ def compute_composite_scores(
     config: DefensiveMomentumConfig,
 ) -> dict[str, dict[str, Any]]:
     """Combine z-scored price momentum and normalized sentiment into one score."""
-    zscores = zscores_by_feature(features_by_symbol, ["short_return", "medium_return", "daily_return"])
+    zscores = zscores_by_feature(features_by_symbol, ["nano_return", "micro_return", "meso_return", "macro_return"])
     scored: dict[str, dict[str, Any]] = {}
     for symbol, features in features_by_symbol.items():
         sentiment = max(-1.0, min(1.0, float(sentiment_scores.get(symbol, 0.0))))
+        nano_z = zscores[symbol]["nano_return"]
+        micro_z = zscores[symbol]["micro_return"]
+        meso_z = zscores[symbol]["meso_return"]
+        micro_return = float(features.get("micro_return", 0.0))
+        pullback_uptrend = 0.0
+        if (
+            config.w_pullback_uptrend > 0
+            and bool(features.get("macro_trend_ok"))
+            and meso_z >= config.pullback_meso_z_threshold
+            and nano_z <= config.pullback_nano_z_threshold
+            and micro_return >= config.pullback_min_micro_return
+        ):
+            pullback_depth = min(abs(nano_z), max(config.pullback_nano_z_cap, 0.0))
+            pullback_uptrend = config.w_pullback_uptrend * meso_z * pullback_depth
         components = {
-            "price_short": config.w_price_short * zscores[symbol]["short_return"],
-            "price_medium": config.w_price_medium * zscores[symbol]["medium_return"],
-            "price_daily": config.w_price_daily * zscores[symbol]["daily_return"],
+            "price_nano": config.w_price_nano * nano_z,
+            "price_micro": config.w_price_micro * micro_z,
+            "price_meso": config.w_price_meso * meso_z,
+            "price_macro": config.w_price_macro * zscores[symbol]["macro_return"],
             "sentiment": config.w_sentiment * sentiment,
+            "pullback_uptrend": pullback_uptrend,
         }
         score = sum(components.values())
         scored[symbol] = {**features, "symbol": symbol, "score": score, "sentiment_score": sentiment, "components": components}
     return scored
-
-
-def compute_market_regime(
-    spy_price_features: dict[str, Any],
-    market_sentiment: float,
-    config: DefensiveMomentumConfig,
-) -> tuple[str, dict[str, float]]:
-    """Classify the current market as RISK_ON, RISK_OFF, or CAUTIOUS."""
-    daily_return = float(spy_price_features.get("daily_return", 0.0))
-    sentiment = float(market_sentiment)
-    if daily_return > config.regime_bull_price_threshold and sentiment > config.regime_sentiment_positive:
-        regime = "RISK_ON"
-    elif daily_return < config.regime_bear_price_threshold and sentiment < config.regime_sentiment_negative:
-        regime = "RISK_OFF"
-    else:
-        regime = "CAUTIOUS"
-    return regime, {"daily_return": daily_return, "market_sentiment": sentiment}
 
 
 def get_intraday_bars(symbols: list[str], lookback_bars: int, config: Any, data_client: Any = None) -> dict[str, pd.DataFrame]:
@@ -289,42 +294,68 @@ def get_sentiment_snapshot(
 
 def decide_target_weights(
     scores_by_symbol: dict[str, dict[str, Any]],
-    regime: str,
     config: DefensiveMomentumConfig,
 ) -> dict[str, float]:
-    """Apply dual momentum ranking and regime rules to produce target weights."""
+    """Rank eligible risk-on and defensive ETFs, then allocate dynamically by score."""
     weights = {symbol: 0.0 for symbol in config.symbols}
 
-    def ranked(symbols: list[str], min_score: float) -> list[dict[str, Any]]:
+    def ranked(
+        symbols: list[str],
+        min_score: float,
+        min_micro_return: float | None = None,
+        *,
+        require_macro_trend: bool = True,
+    ) -> list[dict[str, Any]]:
         candidates = [
             scores_by_symbol[symbol]
             for symbol in symbols
             if symbol in scores_by_symbol
-            and bool(scores_by_symbol[symbol].get("daily_trend_ok"))
+            and (not require_macro_trend or bool(scores_by_symbol[symbol].get("macro_trend_ok")))
             and float(scores_by_symbol[symbol].get("score", 0.0)) >= min_score
+            and (
+                min_micro_return is None
+                or float(scores_by_symbol[symbol].get("micro_return", 0.0)) >= min_micro_return
+            )
         ]
         return sorted(candidates, key=lambda item: float(item.get("score", 0.0)), reverse=True)
 
-    def assign(candidates: list[dict[str, Any]], total_cap: float, position_limit: int) -> None:
-        selected = candidates[: max(position_limit, 0)]
-        if not selected:
-            return
-        per_symbol = min(config.max_single_position_weight, total_cap / len(selected))
-        for row in selected:
-            weights[str(row["symbol"])] = max(0.0, per_symbol)
+    candidates = ranked(config.risk_on_universe, config.min_risk_on_score, config.min_risk_on_micro_return)
+    candidates.extend(ranked(config.defensive_universe, config.min_defensive_score))
+    candidates.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    selected = candidates[: max(config.max_positions, 0)]
 
-    if regime == "RISK_ON":
-        assign(ranked(config.risk_on_universe, 0.0), config.max_gross_exposure, config.max_risk_on_positions)
-    elif regime == "RISK_OFF":
-        assign(ranked(config.defensive_universe, 0.0), config.max_gross_exposure, config.max_defensive_positions)
-    else:
-        assign(
-            ranked(config.risk_on_universe, config.cautious_min_risk_on_score),
-            config.cautious_max_risk_on_exposure,
-            config.max_risk_on_positions,
-        )
-        remaining = max(0.0, config.max_gross_exposure - sum(weights.values()))
-        assign(ranked(config.defensive_universe, 0.0), remaining, config.max_defensive_positions)
+    if not selected:
+        selected = ranked(config.defensive_universe, config.min_defensive_score, require_macro_trend=False)[: max(config.max_positions, 0)]
+
+    remaining = list(selected)
+    remaining_exposure = max(config.max_gross_exposure, 0.0)
+    while remaining and remaining_exposure > 0:
+        positive_scores = [max(float(row.get("score", 0.0)), 0.0) for row in remaining]
+        total_score = sum(positive_scores)
+        allocated_any = False
+        next_remaining: list[dict[str, Any]] = []
+        for row, score in zip(remaining, positive_scores):
+            raw_weight = (
+                remaining_exposure / len(remaining)
+                if total_score <= 0
+                else remaining_exposure * score / total_score
+            )
+            if raw_weight >= config.max_single_position_weight:
+                weights[str(row["symbol"])] = config.max_single_position_weight
+                remaining_exposure -= config.max_single_position_weight
+                allocated_any = True
+            else:
+                next_remaining.append(row)
+        if not allocated_any:
+            for row, score in zip(remaining, positive_scores):
+                weight = (
+                    remaining_exposure / len(remaining)
+                    if total_score <= 0
+                    else remaining_exposure * score / total_score
+                )
+                weights[str(row["symbol"])] = max(0.0, min(weight, config.max_single_position_weight))
+            break
+        remaining = next_remaining
 
     gross = sum(abs(weight) for weight in weights.values())
     if gross > config.max_gross_exposure > 0:
@@ -351,6 +382,8 @@ def apply_risk_guards(
         realized_vol = float(scores_by_symbol.get(symbol, {}).get("realized_volatility", 0.0))
         if config.max_intraday_volatility > 0 and realized_vol > config.max_intraday_volatility:
             capped *= max(0.0, min(1.0, config.high_volatility_weight_scale))
+        if abs(capped - current_weights.get(symbol, 0.0)) < max(config.rebalance_threshold, 0.0):
+            capped = current_weights.get(symbol, 0.0)
         if abs(capped - current_weights.get(symbol, 0.0)) * equity < config.per_trade_value_min:
             capped = current_weights.get(symbol, 0.0)
         guarded[symbol] = capped
@@ -391,7 +424,7 @@ def weights_from_positions(current_positions: dict[str, int], latest_prices: dic
 def rows_from_scores(
     scores_by_symbol: dict[str, dict[str, Any]],
     target_weights: dict[str, float],
-    regime: str,
+    allocation_mode: str,
 ) -> list[dict[str, Any]]:
     """Build dashboard/log signal rows from scored symbols and final weights."""
     rows = []
@@ -402,15 +435,19 @@ def rows_from_scores(
                 "symbol": symbol,
                 "signal": 1 if weight > 0 else 0,
                 "score": float(row.get("score", 0.0)),
-                "price_score": float(row.get("daily_return", 0.0)),
+                "price_score": float(row.get("macro_return", 0.0)),
                 "social_score": float(row.get("sentiment_score", 0.0)),
                 "volume_score": 0.0,
-                "ret_N": float(row.get("medium_return", 0.0)),
+                "ret_N": float(row.get("micro_return", 0.0)),
                 "sma_long": 0.0,
-                "regime": regime,
+                "allocation_mode": allocation_mode,
             }
         )
     return rows
+
+
+def allocation_mode(target_weights: dict[str, float]) -> str:
+    return "FLAT_RANK" if any(weight > 0 for weight in target_weights.values()) else "CASH"
 
 
 def build_defensive_momentum_targets(
@@ -424,7 +461,7 @@ def build_defensive_momentum_targets(
     strategy_config = DefensiveMomentumConfig.from_runtime_config(runtime_config)
     symbols = strategy_config.symbols
     intraday_bars = get_intraday_bars(symbols, strategy_config.required_intraday_bars, runtime_config, data_client)
-    daily_bars = get_daily_bars(symbols, strategy_config.daily_abs_momentum_lookback_days, runtime_config, data_client)
+    daily_bars = get_daily_bars(symbols, strategy_config.required_daily_bars, runtime_config, data_client)
     sentiment, market_sentiment = get_sentiment_snapshot(symbols, strategy_config.sentiment_lookback_minutes, runtime_config)
 
     features = {
@@ -432,12 +469,12 @@ def build_defensive_momentum_targets(
         for symbol in symbols
     }
     scores = compute_composite_scores(features, sentiment, strategy_config)
-    regime, regime_inputs = compute_market_regime(scores.get(strategy_config.regime_symbol, {}), market_sentiment, strategy_config)
-    raw_weights = decide_target_weights(scores, regime, strategy_config)
+    raw_weights = decide_target_weights(scores, strategy_config)
     current_weights = weights_from_positions(current_positions, latest_prices, equity)
     target_weights = apply_risk_guards(raw_weights, scores, current_weights, equity, strategy_config)
+    mode = allocation_mode(target_weights)
 
-    rows = rows_from_scores(scores, target_weights, regime)
+    rows = rows_from_scores(scores, target_weights, mode)
     signals = {
         row["symbol"]: {
             "signal": int(row["signal"]),
@@ -451,15 +488,15 @@ def build_defensive_momentum_targets(
         for row in rows
     }
     metadata = {
-        "regime": regime,
-        "regime_inputs": regime_inputs,
+        "allocation_mode": mode,
+        "market_sentiment": market_sentiment,
         "scores": scores,
         "raw_target_weights": raw_weights,
     }
     logger.info(
-        "Fast Momentum decision regime=%s inputs=%s targets=%s",
-        regime,
-        regime_inputs,
+        "Fast Momentum decision mode=%s market_sentiment=%s targets=%s",
+        mode,
+        market_sentiment,
         target_weights,
     )
     return target_weights, signals, metadata

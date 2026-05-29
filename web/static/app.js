@@ -78,8 +78,17 @@ const STRATEGIES = [
     status: "Live",
     horizon: "Intraday",
     risk: "Medium",
-    logic: "Ranks the curated ETF universe with 30-minute momentum, daily absolute trend, and recent sentiment; regime rules rotate between risk-on and defensive sleeves.",
-    signals: ["30-minute momentum", "Daily trend", "News sentiment", "Market regime", "Defensive sleeve"],
+    logic: "Ranks risk-on and defensive ETFs with nano, micro, meso, and macro momentum scores, then sizes selected positions dynamically with caps and rebalance thresholds.",
+    signals: ["Nano momentum", "Micro momentum", "Meso trend", "Macro trend", "Pullback bonus"],
+  },
+  {
+    key: "invest_spy",
+    name: "Invest SPY",
+    status: "Live",
+    horizon: "Intraday",
+    risk: "Medium",
+    logic: "Classifies SPY as growing, pulling back, flat, falling, or crisis using micro, meso, macro, and sentiment signals, then rotates among SPY, XYLD, defensive assets, and capped hedges.",
+    signals: ["SPY state", "Micro/meso/macro", "Sentiment", "XYLD flat state", "SH/VXX crisis hedge"],
   },
 ];
 
@@ -1235,12 +1244,33 @@ async function loadSignals(strategyKey) {
 
 function formatSignalDetail(strategyKey, row) {
   if (strategyKey === "fast_momentum") {
-    const providers = Array.isArray(row.sentiment_providers) && row.sentiment_providers.length
-      ? row.sentiment_providers.join(", ")
-      : "none";
-    const close = row.close ? ` / Close ${money(row.close, 2)}` : "";
-    const reason = row.reason ? `${row.reason} / ` : "";
-    return `${reason}Sentiment ${num(row.sentiment_score ?? row.social_score, 2)} (${providers}, ${Number(row.sentiment_records || 0)} recs) / Regime ${row.regime || "pending"}${close}`;
+    const components = row.score_components || {};
+    const details = [
+      row.reason || "Signal pending",
+      `Macro ${signedNum(components.price_macro, 2)}`,
+      `Meso ${signedNum(components.price_meso, 2)}`,
+      `Micro ${signedNum(components.price_micro, 2)}`,
+      `Nano ${signedNum(components.price_nano, 2)}`,
+      `Pullback ${signedNum(components.pullback_uptrend, 2)}`,
+      `Sentiment ${signedNum(components.sentiment ?? row.sentiment_component ?? row.sentiment_score ?? row.social_score, 2)}`,
+    ];
+    return details.join(" / ");
+  }
+  if (strategyKey === "invest_spy") {
+    const details = [];
+    if (row.reason) details.push(row.reason);
+    if (row.spy_state) details.push(`SPY ${String(row.spy_state).toLowerCase()}`);
+    if (Math.abs(Number(row.pullback_score || 0)) >= 0.01) {
+      details.push(`Pullback ${Number(row.pullback_score) > 0 ? "+" : ""}${num(row.pullback_score, 2)}`);
+    }
+    if (Number(row.sentiment_records || 0) > 0) {
+      const providers = Array.isArray(row.sentiment_providers) && row.sentiment_providers.length
+        ? row.sentiment_providers.join(", ")
+        : "provider";
+      details.push(`Sentiment ${num(row.sentiment_component ?? row.sentiment_score ?? row.social_score, 2)} (${providers})`);
+    }
+    if (row.close) details.push(`Close ${money(row.close, 2)}`);
+    return details.join(" / ");
   }
   if (row.reason) {
     const close = row.close ? ` / Close ${money(row.close, 2)}` : "";
@@ -1256,6 +1286,24 @@ function formatSignalDetail(strategyKey, row) {
     return `Close ${money(row.close, 2)}`;
   }
   return "Live feed pending";
+}
+
+function signedNum(value, digits = 2) {
+  const parsed = Number(value || 0);
+  return `${parsed > 0 ? "+" : ""}${num(parsed, digits)}`;
+}
+
+function formatSignalHeadline(strategyKey, row) {
+  if (strategyKey === "fast_momentum" || strategyKey === "invest_spy") {
+    const parts = [
+      row.side || row.signal || "Signal",
+      `Score ${num(row.score, 2)}`,
+      `Weight ${percent(row.target_weight)}`,
+    ];
+    if (row.close) parts.push(`Close ${money(row.close, 2)}`);
+    return parts.join(" / ");
+  }
+  return `${row.side || row.signal} / Score ${num(row.score, 2)} / Weight ${percent(row.target_weight)}`;
 }
 
 function backtestStatusLabel(backtest, loading) {
@@ -1381,7 +1429,7 @@ function renderSignalBacktestCard({
           ? visibleLeaders.map((row) => `
             <article>
               <strong>${escapeHtml(row.symbol)}</strong>
-              <span>${escapeHtml(row.side || row.signal)} / Score ${num(row.score, 2)} / Weight ${percent(row.target_weight)}</span>
+              <span>${escapeHtml(formatSignalHeadline(strategyKey, row))}</span>
               <span>${escapeHtml(formatSignalDetail(strategyKey, row))}</span>
             </article>
           `).join("")
