@@ -204,16 +204,20 @@ def get_historical_intraday_bars(
 
     bars_by_symbol: dict[str, pd.DataFrame] = {}
     for symbol in symbols:
-        request = StockBarsRequest(
-            symbol_or_symbols=[symbol],
-            timeframe=timeframe,
-            start=start,
-            end=end,
-            limit=max(lookback_bars + 5, 100),
-            feed=_resolve_data_feed(data_feed),
-        )
-        bars = data_client.get_stock_bars(request)
-        df = _parse_bars_to_df(bars, symbol)
+        try:
+            request = StockBarsRequest(
+                symbol_or_symbols=[symbol],
+                timeframe=timeframe,
+                start=start,
+                end=end,
+                limit=max(lookback_bars + 5, 100),
+                feed=_resolve_data_feed(data_feed),
+            )
+            bars = data_client.get_stock_bars(request)
+            df = _parse_bars_to_df(bars, symbol)
+        except Exception as exc:
+            logger.warning("Skipping intraday bars for %s after provider error: %s", symbol, exc)
+            df = pd.DataFrame()
         if not df.empty:
             df = df.tail(lookback_bars).reset_index(drop=True)
         bars_by_symbol[symbol] = df

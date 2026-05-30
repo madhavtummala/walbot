@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from src import api_payloads
+from src.config import Config
 from src.api_payloads import (
     backtest_payload,
     controls_payload,
@@ -340,8 +341,20 @@ def test_dca_backtest_uses_cron_schedule_and_reports_skipped_cash(monkeypatch) -
 def test_backtest_response_explains_profit_loss_breakdown() -> None:
     history = pd.DataFrame(
         [
-            {"timestamp": pd.Timestamp("2026-01-01", tz="UTC"), "equity": 10_000.0, "cash": 9_000.0, "invested": 1_000.0},
-            {"timestamp": pd.Timestamp("2026-01-02", tz="UTC"), "equity": 10_461.0, "cash": 1_250.0, "invested": 9_211.0},
+            {
+                "timestamp": pd.Timestamp("2026-01-01", tz="UTC"),
+                "equity": 10_000.0,
+                "cash": 9_000.0,
+                "invested": 1_000.0,
+                "positions": {"SPY": 1_000.0},
+            },
+            {
+                "timestamp": pd.Timestamp("2026-01-02", tz="UTC"),
+                "equity": 10_461.0,
+                "cash": 1_250.0,
+                "invested": 9_211.0,
+                "positions": {"SPY": 7_000.0, "QQQ": 2_211.0},
+            },
         ]
     ).set_index("timestamp")
 
@@ -360,6 +373,7 @@ def test_backtest_response_explains_profit_loss_breakdown() -> None:
     assert payload["sizing"]["cash_account_only"] is True
     assert payload["orders"]["capital_limit"] == 10_000.0
     assert payload["orders"]["max_capital_at_work"] == 9_211.0
+    assert payload["rows"][-1]["positions"] == {"SPY": 7000.0, "QQQ": 2211.0}
 
 
 def test_strategy_backtest_is_cash_account_constrained(monkeypatch) -> None:
@@ -384,6 +398,76 @@ def test_strategy_backtest_is_cash_account_constrained(monkeypatch) -> None:
     assert history["order_count"].sum() == 0
     assert history["cash"].min() == 10_000.0
     assert history["invested"].max() == 0.0
+
+
+def test_fast_momentum_backtest_honors_configured_max_positions(monkeypatch) -> None:
+    symbols = ["AAA", "BBB", "CCC", "DDD", "EEE"]
+    bars = {symbol: _strategy_bars([100 + index * 0.2 for index in range(280)]) for symbol in symbols}
+    config = Config(
+        symbols=symbols,
+        cash_buffer=0.0,
+        transaction_cost_bps=0.0,
+        algorithm_configs={
+            "fast_momentum": {
+                "risk_on_universe": symbols,
+                "defensive_universe": [],
+                "max_positions": 4,
+                "max_single_position_weight": 0.25,
+                "max_gross_exposure": 1.0,
+            }
+        },
+    )
+
+    monkeypatch.setattr(api_payloads, "get_config", lambda *args, **kwargs: config)
+    monkeypatch.setattr(api_payloads, "create_data_client", lambda config: object())
+    monkeypatch.setattr(api_payloads, "fetch_daily_bars", lambda *args, **kwargs: bars)
+    monkeypatch.setattr(
+        api_payloads,
+        "strategy_signal_rows_from_prepared",
+        lambda strategy, snapshots: [
+            {"symbol": symbol, "side": "LONG", "signal": 1, "score": 10 - index}
+            for index, symbol in enumerate(symbols)
+        ],
+    )
+
+    history = api_payloads._strategy_backtest("fast_momentum", "6m")
+
+    position_counts = history["positions"].apply(len)
+    assert position_counts.max() == 4
+    assert all("EEE" not in positions for positions in history["positions"])
+
+
+def test_invest_spy_backtest_uses_invest_spy_state_logic(monkeypatch) -> None:
+    symbols = ["SPY", "XYLD", "BIL", "SH"]
+    bars = {symbol: _strategy_bars([100 + index * 0.4 for index in range(280)]) for symbol in symbols}
+    config = Config(
+        symbols=["IGNORED"],
+        cash_buffer=0.0,
+        transaction_cost_bps=0.0,
+        algorithm_configs={
+            "invest_spy": {
+                "spy_symbol": "SPY",
+                "equity_income_universe": ["XYLD"],
+                "defensive_universe": ["BIL"],
+                "crisis_hedge_universe": ["SH"],
+                "macro_trend_lookback_days": 60,
+                "micro_momentum_lookback_bars": 3,
+                "meso_momentum_lookback_bars": 26,
+                "max_gross_exposure": 1.0,
+                "max_single_position_weight": 1.0,
+            }
+        },
+    )
+
+    monkeypatch.setattr(api_payloads, "get_config", lambda *args, **kwargs: config)
+    monkeypatch.setattr(api_payloads, "create_data_client", lambda config: object())
+    monkeypatch.setattr(api_payloads, "fetch_daily_bars", lambda symbols, *args, **kwargs: {symbol: bars[symbol] for symbol in symbols})
+
+    history = api_payloads._strategy_backtest("invest_spy", "6m")
+
+    assert history["order_count"].sum() > 0
+    assert history["positions"].iloc[-1]["SPY"] > 0
+    assert "IGNORED" not in history["positions"].iloc[-1]
 
 
 def test_trend_and_mean_reversion_backtests_can_diverge(monkeypatch) -> None:

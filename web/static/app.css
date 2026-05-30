@@ -604,7 +604,7 @@ main {
 
 .deckChart {
   width: 100%;
-  height: 128px;
+  height: 220px;
   display: block;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -705,7 +705,7 @@ main {
   min-width: 0;
   display: grid;
   gap: 3px;
-  padding: 10px 0;
+  padding: 10px 8px;
   border-bottom: 1px solid var(--line);
 }
 
@@ -1071,61 +1071,48 @@ button:active {
   font-size: 12px;
 }
 
-.universeReview {
-  display: grid;
-  gap: 8px;
-  padding-top: 2px;
-}
-
-.universeRows {
-  display: grid;
-  gap: 7px;
-  max-height: 168px;
-  overflow-y: auto;
-  padding-right: 2px;
-}
-
-.universeRows article {
+.universeProposalHeader,
+.universeProposalRow {
   min-width: 0;
   display: grid;
   grid-template-columns: 52px minmax(0, 1fr);
   gap: 2px 8px;
-  padding: 8px;
+  padding: 9px 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.46);
 }
 
-.universeRows strong {
+.universeProposalHeader {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.universeProposalHeader strong {
+  font-size: 12px;
+}
+
+.universeProposalHeader span {
+  grid-column: 1 / -1;
+}
+
+.universeProposalHeader .applyUniverse {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.universeProposalRow strong {
   grid-row: span 2;
   align-self: center;
   overflow-wrap: anywhere;
   font-size: 12px;
 }
 
-.universeRows span,
-.universeMeta span,
-.universeChips span {
+.universeProposalHeader span,
+.universeProposalRow span {
   color: var(--muted);
   font-size: 10px;
   font-weight: 900;
-}
-
-.universeMeta,
-.universeChips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.universeMeta span,
-.universeChips span {
-  min-height: 22px;
-  display: inline-flex;
-  align-items: center;
-  padding: 0 7px;
-  border-radius: 999px;
-  background: rgba(17, 24, 39, 0.06);
 }
 
 #modeLine {

@@ -164,15 +164,18 @@ def refresh_market_data_cache(
             if request_start > end:
                 request_start = end - timedelta(days=1)
 
-        fresh = get_historical_daily_bars(
-            [symbol],
-            lookback_days=lookback_days + ma_days + extra_buffer_days,
-            extra_buffer_days=extra_buffer_days,
-            data_client=alpaca_data_client,
-            end_date=end,
-            start_date=request_start,
-            data_feed=data_feed,
-        ).get(symbol, _empty_bars())
+        try:
+            fresh = get_historical_daily_bars(
+                [symbol],
+                lookback_days=lookback_days + ma_days + extra_buffer_days,
+                extra_buffer_days=extra_buffer_days,
+                data_client=alpaca_data_client,
+                end_date=end,
+                start_date=request_start,
+                data_feed=data_feed,
+            ).get(symbol, _empty_bars())
+        except Exception:
+            fresh = _empty_bars()
         merged = _normalize_bars(pd.concat([cached, fresh], ignore_index=True))
         merged = _filter_starting_at(merged, target_start)
         cache["items"][item_key] = {

@@ -3,12 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import math
 import pandas as pd
 
 from .fast_momentum import (
     apply_risk_guards,
     compute_composite_scores,
-    compute_price_features,
     get_daily_bars,
     get_intraday_bars,
     get_sentiment_snapshot,
@@ -52,6 +52,7 @@ class InvestSpyConfig:
     sentiment_crisis: float = -0.40
     per_trade_value_min: float = 50.0
     rebalance_threshold: float = 0.01
+    w_price_nano: float = 0.0
     w_price_micro: float = 0.35
     w_price_meso: float = 0.40
     w_price_macro: float = 0.15
@@ -130,6 +131,7 @@ class InvestSpyConfig:
             sentiment_crisis=number("sentiment_crisis", defaults.sentiment_crisis),
             per_trade_value_min=number("per_trade_value_min", getattr(config, "min_trade_dollars", defaults.per_trade_value_min)),
             rebalance_threshold=number("rebalance_threshold", getattr(config, "rebalance_threshold", defaults.rebalance_threshold)),
+            w_price_nano=number("w_price_nano", defaults.w_price_nano),
             w_price_micro=number("w_price_micro", defaults.w_price_micro),
             w_price_meso=number("w_price_meso", defaults.w_price_meso),
             w_price_macro=number("w_price_macro", defaults.w_price_macro),
@@ -156,6 +158,41 @@ class InvestSpyConfig:
             self.meso_momentum_lookback_bars,
             self.volatility_lookback_bars,
         ) + 1
+
+
+def _return_over(closes: pd.Series, bars: int) -> float:
+    if len(closes) <= bars or bars <= 0:
+        return 0.0
+    start = float(closes.iloc[-bars - 1])
+    end = float(closes.iloc[-1])
+    return end / start - 1.0 if start > 0 else 0.0
+
+
+def compute_invest_spy_price_features(
+    symbol: str,
+    intraday_bars: pd.DataFrame,
+    daily_bars: pd.DataFrame,
+    config: InvestSpyConfig,
+) -> dict[str, Any]:
+    intraday = intraday_bars.copy() if isinstance(intraday_bars, pd.DataFrame) else pd.DataFrame()
+    daily = daily_bars.copy() if isinstance(daily_bars, pd.DataFrame) else pd.DataFrame()
+    closes = pd.to_numeric(intraday.get("close", pd.Series(dtype=float)), errors="coerce").dropna()
+    daily_closes = pd.to_numeric(daily.get("close", pd.Series(dtype=float)), errors="coerce").dropna()
+    intraday_returns = closes.pct_change().dropna().tail(config.volatility_lookback_bars)
+    realized_volatility = float(intraday_returns.std()) if not intraday_returns.empty else 0.0
+    macro_return = _return_over(daily_closes, config.macro_trend_lookback_days)
+    micro_return = _return_over(closes, config.micro_momentum_lookback_bars)
+    meso_return = _return_over(closes, config.meso_momentum_lookback_bars)
+    return {
+        "symbol": symbol.upper(),
+        "nano_return": micro_return,
+        "micro_return": micro_return,
+        "meso_return": meso_return,
+        "macro_return": macro_return,
+        "macro_trend_ok": macro_return > 0.0,
+        "realized_volatility": 0.0 if math.isnan(realized_volatility) else realized_volatility,
+        "close": float(closes.iloc[-1]) if not closes.empty else 0.0,
+    }
 
 
 def classify_spy_state(spy_score: dict[str, Any], spy_sentiment: float, config: InvestSpyConfig) -> str:
@@ -272,7 +309,7 @@ def build_invest_spy_targets(
     daily_bars = get_daily_bars(symbols, strategy_config.macro_trend_lookback_days, runtime_config, data_client)
     sentiment, market_sentiment = get_sentiment_snapshot(symbols, strategy_config.sentiment_lookback_minutes, runtime_config)
     features = {
-        symbol: compute_price_features(symbol, intraday_bars.get(symbol, pd.DataFrame()), daily_bars.get(symbol, pd.DataFrame()), strategy_config)
+        symbol: compute_invest_spy_price_features(symbol, intraday_bars.get(symbol, pd.DataFrame()), daily_bars.get(symbol, pd.DataFrame()), strategy_config)
         for symbol in symbols
     }
     scores = compute_composite_scores(features, sentiment, strategy_config)

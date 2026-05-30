@@ -382,6 +382,9 @@ def apply_risk_guards(
         realized_vol = float(scores_by_symbol.get(symbol, {}).get("realized_volatility", 0.0))
         if config.max_intraday_volatility > 0 and realized_vol > config.max_intraday_volatility:
             capped *= max(0.0, min(1.0, config.high_volatility_weight_scale))
+        if capped <= 0.0:
+            guarded[symbol] = 0.0
+            continue
         if abs(capped - current_weights.get(symbol, 0.0)) < max(config.rebalance_threshold, 0.0):
             capped = current_weights.get(symbol, 0.0)
         if abs(capped - current_weights.get(symbol, 0.0)) * equity < config.per_trade_value_min:

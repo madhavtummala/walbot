@@ -213,6 +213,22 @@ def test_risk_guards_scale_high_volatility_and_preserve_small_drifts(monkeypatch
     assert guarded["TLT"] == 0.2
 
 
+def test_risk_guards_do_not_keep_unselected_positions(monkeypatch) -> None:
+    monkeypatch.setattr("src.fast_momentum.intraday_kill_switch_triggered", lambda *_args, **_kwargs: False)
+    config = DefensiveMomentumConfig(per_trade_value_min=100.0, rebalance_threshold=0.05)
+
+    guarded = apply_risk_guards(
+        {"QQQ": 0.25, "TLT": 0.0},
+        {"QQQ": {"realized_volatility": 0.0}, "TLT": {"realized_volatility": 0.0}},
+        {"QQQ": 0.25, "TLT": 0.01},
+        1_000.0,
+        config,
+    )
+
+    assert guarded["QQQ"] == 0.25
+    assert guarded["TLT"] == 0.0
+
+
 def test_sentiment_snapshot_defaults_missing_records_to_neutral(monkeypatch) -> None:
     monkeypatch.setattr("src.fast_momentum.fetch_latest_news_sentiment", lambda *_args, **_kwargs: [])
 

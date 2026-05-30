@@ -43,14 +43,17 @@ def test_frontend_uses_six_month_backtests_and_refresh_button() -> None:
     index_html = (PROJECT_ROOT / "web/index.html").read_text(encoding="utf-8")
 
     assert 'const BACKTEST_PERIOD = "6m";' in app_js
-    assert 'const BACKTEST_STORAGE_KEY = "tradingBot.backtests.6m.v3";' in app_js
+    assert 'const BACKTEST_STORAGE_KEY = "tradingBot.backtests.6m.v6";' in app_js
     assert "6M" in app_js
     assert "Ending equity =" in app_js
     assert "cash cap" not in app_js
     assert "${money(backtest.ending_equity)} end" not in app_js
     assert "cumulative turnover" in app_js
     assert "chart-crosshair" in app_js
-    assert "Invested ${money(row.invested)}" in app_js
+    assert "backtestPositions(row.positions)" in app_js
+    assert '`${symbol} : ${money(value)}`' in app_js
+    assert "renderUniverseProposalRows" in app_js
+    assert "renderUniverseReview" not in app_js
     assert "optionsPowerToggle" in app_js
     assert "Turn options bot off before changing strategies" in app_js
     assert "optionsPowerToggle" in index_html
@@ -60,4 +63,4 @@ def test_frontend_uses_six_month_backtests_and_refresh_button() -> None:
     assert "handleSignalCardClick" in app_js
     assert 'if (optionsKey === "options_swing_dual_momentum") return "dual_momentum";' in app_js
     assert "Running" not in app_js
-    assert "app.js?v=20260521-universe-review" in index_html
+    assert "app.js?v=20260529-position-tooltip" in index_html

@@ -206,6 +206,11 @@ def run_backtest(
         )
         invested = sum(positions.get(symbol, 0) * close_prices[symbol] for symbol in history_by_symbol.keys())
         equity = invested + cash
+        position_values = {
+            symbol: positions.get(symbol, 0) * close_prices[symbol]
+            for symbol in history_by_symbol.keys()
+            if abs(positions.get(symbol, 0) * close_prices[symbol]) > 0.005
+        }
 
         history_records.append(
             {
@@ -214,6 +219,7 @@ def run_backtest(
                 "equity": equity,
                 "cash": cash,
                 "invested": invested,
+                "positions": position_values,
                 "turnover": turnover,
                 "transaction_costs": transaction_costs,
                 **{f"weight_{symbol}": weights.get(symbol, 0.0) for symbol in history_by_symbol.keys()},

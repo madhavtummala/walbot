@@ -42,6 +42,7 @@ from .fast_momentum import (
 from .invest_spy import (
     InvestSpyConfig,
     classify_spy_state,
+    compute_invest_spy_price_features,
     decide_invest_spy_weights,
 )
 from .universe import load_tradable_names, resolve_project_path
@@ -52,7 +53,7 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BACKTEST_CACHE_PATH = "data/backtest_cache.json"
 BACKTEST_CACHE_STATE_KEY = "backtest_cache"
-BACKTEST_CACHE_VERSION = 6
+BACKTEST_CACHE_VERSION = 8
 BACKTEST_STARTING_EQUITY = 10_000.0
 
 
@@ -704,7 +705,7 @@ def _invest_spy_signals_payload() -> dict[str, Any]:
         strategy_config.sentiment_lookback_minutes,
     )
     features = {
-        symbol: compute_price_features(symbol, intraday_bars.get(symbol, pd.DataFrame()), daily_bars.get(symbol, pd.DataFrame()), strategy_config)
+        symbol: compute_invest_spy_price_features(symbol, intraday_bars.get(symbol, pd.DataFrame()), daily_bars.get(symbol, pd.DataFrame()), strategy_config)
         for symbol in symbols
     }
     scores = compute_composite_scores(features, sentiment, strategy_config)
@@ -971,6 +972,16 @@ def _backtest_response(
         ):
             if column in history_df:
                 history_df[column] = pd.to_numeric(history_df[column], errors="coerce") * scale
+        if "positions" in history_df:
+            history_df["positions"] = history_df["positions"].apply(
+                lambda positions: {
+                    str(symbol): float(value) * scale
+                    for symbol, value in (positions or {}).items()
+                    if abs(float(value or 0.0) * scale) > 0.005
+                }
+                if isinstance(positions, dict)
+                else {}
+            )
     metrics = calculate_performance_metrics(history_df["equity"])
     starting_equity = float(history_df["equity"].iloc[0])
     ending_equity = float(history_df["equity"].iloc[-1])
@@ -1134,12 +1145,18 @@ def _dca_backtest(
                 order_value += notional
 
         market_value = sum(shares.get(symbol, 0.0) * price for symbol, price in close_prices.items())
+        positions_value = {
+            symbol: shares.get(symbol, 0.0) * price
+            for symbol, price in close_prices.items()
+            if abs(shares.get(symbol, 0.0) * price) > 0.005
+        }
         records.append(
             {
                 "timestamp": trade_date,
                 "equity": cash + market_value,
                 "cash": cash,
                 "invested": market_value,
+                "positions": positions_value,
                 "dca_contributions": invested_cash,
                 "turnover": order_value,
                 "order_count": order_count,
@@ -1163,9 +1180,11 @@ def _strategy_backtest(
 ) -> pd.DataFrame:
     starting_equity = _backtest_starting_equity() if starting_equity is None else float(starting_equity)
     config = get_config(strategy_id=strategy)
+    invest_spy_config = InvestSpyConfig.from_runtime_config(config) if strategy == "invest_spy" else None
+    backtest_symbols = invest_spy_config.symbols if invest_spy_config else config.symbols
     data_client = create_data_client(config)
     bars_by_symbol = fetch_daily_bars(
-        config.symbols,
+        backtest_symbols,
         lookback_days=320,
         ma_days=200,
         extra_buffer_days=config.history_extra_buffer_days,
@@ -1194,12 +1213,29 @@ def _strategy_backtest(
     cash = starting_equity
     positions = {symbol: 0.0 for symbol in history_by_symbol}
     records: list[dict[str, Any]] = []
+    defensive_strategy_config = DefensiveMomentumConfig.from_runtime_config(config) if strategy == "fast_momentum" else None
     max_exposure = min(
-        max(float(config.max_portfolio_exposure), 0.0),
+        max(float(
+            invest_spy_config.max_gross_exposure
+            if invest_spy_config
+            else defensive_strategy_config.max_gross_exposure
+            if defensive_strategy_config
+            else config.max_portfolio_exposure
+        ), 0.0),
         max(1.0 - max(float(config.cash_buffer), 0.0), 0.0),
         1.0,
     )
-    max_per_symbol = min(max(float(config.max_weight_per_symbol), 0.01), 1.0)
+    max_per_symbol = min(
+        max(float(
+            invest_spy_config.max_single_position_weight
+            if invest_spy_config
+            else defensive_strategy_config.max_single_position_weight
+            if defensive_strategy_config
+            else config.max_weight_per_symbol
+        ), 0.01),
+        1.0,
+    )
+    max_longs = max(int(defensive_strategy_config.max_positions if defensive_strategy_config else config.max_longs), 0)
 
     signal_indexes = list(range(1, len(common_dates)))
     social_by_symbol = (
@@ -1234,12 +1270,22 @@ def _strategy_backtest(
             )
             return index, weights
 
+        if invest_spy_config:
+            snapshots = {symbol: df.loc[:signal_date].reset_index() for symbol, df in history_by_symbol.items()}
+            features = {
+                symbol: compute_invest_spy_price_features(symbol, snapshots.get(symbol, pd.DataFrame()), snapshots.get(symbol, pd.DataFrame()), invest_spy_config)
+                for symbol in history_by_symbol
+            }
+            scores = compute_composite_scores(features, {}, invest_spy_config)
+            state = classify_spy_state(scores.get(invest_spy_config.spy_symbol, {}), 0.0, invest_spy_config)
+            return index, decide_invest_spy_weights(scores, state, invest_spy_config)
+
         snapshots = {symbol: df.loc[:signal_date] for symbol, df in history_by_symbol.items()}
         decisions = strategy_signal_rows_from_prepared(strategy, snapshots)
         return index, weights_from_strategy_rows(
             decisions,
             list(history_by_symbol),
-            max_longs=config.max_longs,
+            max_longs=max_longs,
             max_weight_per_symbol=max_per_symbol,
             max_portfolio_exposure=max_exposure,
         )
@@ -1331,6 +1377,11 @@ def _strategy_backtest(
                 "equity": equity,
                 "cash": cash,
                 "invested": invested,
+                "positions": {
+                    symbol: value
+                    for symbol, value in values.items()
+                    if abs(value) > 0.005
+                },
                 "turnover": turnover,
                 "transaction_costs": costs,
                 "order_count": order_count,

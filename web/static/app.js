@@ -5,7 +5,14 @@ const WHEEL_STEP = 5;
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 const BACKTEST_PERIOD = "6m";
 const BACKTEST_LABEL = "6M";
-const BACKTEST_STORAGE_KEY = "tradingBot.backtests.6m.v3";
+const BACKTEST_STORAGE_KEY = "tradingBot.backtests.6m.v6";
+const LEGACY_BACKTEST_STORAGE_KEYS = [
+  "tradingBot.backtests.6m.v5",
+  "tradingBot.backtests.6m.v4",
+  "tradingBot.backtests.6m.v3",
+  "tradingBot.backtests.6m.v2",
+  "tradingBot.backtests.6m.v1",
+];
 
 const ENABLED_COLORS = {
   buy: "#024c4a",
@@ -1030,6 +1037,14 @@ function loadStoredBacktests() {
   }
 }
 
+function purgeLegacyStoredBacktests() {
+  try {
+    LEGACY_BACKTEST_STORAGE_KEYS.forEach((key) => window.localStorage.removeItem(key));
+  } catch (_error) {
+    // Browser storage cleanup is best-effort.
+  }
+}
+
 function enabledUniverseSymbols() {
   return state.universe
     .filter((row) => row.enabled !== false)
@@ -1344,45 +1359,31 @@ function backtestOrderText(backtest) {
   return `${Number(orders.total_orders || 0)} orders / ${money(traded)} ${tradingLabel}${plannedText}${peakText} / max exposure ${percent(orders.max_gross_exposure_pct)}`;
 }
 
-function renderUniverseReview(label = "Algorithm universe") {
+function renderUniverseProposalRows() {
   const proposal = state.universeProposal;
-  const currentSymbols = enabledUniverseSymbols();
   const rows = proposal?.rows || [];
   const rejectedCount = Number(proposal?.rejected?.length || 0);
   const status = state.universeRefreshing
     ? "Refreshing"
     : proposal
       ? `${rows.length}/${proposal.eligible_count || rows.length}`
-      : `${currentSymbols.length} active`;
+      : "Queued";
+  if (state.universeRefreshing && !proposal) {
+    return `<p>Refreshing universe candidates.</p>`;
+  }
   return `
-    <section class="universeReview" aria-label="${escapeHtml(label)}">
-      <div class="cachedBacktestHeader">
-        <span>Universe</span>
-        <strong>${escapeHtml(status)}</strong>
-      </div>
-      ${proposal
-      ? `
-        <div class="universeRows">
-          ${rows.map((row) => `
-            <article>
-              <strong>${escapeHtml(row.symbol)}</strong>
-              <span>${escapeHtml(row.bucket || "")}</span>
-              <span>${escapeHtml(row.latest_bar || "")} / ${money(row.avg_dollar_volume, 0)}</span>
-            </article>
-          `).join("") || "<p>No proposal</p>"}
-        </div>
-        <div class="universeMeta">
-          <span>${escapeHtml(proposal.data_feed || "feed")}</span>
-          <span>${rejectedCount} filtered</span>
-        </div>
-        <button class="applyUniverse" type="button" data-apply-universe ${state.universeApplying || !rows.length ? 'disabled aria-busy="true"' : ""}>Apply</button>
-      `
-      : `
-        <div class="universeChips">
-          ${currentSymbols.map((symbol) => `<span>${escapeHtml(symbol)}</span>`).join("")}
-        </div>
-      `}
-    </section>
+    <article class="universeProposalHeader">
+      <strong>Universe</strong>
+      <span>${escapeHtml(status)} / ${escapeHtml(proposal?.data_feed || "feed")} / ${rejectedCount} filtered</span>
+      <button class="applyUniverse" type="button" data-apply-universe ${state.universeApplying || !rows.length ? 'disabled aria-busy="true"' : ""}>Apply</button>
+    </article>
+    ${rows.map((row) => `
+      <article class="universeProposalRow">
+        <strong>${escapeHtml(row.symbol)}</strong>
+        <span>${escapeHtml(row.bucket || "")}</span>
+        <span>${escapeHtml(row.latest_bar || "")} / ${money(row.avg_dollar_volume, 0)}</span>
+      </article>
+    `).join("") || "<p>No proposal</p>"}
   `;
 }
 
@@ -1409,6 +1410,21 @@ function renderSignalBacktestCard({
   const activeLeaders = allLeaders.filter((row) => (row.side === "LONG" || row.side === "SHORT" || row.signal === "LONG" || row.signal === "SHORT"));
   const inactiveLeaders = allLeaders.filter((row) => !activeLeaders.includes(row));
   const visibleLeaders = [...activeLeaders, ...inactiveLeaders];
+  const signalRowsHtml = state.universeProposal || state.universeRefreshing
+    ? renderUniverseProposalRows()
+    : loading
+      ? "<p>Fetching live signal snapshot.</p>"
+      : payload?.error
+        ? `<p>${escapeHtml(payload.error)}</p>`
+        : visibleLeaders.length
+          ? visibleLeaders.map((row) => `
+            <article>
+              <strong>${escapeHtml(row.symbol)}</strong>
+              <span>${escapeHtml(formatSignalHeadline(strategyKey, row))}</span>
+              <span>${escapeHtml(formatSignalDetail(strategyKey, row))}</span>
+            </article>
+          `).join("")
+          : renderSignalFallbackRows(selected, payload, signalInputs);
   card.innerHTML = `
     <header class="signalHeader">
       <div>
@@ -1421,20 +1437,7 @@ function renderSignalBacktestCard({
     </header>
     <div class="signalBody">
       <div class="signalRows">
-        ${loading
-      ? "<p>Fetching live signal snapshot.</p>"
-      : payload?.error
-        ? `<p>${escapeHtml(payload.error)}</p>`
-        : visibleLeaders.length
-          ? visibleLeaders.map((row) => `
-            <article>
-              <strong>${escapeHtml(row.symbol)}</strong>
-              <span>${escapeHtml(formatSignalHeadline(strategyKey, row))}</span>
-              <span>${escapeHtml(formatSignalDetail(strategyKey, row))}</span>
-            </article>
-          `).join("")
-          : renderSignalFallbackRows(selected, payload, signalInputs)
-    }
+        ${signalRowsHtml}
       </div>
       <section class="cachedBacktest" aria-label="Cached ${BACKTEST_LABEL} backtest">
         <div class="cachedBacktestHeader">
@@ -1447,7 +1450,6 @@ function renderSignalBacktestCard({
         ${orderCaption ? `<p>${escapeHtml(orderCaption)}</p>` : ""}
         ${backtest?.offline_error ? `<p>${escapeHtml(backtest.offline_error)}</p>` : ""}
       </section>
-      ${renderUniverseReview(universeLabel)}
     </div>
   `;
   renderBacktestChart(backtest, $(`#${backtestChartId}`));
@@ -1739,6 +1741,7 @@ function renderBacktestChart(payload, svg) {
       equity: Number(row.equity),
       invested: Number(row.invested ?? row.gross_exposure ?? 0),
       cash: Number(row.cash ?? 0),
+      positions: backtestPositions(row.positions),
       dcaContributions: Number(row.dca_contributions ?? 0),
     }))
     .filter((row) => Number.isFinite(row.equity) && !Number.isNaN(row.date.getTime()));
@@ -1795,12 +1798,10 @@ function addBacktestChartHover(svg, rows, chart) {
   const vertical = svgEl("line", { class: "chart-crosshair" });
   const horizontal = svgEl("line", { class: "chart-crosshair" });
   const point = svgEl("circle", { class: "chart-hover-point", r: 4 });
-  const box = svgEl("rect", { class: "chart-tooltip-bg", rx: 6, ry: 6, width: 154, height: 72 });
+  const box = svgEl("rect", { class: "chart-tooltip-bg", rx: 6, ry: 6 });
   const dateText = textEl({ class: "chart-tooltip-title" }, "");
-  const equityText = textEl({ class: "chart-tooltip-text" }, "");
-  const investedText = textEl({ class: "chart-tooltip-text" }, "");
-  const cashText = textEl({ class: "chart-tooltip-text" }, "");
-  [vertical, horizontal, point, box, dateText, equityText, investedText, cashText].forEach((node) => {
+  const positionGroup = svgEl("g", { class: "chart-position-lines" });
+  [vertical, horizontal, point, box, dateText, positionGroup].forEach((node) => {
     layer.appendChild(node);
   });
   svg.appendChild(layer);
@@ -1840,10 +1841,16 @@ function addBacktestChartHover(svg, rows, chart) {
     const row = nearestRow(pointInSvg.x);
     const x = chart.xScale(row.date);
     const y = chart.yScale(row.equity);
-    const tooltipWidth = 154;
-    const tooltipHeight = 72;
+    const positionLines = row.positions.length
+      ? row.positions.map(([symbol, value]) => `${symbol} : ${money(value)}`)
+      : ["No positions"];
+    const tooltipWidth = Math.max(168, Math.min(260, 64 + Math.max(...positionLines.map((line) => line.length)) * 6));
+    const tooltipHeight = 30 + positionLines.length * 14;
     const tooltipX = x + tooltipWidth + 12 > chart.width ? x - tooltipWidth - 10 : x + 10;
-    const tooltipY = Math.min(Math.max(y - tooltipHeight / 2, chart.top), chart.height - chart.bottom - tooltipHeight);
+    const availableHeight = chart.height - chart.top - chart.bottom;
+    const tooltipY = tooltipHeight >= availableHeight
+      ? chart.top
+      : Math.min(Math.max(y - tooltipHeight / 2, chart.top), chart.height - chart.bottom - tooltipHeight);
     vertical.setAttribute("x1", x);
     vertical.setAttribute("x2", x);
     vertical.setAttribute("y1", chart.top);
@@ -1856,19 +1863,29 @@ function addBacktestChartHover(svg, rows, chart) {
     point.setAttribute("cy", y);
     box.setAttribute("x", tooltipX);
     box.setAttribute("y", tooltipY);
+    box.setAttribute("width", tooltipWidth);
+    box.setAttribute("height", tooltipHeight);
     dateText.textContent = row.date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
-    equityText.textContent = `Equity ${money(row.equity)}`;
-    investedText.textContent = `Invested ${money(row.invested)}`;
-    cashText.textContent = `Cash ${money(row.cash)}`;
+    positionGroup.replaceChildren();
+    positionLines.forEach((line, index) => {
+      const lineText = textEl({ class: "chart-tooltip-text" }, line);
+      positionText(lineText, tooltipX + 10, tooltipY + 34 + index * 14);
+      positionGroup.appendChild(lineText);
+    });
     positionText(dateText, tooltipX + 10, tooltipY + 17);
-    positionText(equityText, tooltipX + 10, tooltipY + 34);
-    positionText(investedText, tooltipX + 10, tooltipY + 50);
-    positionText(cashText, tooltipX + 10, tooltipY + 66);
     layer.setAttribute("visibility", "visible");
   });
   overlay.addEventListener("pointerleave", () => {
     layer.setAttribute("visibility", "hidden");
   });
+}
+
+function backtestPositions(positions) {
+  if (!positions || typeof positions !== "object" || Array.isArray(positions)) return [];
+  return Object.entries(positions)
+    .map(([symbol, value]) => [symbol, Number(value)])
+    .filter(([symbol, value]) => symbol && Number.isFinite(value) && Math.abs(value) > 0.005)
+    .sort((left, right) => Math.abs(right[1]) - Math.abs(left[1]));
 }
 
 function activateAlgorithmView() {
@@ -2093,6 +2110,7 @@ function handleSignalCardClick(event) {
 
 async function init() {
   wireEvents();
+  purgeLegacyStoredBacktests();
   renderAlgorithmDeck();
   renderOptionsDeck();
   renderOptionsPower();

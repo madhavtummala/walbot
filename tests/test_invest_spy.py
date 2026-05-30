@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from src.config import Config
-from src.invest_spy import InvestSpyConfig, classify_spy_state, decide_invest_spy_weights
+import pandas as pd
+
+from src.invest_spy import InvestSpyConfig, classify_spy_state, compute_invest_spy_price_features, decide_invest_spy_weights
 
 
 def test_invest_spy_config_loads_state_knobs() -> None:
@@ -22,6 +24,23 @@ def test_invest_spy_config_loads_state_knobs() -> None:
     assert config.flat_equity_income_exposure == 0.4
     assert config.max_crisis_hedge_exposure == 0.2
     assert config.sentiment_negative == -0.15
+
+
+def test_invest_spy_price_features_use_intraday_meso_and_daily_macro() -> None:
+    config = InvestSpyConfig(
+        micro_momentum_lookback_bars=2,
+        meso_momentum_lookback_bars=4,
+        macro_trend_lookback_days=3,
+    )
+    intraday = pd.DataFrame({"close": [100, 101, 103, 106, 110, 115]})
+    daily = pd.DataFrame({"close": [100, 101, 102, 104, 108]})
+
+    features = compute_invest_spy_price_features("SPY", intraday, daily, config)
+
+    assert features["micro_return"] == 115 / 106 - 1
+    assert features["meso_return"] == 115 / 101 - 1
+    assert features["macro_return"] == 108 / 101 - 1
+    assert features["nano_return"] == features["micro_return"]
 
 
 def test_spy_state_classifies_growth_pullback_flat_falling_and_crisis() -> None:
