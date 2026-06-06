@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from src import bot_runtime
+from src.core import bot_runtime as bot_runtime
 
 
 def test_cron_matches_multiple_hours_in_same_day() -> None:
@@ -22,6 +22,13 @@ def test_regular_market_hours_are_central_weekdays() -> None:
     assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 8, 29))
     assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 15, 0))
     assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 23, 10, 0))
+
+
+def test_regular_market_hours_honor_configured_window() -> None:
+    assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 9, 29), "09:30", "14:00")
+    assert bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 9, 30), "09:30", "14:00")
+    assert bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 13, 59), "09:30", "14:00")
+    assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 14, 0), "09:30", "14:00")
 
 
 def test_algorithm_bucket_key_uses_refresh_window() -> None:
@@ -53,6 +60,13 @@ def test_algorithm_bucket_key_waits_for_jitter_offset(monkeypatch) -> None:
     assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 8, 34), 60, 5) == (
         "algorithm:2026-05-22T08:30-05:00"
     )
+
+
+def test_algorithm_bucket_key_anchors_to_configured_start() -> None:
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 45), 30, 0, "09:30", "14:00") == (
+        "algorithm:2026-05-22T09:30-05:00"
+    )
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 29), 30, 0, "09:30", "14:00") is None
 
 
 def test_options_enabled_requires_strategy_and_kill_switch_off(monkeypatch) -> None:

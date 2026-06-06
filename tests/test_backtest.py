@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.backtest import run_backtest
+from src.execution.backtest import run_backtest
 
 
 def _bars_from_prices(prices: list[float]) -> pd.DataFrame:

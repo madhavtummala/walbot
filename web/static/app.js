@@ -3,16 +3,8 @@ const BUCKET_NAMES = ["buy", "sell"];
 const MAX_AMOUNT = 50;
 const WHEEL_STEP = 5;
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
-const BACKTEST_PERIOD = "6m";
-const BACKTEST_LABEL = "6M";
-const BACKTEST_STORAGE_KEY = "tradingBot.backtests.6m.v6";
-const LEGACY_BACKTEST_STORAGE_KEYS = [
-  "tradingBot.backtests.6m.v5",
-  "tradingBot.backtests.6m.v4",
-  "tradingBot.backtests.6m.v3",
-  "tradingBot.backtests.6m.v2",
-  "tradingBot.backtests.6m.v1",
-];
+let BACKTEST_PERIOD = "4m";
+let BACKTEST_LABEL = "4M";
 
 const ENABLED_COLORS = {
   buy: "#024c4a",
@@ -1025,67 +1017,24 @@ function isBacktestPayload(payload) {
   return Boolean(payload && typeof payload === "object" && Array.isArray(payload.rows));
 }
 
-function loadStoredBacktests() {
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(BACKTEST_STORAGE_KEY) || "{}");
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    return Object.fromEntries(
-      Object.entries(parsed).filter(([, payload]) => isBacktestPayload(payload)),
-    );
-  } catch (_error) {
-    return {};
+function normalizeBacktestPeriod(period) {
+  const normalized = String(period || "").trim().toLowerCase();
+  return /^[1-9][0-9]*m$/.test(normalized) ? normalized : "4m";
+}
+
+function backtestPeriodLabel(period) {
+  const match = normalizeBacktestPeriod(period).match(/^([1-9][0-9]*)m$/);
+  return match ? `${match[1]}M` : "4M";
+}
+
+function configureBacktestPeriod(period) {
+  const normalized = normalizeBacktestPeriod(period);
+  const label = backtestPeriodLabel(normalized);
+  if (normalized !== BACKTEST_PERIOD) {
+    state.backtests = {};
   }
-}
-
-function purgeLegacyStoredBacktests() {
-  try {
-    LEGACY_BACKTEST_STORAGE_KEYS.forEach((key) => window.localStorage.removeItem(key));
-  } catch (_error) {
-    // Browser storage cleanup is best-effort.
-  }
-}
-
-function enabledUniverseSymbols() {
-  return state.universe
-    .filter((row) => row.enabled !== false)
-    .map((row) => row.symbol)
-    .filter(Boolean);
-}
-
-function universeSignature() {
-  return enabledUniverseSymbols().join(",");
-}
-
-function backtestCacheKey(strategyKey) {
-  return `${strategyKey}:${universeSignature()}`;
-}
-
-function hydrateStoredBacktests() {
-  const stored = loadStoredBacktests();
-  const hydrated = {};
-  for (const strategy of algorithmChoices()) {
-    const payload = stored[backtestCacheKey(strategy.key)];
-    if (payload) hydrated[strategy.key] = payload;
-  }
-  state.backtests = hydrated;
-}
-
-function storedBacktest(strategyKey) {
-  return loadStoredBacktests()[backtestCacheKey(strategyKey)] || null;
-}
-
-function storeBacktest(strategyKey, payload) {
-  if (!isBacktestPayload(payload)) return;
-  try {
-    const cache = loadStoredBacktests();
-    cache[backtestCacheKey(strategyKey)] = {
-      ...payload,
-      browser_cached_at: new Date().toISOString(),
-    };
-    window.localStorage.setItem(BACKTEST_STORAGE_KEY, JSON.stringify(cache));
-  } catch (_error) {
-    // Browser storage is best-effort; the API cache still handles server-side reuse.
-  }
+  BACKTEST_PERIOD = normalized;
+  BACKTEST_LABEL = label;
 }
 
 function renderAlgorithmDeck() {
@@ -1149,20 +1098,13 @@ async function loadBacktest(strategyKey, refresh, options = {}) {
     });
     if (isBacktestPayload(payload)) {
       state.backtests[strategyKey] = payload;
-      storeBacktest(strategyKey, payload);
     } else if (payload?.error) {
-      const fallback = storedBacktest(strategyKey);
-      if (fallback) {
-        state.backtests[strategyKey] = { ...fallback, cached: true, offline_error: payload.error };
-      } else if (!cacheOnly) {
+      if (!cacheOnly) {
         state.backtests[strategyKey] = { error: payload.error };
       }
     }
   } catch (error) {
-    const fallback = storedBacktest(strategyKey);
-    if (fallback) {
-      state.backtests[strategyKey] = { ...fallback, cached: true, offline_error: error.message };
-    } else if (!cacheOnly) {
+    if (!cacheOnly) {
       state.backtests[strategyKey] = { error: error.message };
     }
   } finally {
@@ -1209,7 +1151,6 @@ async function applyUniverseProposal() {
     const dcaPayload = await api("/api/dca", { timeoutMs: 5000 });
     state.dca = dcaPayload;
     state.dca.plan.max_item_amount = MAX_AMOUNT;
-    hydrateStoredBacktests();
     renderDca();
     renderAlgorithmDeck();
     renderOptionsSignals();
@@ -1448,7 +1389,6 @@ function renderSignalBacktestCard({
         ${backtestCaption ? `<p>${escapeHtml(backtestCaption)}</p>` : ""}
         ${equityCaption ? `<p>${escapeHtml(equityCaption)}</p>` : ""}
         ${orderCaption ? `<p>${escapeHtml(orderCaption)}</p>` : ""}
-        ${backtest?.offline_error ? `<p>${escapeHtml(backtest.offline_error)}</p>` : ""}
       </section>
     </div>
   `;
@@ -1799,9 +1739,12 @@ function addBacktestChartHover(svg, rows, chart) {
   const horizontal = svgEl("line", { class: "chart-crosshair" });
   const point = svgEl("circle", { class: "chart-hover-point", r: 4 });
   const box = svgEl("rect", { class: "chart-tooltip-bg", rx: 6, ry: 6 });
-  const dateText = textEl({ class: "chart-tooltip-title" }, "");
   const positionGroup = svgEl("g", { class: "chart-position-lines" });
-  [vertical, horizontal, point, box, dateText, positionGroup].forEach((node) => {
+  const valueBox = svgEl("rect", { class: "chart-axis-value-bg", rx: 4, ry: 4 });
+  const valueText = textEl({ class: "chart-axis-value", "text-anchor": "start" }, "");
+  const axisDateBox = svgEl("rect", { class: "chart-axis-value-bg", rx: 4, ry: 4 });
+  const axisDateText = textEl({ class: "chart-axis-value", "text-anchor": "middle" }, "");
+  [vertical, horizontal, point, box, positionGroup, valueBox, valueText, axisDateBox, axisDateText].forEach((node) => {
     layer.appendChild(node);
   });
   svg.appendChild(layer);
@@ -1845,12 +1788,23 @@ function addBacktestChartHover(svg, rows, chart) {
       ? row.positions.map(([symbol, value]) => `${symbol} : ${money(value)}`)
       : ["No positions"];
     const tooltipWidth = Math.max(168, Math.min(260, 64 + Math.max(...positionLines.map((line) => line.length)) * 6));
-    const tooltipHeight = 30 + positionLines.length * 14;
+    const tooltipHeight = 16 + positionLines.length * 14;
     const tooltipX = x + tooltipWidth + 12 > chart.width ? x - tooltipWidth - 10 : x + 10;
     const availableHeight = chart.height - chart.top - chart.bottom;
     const tooltipY = tooltipHeight >= availableHeight
       ? chart.top
       : Math.min(Math.max(y - tooltipHeight / 2, chart.top), chart.height - chart.bottom - tooltipHeight);
+    const axisValue = money(row.equity);
+    const axisValueWidth = Math.max(58, axisValue.length * 6.3 + 14);
+    const axisValueX = chart.left;
+    const axisValueY = Math.min(Math.max(y - 9, chart.top), chart.height - chart.bottom - 18);
+    const axisDate = formatDateTick(row.date, 4);
+    const axisDateWidth = Math.max(52, axisDate.length * 6.3 + 16);
+    const axisDateX = Math.min(
+      Math.max(x - axisDateWidth / 2, chart.left),
+      chart.width - chart.right - axisDateWidth,
+    );
+    const axisDateY = chart.height - chart.bottom + 5;
     vertical.setAttribute("x1", x);
     vertical.setAttribute("x2", x);
     vertical.setAttribute("y1", chart.top);
@@ -1865,14 +1819,26 @@ function addBacktestChartHover(svg, rows, chart) {
     box.setAttribute("y", tooltipY);
     box.setAttribute("width", tooltipWidth);
     box.setAttribute("height", tooltipHeight);
-    dateText.textContent = row.date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+    valueBox.setAttribute("x", axisValueX);
+    valueBox.setAttribute("y", axisValueY);
+    valueBox.setAttribute("width", axisValueWidth);
+    valueBox.setAttribute("height", 18);
+    valueText.setAttribute("x", axisValueX + 7);
+    valueText.setAttribute("y", axisValueY + 12);
+    valueText.textContent = axisValue;
+    axisDateBox.setAttribute("x", axisDateX);
+    axisDateBox.setAttribute("y", axisDateY);
+    axisDateBox.setAttribute("width", axisDateWidth);
+    axisDateBox.setAttribute("height", 18);
+    axisDateText.setAttribute("x", axisDateX + axisDateWidth / 2);
+    axisDateText.setAttribute("y", axisDateY + 12);
+    axisDateText.textContent = axisDate;
     positionGroup.replaceChildren();
     positionLines.forEach((line, index) => {
       const lineText = textEl({ class: "chart-tooltip-text" }, line);
-      positionText(lineText, tooltipX + 10, tooltipY + 34 + index * 14);
+      positionText(lineText, tooltipX + 10, tooltipY + 18 + index * 14);
       positionGroup.appendChild(lineText);
     });
-    positionText(dateText, tooltipX + 10, tooltipY + 17);
     layer.setAttribute("visibility", "visible");
   });
   overlay.addEventListener("pointerleave", () => {
@@ -2110,7 +2076,6 @@ function handleSignalCardClick(event) {
 
 async function init() {
   wireEvents();
-  purgeLegacyStoredBacktests();
   renderAlgorithmDeck();
   renderOptionsDeck();
   renderOptionsPower();
@@ -2123,13 +2088,13 @@ async function init() {
       api("/api/controls", { timeoutMs: 5000 }),
     ]);
     state.status = statusPayload;
+    configureBacktestPeriod(statusPayload.config?.backtest_period);
     state.universe = universePayload.rows || [];
     state.dca = dcaPayload;
     state.controls = controlsPayload.controls || state.controls;
     state.accounts = controlsPayload.accounts || [];
     state.bot = controlsPayload.bot || statusPayload.bot || null;
     state.dca.plan.max_item_amount = MAX_AMOUNT;
-    hydrateStoredBacktests();
     renderDca();
     renderAlgorithmDeck();
     renderOptionsDeck();

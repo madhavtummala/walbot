@@ -1,0 +1,50 @@
+algorithms:
+  momentum_social: {}
+  trend_following: {}
+  mean_reversion: {}
+  breakout: {}
+  risk_parity:
+    target_annual_vol: 0.14
+  dual_momentum:
+    momentum_lookback_days: 126
+    social_momentum_weight: 0.1
+    max_longs: 4
+    max_weight_per_symbol: 0.35
+    rebalance_threshold: 0.03
+  fast_momentum:
+    risk_on_universe:
+    - QQQM
+    - XSD
+    - PBD
+    - AIQ
+    - IBIT
+    - USO
+    - IEMG
+    - HYG
+    - GLD
+    - GTEK
+    - BBC
+    - GVIP
+    defensive_universe:
+    - BIL
+    - IEF
+    - AGG
+    - TLT
+    max_positions: 4
+    max_single_position_weight: 0.5
+    max_gross_exposure: 0.95
+    min_score_delta_to_replace: 0.10
+    pullback_min_micro_return: -0.02
+    min_risk_on_micro_return: 0.01
+  invest_spy:
+    spy_symbol: SPY
+    equity_income_universe:
+    - XYLD
+    - GPIX
+    defensive_universe:
+    - BIL
+    crisis_hedge_universe:
+    - SH
+    - VXX
+    flat_equity_income_exposure: 0.5
+    max_crisis_hedge_exposure: 0.15

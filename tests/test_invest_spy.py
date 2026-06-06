@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from src.config import Config
+from src.core.config import Config
 import pandas as pd
 
-from src.invest_spy import InvestSpyConfig, classify_spy_state, compute_invest_spy_price_features, decide_invest_spy_weights
+from src.algorithms.invest_spy import InvestSpyConfig, classify_spy_state, compute_invest_spy_price_features, decide_invest_spy_weights
 
 
 def test_invest_spy_config_loads_state_knobs() -> None:

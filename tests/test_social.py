@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.social import load_social_trends_csv
+from src.data.social import load_social_trends_csv
 
 
 def test_load_social_trends_csv_normalizes_vendor_columns(tmp_path) -> None:

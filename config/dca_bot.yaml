@@ -1,0 +1,23 @@
+dca_bot:
+  dca_check_seconds: 300
+  dca_plan:
+    enabled: false
+    frequency: weekly
+    schedule_pattern: 0 12 * * 1-5
+    next_run_date: ""
+    max_item_amount: 50.0
+    buy:
+      amount: 120.0
+      items:
+        -
+          symbol: GLD
+          amount: 50.0
+        -
+          symbol: XSD
+          amount: 50.0
+        -
+          symbol: QQQM
+          amount: 20.0
+    sell:
+      amount: 0
+      items: []

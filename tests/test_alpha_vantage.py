@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.alpha_vantage import normalize_news_sentiment
+from src.connectors.sentiment.alpha_vantage import normalize_news_sentiment
 
 
 def test_normalize_news_sentiment_aggregates_daily_rows() -> None:

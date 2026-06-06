@@ -1,0 +1,16 @@
+tradable_universe:
+  master_list: data/tradable_etfs.csv
+  symbols:
+    - SPY
+    - QQQ
+    - IBIT
+    - GLD
+    - TLT
+    - XSD
+    - VTI
+    - VTV
+    - PBD
+    - XBI
+    - GTEK
+    - BIL
+    - AGG

@@ -1,7 +1,0 @@
-algorithm_bot:
-  enabled: false
-  strategy: momentum_social
-  trading_account_id: ''
-  algorithm_check_seconds: 60
-  algorithm_market_data_refresh_minutes: 60
-  algorithm_run_jitter_minutes: 5

@@ -4,8 +4,8 @@ import logging
 
 import pandas as pd
 
-from src import connectors
-from src.config import Config
+from src.connectors import service as connectors
+from src.core.config import Config
 
 
 def test_market_quote_fetch_falls_back_to_next_provider(monkeypatch, caplog) -> None:
@@ -76,13 +76,196 @@ def test_append_latest_quotes_to_bars_adds_intraday_row() -> None:
     assert merged["SPY"]["timestamp"].iloc[-1].isoformat() == "2026-05-21T15:00:00+00:00"
 
 
+def test_normalize_intraday_frame_preserves_adjusted_close() -> None:
+    raw = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-05-20", "2026-05-21"]),
+            "Open": [100.0, 101.0],
+            "High": [101.0, 102.0],
+            "Low": [99.0, 100.0],
+            "Close": [100.5, 101.5],
+            "Adj Close": [99.75, None],
+            "Volume": [1000, 2000],
+        }
+    )
+
+    bars = connectors._normalize_intraday_frame(raw)
+
+    assert bars["adjusted_close"].tolist() == [99.75, 101.5]
+
+
+def test_fetch_finnhub_intraday_bars_parses_and_caches_candles(monkeypatch) -> None:
+    saved = {}
+    config = Config(
+        data_source_configs={
+            "market_data": {
+                "providers": {
+                    "finnhub": {"enabled": True, "api_key": "finnhub-key"},
+                }
+            }
+        }
+    )
+
+    def fake_request(provider, category, url, params=None, headers=None):
+        assert provider == "finnhub"
+        assert category == connectors.INTRADAY_MARKET_CATEGORY
+        assert url.endswith("/stock/candle")
+        assert params["symbol"] == "SPY"
+        assert params["resolution"] == "30"
+        return {
+            "s": "ok",
+            "t": [1_779_999_000, 1_780_000_800],
+            "o": [100.0, 101.0],
+            "h": [101.0, 102.0],
+            "l": [99.0, 100.0],
+            "c": [100.5, 101.5],
+            "v": [1000, 2000],
+        }
+
+    monkeypatch.setattr(connectors, "_request_json", fake_request)
+    monkeypatch.setattr(connectors, "load_cached_payload", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(connectors, "save_cached_payload", lambda *args, **kwargs: saved.update({"args": args, "kwargs": kwargs}))
+    monkeypatch.setattr(connectors, "_read_duckdb_bars", lambda *_args, **_kwargs: pd.DataFrame())
+    monkeypatch.setattr(connectors, "_write_duckdb_bars", lambda *_args, **_kwargs: None)
+
+    bars = connectors.fetch_finnhub_intraday_bars(["SPY"], config, lookback_bars=2, bar_minutes=30)
+
+    assert bars["SPY"]["close"].tolist() == [100.5, 101.5]
+    assert saved["args"][0] == connectors.INTRADAY_MARKET_CATEGORY
+    assert saved["args"][1] == "finnhub"
+    assert saved["kwargs"]["ttl_seconds"] == connectors.INTRADAY_CACHE_TTL_SECONDS
+
+
+def test_fetch_intraday_market_bars_uses_yfinance_provider(monkeypatch) -> None:
+    calls = {}
+    config = Config(intraday_market_data_provider_order=["yfinance"])
+
+    def fake_yfinance(symbols, _config, *, lookback_bars, bar_minutes, force_refresh=False):
+        calls.update(
+            {
+                "symbols": symbols,
+                "lookback_bars": lookback_bars,
+                "bar_minutes": bar_minutes,
+                "force_refresh": force_refresh,
+            }
+        )
+        return {"SPY": pd.DataFrame({"close": [101.0]})}
+
+    monkeypatch.setattr(connectors, "fetch_yfinance_intraday_bars", fake_yfinance)
+
+    bars = connectors.fetch_intraday_market_bars(["SPY"], config, lookback_bars=78, bar_minutes=15, force_refresh=True)
+
+    assert bars["SPY"]["close"].iloc[-1] == 101.0
+    assert calls == {
+        "symbols": ["SPY"],
+        "lookback_bars": 78,
+        "bar_minutes": 15,
+        "force_refresh": True,
+    }
+
+
+def test_fetch_eod_market_bars_falls_back_to_next_provider(monkeypatch, caplog) -> None:
+    calls = []
+    config = Config(eod_market_data_provider_order=["finnhub", "yfinance"])
+
+    def failing_finnhub(*_args, **_kwargs):
+        calls.append("finnhub")
+        raise connectors.ProviderUnavailable("down")
+
+    def working_yfinance(symbols, _config, *, lookback_bars, force_refresh=False):
+        calls.append("yfinance")
+        assert symbols == ["SPY"]
+        assert lookback_bars == 3
+        assert force_refresh is True
+        return {"SPY": pd.DataFrame({"timestamp": pd.to_datetime(["2026-05-01"], utc=True), "close": [101.0]})}
+
+    monkeypatch.setattr(connectors, "fetch_finnhub_eod_bars", failing_finnhub)
+    monkeypatch.setattr(connectors, "fetch_yfinance_eod_bars", working_yfinance)
+
+    with caplog.at_level(logging.INFO):
+        bars = connectors.fetch_eod_market_bars(["SPY"], config, lookback_bars=3, force_refresh=True)
+
+    assert calls == ["finnhub", "yfinance"]
+    assert bars["SPY"]["close"].iloc[-1] == 101.0
+    assert "EOD market data provider finnhub failed; falling back to yfinance" in caplog.text
+
+
+def test_fetch_schwab_intraday_bars_parses_price_history(monkeypatch) -> None:
+    captured = {}
+    config = Config(
+        data_source_configs={
+            "intraday_market_data": {
+                "providers": {
+                    "schwab": {"access_token": "token"},
+                }
+            }
+        }
+    )
+
+    def fake_request(provider, category, url, params=None, headers=None):
+        captured.update({"provider": provider, "category": category, "url": url, "params": params, "headers": headers})
+        return {
+            "candles": [
+                {"datetime": 1_780_000_000_000, "open": 100, "high": 101, "low": 99, "close": 100.5, "volume": 1000},
+                {"datetime": 1_780_000_900_000, "open": 101, "high": 102, "low": 100, "close": 101.5, "volume": 2000},
+            ]
+        }
+
+    monkeypatch.setattr(connectors, "_request_json", fake_request)
+    monkeypatch.setattr(connectors, "_read_duckdb_bars", lambda *_args, **_kwargs: pd.DataFrame())
+    monkeypatch.setattr(connectors, "_write_duckdb_bars", lambda *_args, **_kwargs: None)
+
+    bars = connectors.fetch_schwab_intraday_bars(["SPY"], config, lookback_bars=2, bar_minutes=15)
+
+    assert bars["SPY"]["close"].tolist() == [100.5, 101.5]
+    assert captured["provider"] == "schwab"
+    assert captured["category"] == connectors.INTRADAY_MARKET_CATEGORY
+    assert captured["url"].endswith("/marketdata/v1/pricehistory")
+    assert captured["params"]["frequencyType"] == "minute"
+    assert captured["params"]["frequency"] == 15
+    assert captured["headers"]["Authorization"] == "Bearer token"
+
+
+def test_fetch_schwab_eod_bars_parses_price_history(monkeypatch) -> None:
+    captured = {}
+    config = Config(
+        data_source_configs={
+            "eod_market_data": {
+                "providers": {
+                    "schwab": {"access_token": "token"},
+                }
+            }
+        }
+    )
+
+    def fake_request(provider, category, url, params=None, headers=None):
+        captured.update({"provider": provider, "category": category, "params": params, "headers": headers})
+        return {
+            "candles": [
+                {"datetime": 1_780_000_000_000, "open": 100, "high": 101, "low": 99, "close": 100.5, "volume": 1000},
+            ]
+        }
+
+    monkeypatch.setattr(connectors, "_request_json", fake_request)
+    monkeypatch.setattr(connectors, "_read_duckdb_bars", lambda *_args, **_kwargs: pd.DataFrame())
+    monkeypatch.setattr(connectors, "_write_duckdb_bars", lambda *_args, **_kwargs: None)
+
+    bars = connectors.fetch_schwab_eod_bars(["SPY"], config, lookback_bars=1)
+
+    assert bars["SPY"]["close"].tolist() == [100.5]
+    assert captured["category"] == connectors.EOD_MARKET_CATEGORY
+    assert captured["params"]["frequencyType"] == "daily"
+    assert captured["params"]["frequency"] == 1
+    assert captured["headers"]["Authorization"] == "Bearer token"
+
+
 def test_alpaca_quote_fetch_skips_symbols_without_latest_price(monkeypatch) -> None:
     def fake_latest_price(symbol, _client, data_feed=None):
         if symbol == "SPY":
             raise RuntimeError("No latest bar found for SPY")
         return 50.0
 
-    monkeypatch.setattr("src.alpaca_client.get_latest_price", fake_latest_price)
+    monkeypatch.setattr("src.brokerages.alpaca_client.get_latest_price", fake_latest_price)
     monkeypatch.setattr(connectors, "record_provider_success", lambda *_args, **_kwargs: None)
 
     quotes = connectors._fetch_alpaca_quotes(["SPY", "QQQ"], Config(), data_client=object())
@@ -127,6 +310,9 @@ def test_news_sentiment_fetch_falls_back_to_stocktwits(monkeypatch, caplog) -> N
     monkeypatch.setattr(connectors, "provider_is_limited", lambda _provider: False)
     monkeypatch.setattr(connectors, "load_cached_payload", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(connectors, "save_cached_payload", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(connectors, "_read_duckdb_sentiment", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(connectors, "_read_duckdb_bars", lambda *_args, **_kwargs: pd.DataFrame())
+    monkeypatch.setattr(connectors, "_write_duckdb_bars", lambda *_args, **_kwargs: None)
 
     with caplog.at_level(logging.INFO):
         records = connectors.fetch_latest_news_sentiment(["SPY"], config)
@@ -185,11 +371,55 @@ def test_news_sentiment_fetch_combines_configured_providers(monkeypatch) -> None
     monkeypatch.setattr(connectors, "provider_is_limited", lambda _provider: False)
     monkeypatch.setattr(connectors, "load_cached_payload", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(connectors, "save_cached_payload", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(connectors, "_read_duckdb_sentiment", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(connectors, "_read_duckdb_bars", lambda *_args, **_kwargs: pd.DataFrame())
+    monkeypatch.setattr(connectors, "_write_duckdb_bars", lambda *_args, **_kwargs: None)
 
     records = connectors.fetch_latest_news_sentiment(["SPY"], config)
 
     assert [record["provider"] for record in records] == ["newsapi", "stocktwits"]
     assert records[-1]["sentiment"] == 0.4
+
+
+def test_sentiment_data_alias_uses_new_provider_order(monkeypatch) -> None:
+    config = Config(
+        sentiment_data_provider_order=["newsapi"],
+        data_source_configs={
+            "sentiment_data": {
+                "providers": {
+                    "newsapi": {"enabled": True, "api_key": "newsapi-key"},
+                }
+            }
+        },
+    )
+
+    def newsapi_news(symbols, _config):
+        return [
+            {
+                "timestamp": "2026-05-27T15:00:00+00:00",
+                "symbol": symbols[0],
+                "mentions": 1.0,
+                "sentiment": 0.2,
+                "social_score": 0.2,
+                "provider": "newsapi",
+                "title": "headline",
+                "url": "",
+                "raw": {},
+            }
+        ]
+
+    monkeypatch.setitem(connectors.NEWS_FETCHERS, "newsapi", newsapi_news)
+    monkeypatch.setattr(connectors, "provider_is_limited", lambda _provider: False)
+    monkeypatch.setattr(connectors, "load_cached_payload", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(connectors, "save_cached_payload", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(connectors, "_read_duckdb_sentiment", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(connectors, "_read_duckdb_bars", lambda *_args, **_kwargs: pd.DataFrame())
+    monkeypatch.setattr(connectors, "_write_duckdb_bars", lambda *_args, **_kwargs: None)
+
+    records = connectors.fetch_latest_sentiment_data(["SPY"], config)
+
+    assert records[0]["provider"] == "newsapi"
+    assert records[0]["sentiment"] == 0.2
 
 
 def test_news_sentiment_fetch_logs_unsupported_provider(caplog) -> None:

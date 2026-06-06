@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.controls import load_controls, sanitize_controls, save_controls
+from src.api.controls import load_controls, sanitize_controls, save_controls
 
 
 def test_sanitize_controls_defaults_and_bools() -> None:

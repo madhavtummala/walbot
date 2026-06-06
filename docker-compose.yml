@@ -1,14 +1,17 @@
 services:
-  trading-bot:
-    image: ${TRADING_BOT_IMAGE:-ghcr.io/madhavtummala/robotrade:latest}
-    container_name: trading-bot
-    pull_policy: ${TRADING_BOT_PULL_POLICY:-always}
+  walbot:
+    image: ${WALBOT_IMAGE:-ghcr.io/madhavtummala/walbot:latest}
+    container_name: walbot
+    pull_policy: ${WALBOT_PULL_POLICY:-always}
     environment:
       KILL_SWITCH: ${KILL_SWITCH:-true}
       CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-*}
+      MCP_PORT: ${WALBOT_MCP_CONTAINER_PORT:-8001}
+    command: ["${WALBOT_MODE:---bot}"]
     ports:
-      - "${TRADING_BOT_PORT:-8000}:8000"
+      - "${WALBOT_PORT:-8000}:8000"
+      - "${WALBOT_MCP_PORT:-8001}:8001"
     volumes:
-      - ${TRADING_BOT_RUNTIME:-./runtime}/config:/config
-      - ${TRADING_BOT_RUNTIME:-./runtime}/data:/data
+      - ${WALBOT_RUNTIME:-./runtime}/config:/config
+      - ${WALBOT_RUNTIME:-./runtime}/data:/data
     restart: unless-stopped

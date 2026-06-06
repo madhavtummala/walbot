@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from src.logging_utils import (
+from src.common.logging_utils import (
     configure_logging,
     demote_uvicorn_access_logs_to_debug,
     log_position_changes,
@@ -73,7 +73,8 @@ def test_uvicorn_access_logs_are_debug_when_debug_enabled() -> None:
             "uvicorn.access", logging.INFO, __file__, 1, "GET /api/status", (), None
         )
 
-        assert logger.filter(record) is True
+        assert bool(logger.filter(record)) is True
+
         assert record.levelno == logging.DEBUG
         assert record.levelname == "DEBUG"
     finally:

@@ -1,16 +1,17 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from src.alpaca_client import (
+from src.brokerages.alpaca_client import (
     create_trading_client,
     get_historical_daily_bars,
     get_historical_intraday_bars,
     get_latest_price,
     is_market_open,
     submit_option_limit_order,
+    validate_short_sale_feasibility,
 )
-from src.config import Config
+from src.core.config import Config
 
 
 class FakeDataClient:
@@ -64,6 +65,20 @@ def test_get_historical_intraday_bars_builds_30_minute_request() -> None:
     assert client.requests[0].feed.value == "iex"
 
 
+def test_get_historical_intraday_bars_uses_trading_session_window() -> None:
+    client = FakeDataClient()
+    end = datetime(2026, 6, 1, 15, 0, tzinfo=timezone.utc)
+
+    get_historical_intraday_bars(
+        ["SPY"],
+        lookback_bars=27,
+        data_client=client,
+        end_date=end,
+    )
+
+    assert end.replace(tzinfo=None) - client.requests[0].start >= timedelta(days=7)
+
+
 def test_create_trading_client_uses_configured_endpoint_without_paper_mode(monkeypatch) -> None:
     captured = {}
 
@@ -71,7 +86,7 @@ def test_create_trading_client_uses_configured_endpoint_without_paper_mode(monke
         def __init__(self, **kwargs) -> None:
             captured.update(kwargs)
 
-    monkeypatch.setattr("src.alpaca_client.TradingClient", FakeTradingClient)
+    monkeypatch.setattr("src.brokerages.alpaca_client.TradingClient", FakeTradingClient)
 
     create_trading_client(
         Config(
@@ -99,6 +114,81 @@ def test_is_market_open_fails_closed() -> None:
             raise RuntimeError("clock unavailable")
 
     assert not is_market_open(FakeTradingClient())
+
+
+def test_validate_short_sale_feasibility_accepts_shortable_asset() -> None:
+    class FakeTradingClient:
+        def get_account(self):
+            return type(
+                "Account",
+                (),
+                {
+                    "shorting_enabled": True,
+                    "trading_blocked": False,
+                    "account_blocked": False,
+                    "buying_power": "10000",
+                },
+            )()
+
+        def get_asset(self, symbol):
+            assert symbol == "SPY"
+            return type(
+                "Asset",
+                (),
+                {"tradable": True, "shortable": True, "easy_to_borrow": True, "marginable": True},
+            )()
+
+    result = validate_short_sale_feasibility(FakeTradingClient(), "SPY", quantity=5, target_shares=-5, latest_price=100.0)
+
+    assert result["shortable"] is True
+    assert result["short_notional_after"] == 500.0
+
+
+def test_validate_short_sale_feasibility_rejects_unshortable_asset() -> None:
+    class FakeTradingClient:
+        def get_account(self):
+            return type(
+                "Account",
+                (),
+                {
+                    "shorting_enabled": True,
+                    "trading_blocked": False,
+                    "account_blocked": False,
+                    "buying_power": "10000",
+                },
+            )()
+
+        def get_asset(self, _symbol):
+            return type(
+                "Asset",
+                (),
+                {"tradable": True, "shortable": False, "easy_to_borrow": True, "marginable": True},
+            )()
+
+    result = validate_short_sale_feasibility(FakeTradingClient(), "XYZ", quantity=5, target_shares=-5, latest_price=100.0)
+
+    assert result["shortable"] is False
+    assert "shortable" in str(result["reason"])
+
+
+def test_validate_short_sale_feasibility_rejects_account_without_shorting() -> None:
+    class FakeTradingClient:
+        def get_account(self):
+            return type(
+                "Account",
+                (),
+                {
+                    "shorting_enabled": False,
+                    "trading_blocked": False,
+                    "account_blocked": False,
+                    "buying_power": "10000",
+                },
+            )()
+
+    result = validate_short_sale_feasibility(FakeTradingClient(), "SPY", quantity=5, target_shares=-5, latest_price=100.0)
+
+    assert result["shortable"] is False
+    assert result["reason"] == "account shorting is not enabled"
 
 
 def test_submit_option_limit_order_uses_buy_to_open_intent() -> None:

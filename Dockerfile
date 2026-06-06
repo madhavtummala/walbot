@@ -10,7 +10,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     TRADING_OPTIONS_BOT_FILE=/config/options_bot.yaml \
     TRADING_DCA_BOT_FILE=/config/dca_bot.yaml \
     TRADING_UNIVERSE_FILE=/config/universe.yaml \
-    STATE_DB_PATH=/data/trading_bot.sqlite \
+    STATE_DUCKDB_PATH=/data/walbot.duckdb \
     TRADABLES_CSV=/app/data/tradable_etfs.csv \
     ALPHA_VANTAGE_NEWS_CSV=/data/social_trends.csv
 
@@ -29,19 +29,21 @@ RUN pip install --no-cache-dir --no-compile -r requirements.txt
 COPY src ./src
 COPY web ./web
 COPY data/tradable_etfs.csv ./data/tradable_etfs.csv
-COPY --chown=app:app deploy/examples/accounts.yaml /config/accounts.yaml
-COPY --chown=app:app deploy/examples/connectors.yaml /config/connectors.yaml
-COPY --chown=app:app deploy/examples/algorithm_bot.yaml /config/algorithm_bot.yaml
-COPY --chown=app:app deploy/examples/algorithms.yaml /config/algorithms.yaml
-COPY --chown=app:app deploy/examples/options_bot.yaml /config/options_bot.yaml
-COPY --chown=app:app deploy/examples/dca_bot.yaml /config/dca_bot.yaml
-COPY --chown=app:app deploy/examples/universe.yaml /config/universe.yaml
+COPY --chown=app:app config/accounts.yaml /config/accounts.yaml
+COPY --chown=app:app config/connectors.yaml /config/connectors.yaml
+COPY --chown=app:app config/algorithm_bot.yaml /config/algorithm_bot.yaml
+COPY --chown=app:app config/algorithms.yaml /config/algorithms.yaml
+COPY --chown=app:app config/options_bot.yaml /config/options_bot.yaml
+COPY --chown=app:app config/dca_bot.yaml /config/dca_bot.yaml
+COPY --chown=app:app config/universe.yaml /config/universe.yaml
 
 USER app
 EXPOSE 8000
+EXPOSE 8001
 VOLUME ["/config", "/data"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '8000') + '/api/status', timeout=3).read()" || exit 1
 
-CMD ["sh", "-c", "uvicorn src.api_app:app --host 0.0.0.0 --port ${PORT:-8000}"]
+ENTRYPOINT ["python", "-m", "src.container_entrypoint"]
+CMD ["--bot"]

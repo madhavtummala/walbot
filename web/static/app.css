@@ -1189,6 +1189,16 @@ h2 {
   font-weight: 850;
 }
 
+.chart-axis-value-bg {
+  fill: rgba(17, 24, 39, 0.9);
+}
+
+.chart-axis-value {
+  fill: #ffffff;
+  font-size: 10px;
+  font-weight: 900;
+}
+
 #toast {
   position: fixed;
   right: 18px;

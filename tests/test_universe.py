@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.universe import load_tradable_names, resolve_project_path
+from src.data.universe import load_tradable_names, resolve_project_path
 
 
 def test_load_tradable_names_returns_symbol_lookup(tmp_path) -> None:

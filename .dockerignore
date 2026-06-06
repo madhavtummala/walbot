@@ -11,6 +11,8 @@ data/*
 !data/tradable_etfs.csv
 *.sqlite
 *.sqlite-*
+*.duckdb
+*.duckdb-*
 tests/
 tradable_universe.csv
 README.md

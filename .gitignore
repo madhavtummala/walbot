@@ -6,6 +6,5 @@
 __pycache__/
 *.py[cod]
 runtime/
-config/
 data/*
 !data/tradable_etfs.csv

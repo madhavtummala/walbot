@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src import live_runner
-from src.config import Config
+from src.execution import live_runner as live_runner
+from src.core.config import Config
+from src.algorithms.registry import get_algorithm_class
 
 
 def _bars() -> pd.DataFrame:
@@ -24,6 +25,16 @@ def _bars() -> pd.DataFrame:
 def test_live_runner_sizing_equity_cap_is_optional() -> None:
     assert live_runner._sizing_equity(Config(algorithm_equity_cap=10_000.0), 50_000.0) == 10_000.0
     assert live_runner._sizing_equity(Config(algorithm_equity_cap=0.0), 50_000.0) == 50_000.0
+
+
+def test_algorithm_registry_returns_plugin_class() -> None:
+    algorithm = get_algorithm_class("risk_parity").from_config(Config(symbols=["AAA"]))
+
+    requirements = algorithm.requirements(Config(symbols=["AAA"]), {})
+
+    assert algorithm.algorithm_id == "risk_parity"
+    assert requirements.price_symbols == ["AAA"]
+    assert requirements.daily_lookback_days == Config().momentum_lookback_days
 
 
 def test_live_runner_uses_selected_template_strategy(monkeypatch) -> None:

@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.config import Config
-from src.fast_momentum import (
+from src.core.config import Config
+from src.algorithms.fast_momentum import (
     DefensiveMomentumConfig,
     apply_risk_guards,
     compute_composite_scores,
     compute_price_features,
     decide_target_weights,
     get_sentiment_snapshot,
+    rows_from_scores,
 )
 
 
@@ -63,8 +64,8 @@ def test_fast_momentum_config_uses_named_horizons() -> None:
     runtime = Config(
         algorithm_configs={
             "fast_momentum": {
-                "nano_momentum_lookback_bars": 3,
-                "micro_momentum_lookback_bars": 26,
+                "nano_momentum_lookback_bars": 10,
+                "micro_momentum_lookback_bars": 78,
                 "meso_trend_lookback_days": 60,
                 "macro_trend_lookback_days": 180,
                 "max_positions": 4,
@@ -79,8 +80,8 @@ def test_fast_momentum_config_uses_named_horizons() -> None:
 
     config = DefensiveMomentumConfig.from_runtime_config(runtime)
 
-    assert config.nano_momentum_lookback_bars == 3
-    assert config.micro_momentum_lookback_bars == 26
+    assert config.nano_momentum_lookback_bars == 10
+    assert config.micro_momentum_lookback_bars == 78
     assert config.meso_trend_lookback_days == 60
     assert config.macro_trend_lookback_days == 180
     assert config.max_positions == 4
@@ -138,6 +139,26 @@ def test_pullback_uptrend_bonus_rewards_short_term_dip_in_strong_trend() -> None
     assert scores["VXX"]["components"]["pullback_uptrend"] == 0.0
 
 
+def test_pullback_uptrend_bonus_allows_moderate_micro_dip() -> None:
+    config = DefensiveMomentumConfig(
+        w_pullback_uptrend=0.25,
+        pullback_meso_z_threshold=1.0,
+        pullback_nano_z_threshold=-0.5,
+        pullback_min_micro_return=-0.02,
+    )
+    features = {
+        "XSD": {"nano_return": -0.0218, "micro_return": -0.008, "meso_return": 0.8519, "macro_return": 0.5519, "macro_trend_ok": True},
+        "AIQ": {"nano_return": 0.0025, "micro_return": 0.0333, "meso_return": 0.3549, "macro_return": 0.2549, "macro_trend_ok": True},
+        "SPY": {"nano_return": 0.0017, "micro_return": 0.0055, "meso_return": 0.1114, "macro_return": 0.0914, "macro_trend_ok": True},
+        "VXX": {"nano_return": -0.0101, "micro_return": -0.0488, "meso_return": -0.2335, "macro_return": -0.3335, "macro_trend_ok": False},
+    }
+
+    scores = compute_composite_scores(features, {}, config)
+
+    assert scores["XSD"]["components"]["pullback_uptrend"] > 0.0
+    assert scores["VXX"]["components"]["pullback_uptrend"] == 0.0
+
+
 def test_weights_fall_back_to_defensive_when_no_risk_on_qualifies() -> None:
     config = DefensiveMomentumConfig(
         risk_on_universe=["QQQ"],
@@ -178,6 +199,27 @@ def test_risk_on_selection_requires_micro_floor() -> None:
     assert weights["BIL"] == 0.25
 
 
+def test_held_positions_require_score_gap_before_replacement() -> None:
+    config = DefensiveMomentumConfig(
+        risk_on_universe=["QQQ", "XSD"],
+        defensive_universe=["BIL"],
+        max_positions=1,
+        max_single_position_weight=0.25,
+        min_score_delta_to_replace=0.10,
+    )
+    scores = {
+        "QQQ": {"symbol": "QQQ", "score": 1.00, "macro_trend_ok": True},
+        "XSD": {"symbol": "XSD", "score": 1.05, "macro_trend_ok": True},
+        "BIL": {"symbol": "BIL", "score": 0.20, "macro_trend_ok": True},
+    }
+
+    weights = decide_target_weights(scores, config, {"QQQ": 0.25})
+
+    assert weights["QQQ"] == 0.25
+    assert weights["XSD"] == 0.0
+    assert weights["BIL"] == 0.0
+
+
 def test_dynamic_weights_follow_scores_with_position_caps() -> None:
     config = DefensiveMomentumConfig(
         risk_on_universe=["QQQ", "XSD"],
@@ -199,8 +241,37 @@ def test_dynamic_weights_follow_scores_with_position_caps() -> None:
     assert round(weights["BIL"], 6) == 0.116667
 
 
+def test_rows_from_scores_preserve_fast_momentum_horizon_definitions() -> None:
+    rows = rows_from_scores(
+        {
+            "XSD": {
+                "symbol": "XSD",
+                "score": 1.2,
+                "sentiment_score": 0.4,
+                "macro_return": 0.18,
+                "meso_return": 0.06,
+                "micro_return": -0.008,
+                "nano_return": -0.021,
+                "components": {"sentiment": 0.04, "pullback_uptrend": 0.12},
+            }
+        },
+        {"XSD": 0.25},
+        "FLAT_RANK",
+    )
+
+    row = rows[0]
+    assert row["ret_N"] == 0.06
+    assert row["ret_short"] == -0.021
+    assert row["macro_return"] == 0.18
+    assert row["meso_return"] == 0.06
+    assert row["micro_return"] == -0.008
+    assert row["nano_return"] == -0.021
+    assert row["pullback_score"] == 0.12
+    assert row["sentiment_component"] == 0.04
+
+
 def test_risk_guards_scale_high_volatility_and_preserve_small_drifts(monkeypatch) -> None:
-    monkeypatch.setattr("src.fast_momentum.intraday_kill_switch_triggered", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr("src.algorithms.fast_momentum.intraday_kill_switch_triggered", lambda *_args, **_kwargs: False)
     config = DefensiveMomentumConfig(max_intraday_volatility=0.02, high_volatility_weight_scale=0.5, per_trade_value_min=100.0)
     scores = {
         "QQQ": {"realized_volatility": 0.03},
@@ -214,7 +285,7 @@ def test_risk_guards_scale_high_volatility_and_preserve_small_drifts(monkeypatch
 
 
 def test_risk_guards_do_not_keep_unselected_positions(monkeypatch) -> None:
-    monkeypatch.setattr("src.fast_momentum.intraday_kill_switch_triggered", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr("src.algorithms.fast_momentum.intraday_kill_switch_triggered", lambda *_args, **_kwargs: False)
     config = DefensiveMomentumConfig(per_trade_value_min=100.0, rebalance_threshold=0.05)
 
     guarded = apply_risk_guards(
@@ -230,7 +301,7 @@ def test_risk_guards_do_not_keep_unselected_positions(monkeypatch) -> None:
 
 
 def test_sentiment_snapshot_defaults_missing_records_to_neutral(monkeypatch) -> None:
-    monkeypatch.setattr("src.fast_momentum.fetch_latest_news_sentiment", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("src.algorithms.fast_momentum.fetch_latest_news_sentiment", lambda *_args, **_kwargs: [])
 
     symbol_sentiment, market_sentiment = get_sentiment_snapshot(["SPY", "QQQ"], 60, Config())
 
@@ -247,7 +318,7 @@ def test_sentiment_snapshot_combines_configured_providers(monkeypatch) -> None:
         sentiment = 0.6 if provider == "marketaux" else -0.2
         return [{"symbol": "SPY", "timestamp": pd.Timestamp.now(tz="UTC").isoformat(), "sentiment": sentiment}]
 
-    monkeypatch.setattr("src.fast_momentum.fetch_latest_news_sentiment", fake_fetch)
+    monkeypatch.setattr("src.algorithms.fast_momentum.fetch_latest_news_sentiment", fake_fetch)
 
     symbol_sentiment, market_sentiment = get_sentiment_snapshot(
         ["SPY"],

@@ -1,0 +1,10 @@
+default: paper
+accounts:
+  items:
+    paper:
+      label: Alpaca Paper
+      broker: alpaca
+      api_key_env: ALPACA_API_KEY
+      api_secret_env: ALPACA_API_SECRET
+      base_url: https://paper-api.alpaca.markets
+      data_feed: iex

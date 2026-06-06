@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.dca import allocation_preview, load_dca_plan, sanitize_dca_plan, save_dca_plan
+from src.algorithms.dca import allocation_preview, load_dca_plan, sanitize_dca_plan, save_dca_plan
 
 
 UNIVERSE = [

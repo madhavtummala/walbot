@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.dual_momentum_optimizer import DualMomentumConfig, rank_dual_momentum_experiments, universe_subsets
+from src.algorithms.equities.dual_momentum_optimizer import DualMomentumConfig, rank_dual_momentum_experiments, universe_subsets
 
 
 def _trend_bars(start: float, end: float, periods: int = 320) -> pd.DataFrame:

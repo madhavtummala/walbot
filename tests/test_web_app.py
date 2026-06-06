@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.web_app import controls_payload, dca_payload, status_payload, universe_payload
+from src.api.web_app import controls_payload, dca_payload, status_payload, universe_payload
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -38,13 +38,13 @@ def test_controls_payload_returns_switches() -> None:
     assert {"algorithm_enabled", "options_trading_enabled"} <= set(payload["controls"])
 
 
-def test_frontend_uses_six_month_backtests_and_refresh_button() -> None:
+def test_frontend_uses_configured_backtests_and_refresh_button() -> None:
     app_js = (PROJECT_ROOT / "web/static/app.js").read_text(encoding="utf-8")
     index_html = (PROJECT_ROOT / "web/index.html").read_text(encoding="utf-8")
 
-    assert 'const BACKTEST_PERIOD = "6m";' in app_js
-    assert 'const BACKTEST_STORAGE_KEY = "tradingBot.backtests.6m.v6";' in app_js
-    assert "6M" in app_js
+    assert 'let BACKTEST_PERIOD = "4m";' in app_js
+    assert "configureBacktestPeriod(statusPayload.config?.backtest_period)" in app_js
+    assert "4M" in app_js
     assert "Ending equity =" in app_js
     assert "cash cap" not in app_js
     assert "${money(backtest.ending_equity)} end" not in app_js

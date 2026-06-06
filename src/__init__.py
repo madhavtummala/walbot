@@ -1,1 +1,1 @@
-"""Momentum trading bot package."""
+"""Walbot trading automation package."""

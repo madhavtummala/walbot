@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from src.config import Config
-from src import options_trader
+from src.core.config import Config
+from src.algorithms.options import swing as options_trader
 
 
 class Contract:

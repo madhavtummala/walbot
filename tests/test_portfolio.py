@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.portfolio import compute_target_weights
+from src.core.portfolio import compute_target_weights
 
 
 def test_compute_target_weights_uses_scores_caps_and_risk() -> None:

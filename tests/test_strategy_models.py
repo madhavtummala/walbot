@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.strategy_models import strategy_signal_rows
+from src.core.strategy_models import strategy_signal_rows
 
 
 def _trend_bars(start: float, end: float, periods: int = 320) -> pd.DataFrame:
