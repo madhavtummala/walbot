@@ -291,8 +291,6 @@ def dca_payload() -> dict[str, Any]:
 def save_dca_payload(body: dict[str, Any]) -> dict[str, Any]:
     universe = universe_payload()["rows"]
     plan = save_dca_plan(body.get("plan", body), universe)
-    if plan.get("enabled"):
-        bot_runtime.wake_dca()
     available = [row for row in universe if row["enabled"]]
     return {
         "plan": plan,
@@ -320,8 +318,6 @@ def save_controls_payload(body: dict[str, Any]) -> dict[str, Any]:
     if str(raw_controls.get("options_strategy") or "none") == "none":
         raw_controls = {**raw_controls, "options_trading_enabled": False}
     controls = save_controls(raw_controls)
-    bot_runtime.wake_algorithm()
-    bot_runtime.wake_options()
     return {
         "controls": controls,
         "accounts": get_config(account_id=str(controls.get("trading_account_id") or "") or None).account_options,

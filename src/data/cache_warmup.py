@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
@@ -12,6 +13,7 @@ from src.core.config import get_config, load_algorithms_config
 from src.data.duckdb_store import clear_market_bars, market_bars_summary
 from src.data.provider_cache import clear_cached_payloads
 
+logger = logging.getLogger(__name__)
 
 DEFAULT_BACKTEST_BUFFER_BARS = 10
 DEFAULT_INTRADAY_LOOKBACK_BARS = 78
@@ -187,6 +189,14 @@ def warm_market_data_cache(
     )
     eod_lookback_bars = int(eod_lookback_bars or range_eod_bars or _default_eod_lookback_bars())
     intraday_lookback_bars = int(intraday_lookback_bars or range_intraday_bars or DEFAULT_INTRADAY_LOOKBACK_BARS)
+
+    logger.info("Warming market data cache for %s symbols...", len(wanted))
+    if warm_eod:
+        logger.info("  EOD: provider=%s, lookback=%s bars", actual_eod_provider, eod_lookback_bars)
+    if warm_intraday:
+        logger.info("  Intraday: provider=%s, lookback=%s bars, timeframe=%sm", 
+                    actual_intraday_provider, intraday_lookback_bars, intraday_bar_minutes)
+
     deleted = (
         _clear_market_cache(
             wanted,
@@ -199,6 +209,9 @@ def warm_market_data_cache(
         if clear
         else {}
     )
+    if deleted:
+        logger.info("Cleared existing cache: %s", deleted)
+
     eod = (
         fetch_eod_market_bars(
             wanted,
@@ -212,6 +225,10 @@ def warm_market_data_cache(
         if warm_eod
         else {}
     )
+    if warm_eod:
+        total_eod = sum(_count_rows(eod).values())
+        logger.info("Fetched %s EOD bars total", total_eod)
+
     intraday = (
         fetch_intraday_market_bars(
             wanted,
@@ -226,6 +243,11 @@ def warm_market_data_cache(
         if warm_intraday
         else {}
     )
+    if warm_intraday:
+        total_intraday = sum(_count_rows(intraday).values())
+        logger.info("Fetched %s intraday bars total", total_intraday)
+
+    logger.info("Market data cache warming complete.")
     return {
         "algorithm": algorithm_id,
         "provider": {

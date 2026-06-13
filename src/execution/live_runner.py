@@ -94,6 +94,7 @@ def run_once(account_id: str | None = None) -> None:
         return
 
     price_symbols = sorted(set(requirements.price_symbols or config.symbols) | set(current_positions))
+    logger.info("Fetching latest market quotes for %s symbols...", len(price_symbols))
     latest_quotes = fetch_latest_market_quotes(price_symbols, config, data_client=data_client)
     latest_prices = {}
     for symbol in price_symbols:
@@ -106,6 +107,7 @@ def run_once(account_id: str | None = None) -> None:
 
     bars_by_symbol = {}
     if requirements.daily_lookback_days:
+        logger.info("Fetching daily bars (%s lookback days) for %s symbols...", requirements.daily_lookback_days, len(config.symbols))
         bars_by_symbol = fetch_daily_bars(
             config.symbols,
             requirements.daily_lookback_days,
@@ -116,7 +118,13 @@ def run_once(account_id: str | None = None) -> None:
             include_latest=requirements.include_latest_daily,
             config=config,
         )
-    sentiment_by_symbol = _load_sentiment_frames(config, config.symbols) if requirements.needs_sentiment else {}
+    
+    sentiment_by_symbol = {}
+    if requirements.needs_sentiment:
+        logger.info("Fetching/loading sentiment data for %s symbols...", len(config.symbols))
+        sentiment_by_symbol = _load_sentiment_frames(config, config.symbols)
+    
+    logger.info("Running algorithm decision logic...")
     decision = algorithm.decide(
         AlgorithmContext(
             config=config,

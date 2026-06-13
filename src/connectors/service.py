@@ -34,6 +34,7 @@ NEWS_CATEGORY = "news_sentiment"
 SENTIMENT_CATEGORY = "sentiment_data"
 INTRADAY_CACHE_TTL_SECONDS = 900
 EOD_CACHE_TTL_SECONDS = 1800
+EOD_BAR_FRESH_FOR_DAYS = 3
 
 _CATEGORY_ALIASES = {
     MARKET_CATEGORY: (MARKET_CATEGORY, EOD_MARKET_CATEGORY),
@@ -197,6 +198,31 @@ def _intraday_cache_key(symbol: str, bar_minutes: int, lookback_bars: int) -> st
 
 def _timeframe_from_minutes(bar_minutes: int) -> str:
     return f"{int(bar_minutes)}m"
+
+
+def _fresh_cached_bars(
+    bars: pd.DataFrame,
+    category: str,
+    *,
+    bar_minutes: int | None = None,
+    now: datetime | None = None,
+) -> pd.DataFrame:
+    if bars.empty or "timestamp" not in bars:
+        return pd.DataFrame()
+    timestamps = pd.to_datetime(bars["timestamp"], utc=True, errors="coerce").dropna()
+    if timestamps.empty:
+        return pd.DataFrame()
+    now_ts = pd.Timestamp(now or datetime.now(timezone.utc))
+    now_ts = now_ts.tz_localize("UTC") if now_ts.tzinfo is None else now_ts.tz_convert("UTC")
+    latest = timestamps.max()
+    if category == INTRADAY_MARKET_CATEGORY:
+        if latest.date() == now_ts.date():
+            return bars
+        max_age = pd.Timedelta(seconds=max(INTRADAY_CACHE_TTL_SECONDS, int(bar_minutes or 15) * 60 * 3))
+        return bars if now_ts - latest <= max_age else pd.DataFrame()
+    if category == EOD_MARKET_CATEGORY:
+        return bars if now_ts - latest <= pd.Timedelta(days=EOD_BAR_FRESH_FOR_DAYS) else pd.DataFrame()
+    return bars
 
 
 def _news_cache_key(symbols: list[str]) -> str:
@@ -443,6 +469,7 @@ def fetch_yfinance_intraday_bars(
                 timeframe,
                 lookback_bars=lookback_bars,
             )
+            duckdb_bars = _fresh_cached_bars(duckdb_bars, INTRADAY_MARKET_CATEGORY, bar_minutes=bar_minutes)
             if not duckdb_bars.empty:
                 bars_by_symbol[symbol] = duckdb_bars.tail(lookback_bars).reset_index(drop=True)
                 continue
@@ -491,6 +518,7 @@ def fetch_intraday_market_bars(
     start_date: datetime | None = None,
     end_date: datetime | None = None,
 ) -> dict[str, pd.DataFrame]:
+    logger.info("Fetching intraday bars for %s symbols (lookback=%s, timeframe=%sm)", len(symbols), lookback_bars, bar_minutes)
     range_kwargs = {
         key: value
         for key, value in {"start_date": start_date, "end_date": end_date}.items()
@@ -584,7 +612,11 @@ def fetch_alpaca_intraday_bars(
         cached = (
             pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
             if force_refresh
-            else _read_duckdb_bars(INTRADAY_MARKET_CATEGORY, "alpaca", symbol, timeframe, lookback_bars=lookback_bars)
+            else _fresh_cached_bars(
+                _read_duckdb_bars(INTRADAY_MARKET_CATEGORY, "alpaca", symbol, timeframe, lookback_bars=lookback_bars),
+                INTRADAY_MARKET_CATEGORY,
+                bar_minutes=bar_minutes,
+            )
         )
         if not cached.empty:
             bars_by_symbol[symbol] = cached.tail(lookback_bars).reset_index(drop=True)
@@ -640,7 +672,11 @@ def fetch_schwab_intraday_bars(
         cached = (
             pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
             if force_refresh
-            else _read_duckdb_bars(INTRADAY_MARKET_CATEGORY, "schwab", symbol, timeframe, lookback_bars=lookback_bars)
+            else _fresh_cached_bars(
+                _read_duckdb_bars(INTRADAY_MARKET_CATEGORY, "schwab", symbol, timeframe, lookback_bars=lookback_bars),
+                INTRADAY_MARKET_CATEGORY,
+                bar_minutes=bar_minutes,
+            )
         )
         if not cached.empty:
             bars_by_symbol[symbol] = cached.tail(lookback_bars).reset_index(drop=True)
@@ -691,7 +727,10 @@ def fetch_yfinance_eod_bars(
         cached = (
             pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
             if force_refresh
-            else _read_duckdb_bars(EOD_MARKET_CATEGORY, "yfinance", symbol, "1d", lookback_bars=lookback_bars)
+            else _fresh_cached_bars(
+                _read_duckdb_bars(EOD_MARKET_CATEGORY, "yfinance", symbol, "1d", lookback_bars=lookback_bars),
+                EOD_MARKET_CATEGORY,
+            )
         )
         if not cached.empty:
             bars_by_symbol[symbol] = cached.tail(lookback_bars).reset_index(drop=True)
@@ -735,7 +774,10 @@ def fetch_alpaca_eod_bars(
         cached = (
             pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
             if force_refresh
-            else _read_duckdb_bars(EOD_MARKET_CATEGORY, "alpaca", symbol, "1d", lookback_bars=lookback_bars)
+            else _fresh_cached_bars(
+                _read_duckdb_bars(EOD_MARKET_CATEGORY, "alpaca", symbol, "1d", lookback_bars=lookback_bars),
+                EOD_MARKET_CATEGORY,
+            )
         )
         if not cached.empty:
             bars_by_symbol[symbol] = cached.tail(lookback_bars).reset_index(drop=True)
@@ -783,7 +825,10 @@ def fetch_finnhub_eod_bars(
         cached = (
             pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
             if force_refresh
-            else _read_duckdb_bars(EOD_MARKET_CATEGORY, "finnhub", symbol, "1d", lookback_bars=lookback_bars)
+            else _fresh_cached_bars(
+                _read_duckdb_bars(EOD_MARKET_CATEGORY, "finnhub", symbol, "1d", lookback_bars=lookback_bars),
+                EOD_MARKET_CATEGORY,
+            )
         )
         if not cached.empty:
             bars_by_symbol[symbol] = cached.tail(lookback_bars).reset_index(drop=True)
@@ -834,7 +879,10 @@ def fetch_schwab_eod_bars(
         cached = (
             pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
             if force_refresh
-            else _read_duckdb_bars(EOD_MARKET_CATEGORY, "schwab", symbol, "1d", lookback_bars=lookback_bars)
+            else _fresh_cached_bars(
+                _read_duckdb_bars(EOD_MARKET_CATEGORY, "schwab", symbol, "1d", lookback_bars=lookback_bars),
+                EOD_MARKET_CATEGORY,
+            )
         )
         if not cached.empty:
             bars_by_symbol[symbol] = cached.tail(lookback_bars).reset_index(drop=True)
@@ -876,6 +924,7 @@ def fetch_eod_market_bars(
     start_date: datetime | None = None,
     end_date: datetime | None = None,
 ) -> dict[str, pd.DataFrame]:
+    logger.info("Fetching EOD bars for %s symbols (lookback=%s)", len(symbols), lookback_bars)
     range_kwargs = {
         key: value
         for key, value in {"start_date": start_date, "end_date": end_date}.items()
@@ -1012,6 +1061,7 @@ def fetch_finnhub_intraday_bars(
                 timeframe,
                 lookback_bars=lookback_bars,
             )
+            duckdb_bars = _fresh_cached_bars(duckdb_bars, INTRADAY_MARKET_CATEGORY, bar_minutes=bar_minutes)
             if not duckdb_bars.empty:
                 bars_by_symbol[symbol] = duckdb_bars.tail(lookback_bars).reset_index(drop=True)
                 continue

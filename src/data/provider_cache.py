@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -8,6 +9,8 @@ import pandas as pd
 
 from .duckdb_store import _connect
 from .state_store import STATE_DUCKDB_PATH
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> pd.Timestamp:
@@ -40,10 +43,13 @@ def load_cached_payload(
             [category, provider, cache_key],
         ).fetchone()
     if not row:
+        logger.debug("Cache miss: %s/%s [%s]", category, provider, cache_key)
         return None
     try:
+        logger.debug("Cache hit: %s/%s [%s]", category, provider, cache_key)
         return json.loads(row[0])
     except json.JSONDecodeError:
+        logger.warning("Cache corruption: Failed to decode %s/%s [%s]", category, provider, cache_key)
         return None
 
 
@@ -58,6 +64,7 @@ def save_cached_payload(
 ) -> None:
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(seconds=max(int(ttl_seconds), 0))
+    logger.debug("Saving to cache: %s/%s [%s] (ttl=%ss)", category, provider, cache_key, ttl_seconds)
     with _connect(db_path) as connection:
         connection.execute(
             """

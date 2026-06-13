@@ -60,12 +60,6 @@ class _RuntimeLoop:
         self._stop.set()
         self._wake.set()
 
-    def wake(self) -> None:
-        self.start()
-        with self._lock:
-            self._state.last_run_date = ""
-        self._wake.set()
-
     def snapshot(self) -> dict[str, Any]:
         controls = load_controls()
         with self._lock:
@@ -115,10 +109,13 @@ class _RuntimeLoop:
             self._state.last_error = ""
             if run_key:
                 self._state.last_run_key = run_key
+        
+        logger.info("Starting %s run (key=%s)", self.name, run_key or "manual")
         try:
             self._run_fn(account_id or None)
             with self._lock:
                 self._state.last_run_date = date.today().isoformat()
+            logger.info("Completed %s run successfully", self.name)
         except Exception as exc:  # pragma: no cover - surfaced via status payload.
             logger.exception("%s runtime failed", self.name)
             with self._lock:
@@ -400,15 +397,6 @@ class BotRuntime:
         self.algorithm.stop()
         self.options.stop()
         self.dca.stop()
-
-    def wake_algorithm(self) -> None:
-        self.algorithm.wake()
-
-    def wake_options(self) -> None:
-        self.options.wake()
-
-    def wake_dca(self) -> None:
-        self.dca.wake()
 
     def snapshot(self) -> dict[str, Any]:
         return {

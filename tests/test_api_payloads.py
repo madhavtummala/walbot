@@ -198,13 +198,9 @@ def test_fast_momentum_reason_describes_risk_on_rank_cutoff() -> None:
     )
 
 
-def test_save_controls_payload_wakes_options_runtime(tmp_path, monkeypatch) -> None:
-    woke = {"algorithm": 0, "options": 0}
+def test_save_controls_payload_does_not_wake_runtimes(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("TRADING_ALGORITHM_BOT_FILE", str(tmp_path / "algorithm_bot.yaml"))
     monkeypatch.setenv("TRADING_OPTIONS_BOT_FILE", str(tmp_path / "options_bot.yaml"))
-
-    monkeypatch.setattr(api_payloads.bot_runtime, "wake_algorithm", lambda: woke.__setitem__("algorithm", woke["algorithm"] + 1))
-    monkeypatch.setattr(api_payloads.bot_runtime, "wake_options", lambda: woke.__setitem__("options", woke["options"] + 1))
 
     payload = api_payloads.save_controls_payload(
         {
@@ -219,7 +215,8 @@ def test_save_controls_payload_wakes_options_runtime(tmp_path, monkeypatch) -> N
 
     assert payload["controls"]["algorithm_enabled"] is False
     assert payload["controls"]["options_trading_enabled"] is False
-    assert woke == {"algorithm": 1, "options": 1}
+    assert not hasattr(api_payloads.bot_runtime, "wake_algorithm")
+    assert not hasattr(api_payloads.bot_runtime, "wake_options")
 
 
 def test_none_backtest_returns_flat_payload_without_market_data(monkeypatch) -> None:

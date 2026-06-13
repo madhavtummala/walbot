@@ -4,6 +4,7 @@ import logging
 
 import pandas as pd
 
+from src.brokerages import alpaca_client
 from src.connectors import service as connectors
 from src.core.config import Config
 
@@ -92,6 +93,67 @@ def test_normalize_intraday_frame_preserves_adjusted_close() -> None:
     bars = connectors._normalize_intraday_frame(raw)
 
     assert bars["adjusted_close"].tolist() == [99.75, 101.5]
+
+
+def test_fresh_cached_bars_rejects_stale_eod_rows() -> None:
+    bars = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2026-06-04T23:00:00-05:00"]),
+            "open": [100.0],
+            "high": [101.0],
+            "low": [99.0],
+            "close": [100.5],
+            "volume": [1000],
+        }
+    )
+
+    fresh = connectors._fresh_cached_bars(
+        bars,
+        connectors.EOD_MARKET_CATEGORY,
+        now=pd.Timestamp("2026-06-12T12:00:00-05:00"),
+    )
+
+    assert fresh.empty
+
+
+def test_fetch_alpaca_eod_bars_fetches_when_duckdb_rows_are_stale(monkeypatch) -> None:
+    config = Config(alpaca_data_feed="iex")
+    stale = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2026-06-04T23:00:00-05:00"]),
+            "open": [100.0],
+            "high": [101.0],
+            "low": [99.0],
+            "close": [100.5],
+            "volume": [1000],
+        }
+    )
+    fresh = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2026-06-11T23:00:00-05:00"]),
+            "open": [110.0],
+            "high": [111.0],
+            "low": [109.0],
+            "close": [110.5],
+            "volume": [2000],
+        }
+    )
+    calls = []
+
+    monkeypatch.setattr(connectors, "_read_duckdb_bars", lambda *_args, **_kwargs: stale)
+    monkeypatch.setattr(connectors, "_write_duckdb_bars", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(alpaca_client, "create_data_client", lambda _config: object())
+
+    def fake_historical_daily_bars(symbols, **_kwargs):
+        calls.append(symbols)
+        return {"SPY": fresh}
+
+    monkeypatch.setattr(alpaca_client, "get_historical_daily_bars", fake_historical_daily_bars)
+
+    bars = connectors.fetch_alpaca_eod_bars(["SPY"], config, lookback_bars=1)
+
+    assert calls == [["SPY"]]
+    assert bars["SPY"]["close"].tolist() == [110.5]
 
 
 def test_fetch_finnhub_intraday_bars_parses_and_caches_candles(monkeypatch) -> None:
