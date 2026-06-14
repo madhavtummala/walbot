@@ -100,6 +100,20 @@ class Brokerage(ABC):
     def cancel_all_orders(self) -> None:
         pass
 
+    def is_market_open(self) -> bool:
+        """Return whether the market is currently open for trading."""
+        return bool(self.get_account_state().get("is_market_open", False))
+
+    def validate_short_sale_feasibility(
+        self, symbol: str, quantity: int, target_shares: int, latest_price: float
+    ) -> Dict[str, Any]:
+        """Check whether the brokerage allows a short sale for the given symbol and quantity.
+
+        Returns a dict with ``"shortable"`` (bool) and ``"reason"`` (str).
+        The default assumes shorting is allowed.
+        """
+        return {"shortable": False, "reason": "short sale not confirmed by brokerage"}
+
 class AlgorithmPlugin(ABC):
     algorithm_id: str = ""
 

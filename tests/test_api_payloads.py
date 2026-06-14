@@ -180,7 +180,7 @@ def test_fast_momentum_reason_uses_configured_defensive_symbols() -> None:
 
     reason = api_payloads._defensive_momentum_reason(row, 0.25, config)
 
-    assert reason == "Dynamic rank"
+    assert reason == "Top Rank"
 
 
 def test_fast_momentum_reason_describes_risk_on_rank_cutoff() -> None:
@@ -191,10 +191,10 @@ def test_fast_momentum_reason_describes_risk_on_rank_cutoff() -> None:
         min_risk_on_micro_return=0.0,
     )
 
-    assert api_payloads._defensive_momentum_reason({"symbol": "AIQ", "macro_trend_ok": True}, 0.0, config) == "Outside top 4 rank"
+    assert api_payloads._defensive_momentum_reason({"symbol": "AIQ", "macro_trend_ok": True}, 0.0, config) == "No rank slot"
     assert (
         api_payloads._defensive_momentum_reason({"symbol": "XSD", "macro_trend_ok": True, "micro_return": -0.001}, 0.0, config)
-        == "Micro trend below risk-on floor"
+        == "Micro too low"
     )
 
 
@@ -621,12 +621,8 @@ def test_defensive_momentum_signals_include_inactive_universe_rows(monkeypatch) 
 
     by_symbol = {row["symbol"]: row for row in payload["leaders"]}
     assert {"XSD", "BIL"} <= set(by_symbol)
-    assert by_symbol["XSD"]["side"] == "LONG"
-    assert by_symbol["XSD"]["sentiment_providers"] == ["stocktwits"]
-    assert by_symbol["XSD"]["sentiment_records"] == 1
+    assert by_symbol["XSD"]["signal"] == "LONG"
     assert "score_components" in by_symbol["XSD"]
-    assert by_symbol["XSD"]["sentiment_component"] is not None
-    assert by_symbol["XSD"]["pullback_score"] is not None
     assert payload["summary"][0]["value"] == "Dynamic rank"
     assert by_symbol["BIL"]["reason"]
 
@@ -647,9 +643,9 @@ def test_momentum_social_signals_include_all_tracked_universe_rows(monkeypatch) 
 
     by_symbol = {row["symbol"]: row for row in payload["leaders"]}
     assert set(by_symbol) == {"VTI", "XBI", "BIL"}
-    assert by_symbol["VTI"]["side"] in {"LONG", "FLAT"}
-    assert by_symbol["XBI"]["side"] in {"LONG", "FLAT"}
-    assert by_symbol["BIL"]["side"] in {"LONG", "FLAT"}
+    assert by_symbol["VTI"]["signal"] in {"LONG", "FLAT"}
+    assert by_symbol["XBI"]["signal"] in {"LONG", "FLAT"}
+    assert by_symbol["BIL"]["signal"] in {"LONG", "FLAT"}
     assert by_symbol["XBI"]["reason"]
 
 

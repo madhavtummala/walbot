@@ -377,6 +377,20 @@ def _normalize_accounts_config(raw: dict[str, Any]) -> tuple[str, dict[str, dict
     return str(accounts.get("default") or raw.get("default") or ""), _normalize_keyed_items(items)
 
 
+def get_account_broker_type(account_id: str) -> str:
+    """Resolve the broker type for a given account ID from accounts config."""
+    raw = load_accounts_config()
+    _, items = _normalize_accounts_config(raw)
+    account = items.get(account_id, {})
+    if not account and items:
+        default_id = raw.get("default", "")
+        if isinstance(default_id, str) and default_id in items:
+            account = items[default_id]
+        elif items:
+            account = next(iter(items.values()), {})
+    return str(account.get("broker", "alpaca")).strip().lower()
+
+
 def _normalize_data_sources(raw: dict[str, Any]) -> dict[str, Any]:
     if not raw:
         return {}
@@ -507,6 +521,7 @@ def _algorithm_sections(raw_algorithms_config: dict[str, Any]) -> dict[str, dict
 class Config:
     account_id: str = "default"
     account_label: str = "Default"
+
     algorithm_id: str = "momentum_social"
     symbols: list[str] = field(default_factory=lambda: list(SYMBOLS))
     momentum_lookback_days: int = MOMENTUM_LOOKBACK_DAYS
@@ -688,6 +703,7 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
     return Config(
         account_id=selected_account_id,
         account_label=str(account_config.get("label") or selected_account_id),
+
         algorithm_id=selected_strategy_id,
         symbols=symbols,
         momentum_lookback_days=_as_int(_config_value(algorithm, "momentum_lookback_days", "MOMENTUM_LOOKBACK_DAYS", MOMENTUM_LOOKBACK_DAYS), MOMENTUM_LOOKBACK_DAYS),

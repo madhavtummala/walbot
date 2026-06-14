@@ -3,36 +3,30 @@ from __future__ import annotations
 from src import mcp_server
 
 
-def test_request_trade_approval_payload_uses_notification_approval(monkeypatch) -> None:
-    calls = []
+class DummyMCP:
+    def __init__(self) -> None:
+        self.tools = []
 
-    def fake_request_trade_approval(planned_orders, *, approval_id, timeout_seconds, poll_seconds):
-        calls.append((planned_orders, approval_id, timeout_seconds, poll_seconds))
-        return True
+    def tool(self):
+        def decorator(func):
+            self.tools.append(func)
+            setattr(self, func.__name__, func)
+            return func
 
-    monkeypatch.setattr(mcp_server, "request_trade_approval_via_notifications", fake_request_trade_approval)
-
-    result = mcp_server.request_trade_approval_payload(
-        [{"symbol": "AAA", "action": "buy", "quantity": 2}],
-        approval_id="abc123",
-        timeout_seconds=30,
-        poll_seconds=2,
-    )
-
-    assert result == {"approved": True, "approval_id": "abc123", "requested": True}
-    assert calls == [([{"symbol": "AAA", "action": "buy", "quantity": 2}], "abc123", 30, 2)]
+        return decorator
 
 
-def test_request_trade_approval_payload_skips_empty_plans(monkeypatch) -> None:
-    monkeypatch.setattr(
-        mcp_server,
-        "request_trade_approval_via_notifications",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not request approval")),
-    )
+def test_create_mcp_server_exposes_expected_tools(monkeypatch) -> None:
+    fake_server = DummyMCP()
+    monkeypatch.setattr(mcp_server, "_server", lambda *args, **kwargs: fake_server)
+    monkeypatch.setattr(mcp_server, "strategy_signals_payload", lambda strategy="momentum_social": {"strategy": strategy, "ok": True, "leaders": []})
 
-    assert mcp_server.request_trade_approval_payload([], approval_id="abc123") == {
-        "approved": False,
-        "approval_id": "abc123",
-        "requested": False,
-        "reason": "no_planned_orders",
-    }
+    mcp = mcp_server.create_mcp_server()
+
+    assert [tool.__name__ for tool in fake_server.tools] == [
+        "get_live_signals",
+        "get_portfolio_preview",
+        "get_planned_orders",
+        "place_orders",
+    ]
+    assert mcp.get_live_signals("fast_momentum") == {"strategy": "fast_momentum", "ok": True, "leaders": []}

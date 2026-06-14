@@ -338,6 +338,17 @@ def decide_target_weights(
         reverse=True,
     )
     selected = candidates[: max(config.max_positions, 0)]
+    if score_delta > 0 and current_symbol_positions:
+        effective_top = sorted(candidates, key=lambda item: float(item.get("score", 0.0)), reverse=True)[: max(config.max_positions, 0)]
+        retained_by_bonus = [s for s in selected if s["symbol"] in current_symbol_positions and s not in effective_top]
+        for item in retained_by_bonus:
+            logger.info(
+                "Stickiness retained %s: score=%.3f + delta=%.2f kept it in top %d",
+                item["symbol"],
+                float(item.get("score", 0.0)),
+                score_delta,
+                config.max_positions,
+            )
 
     if not selected:
         selected = ranked(config.defensive_universe, config.min_defensive_score, require_macro_trend=False)[: max(config.max_positions, 0)]

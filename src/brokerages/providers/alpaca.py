@@ -8,7 +8,8 @@ from src.brokerages.alpaca_client import (
     get_positions,
     submit_market_order,
     submit_option_limit_order,
-    is_market_open
+    is_market_open,
+    validate_short_sale_feasibility as _alpaca_short_check,
 )
 
 class AlpacaBrokerage(BaseBrokerage):
@@ -63,3 +64,8 @@ class AlpacaBrokerage(BaseBrokerage):
 
     def cancel_all_orders(self) -> None:
         self.client.cancel_orders()
+
+    def validate_short_sale_feasibility(
+        self, symbol: str, quantity: int, target_shares: int, latest_price: float
+    ) -> Dict[str, Any]:
+        return _alpaca_short_check(self.client, symbol, quantity, target_shares, latest_price)

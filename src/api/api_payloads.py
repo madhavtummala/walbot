@@ -12,7 +12,7 @@ from typing import Any
 import pandas as pd
 
 from ..connectors.sentiment.alpha_vantage import collect_alpha_vantage_news, write_social_trends_csv
-from ..brokerages.alpaca_client import create_data_client
+from ..brokerages.alpaca_client import create_data_client, create_trading_client, get_account_equity, get_positions
 from ..data import fetch_daily_bars
 from ..execution.backtest import calculate_performance_metrics
 from ..core.bot_runtime import bot_runtime
@@ -39,6 +39,7 @@ from ..core.strategy_models import (
 )
 from ..algorithms.fast_momentum import (
     DefensiveMomentumConfig,
+    build_defensive_momentum_targets,
     compute_composite_scores,
     compute_price_features,
     decide_target_weights,
@@ -51,6 +52,7 @@ from ..algorithms.invest_spy import (
     compute_invest_spy_price_features,
     decide_invest_spy_weights,
 )
+from ..core.orders import plan_position_orders
 from ..data.universe import load_tradable_names, resolve_project_path
 from ..data.universe_selector import candidate_specs_by_symbol, preferred_symbols, recommend_universe_rows
 
@@ -369,7 +371,7 @@ def _json_number(value: Any) -> float | None:
         return None
     if pd.isna(parsed) or parsed in {float("inf"), float("-inf")}:
         return None
-    return parsed
+    return round(parsed, 2)
 
 
 def _latest_signal_bars(strategy: str = "momentum_social") -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame]]:
@@ -449,12 +451,11 @@ def strategy_signals_payload(strategy: str = "momentum_social") -> dict[str, Any
             social_lookback_days=config.social_lookback_days,
             social_weight=config.social_momentum_weight if strategy == "dual_momentum" else 0.0,
         )
-        long_count = sum(1 for row in leaders if row["side"] == "LONG")
-        short_count = sum(1 for row in leaders if row["side"] == "SHORT")
+        long_count = sum(1 for row in leaders if row["signal"] == "LONG")
+        short_count = sum(1 for row in leaders if row["signal"] == "SHORT")
         gross_count = max(long_count + short_count, 1)
         for row in leaders:
-            row["target_weight"] = (1 / gross_count) if row["side"] == "LONG" else (-1 / gross_count) if row["side"] == "SHORT" else 0.0
-            row["signal"] = row["side"]
+            row["target_weight"] = (1 / gross_count) if row["signal"] == "LONG" else (-1 / gross_count) if row["signal"] == "SHORT" else 0.0
         return {
             "strategy": strategy,
             "wired": True,
@@ -515,7 +516,6 @@ def strategy_signals_payload(strategy: str = "momentum_social") -> dict[str, Any
         {
             "symbol": symbol,
             "signal": "LONG" if int(values.get("signal", 0)) else "FLAT",
-            "side": "LONG" if int(values.get("signal", 0)) else "FLAT",
             "close": _json_number(values.get("close")),
             "sma_20": _latest_sma(bars_by_symbol.get(symbol, pd.DataFrame()), 20),
             "sma_50": _latest_sma(bars_by_symbol.get(symbol, pd.DataFrame()), 50),
@@ -595,15 +595,15 @@ def _defensive_momentum_reason(
 ) -> str:
     symbol = str(row.get("symbol", "")).upper()
     if weight > 0:
-        return "Dynamic rank"
+        return "Top Rank"
     if not bool(row.get("macro_trend_ok")):
-        return "Macro trend below zero"
+        return "Macro negative"
     score_floor = strategy_config.min_risk_on_score if symbol in {item.upper() for item in strategy_config.risk_on_universe} else strategy_config.min_defensive_score
     if float(row.get("score", 0.0)) < score_floor:
-        return "Below score floor"
+        return "Score too low"
     if symbol in {item.upper() for item in strategy_config.risk_on_universe} and float(row.get("micro_return", 0.0)) < strategy_config.min_risk_on_micro_return:
-        return "Micro trend below risk-on floor"
-    return f"Outside top {strategy_config.max_positions} rank"
+        return "Micro too low"
+    return "No rank slot"
 
 
 def _defensive_momentum_signals_payload() -> dict[str, Any]:
@@ -614,7 +614,7 @@ def _defensive_momentum_signals_payload() -> dict[str, Any]:
     intraday_bars = get_intraday_bars(symbols, strategy_config.required_intraday_bars, config, data_client)
     daily_bars = get_defensive_daily_bars(symbols, strategy_config.required_daily_bars, config, data_client)
     sentiment_records = fetch_latest_news_sentiment(symbols, config)
-    sentiment, market_sentiment, sentiment_meta, providers = _defensive_momentum_sentiment_from_records(
+    sentiment, market_sentiment, _, providers = _defensive_momentum_sentiment_from_records(
         symbols,
         sentiment_records,
         strategy_config.sentiment_lookback_minutes,
@@ -629,38 +629,22 @@ def _defensive_momentum_signals_payload() -> dict[str, Any]:
     leaders = []
     for symbol, row in scores.items():
         weight = float(weights.get(symbol, 0.0))
-        meta = sentiment_meta.get(symbol, {})
         components = row.get("components", {}) if isinstance(row.get("components"), dict) else {}
         leaders.append(
             {
                 "symbol": symbol,
                 "signal": "LONG" if weight > 0 else "FLAT",
-                "side": "LONG" if weight > 0 else "FLAT",
                 "close": _json_number(row.get("close")),
                 "score": _json_number(row.get("score")),
-                "price_score": _json_number(row.get("macro_return")),
-                "social_score": _json_number(row.get("sentiment_score")),
-                "sentiment_score": _json_number(row.get("sentiment_score")),
-                "sentiment_component": _json_number(components.get("sentiment")),
-                "pullback_score": _json_number(components.get("pullback_uptrend")),
                 "score_components": {key: _json_number(value) for key, value in components.items()},
-                "sentiment_records": int(meta.get("sentiment_records", 0)),
-                "sentiment_providers": meta.get("sentiment_providers", []),
-                "market_sentiment": _json_number(market_sentiment),
                 "allocation_mode": allocation_mode,
-                "ret_N": _json_number(row.get("meso_return")),
-                "ret_short": _json_number(row.get("nano_return")),
-                "macro_return": _json_number(row.get("macro_return")),
-                "meso_return": _json_number(row.get("meso_return")),
-                "micro_return": _json_number(row.get("micro_return")),
-                "nano_return": _json_number(row.get("nano_return")),
                 "realized_vol": _json_number(row.get("realized_volatility")),
                 "trend_ok": int(bool(row.get("macro_trend_ok"))),
                 "target_weight": _json_number(weight),
                 "reason": _defensive_momentum_reason(row, weight, strategy_config),
             }
         )
-    leaders.sort(key=lambda item: (item["side"] != "LONG", -float(item.get("target_weight") or 0.0), -float(item.get("score") or 0.0)))
+    leaders.sort(key=lambda item: (item["signal"] != "LONG", -float(item.get("target_weight") or 0.0), -float(item.get("score") or 0.0)))
     return {
         "strategy": "fast_momentum",
         "wired": True,
@@ -672,6 +656,144 @@ def _defensive_momentum_signals_payload() -> dict[str, Any]:
             {"label": "Universe", "value": str(len(symbols))},
         ],
         "leaders": leaders,
+    }
+
+
+def defensive_momentum_portfolio_preview() -> dict[str, Any]:
+    """Compute what the fast momentum algorithm would do given current positions and stickiness.
+
+    Fetches live market data and current brokerage positions, applies the full algorithm
+    (including the min_score_delta_to_replace incumbency bonus), and returns the planned
+    portfolio changes alongside the current state.
+    """
+    config = get_config(strategy_id="fast_momentum")
+    data_client = create_data_client(config)
+    trading_client = create_trading_client(config)
+    current_positions = get_positions(trading_client)
+    account_equity = get_account_equity(trading_client)
+    equity = float(account_equity)
+    strategy_config = DefensiveMomentumConfig.from_runtime_config(config)
+
+    latest_prices: dict[str, float] = {}
+    for symbol in strategy_config.symbols:
+        bars = get_intraday_bars([symbol], strategy_config.required_intraday_bars, config, data_client)
+        df = bars.get(symbol)
+        if df is not None and not df.empty and "close" in df.columns:
+            price = float(df["close"].iloc[-1])
+            if price > 0:
+                latest_prices[symbol] = price
+    for symbol in set(current_positions) - set(latest_prices):
+        bars = get_intraday_bars([symbol], 2, config, data_client)
+        df = bars.get(symbol)
+        if df is not None and not df.empty and "close" in df.columns:
+            price = float(df["close"].iloc[-1])
+            if price > 0:
+                latest_prices[symbol] = price
+
+    target_weights, signals, metadata = build_defensive_momentum_targets(
+        config,
+        data_client,
+        current_positions,
+        latest_prices,
+        equity,
+    )
+
+    current_weights = {
+        symbol: (shares * latest_prices.get(symbol, 0.0)) / max(equity, 1.0)
+        for symbol, shares in current_positions.items()
+        if latest_prices.get(symbol, 0.0) > 0
+    }
+
+    score_delta = max(strategy_config.min_score_delta_to_replace, 0.0)
+    scores_data = metadata.get("scores", {})
+    all_scored = [
+        (s, float(scores_data[s].get("score", 0.0)))
+        for s in strategy_config.symbols
+        if s in scores_data
+    ]
+    without_bonus_top = set(
+        s for s, _ in sorted(all_scored, key=lambda x: -x[1])[:max(strategy_config.max_positions, 0)]
+    )
+    current_held = {s for s, w in current_weights.items() if w > 0}
+    target_set = {s for s, w in target_weights.items() if w > 0}
+
+    planned_orders = plan_position_orders(
+        latest_prices=latest_prices,
+        current_positions=current_positions,
+        target_weights=target_weights,
+        equity=equity,
+        cash_buffer=0.0,
+        min_trade_dollars=strategy_config.per_trade_value_min,
+        rebalance_threshold=strategy_config.rebalance_threshold,
+    )
+
+    positions_detail = []
+    for symbol in strategy_config.symbols:
+        cw = round(current_weights.get(symbol, 0.0), 4)
+        tw = round(target_weights.get(symbol, 0.0), 4)
+        in_current = symbol in current_held
+        in_target = symbol in target_set
+
+        if in_current and in_target:
+            if score_delta > 0 and symbol not in without_bonus_top:
+                status = "retained"
+                sticky = True
+                reason = "Sticky"
+            else:
+                status = "retained"
+                sticky = False
+                reason = "Retained"
+        elif in_current and not in_target:
+            status = "dropped"
+            sticky = False
+            reason = "Dropped"
+        elif not in_current and in_target:
+            status = "new"
+            sticky = False
+            reason = "New"
+        else:
+            status = "none"
+            sticky = False
+            reason = "None"
+
+        positions_detail.append({
+            "symbol": symbol,
+            "current_weight": cw,
+            "target_weight": tw,
+            "status": status,
+            "sticky": sticky,
+            "reason": reason,
+        })
+
+    return {
+        "strategy": "fast_momentum",
+        "updated_at": pd.Timestamp.now(tz="UTC").isoformat(),
+        "equity": equity,
+        "current_weights": {s: round(w, 4) for s, w in sorted(current_weights.items()) if w > 0},
+        "target_weights": {s: round(w, 4) for s, w in sorted(target_weights.items()) if w != 0},
+        "positions": positions_detail,
+        "planned_orders": [
+            {
+                "symbol": o["symbol"],
+                "action": o["action"],
+                "quantity": o["quantity"],
+                "current_shares": o["current_shares"],
+                "target_shares": o["target_shares"],
+                "trade_dollars": round(float(o["trade_dollars"]), 2),
+                "latest_price": float(o["latest_price"]),
+            }
+            for o in planned_orders
+        ],
+        "stickiness": {
+            "delta": score_delta,
+            "enabled": score_delta > 0,
+        },
+        "summary": [
+            {"label": "Allocation", "value": metadata.get("allocation_mode", "N/A")},
+            {"label": "Exposure", "value": f"{sum(float(w) for w in target_weights.values()) * 100:.0f}%"},
+            {"label": "Positions", "value": str(len(current_positions))},
+            {"label": "Changes", "value": str(len(planned_orders))},
+        ],
     }
 
 
@@ -701,7 +823,7 @@ def _invest_spy_signals_payload() -> dict[str, Any]:
     intraday_bars = get_intraday_bars(symbols, strategy_config.required_intraday_bars, config, data_client)
     daily_bars = get_defensive_daily_bars(symbols, strategy_config.macro_trend_lookback_days, config, data_client)
     sentiment_records = fetch_latest_news_sentiment(symbols, config)
-    sentiment, market_sentiment, sentiment_meta, providers = _defensive_momentum_sentiment_from_records(
+    sentiment, market_sentiment, _, providers = _defensive_momentum_sentiment_from_records(
         symbols,
         sentiment_records,
         strategy_config.sentiment_lookback_minutes,
@@ -716,36 +838,22 @@ def _invest_spy_signals_payload() -> dict[str, Any]:
     leaders = []
     for symbol, row in scores.items():
         weight = float(weights.get(symbol, 0.0))
-        meta = sentiment_meta.get(symbol, {})
         components = row.get("components", {}) if isinstance(row.get("components"), dict) else {}
         leaders.append(
             {
                 "symbol": symbol,
                 "signal": "LONG" if weight > 0 else "FLAT",
-                "side": "LONG" if weight > 0 else "FLAT",
                 "close": _json_number(row.get("close")),
                 "score": _json_number(row.get("score")),
-                "price_score": _json_number(row.get("macro_return")),
-                "social_score": _json_number(row.get("sentiment_score")),
-                "sentiment_score": _json_number(row.get("sentiment_score")),
-                "sentiment_component": _json_number(components.get("sentiment")),
                 "score_components": {key: _json_number(value) for key, value in components.items()},
-                "sentiment_records": int(meta.get("sentiment_records", 0)),
-                "sentiment_providers": meta.get("sentiment_providers", []),
-                "market_sentiment": _json_number(market_sentiment),
                 "spy_state": state,
-                "ret_N": _json_number(row.get("meso_return")),
-                "ret_short": _json_number(row.get("micro_return")),
-                "macro_return": _json_number(row.get("macro_return")),
-                "meso_return": _json_number(row.get("meso_return")),
-                "micro_return": _json_number(row.get("micro_return")),
                 "realized_vol": _json_number(row.get("realized_volatility")),
                 "trend_ok": int(bool(row.get("macro_trend_ok"))),
                 "target_weight": _json_number(weight),
                 "reason": _invest_spy_reason(symbol, weight, state, strategy_config),
             }
         )
-    leaders.sort(key=lambda item: (item["side"] != "LONG", -float(item.get("target_weight") or 0.0), -float(item.get("score") or 0.0)))
+    leaders.sort(key=lambda item: (item["signal"] != "LONG", -float(item.get("target_weight") or 0.0), -float(item.get("score") or 0.0)))
     return {
         "strategy": "invest_spy",
         "wired": True,
