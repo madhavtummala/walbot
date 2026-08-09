@@ -9,13 +9,15 @@ from math import floor
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from ..brokerages.alpaca_client import create_data_client, create_trading_client, get_latest_price, is_market_open, submit_market_order
+from ..brokerages.alpaca_client import create_data_client, get_latest_price
 from src.core.config import get_config
+from src.core.cron import cron_matches
+from src.core.orders import submit_planned_orders
+from src.core import pipeline
 from ..api.controls import load_controls
 from ..algorithms.dca import allocation_preview, load_dca_plan
 from ..execution.live_runner import run_once
 from ..common.logging_utils import log_position_changes
-from ..notifications.service import request_trade_approval
 
 logger = logging.getLogger(__name__)
 MARKET_TZ = ZoneInfo("America/Chicago")
@@ -171,8 +173,8 @@ def _run_dca(account_id: str | None) -> None:
         log_position_changes([])
         return
 
-    trading_client = create_trading_client(config)
-    if not is_market_open(trading_client):
+    brokerage = pipeline.resolve_brokerage(config)
+    if not brokerage.is_market_open():
         logger.warning("Market is closed according to Alpaca clock. Exiting DCA runtime without sending orders.")
         return
 
@@ -200,82 +202,15 @@ def _run_dca(account_id: str | None) -> None:
         log_position_changes([])
         return
 
-    if config.require_trade_approval:
-        approval_id = f"dca-{datetime.now(timezone.utc).strftime('%H%M%S')}"
-        approved = request_trade_approval(
-            planned_orders,
-            approval_id=approval_id,
-            timeout_seconds=config.trade_approval_timeout_seconds,
-            poll_seconds=config.trade_approval_poll_seconds,
-        )
-        if not approved:
-            logger.warning("DCA approval %s was denied or timed out; skipping %s planned order(s)", approval_id, len(planned_orders))
-            log_position_changes([
-                {**order, "action": "skip", "quantity": 0, "approval_id": approval_id, "approval_status": "not_approved"}
-                for order in planned_orders
-            ])
-            return
-
-    order_results: list[dict[str, Any]] = []
-    for planned_order in planned_orders:
-        symbol = str(planned_order["symbol"])
-        side = str(planned_order["action"])
-        quantity = int(planned_order["quantity"])
-        logger.info("Submitting DCA %s order for %s qty=%s", side, symbol, quantity)
-        order = submit_market_order(trading_client, symbol, side, quantity)
-        order_results.append({**planned_order, "order_id": getattr(order, "id", "unknown")})
-    log_position_changes(order_results)
-
-
-def _cron_field_matches(field: str, value: int, *, min_value: int, max_value: int) -> bool:
-    field = str(field or "*").strip()
-    if field == "*":
-        return True
-    for part in field.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        step = 1
-        if "/" in part:
-            part, raw_step = part.split("/", 1)
-            try:
-                step = max(int(raw_step), 1)
-            except ValueError:
-                return False
-        if part == "*":
-            start, end = min_value, max_value
-        elif "-" in part:
-            raw_start, raw_end = part.split("-", 1)
-            try:
-                start, end = int(raw_start), int(raw_end)
-            except ValueError:
-                return False
-        else:
-            try:
-                start = end = int(part)
-            except ValueError:
-                return False
-        if start <= value <= end and (value - start) % step == 0:
-            return True
-    return False
-
-
-def _cron_matches(pattern: str, now: datetime) -> bool:
-    fields = str(pattern or "").split()
-    if len(fields) != 5:
-        return False
-    minute, hour, day_of_month, month, day_of_week = fields
-    cron_dow = 0 if now.weekday() == 6 else now.weekday() + 1
-    return (
-        _cron_field_matches(minute, now.minute, min_value=0, max_value=59)
-        and _cron_field_matches(hour, now.hour, min_value=0, max_value=23)
-        and _cron_field_matches(day_of_month, now.day, min_value=1, max_value=31)
-        and _cron_field_matches(month, now.month, min_value=1, max_value=12)
-        and (
-            _cron_field_matches(day_of_week, cron_dow, min_value=0, max_value=7)
-            or (cron_dow == 0 and _cron_field_matches(day_of_week, 7, min_value=0, max_value=7))
-        )
+    order_results = submit_planned_orders(
+        brokerage,
+        planned_orders,
+        require_approval=config.require_trade_approval,
+        approval_id=f"dca-{datetime.now(timezone.utc).strftime('%H%M%S')}",
+        approval_timeout_seconds=config.trade_approval_timeout_seconds,
+        approval_poll_seconds=config.trade_approval_poll_seconds,
     )
+    log_position_changes(order_results)
 
 
 def _dca_run_key() -> str | None:
@@ -283,7 +218,7 @@ def _dca_run_key() -> str | None:
 
     plan = load_dca_plan(universe_payload()["rows"])
     now = datetime.now(MARKET_TZ).replace(second=0, microsecond=0)
-    if not _cron_matches(str(plan.get("schedule_pattern") or ""), now):
+    if not cron_matches(str(plan.get("schedule_pattern") or ""), now):
         return None
     return f"dca:{now.isoformat(timespec='minutes')}"
 

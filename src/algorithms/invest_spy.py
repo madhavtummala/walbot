@@ -13,7 +13,6 @@ from .fast_momentum import (
     get_daily_bars,
     get_intraday_bars,
     get_sentiment_snapshot,
-    weights_from_positions,
 )
 from ..core.interfaces import AlgorithmContext, AlgorithmDecision, AlgorithmRequirements
 
@@ -298,14 +297,10 @@ def decide_invest_spy_weights(
     return weights
 
 
-def build_invest_spy_targets(
-    runtime_config: Any,
-    data_client: Any,
-    current_positions: dict[str, int],
-    latest_prices: dict[str, float],
-    equity: float,
-) -> tuple[dict[str, float], dict[str, dict[str, float | int]], dict[str, Any]]:
-    strategy_config = InvestSpyConfig.from_runtime_config(runtime_config)
+def score_universe(
+    runtime_config: Any, data_client: Any, strategy_config: InvestSpyConfig
+) -> tuple[dict[str, dict[str, Any]], str, float]:
+    """Load data and score the universe. Pure market data -- no account state."""
     symbols = strategy_config.symbols
     intraday_bars = get_intraday_bars(symbols, strategy_config.required_intraday_bars, runtime_config, data_client)
     daily_bars = get_daily_bars(symbols, strategy_config.macro_trend_lookback_days, runtime_config, data_client)
@@ -315,27 +310,38 @@ def build_invest_spy_targets(
         for symbol in symbols
     }
     scores = compute_composite_scores(features, sentiment, strategy_config)
-    state = classify_spy_state(scores.get(strategy_config.spy_symbol, {}), sentiment.get(strategy_config.spy_symbol, market_sentiment), strategy_config)
-    raw_weights = decide_invest_spy_weights(scores, state, strategy_config)
-    current_weights = weights_from_positions(current_positions, latest_prices, equity)
-    target_weights = apply_risk_guards(raw_weights, scores, current_weights, equity, strategy_config)
-    signals = {
+    state = classify_spy_state(
+        scores.get(strategy_config.spy_symbol, {}),
+        sentiment.get(strategy_config.spy_symbol, market_sentiment),
+        strategy_config,
+    )
+    return scores, state, market_sentiment
+
+
+def signals_from_scores(
+    scores_by_symbol: dict[str, dict[str, Any]], target_weights: dict[str, float]
+) -> dict[str, dict[str, Any]]:
+    """Per-symbol signal rows the dashboard and step 2 both read."""
+    return {
         symbol: {
             "signal": 1 if float(target_weights.get(symbol, 0.0)) > 0 else 0,
             "score": float(row.get("score", 0.0)),
             "price_score": float(row.get("macro_return", 0.0)),
             "social_score": float(row.get("sentiment_score", 0.0)),
+            "realized_volatility": float(row.get("realized_volatility", 0.0)),
+            "trend_ok": 1 if row.get("macro_trend_ok") else 0,
+            "reason": (
+                "Selected"
+                if float(target_weights.get(symbol, 0.0)) > 0
+                else "Macro negative"
+                if not row.get("macro_trend_ok")
+                else "No rank slot"
+            ),
             "volume_score": 0.0,
             "ret_N": float(row.get("meso_return", 0.0)),
             "sma_long": 0.0,
         }
-        for symbol, row in scores.items()
-    }
-    return target_weights, signals, {
-        "spy_state": state,
-        "market_sentiment": market_sentiment,
-        "scores": scores,
-        "raw_target_weights": raw_weights,
+        for symbol, row in scores_by_symbol.items()
     }
 
 
@@ -350,20 +356,42 @@ class InvestSpyAlgorithm(BaseAlgorithm):
             paper_only=True,
         )
 
-    def decide(self, context: AlgorithmContext) -> AlgorithmDecision:
+    def sizing(self, config: Any) -> dict[str, float]:
+        """No cash buffer: gross exposure is already capped inside the weights."""
+        strategy_config = InvestSpyConfig.from_runtime_config(config)
+        return {
+            "cash_buffer": 0.0,
+            "min_trade_dollars": strategy_config.per_trade_value_min,
+            "rebalance_threshold": strategy_config.rebalance_threshold,
+        }
+
+    def analyze(self, context: AlgorithmContext) -> AlgorithmDecision:
+        """Score the universe and allocate, with no knowledge of what is held."""
         strategy_config = InvestSpyConfig.from_runtime_config(context.config)
-        target_weights, signals, metadata = build_invest_spy_targets(
-            context.config,
-            context.extra.get("data_client"),
-            context.positions,
-            context.latest_prices,
-            context.equity,
+        scores, state, market_sentiment = score_universe(
+            context.config, context.extra.get("data_client"), strategy_config
         )
+        raw_weights = decide_invest_spy_weights(scores, state, strategy_config)
         return AlgorithmDecision(
-            target_weights=target_weights,
-            signals=signals,
-            metadata=metadata,
-            cash_buffer=0.0,
-            min_trade_dollars=strategy_config.per_trade_value_min,
-            rebalance_threshold=strategy_config.rebalance_threshold,
+            target_weights=raw_weights,
+            signals=signals_from_scores(scores, raw_weights),
+            metadata={
+                "allocation_mode": state,
+                "market_sentiment": market_sentiment,
+                "spy_state": state,
+            },
         )
+
+    def refine(
+        self,
+        target_weights: dict[str, float],
+        signals: dict[str, dict[str, Any]],
+        snapshot: Any,
+        latest_prices: dict[str, float],
+        config: Any,
+    ) -> dict[str, float]:
+        """Apply the position-aware risk guards to a reviewed set of weights."""
+        strategy_config = InvestSpyConfig.from_runtime_config(config)
+        current_weights = snapshot.weights(latest_prices)
+        scores = {symbol: dict(row) for symbol, row in signals.items()}
+        return apply_risk_guards(target_weights, scores, current_weights, snapshot.equity, strategy_config)

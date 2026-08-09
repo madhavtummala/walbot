@@ -180,6 +180,19 @@ def _access_token(config: Config, category: str, provider: str) -> str:
     return os.getenv(env_name, configured_token).strip() if env_name else configured_token
 
 
+def _schwab_token(config: Config, category: str) -> str:
+    """Schwab bearer token, refreshed via OAuth when app credentials are configured.
+
+    Schwab access tokens last ~30 minutes, so a statically configured token goes stale almost
+    immediately; it is kept only as a fallback for manual testing.
+    """
+    if getattr(config, "schwab_app_key", "") and getattr(config, "schwab_refresh_token", ""):
+        from src.brokerages.schwab_client import SchwabSession
+
+        return SchwabSession(config).access_token()
+    return _access_token(config, category, "schwab")
+
+
 def _finite(value: Any) -> float | None:
     try:
         parsed = float(value)
@@ -198,6 +211,10 @@ def _intraday_cache_key(symbol: str, bar_minutes: int, lookback_bars: int) -> st
 
 def _timeframe_from_minutes(bar_minutes: int) -> str:
     return f"{int(bar_minutes)}m"
+
+
+def _empty_bars() -> pd.DataFrame:
+    return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
 
 
 def _fresh_cached_bars(
@@ -275,7 +292,7 @@ def _read_duckdb_bars(
             end,
             exc,
         )
-    return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+    return _empty_bars()
 
 
 def _write_duckdb_bars(
@@ -376,7 +393,7 @@ def _fetch_finnhub_quotes(symbols: list[str], config: Config) -> dict[str, dict[
 
 def _finnhub_candles_to_bars(payload: Any) -> pd.DataFrame:
     if not isinstance(payload, dict) or payload.get("s") != "ok":
-        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+        return _empty_bars()
     timestamps = payload.get("t") or []
     opens = payload.get("o") or []
     highs = payload.get("h") or []
@@ -396,7 +413,7 @@ def _finnhub_candles_to_bars(payload: Any) -> pd.DataFrame:
             }
         )
     if not rows:
-        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+        return _empty_bars()
     return pd.DataFrame.from_records(rows).sort_values("timestamp").reset_index(drop=True)
 
 
@@ -418,7 +435,7 @@ def _schwab_candles_to_bars(payload: Any) -> pd.DataFrame:
             }
         )
     if not rows:
-        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+        return _empty_bars()
     return pd.DataFrame.from_records(rows).sort_values("timestamp").reset_index(drop=True)
 
 
@@ -492,7 +509,7 @@ def fetch_yfinance_intraday_bars(
             ).tail(lookback_bars).reset_index(drop=True)
         except Exception as exc:
             logger.warning("Skipping yfinance intraday bars for %s after provider error: %s", symbol, exc)
-            bars = pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+            bars = _empty_bars()
         if not bars.empty:
             save_cached_payload(
                 INTRADAY_MARKET_CATEGORY,
@@ -504,6 +521,36 @@ def fetch_yfinance_intraday_bars(
             _write_duckdb_bars(INTRADAY_MARKET_CATEGORY, "yfinance", symbol, timeframe, bars, ttl_seconds=ttl_seconds)
         bars_by_symbol[symbol] = bars
     return bars_by_symbol
+
+
+def _run_provider_fallback(
+    symbols: list[str],
+    providers: list[str],
+    fetchers: dict[str, Any],
+    config: Config,
+    *,
+    category: str,
+    label: str,
+) -> dict[str, pd.DataFrame]:
+    """Try each provider in order, returning the first non-empty result (empty frames if all fail)."""
+    for index, provider_name in enumerate(providers):
+        if provider_name not in fetchers:
+            logger.warning("%s market data provider %s is not supported; skipping", label, provider_name)
+            continue
+        if _provider_configured(config, category, provider_name):
+            if _provider_config(config, category, provider_name).get("enabled") is False:
+                continue
+        next_provider = next((item for item in providers[index + 1 :] if item in fetchers), "")
+        try:
+            bars = fetchers[provider_name]()
+        except Exception as exc:
+            log = logger.info if next_provider else logger.warning
+            log("%s market data provider %s failed%s: %s", label, provider_name, _fallback_suffix(next_provider), exc)
+            continue
+        if any(not frame.empty for frame in bars.values()):
+            return bars
+        logger.info("%s market data provider %s returned no bars%s", label, provider_name, _fallback_suffix(next_provider))
+    return {symbol.upper(): _empty_bars() for symbol in symbols}
 
 
 def fetch_intraday_market_bars(
@@ -563,32 +610,9 @@ def fetch_intraday_market_bars(
             **range_kwargs,
         ),
     }
-    empty = {symbol.upper(): pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"]) for symbol in symbols}
-    for index, provider_name in enumerate(providers):
-        if provider_name not in fetchers:
-            logger.warning("Intraday market data provider %s is not supported; skipping", provider_name)
-            continue
-        if _provider_configured(config, INTRADAY_MARKET_CATEGORY, provider_name):
-            provider_config = _provider_config(config, INTRADAY_MARKET_CATEGORY, provider_name)
-            if provider_config.get("enabled") is False:
-                continue
-        try:
-            bars = fetchers[provider_name]()
-        except ProviderUnavailable as exc:
-            next_provider = next((item for item in providers[index + 1 :] if item in fetchers), "")
-            log = logger.info if next_provider else logger.warning
-            log("Intraday market data provider %s failed%s: %s", provider_name, _fallback_suffix(next_provider), exc)
-            continue
-        except Exception as exc:
-            next_provider = next((item for item in providers[index + 1 :] if item in fetchers), "")
-            log = logger.info if next_provider else logger.warning
-            log("Intraday market data provider %s failed%s: %s", provider_name, _fallback_suffix(next_provider), exc)
-            continue
-        if any(not frame.empty for frame in bars.values()):
-            return bars
-        next_provider = next((item for item in providers[index + 1 :] if item in fetchers), "")
-        logger.info("Intraday market data provider %s returned no bars%s", provider_name, _fallback_suffix(next_provider))
-    return empty
+    return _run_provider_fallback(
+        symbols, providers, fetchers, config, category=INTRADAY_MARKET_CATEGORY, label="Intraday"
+    )
 
 
 def fetch_alpaca_intraday_bars(
@@ -610,7 +634,7 @@ def fetch_alpaca_intraday_bars(
     missing: list[str] = []
     for symbol in [item.upper() for item in symbols]:
         cached = (
-            pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+            _empty_bars()
             if force_refresh
             else _fresh_cached_bars(
                 _read_duckdb_bars(INTRADAY_MARKET_CATEGORY, "alpaca", symbol, timeframe, lookback_bars=lookback_bars),
@@ -654,7 +678,7 @@ def fetch_schwab_intraday_bars(
     end_date: datetime | None = None,
     force_refresh: bool = False,
 ) -> dict[str, pd.DataFrame]:
-    token = _access_token(config, INTRADAY_MARKET_CATEGORY, "schwab")
+    token = _schwab_token(config, INTRADAY_MARKET_CATEGORY)
     if not token:
         raise ProviderUnavailable("Schwab access token is not configured")
     if lookback_bars <= 0:
@@ -670,7 +694,7 @@ def fetch_schwab_intraday_bars(
     bars_by_symbol: dict[str, pd.DataFrame] = {}
     for symbol in [item.upper() for item in symbols]:
         cached = (
-            pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+            _empty_bars()
             if force_refresh
             else _fresh_cached_bars(
                 _read_duckdb_bars(INTRADAY_MARKET_CATEGORY, "schwab", symbol, timeframe, lookback_bars=lookback_bars),
@@ -725,7 +749,7 @@ def fetch_yfinance_eod_bars(
     period = f"{max(int(lookback_bars * 2), 30)}d"
     for symbol in [item.upper() for item in symbols]:
         cached = (
-            pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+            _empty_bars()
             if force_refresh
             else _fresh_cached_bars(
                 _read_duckdb_bars(EOD_MARKET_CATEGORY, "yfinance", symbol, "1d", lookback_bars=lookback_bars),
@@ -749,7 +773,7 @@ def fetch_yfinance_eod_bars(
             ).tail(lookback_bars).reset_index(drop=True)
         except Exception as exc:
             logger.warning("Skipping yfinance EOD bars for %s after provider error: %s", symbol, exc)
-            bars = pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+            bars = _empty_bars()
         _write_duckdb_bars(EOD_MARKET_CATEGORY, "yfinance", symbol, "1d", bars, ttl_seconds=ttl_seconds)
         bars_by_symbol[symbol] = bars
     return bars_by_symbol
@@ -772,7 +796,7 @@ def fetch_alpaca_eod_bars(
     missing: list[str] = []
     for symbol in [item.upper() for item in symbols]:
         cached = (
-            pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+            _empty_bars()
             if force_refresh
             else _fresh_cached_bars(
                 _read_duckdb_bars(EOD_MARKET_CATEGORY, "alpaca", symbol, "1d", lookback_bars=lookback_bars),
@@ -823,7 +847,7 @@ def fetch_finnhub_eod_bars(
     bars_by_symbol: dict[str, pd.DataFrame] = {}
     for symbol in [item.upper() for item in symbols]:
         cached = (
-            pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+            _empty_bars()
             if force_refresh
             else _fresh_cached_bars(
                 _read_duckdb_bars(EOD_MARKET_CATEGORY, "finnhub", symbol, "1d", lookback_bars=lookback_bars),
@@ -853,7 +877,7 @@ def fetch_finnhub_eod_bars(
             ).tail(lookback_bars).reset_index(drop=True)
         except ProviderUnavailable as exc:
             logger.warning("Skipping Finnhub EOD bars for %s after provider error: %s", symbol, exc)
-            bars = pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+            bars = _empty_bars()
         _write_duckdb_bars(EOD_MARKET_CATEGORY, "finnhub", symbol, "1d", bars, ttl_seconds=ttl_seconds)
         bars_by_symbol[symbol] = bars
     return bars_by_symbol
@@ -868,7 +892,7 @@ def fetch_schwab_eod_bars(
     end_date: datetime | None = None,
     force_refresh: bool = False,
 ) -> dict[str, pd.DataFrame]:
-    token = _access_token(config, EOD_MARKET_CATEGORY, "schwab")
+    token = _schwab_token(config, EOD_MARKET_CATEGORY)
     if not token:
         raise ProviderUnavailable("Schwab access token is not configured")
     ttl_seconds = int(getattr(config, "eod_market_data_cache_ttl_seconds", EOD_CACHE_TTL_SECONDS))
@@ -877,7 +901,7 @@ def fetch_schwab_eod_bars(
     bars_by_symbol: dict[str, pd.DataFrame] = {}
     for symbol in [item.upper() for item in symbols]:
         cached = (
-            pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+            _empty_bars()
             if force_refresh
             else _fresh_cached_bars(
                 _read_duckdb_bars(EOD_MARKET_CATEGORY, "schwab", symbol, "1d", lookback_bars=lookback_bars),
@@ -947,32 +971,9 @@ def fetch_eod_market_bars(
         "finnhub": lambda: fetch_finnhub_eod_bars(symbols, config, lookback_bars=lookback_bars, force_refresh=force_refresh, **range_kwargs),
         "schwab": lambda: fetch_schwab_eod_bars(symbols, config, lookback_bars=lookback_bars, force_refresh=force_refresh, **range_kwargs),
     }
-    empty = {symbol.upper(): pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"]) for symbol in symbols}
-    for index, provider_name in enumerate(providers):
-        if provider_name not in fetchers:
-            logger.warning("EOD market data provider %s is not supported; skipping", provider_name)
-            continue
-        if _provider_configured(config, EOD_MARKET_CATEGORY, provider_name):
-            provider_config = _provider_config(config, EOD_MARKET_CATEGORY, provider_name)
-            if provider_config.get("enabled") is False:
-                continue
-        try:
-            bars = fetchers[provider_name]()
-        except ProviderUnavailable as exc:
-            next_provider = next((item for item in providers[index + 1 :] if item in fetchers), "")
-            log = logger.info if next_provider else logger.warning
-            log("EOD market data provider %s failed%s: %s", provider_name, _fallback_suffix(next_provider), exc)
-            continue
-        except Exception as exc:
-            next_provider = next((item for item in providers[index + 1 :] if item in fetchers), "")
-            log = logger.info if next_provider else logger.warning
-            log("EOD market data provider %s failed%s: %s", provider_name, _fallback_suffix(next_provider), exc)
-            continue
-        if any(not frame.empty for frame in bars.values()):
-            return bars
-        next_provider = next((item for item in providers[index + 1 :] if item in fetchers), "")
-        logger.info("EOD market data provider %s returned no bars%s", provider_name, _fallback_suffix(next_provider))
-    return empty
+    return _run_provider_fallback(
+        symbols, providers, fetchers, config, category=EOD_MARKET_CATEGORY, label="EOD"
+    )
 
 
 def _bars_to_records(df: pd.DataFrame) -> list[dict[str, Any]]:
@@ -1085,7 +1086,7 @@ def fetch_finnhub_intraday_bars(
             ).tail(lookback_bars).reset_index(drop=True)
         except ProviderUnavailable as exc:
             logger.warning("Skipping Finnhub intraday bars for %s after provider error: %s", symbol, exc)
-            bars = pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+            bars = _empty_bars()
         if not bars.empty:
             save_cached_payload(
                 INTRADAY_MARKET_CATEGORY,
@@ -1131,8 +1132,46 @@ def _fetch_alpha_vantage_quotes(symbols: list[str], config: Config) -> dict[str,
     return quotes
 
 
+def _fetch_schwab_quotes(symbols: list[str], config: Config) -> dict[str, dict[str, Any]]:
+    """Latest Schwab quotes, preferring last trade and falling back to the bid/ask mid."""
+    token = _schwab_token(config, MARKET_CATEGORY)
+    if not token:
+        raise ProviderUnavailable("Schwab access token is not configured")
+
+    wanted = [symbol.upper() for symbol in symbols if symbol]
+    payload = _request_json(
+        "schwab",
+        MARKET_CATEGORY,
+        "https://api.schwabapi.com/marketdata/v1/quotes",
+        {"symbols": ",".join(wanted)},
+        headers=_bearer_auth_header(token),
+    ) or {}
+
+    quotes: dict[str, dict[str, Any]] = {}
+    for symbol in wanted:
+        row = payload.get(symbol) or {}
+        raw_quote = row.get("quote", row) or {}
+        price = _finite(raw_quote.get("lastPrice"))
+        if not price or price <= 0:
+            bid = _finite(raw_quote.get("bidPrice")) or 0.0
+            ask = _finite(raw_quote.get("askPrice")) or 0.0
+            price = (bid + ask) / 2 if bid > 0 and ask > 0 else _finite(raw_quote.get("closePrice"))
+        timestamp = raw_quote.get("quoteTime") or raw_quote.get("tradeTime")
+        quote = _normalize_quote(
+            "schwab",
+            symbol,
+            price,
+            row,
+            pd.to_datetime(timestamp, unit="ms", utc=True, errors="coerce") if timestamp else None,
+        )
+        if quote:
+            quotes[symbol] = quote
+    return quotes
+
+
 MARKET_FETCHERS = {
     "alpaca": _fetch_alpaca_quotes,
+    "schwab": _fetch_schwab_quotes,
     "finnhub": _fetch_finnhub_quotes,
     "alpha_vantage": _fetch_alpha_vantage_quotes,
 }

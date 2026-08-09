@@ -11,7 +11,7 @@ class BaseBrokerage(Brokerage):
     def get_account_state(self) -> Dict[str, Any]:
         raise NotImplementedError
 
-    def get_positions(self) -> Dict[str, int]:
+    def get_positions(self) -> Dict[str, float]:
         raise NotImplementedError
 
     def submit_order(self, request: OrderRequest) -> Dict[str, Any]:

@@ -4,9 +4,11 @@ from typing import Any
 import pandas as pd
 
 from src.execution import live_runner as live_runner
+from src.core import pipeline as pipeline
+from src.core import market_context as market_context
 from src.core.config import Config
 from src.algorithms.registry import get_algorithm_class
-from src.core.interfaces import AlgorithmDecision, OrderRequest
+from src.core.interfaces import AlgorithmDecision, AlgorithmResult, OrderRequest
 
 
 class FakeBrokerage:
@@ -45,8 +47,8 @@ def _bars() -> pd.DataFrame:
 
 
 def test_live_runner_sizing_equity_cap_is_optional() -> None:
-    assert live_runner._sizing_equity(Config(algorithm_equity_cap=10_000.0), 50_000.0) == 10_000.0
-    assert live_runner._sizing_equity(Config(algorithm_equity_cap=0.0), 50_000.0) == 50_000.0
+    assert pipeline.sizing_equity(Config(algorithm_equity_cap=10_000.0), 50_000.0) == 10_000.0
+    assert pipeline.sizing_equity(Config(algorithm_equity_cap=0.0), 50_000.0) == 50_000.0
 
 
 def test_algorithm_registry_returns_plugin_class() -> None:
@@ -80,37 +82,32 @@ def test_live_runner_uses_selected_template_strategy(monkeypatch) -> None:
     )
 
     fake_registry = {"alpaca": lambda config: FakeBrokerage(is_open=True)}
-    monkeypatch.setattr(live_runner, "BROKERAGE_REGISTRY", fake_registry)
-    monkeypatch.setattr(live_runner, "create_data_client", lambda config: object())
+    monkeypatch.setattr(pipeline, "BROKERAGE_REGISTRY", fake_registry)
+    monkeypatch.setattr(market_context, "create_data_client", lambda config: object())
 
-    fake_decision = AlgorithmDecision(
-        target_weights={"AAA": 0.5},
-        signals={"AAA": {"signal": 1, "score": 1.0}},
-        metadata={},
-    )
+    def fake_run_algorithm(strategy, config, **kwargs):
+        captured["strategy"] = strategy
+        return AlgorithmResult(
+            strategy=strategy,
+            target_weights={"AAA": 0.5},
+            signals={"AAA": {"signal": 1, "score": 1.0}},
+            latest_prices={"AAA": 100.0},
+            metadata={"requirements": type("R", (), {"paper_only": False})()},
+        )
 
-    def fake_pipeline(strategy, config, brokerage, data_client, current_positions, equity):
-        captured.update({"strategy": strategy, "equity": equity})
-        return {
-            "decision": fake_decision,
-            "latest_prices": {"AAA": 100.0},
-            "current_positions": current_positions,
-            "planned_orders": [],
-            "equity": equity,
-            "requirements": type("R", (), {"paper_only": False})(),
-        }
+    def fake_place_orders(result, config, brokerage, **kwargs):
+        captured["orders_weights"] = result.target_weights
+        return {"final_weights": result.target_weights, "equity": 1_000.0, "order_results": []}
 
-    monkeypatch.setattr(live_runner, "_run_pipeline", fake_pipeline)
+    monkeypatch.setattr(pipeline, "run_algorithm", fake_run_algorithm)
+    monkeypatch.setattr(pipeline, "place_orders", fake_place_orders)
     monkeypatch.setattr(live_runner, "log_signals", lambda signals, prices: captured.update({"signals": signals}))
     monkeypatch.setattr(live_runner, "log_portfolio", lambda weights, equity: captured.update({"weights": weights}))
     monkeypatch.setattr(live_runner, "log_orders", lambda orders: None)
-    monkeypatch.setattr(
-        live_runner, "sync_positions_to_targets",
-        lambda brokerage, _prices, _positions, weights, *a, **kw: captured.update({"orders_weights": weights}) or [],
-    )
 
     live_runner.main()
 
+    assert captured["strategy"] == "risk_parity"
     assert captured["signals"]["AAA"]["signal"] == 1
     assert captured["weights"]["AAA"] == 0.5
     assert captured["orders_weights"]["AAA"] == 0.5
@@ -125,8 +122,8 @@ def test_live_runner_exits_when_market_clock_is_closed(monkeypatch) -> None:
         live_runner, "load_controls", lambda: {"algorithm_enabled": True, "active_strategy": "momentum_social"}
     )
     fake_registry = {"alpaca": lambda config: FakeBrokerage(is_open=False)}
-    monkeypatch.setattr(live_runner, "BROKERAGE_REGISTRY", fake_registry)
-    monkeypatch.setattr(live_runner, "create_data_client", lambda config: called.__setitem__("data_client", True))
+    monkeypatch.setattr(pipeline, "BROKERAGE_REGISTRY", fake_registry)
+    monkeypatch.setattr(market_context, "create_data_client", lambda config: called.__setitem__("data_client", True))
 
     live_runner.run_once()
 

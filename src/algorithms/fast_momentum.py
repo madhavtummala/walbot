@@ -270,9 +270,32 @@ def get_sentiment_snapshot(
         except Exception as exc:
             logger.warning("Sentiment provider %s unavailable; continuing with neutral fallback: %s", provider or "default", exc)
 
+    symbol_sentiment, market_sentiment, _metadata, _providers = sentiment_scores_from_records(
+        symbols, records, lookback_minutes
+    )
+    return symbol_sentiment, market_sentiment
+
+
+def sentiment_scores_from_records(
+    symbols: list[str],
+    records: list[dict[str, Any]],
+    lookback_minutes: int,
+) -> tuple[dict[str, float], float, dict[str, Any], list[str]]:
+    """Normalise raw provider sentiment records into per-symbol and market scores.
+
+    Pure: takes already-fetched records so callers control provider selection and fetching.
+    Returns ``(by_symbol, market_sentiment, metadata, providers_seen)``. Market sentiment
+    falls back to the universe average when SPY is not covered.
+    """
     cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=max(lookback_minutes, 1))
     by_symbol: dict[str, list[float]] = {symbol.upper(): [] for symbol in symbols}
-    for record in records:
+    providers_seen: list[str] = []
+    used = 0
+
+    for record in records or []:
+        provider = str(record.get("provider", "")).lower()
+        if provider and provider not in providers_seen:
+            providers_seen.append(provider)
         symbol = str(record.get("symbol", "")).upper()
         if symbol not in by_symbol:
             continue
@@ -284,6 +307,7 @@ def get_sentiment_snapshot(
         except (TypeError, ValueError):
             sentiment = 0.0
         by_symbol[symbol].append(max(-1.0, min(1.0, sentiment)))
+        used += 1
 
     symbol_sentiment = {
         symbol: (sum(values) / len(values) if values else 0.0)
@@ -293,7 +317,36 @@ def get_sentiment_snapshot(
     if market_sentiment is None:
         values = list(symbol_sentiment.values())
         market_sentiment = sum(values) / len(values) if values else 0.0
-    return symbol_sentiment, float(market_sentiment)
+
+    metadata = {
+        "records_seen": len(records or []),
+        "records_used": used,
+        "covered_symbols": sum(1 for values in by_symbol.values() if values),
+    }
+    return symbol_sentiment, float(market_sentiment), metadata, providers_seen
+
+
+def _defensive_momentum_reason(
+    row: dict[str, Any], weight: float, config: DefensiveMomentumConfig
+) -> str:
+    """Explain why a symbol was or was not selected, for the dashboard and the MCP agent."""
+    if weight > 0:
+        return "Top Rank"
+
+    symbol = str(row.get("symbol", "")).upper()
+    is_defensive = symbol in {item.upper() for item in config.defensive_universe}
+    if not is_defensive and not bool(row.get("macro_trend_ok", False)):
+        return "Macro negative"
+
+    score = float(row.get("score", 0.0) or 0.0)
+    min_score = config.min_defensive_score if is_defensive else config.min_risk_on_score
+    if score < min_score:
+        return "Score too low"
+
+    if not is_defensive and float(row.get("micro_return", 0.0) or 0.0) < config.min_risk_on_micro_return:
+        return "Micro too low"
+
+    return "No rank slot"
 
 
 def decide_target_weights(
@@ -485,18 +538,13 @@ def rows_from_scores(
 
 
 def allocation_mode(target_weights: dict[str, float]) -> str:
-    return "FLAT_RANK" if any(weight > 0 for weight in target_weights.values()) else "CASH"
+    return "Dynamic rank" if any(weight > 0 for weight in target_weights.values()) else "Cash"
 
 
-def build_defensive_momentum_targets(
-    runtime_config: Any,
-    data_client: Any,
-    current_positions: dict[str, int],
-    latest_prices: dict[str, float],
-    equity: float,
-) -> tuple[dict[str, float], dict[str, dict[str, Any]], dict[str, Any]]:
-    """Run the full 30-minute strategy decision loop and return weights plus signal logs."""
-    strategy_config = DefensiveMomentumConfig.from_runtime_config(runtime_config)
+def score_universe(
+    runtime_config: Any, data_client: Any, strategy_config: DefensiveMomentumConfig
+) -> tuple[dict[str, dict[str, Any]], float]:
+    """Load bars and sentiment, then score every symbol. Pure market data -- no account state."""
     symbols = strategy_config.symbols
     intraday_bars = get_intraday_bars(symbols, strategy_config.required_intraday_bars, runtime_config, data_client)
     daily_bars = get_daily_bars(symbols, strategy_config.required_daily_bars, runtime_config, data_client)
@@ -506,14 +554,65 @@ def build_defensive_momentum_targets(
         symbol: compute_price_features(symbol, intraday_bars.get(symbol, pd.DataFrame()), daily_bars.get(symbol, pd.DataFrame()), strategy_config)
         for symbol in symbols
     }
-    scores = compute_composite_scores(features, sentiment, strategy_config)
-    current_weights = weights_from_positions(current_positions, latest_prices, equity)
-    raw_weights = decide_target_weights(scores, strategy_config, current_weights)
-    target_weights = apply_risk_guards(raw_weights, scores, current_weights, equity, strategy_config)
-    mode = allocation_mode(target_weights)
+    return compute_composite_scores(features, sentiment, strategy_config), market_sentiment
 
-    rows = rows_from_scores(scores, target_weights, mode)
-    signals = {
+
+def apply_stickiness(
+    target_weights: dict[str, float],
+    scores_by_symbol: dict[str, dict[str, Any]],
+    current_weights: dict[str, float],
+    config: DefensiveMomentumConfig,
+) -> dict[str, float]:
+    """Retain a held symbol the proposal drops unless a challenger beats it by the score delta.
+
+    The churn guard from ``decide_target_weights``, restated against an already-chosen set so
+    it also protects incumbents when the proposal came from a reviewing agent rather than
+    from the ranking itself.
+    """
+    score_delta = max(config.min_score_delta_to_replace, 0.0)
+    incumbents = {symbol for symbol, weight in current_weights.items() if weight > 0.0}
+    proposed = {symbol: weight for symbol, weight in target_weights.items() if weight > 0.0}
+    dropped = incumbents - set(proposed)
+    if not score_delta or not dropped or len(proposed) < max(config.max_positions, 0):
+        return dict(target_weights)
+
+    def score_of(symbol: str) -> float:
+        return float(scores_by_symbol.get(symbol, {}).get("score", 0.0))
+
+    weakest = min(proposed, key=score_of)
+    kept = dict(target_weights)
+    for symbol in sorted(dropped, key=score_of, reverse=True):
+        if score_of(symbol) + score_delta <= score_of(weakest):
+            continue
+        logger.info(
+            "Stickiness retained %s: score=%.3f + delta=%.2f beats %s at %.3f",
+            symbol,
+            score_of(symbol),
+            score_delta,
+            weakest,
+            score_of(weakest),
+        )
+        kept[symbol] = current_weights[symbol]
+        kept[weakest] = 0.0
+        proposed.pop(weakest, None)
+        if not proposed:
+            break
+        weakest = min(proposed, key=score_of)
+    return kept
+
+
+def signals_from_scores(
+    scores_by_symbol: dict[str, dict[str, Any]],
+    target_weights: dict[str, float],
+    config: "DefensiveMomentumConfig",
+) -> dict[str, dict[str, Any]]:
+    """Flatten scores into the per-symbol signal rows the dashboard and step 2 both read.
+
+    ``refine`` reads ``score`` and ``realized_volatility`` back out of these rows, so this is
+    the contract that lets step 2 work without re-deriving anything from market data.
+    """
+    rows = rows_from_scores(scores_by_symbol, target_weights, allocation_mode(target_weights))
+    return {
         row["symbol"]: {
             "signal": int(row["signal"]),
             "score": float(row["score"]),
@@ -529,23 +628,19 @@ def build_defensive_momentum_targets(
             "meso_return": float(row["meso_return"]),
             "micro_return": float(row["micro_return"]),
             "nano_return": float(row["nano_return"]),
+            "realized_volatility": float(scores_by_symbol.get(row["symbol"], {}).get("realized_volatility", 0.0)),
+            # Consumed by the dashboard row subtitle (web/static/app.js) -- dropping it renders
+            # every symbol as "Inactive".
+            "trend_ok": 1 if scores_by_symbol.get(row["symbol"], {}).get("macro_trend_ok") else 0,
+            "reason": _defensive_momentum_reason(
+                scores_by_symbol.get(row["symbol"], {}),
+                float(target_weights.get(row["symbol"], 0.0)),
+                config,
+            ),
             "sma_long": 0.0,
         }
         for row in rows
     }
-    metadata = {
-        "allocation_mode": mode,
-        "market_sentiment": market_sentiment,
-        "scores": scores,
-        "raw_target_weights": raw_weights,
-    }
-    logger.info(
-        "Fast Momentum decision mode=%s market_sentiment=%s targets=%s",
-        mode,
-        market_sentiment,
-        target_weights,
-    )
-    return target_weights, signals, metadata
 
 
 class FastMomentumAlgorithm(BaseAlgorithm):
@@ -559,20 +654,49 @@ class FastMomentumAlgorithm(BaseAlgorithm):
             paper_only=True,
         )
 
-    def decide(self, context: AlgorithmContext) -> AlgorithmDecision:
+    def sizing(self, config: Any) -> dict[str, float]:
+        """No cash buffer: gross exposure is already capped inside the weights."""
+        strategy_config = DefensiveMomentumConfig.from_runtime_config(config)
+        return {
+            "cash_buffer": 0.0,
+            "min_trade_dollars": strategy_config.per_trade_value_min,
+            "rebalance_threshold": strategy_config.rebalance_threshold,
+        }
+
+    def analyze(self, context: AlgorithmContext) -> AlgorithmDecision:
+        """Score the universe and rank it with no knowledge of what is held.
+
+        Stickiness and the risk guards are deliberately absent -- both need current weights
+        and equity, so they run in ``refine``.
+        """
         strategy_config = DefensiveMomentumConfig.from_runtime_config(context.config)
-        target_weights, signals, metadata = build_defensive_momentum_targets(
-            context.config,
-            context.extra.get("data_client"),
-            context.positions,
-            context.latest_prices,
-            context.equity,
+        scores, market_sentiment = score_universe(
+            context.config, context.extra.get("data_client"), strategy_config
         )
+        raw_weights = decide_target_weights(scores, strategy_config)
         return AlgorithmDecision(
-            target_weights=target_weights,
-            signals=signals,
-            metadata=metadata,
-            cash_buffer=0.0,
-            min_trade_dollars=strategy_config.per_trade_value_min,
-            rebalance_threshold=strategy_config.rebalance_threshold,
+            target_weights=raw_weights,
+            signals=signals_from_scores(scores, raw_weights, strategy_config),
+            metadata={
+                "allocation_mode": allocation_mode(raw_weights),
+                "market_sentiment": market_sentiment,
+            },
         )
+
+    def refine(
+        self,
+        target_weights: dict[str, float],
+        signals: dict[str, dict[str, Any]],
+        snapshot: Any,
+        latest_prices: dict[str, float],
+        config: Any,
+    ) -> dict[str, float]:
+        """Protect incumbents from churn, then apply the position-aware risk guards."""
+        strategy_config = DefensiveMomentumConfig.from_runtime_config(config)
+        current_weights = snapshot.weights(latest_prices)
+        scores = {symbol: dict(row) for symbol, row in signals.items()}
+        for symbol, row in scores.items():
+            row.setdefault("symbol", symbol)
+
+        kept = apply_stickiness(target_weights, scores, current_weights, strategy_config)
+        return apply_risk_guards(kept, scores, current_weights, snapshot.equity, strategy_config)

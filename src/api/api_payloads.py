@@ -17,12 +17,9 @@ from ..data import fetch_daily_bars
 from ..execution.backtest import calculate_performance_metrics
 from ..core.bot_runtime import bot_runtime
 from ..core.config import get_config, save_universe_symbols
+from ..core.cron import cron_day_of_week_matches, cron_field_matches
 from ..algorithms.registry import get_algorithm_class
-from ..connectors import (
-    fetch_latest_news_sentiment,
-    merge_social_frames,
-    news_records_to_social_frames,
-)
+from ..connectors import fetch_latest_news_sentiment
 from src.api.controls import load_controls, save_controls
 from ..algorithms.dca import allocation_preview, load_dca_plan, save_dca_plan
 from ..core.portfolio import compute_target_weights
@@ -31,19 +28,15 @@ from ..data.social import load_social_trends_csv
 from ..data.duckdb_store import read_market_bars
 from ..data.state_store import load_state, save_state
 from ..core.strategy_models import (
-    STRATEGY_LABELS,
     prepared_strategy_frame,
-    strategy_signal_rows,
     strategy_signal_rows_from_prepared,
     weights_from_strategy_rows,
 )
 from ..algorithms.fast_momentum import (
     DefensiveMomentumConfig,
-    build_defensive_momentum_targets,
     compute_composite_scores,
     compute_price_features,
     decide_target_weights,
-    get_daily_bars as get_defensive_daily_bars,
     get_intraday_bars,
 )
 from ..algorithms.invest_spy import (
@@ -374,497 +367,48 @@ def _json_number(value: Any) -> float | None:
     return round(parsed, 2)
 
 
-def _latest_signal_bars(strategy: str = "momentum_social") -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame]]:
-    config = get_config(strategy_id=strategy)
-    data_client = create_data_client(config)
-    bars_by_symbol = fetch_daily_bars(
-        config.symbols,
-        max(260, config.momentum_lookback_days),
-        ma_days=max(200, config.long_ma_days),
-        extra_buffer_days=config.history_extra_buffer_days,
-        alpaca_data_client=data_client,
-        data_feed=config.alpaca_data_feed,
-        include_latest=True,
-        config=config,
-    )
-    social_by_symbol = merge_social_frames(
-        load_social_trends_csv(config.social_trends_csv, config.symbols),
-        news_records_to_social_frames(fetch_latest_news_sentiment(config.symbols, config)),
-    )
-    return bars_by_symbol, social_by_symbol
-
-
-def _sanitize_social_frames(social_by_symbol: dict[str, Any]) -> dict[str, pd.DataFrame | None]:
-    return {
-        symbol: frame if isinstance(frame, pd.DataFrame) else None
-        for symbol, frame in social_by_symbol.items()
-    }
-
-
-def _latest_sma(df: pd.DataFrame, window: int) -> float | None:
-    if df.empty or "close" not in df or len(df) < window:
-        return None
-    close = pd.to_numeric(df["close"], errors="coerce")
-    return _json_number(close.rolling(window).mean().iloc[-1])
-
-
 def strategy_signals_payload(strategy: str = "momentum_social") -> dict[str, Any]:
+    """Dashboard signal payload: dispatch to the algorithm's own ``signal_view``."""
     strategy = (strategy or "none").lower()[:80]
     if strategy == "none":
-        plan = load_dca_plan(universe_payload()["rows"])
-        preview = allocation_preview(plan)
-        return {
-            "strategy": strategy,
-            "wired": True,
-            "updated_at": pd.Timestamp.now(tz="UTC").isoformat(),
-            "summary": [
-                {"label": "Mode", "value": "DCA" if plan.get("enabled") else "Flat"},
-                {"label": "Schedule", "value": plan.get("schedule_pattern", "--")},
-                {"label": "Planned", "value": f"${sum(float(row.get('notional', 0.0)) for row in preview):.0f}"},
-            ],
-            "leaders": [
-                {
-                    "symbol": row["symbol"],
-                    "signal": row["action"].upper(),
-                    "score": _json_number(row.get("weight")),
-                    "target_weight": _json_number(row.get("weight")),
-                    "ret_N": None,
-                    "social_score": None,
-                    "trend_ok": 1,
-                }
-                for row in preview[:5]
-            ],
-        }
-
-    if strategy == "fast_momentum":
-        return _defensive_momentum_signals_payload()
-    if strategy == "invest_spy":
-        return _invest_spy_signals_payload()
-
-    if strategy != "momentum_social":
-        config = get_config(strategy_id=strategy)
-        bars_by_symbol, social_by_symbol = _latest_signal_bars(strategy)
-        leaders = strategy_signal_rows(
-            strategy,
-            bars_by_symbol,
-            social_by_symbol=social_by_symbol if strategy == "dual_momentum" else None,
-            social_lookback_days=config.social_lookback_days,
-            social_weight=config.social_momentum_weight if strategy == "dual_momentum" else 0.0,
-        )
-        long_count = sum(1 for row in leaders if row["signal"] == "LONG")
-        short_count = sum(1 for row in leaders if row["signal"] == "SHORT")
-        gross_count = max(long_count + short_count, 1)
-        for row in leaders:
-            row["target_weight"] = (1 / gross_count) if row["signal"] == "LONG" else (-1 / gross_count) if row["signal"] == "SHORT" else 0.0
-        return {
-            "strategy": strategy,
-            "wired": True,
-            "updated_at": pd.Timestamp.now(tz="UTC").isoformat(),
-            "summary": [
-                {"label": "Long", "value": str(long_count)},
-                {"label": "Short", "value": str(short_count)},
-                {"label": "Model", "value": STRATEGY_LABELS.get(strategy, strategy.replace("_", " ").title())},
-            ],
-            "leaders": leaders,
-        }
+        return _dca_signal_payload()
 
     config = get_config(strategy_id=strategy)
-    data_client = create_data_client(config)
-    bars_by_symbol = fetch_daily_bars(
-        config.symbols,
-        config.momentum_lookback_days,
-        ma_days=config.long_ma_days,
-        extra_buffer_days=config.history_extra_buffer_days,
-        alpaca_data_client=data_client,
-        data_feed=config.alpaca_data_feed,
-        include_latest=True,
-        config=config,
-    )
-    social_by_symbol = _sanitize_social_frames(
-        merge_social_frames(
-            load_social_trends_csv(config.social_trends_csv, config.symbols),
-            news_records_to_social_frames(fetch_latest_news_sentiment(config.symbols, config)),
-        )
-    )
-    signals = compute_signals_for_universe(
-        bars_by_symbol,
-        config.momentum_lookback_days,
-        config.long_ma_days,
-        short_lookback_days=config.short_momentum_lookback_days,
-        volume_lookback_days=config.volume_lookback_days,
-        social_by_symbol=social_by_symbol,
-        social_lookback_days=config.social_lookback_days,
-        price_momentum_weight=config.price_momentum_weight,
-        social_momentum_weight=config.social_momentum_weight,
-        volume_momentum_weight=config.volume_momentum_weight,
-        min_composite_score=config.min_composite_score,
-    )
-    weights = compute_target_weights(
-        signals,
-        config.max_weight_per_symbol,
-        max_portfolio_exposure=config.max_portfolio_exposure,
-        max_longs=config.max_longs,
-        target_annual_vol=config.target_annual_vol,
-    )
-    ranked = sorted(
-        signals.items(),
-        key=lambda item: (int(item[1].get("signal", 0)), float(item[1].get("score", 0.0) or 0.0)),
-        reverse=True,
-    )
-    active = [item for item in ranked if int(item[1].get("signal", 0))]
-    leaders = [
-        {
-            "symbol": symbol,
-            "signal": "LONG" if int(values.get("signal", 0)) else "FLAT",
-            "close": _json_number(values.get("close")),
-            "sma_20": _latest_sma(bars_by_symbol.get(symbol, pd.DataFrame()), 20),
-            "sma_50": _latest_sma(bars_by_symbol.get(symbol, pd.DataFrame()), 50),
-            "sma_long": _json_number(values.get("sma_long")),
-            "score": _json_number(values.get("score")),
-            "price_score": _json_number(values.get("price_score")),
-            "social_score": _json_number(values.get("social_score")),
-            "volume_score": _json_number(values.get("volume_score")),
-            "ret_N": _json_number(values.get("ret_N")),
-            "ret_short": _json_number(values.get("ret_short")),
-            "realized_vol": _json_number(values.get("realized_vol")),
-            "trend_ok": int(values.get("trend_ok", 0)),
-            "target_weight": _json_number(weights.get(symbol, 0.0)),
-            "reason": "Positive composite momentum above long trend" if int(values.get("signal", 0)) else "Watching for trend and score confirmation",
-        }
-        for symbol, values in ranked
-    ]
+    algorithm = get_algorithm_class(strategy).from_config(config)
+    view = algorithm.signal_view(config)
     return {
         "strategy": strategy,
+        "wired": view.wired,
+        "updated_at": pd.Timestamp.now(tz="UTC").isoformat(),
+        "summary": view.summary,
+        "leaders": view.leaders,
+    }
+
+
+def _dca_signal_payload() -> dict[str, Any]:
+    plan = load_dca_plan(universe_payload()["rows"])
+    preview = allocation_preview(plan)
+    return {
+        "strategy": "none",
         "wired": True,
         "updated_at": pd.Timestamp.now(tz="UTC").isoformat(),
         "summary": [
-            {"label": "Active buys", "value": str(len(active))},
-            {"label": "Universe", "value": str(len(signals))},
-            {"label": "Exposure", "value": f"{sum(weights.values()) * 100:.0f}%"},
+            {"label": "Mode", "value": "DCA" if plan.get("enabled") else "Flat"},
+            {"label": "Schedule", "value": plan.get("schedule_pattern", "--")},
+            {"label": "Planned", "value": f"${sum(float(row.get('notional', 0.0)) for row in preview):.0f}"},
         ],
-        "leaders": leaders,
-    }
-
-
-def _defensive_momentum_sentiment_from_records(
-    symbols: list[str],
-    records: list[dict[str, Any]],
-    lookback_minutes: int,
-) -> tuple[dict[str, float], float, dict[str, dict[str, Any]], list[str]]:
-    cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=max(lookback_minutes, 1))
-    by_symbol: dict[str, list[float]] = {symbol.upper(): [] for symbol in symbols}
-    metadata: dict[str, dict[str, Any]] = {
-        symbol.upper(): {"sentiment_records": 0, "sentiment_providers": []}
-        for symbol in symbols
-    }
-    providers: set[str] = set()
-    for record in records:
-        symbol = str(record.get("symbol", "")).upper()
-        if symbol not in by_symbol:
-            continue
-        timestamp = pd.to_datetime(record.get("timestamp"), utc=True, errors="coerce")
-        if not pd.isna(timestamp) and timestamp < cutoff:
-            continue
-        try:
-            sentiment = float(record.get("social_score", record.get("sentiment", 0.0)))
-        except (TypeError, ValueError):
-            sentiment = 0.0
-        provider = str(record.get("provider") or "").strip().lower()
-        if provider:
-            providers.add(provider)
-            if provider not in metadata[symbol]["sentiment_providers"]:
-                metadata[symbol]["sentiment_providers"].append(provider)
-        metadata[symbol]["sentiment_records"] += 1
-        by_symbol[symbol].append(max(-1.0, min(1.0, sentiment)))
-
-    symbol_sentiment = {
-        symbol: (sum(values) / len(values) if values else 0.0)
-        for symbol, values in by_symbol.items()
-    }
-    market_sentiment = symbol_sentiment.get("SPY")
-    if market_sentiment is None:
-        values = list(symbol_sentiment.values())
-        market_sentiment = sum(values) / len(values) if values else 0.0
-    return symbol_sentiment, float(market_sentiment), metadata, sorted(providers)
-
-
-def _defensive_momentum_reason(
-    row: dict[str, Any],
-    weight: float,
-    strategy_config: DefensiveMomentumConfig,
-) -> str:
-    symbol = str(row.get("symbol", "")).upper()
-    if weight > 0:
-        return "Top Rank"
-    if not bool(row.get("macro_trend_ok")):
-        return "Macro negative"
-    score_floor = strategy_config.min_risk_on_score if symbol in {item.upper() for item in strategy_config.risk_on_universe} else strategy_config.min_defensive_score
-    if float(row.get("score", 0.0)) < score_floor:
-        return "Score too low"
-    if symbol in {item.upper() for item in strategy_config.risk_on_universe} and float(row.get("micro_return", 0.0)) < strategy_config.min_risk_on_micro_return:
-        return "Micro too low"
-    return "No rank slot"
-
-
-def _defensive_momentum_signals_payload() -> dict[str, Any]:
-    config = get_config(strategy_id="fast_momentum")
-    strategy_config = DefensiveMomentumConfig.from_runtime_config(config)
-    symbols = strategy_config.symbols
-    data_client = create_data_client(config)
-    intraday_bars = get_intraday_bars(symbols, strategy_config.required_intraday_bars, config, data_client)
-    daily_bars = get_defensive_daily_bars(symbols, strategy_config.required_daily_bars, config, data_client)
-    sentiment_records = fetch_latest_news_sentiment(symbols, config)
-    sentiment, market_sentiment, _, providers = _defensive_momentum_sentiment_from_records(
-        symbols,
-        sentiment_records,
-        strategy_config.sentiment_lookback_minutes,
-    )
-    features = {
-        symbol: compute_price_features(symbol, intraday_bars.get(symbol, pd.DataFrame()), daily_bars.get(symbol, pd.DataFrame()), strategy_config)
-        for symbol in symbols
-    }
-    scores = compute_composite_scores(features, sentiment, strategy_config)
-    weights = decide_target_weights(scores, strategy_config)
-    allocation_mode = "Dynamic rank" if any(float(weight) > 0 for weight in weights.values()) else "Cash"
-    leaders = []
-    for symbol, row in scores.items():
-        weight = float(weights.get(symbol, 0.0))
-        components = row.get("components", {}) if isinstance(row.get("components"), dict) else {}
-        leaders.append(
+        "leaders": [
             {
-                "symbol": symbol,
-                "signal": "LONG" if weight > 0 else "FLAT",
-                "close": _json_number(row.get("close")),
-                "score": _json_number(row.get("score")),
-                "score_components": {key: _json_number(value) for key, value in components.items()},
-                "allocation_mode": allocation_mode,
-                "realized_vol": _json_number(row.get("realized_volatility")),
-                "trend_ok": int(bool(row.get("macro_trend_ok"))),
-                "target_weight": _json_number(weight),
-                "reason": _defensive_momentum_reason(row, weight, strategy_config),
+                "symbol": row["symbol"],
+                "signal": row["action"].upper(),
+                "score": _json_number(row.get("weight")),
+                "target_weight": _json_number(row.get("weight")),
+                "ret_N": None,
+                "social_score": None,
+                "trend_ok": 1,
             }
-        )
-    leaders.sort(key=lambda item: (item["signal"] != "LONG", -float(item.get("target_weight") or 0.0), -float(item.get("score") or 0.0)))
-    return {
-        "strategy": "fast_momentum",
-        "wired": True,
-        "updated_at": pd.Timestamp.now(tz="UTC").isoformat(),
-        "summary": [
-            {"label": "Allocation", "value": allocation_mode},
-            {"label": "Exposure", "value": f"{sum(float(weight) for weight in weights.values()) * 100:.0f}%"},
-            {"label": "Sentiment", "value": ", ".join(providers) if providers else "No recent records"},
-            {"label": "Universe", "value": str(len(symbols))},
+            for row in preview[:5]
         ],
-        "leaders": leaders,
-    }
-
-
-def defensive_momentum_portfolio_preview() -> dict[str, Any]:
-    """Compute what the fast momentum algorithm would do given current positions and stickiness.
-
-    Fetches live market data and current brokerage positions, applies the full algorithm
-    (including the min_score_delta_to_replace incumbency bonus), and returns the planned
-    portfolio changes alongside the current state.
-    """
-    config = get_config(strategy_id="fast_momentum")
-    data_client = create_data_client(config)
-    trading_client = create_trading_client(config)
-    current_positions = get_positions(trading_client)
-    account_equity = get_account_equity(trading_client)
-    equity = float(account_equity)
-    strategy_config = DefensiveMomentumConfig.from_runtime_config(config)
-
-    latest_prices: dict[str, float] = {}
-    for symbol in strategy_config.symbols:
-        bars = get_intraday_bars([symbol], strategy_config.required_intraday_bars, config, data_client)
-        df = bars.get(symbol)
-        if df is not None and not df.empty and "close" in df.columns:
-            price = float(df["close"].iloc[-1])
-            if price > 0:
-                latest_prices[symbol] = price
-    for symbol in set(current_positions) - set(latest_prices):
-        bars = get_intraday_bars([symbol], 2, config, data_client)
-        df = bars.get(symbol)
-        if df is not None and not df.empty and "close" in df.columns:
-            price = float(df["close"].iloc[-1])
-            if price > 0:
-                latest_prices[symbol] = price
-
-    target_weights, signals, metadata = build_defensive_momentum_targets(
-        config,
-        data_client,
-        current_positions,
-        latest_prices,
-        equity,
-    )
-
-    current_weights = {
-        symbol: (shares * latest_prices.get(symbol, 0.0)) / max(equity, 1.0)
-        for symbol, shares in current_positions.items()
-        if latest_prices.get(symbol, 0.0) > 0
-    }
-
-    score_delta = max(strategy_config.min_score_delta_to_replace, 0.0)
-    scores_data = metadata.get("scores", {})
-    all_scored = [
-        (s, float(scores_data[s].get("score", 0.0)))
-        for s in strategy_config.symbols
-        if s in scores_data
-    ]
-    without_bonus_top = set(
-        s for s, _ in sorted(all_scored, key=lambda x: -x[1])[:max(strategy_config.max_positions, 0)]
-    )
-    current_held = {s for s, w in current_weights.items() if w > 0}
-    target_set = {s for s, w in target_weights.items() if w > 0}
-
-    planned_orders = plan_position_orders(
-        latest_prices=latest_prices,
-        current_positions=current_positions,
-        target_weights=target_weights,
-        equity=equity,
-        cash_buffer=0.0,
-        min_trade_dollars=strategy_config.per_trade_value_min,
-        rebalance_threshold=strategy_config.rebalance_threshold,
-    )
-
-    positions_detail = []
-    for symbol in strategy_config.symbols:
-        cw = round(current_weights.get(symbol, 0.0), 4)
-        tw = round(target_weights.get(symbol, 0.0), 4)
-        in_current = symbol in current_held
-        in_target = symbol in target_set
-
-        if in_current and in_target:
-            if score_delta > 0 and symbol not in without_bonus_top:
-                status = "retained"
-                sticky = True
-                reason = "Sticky"
-            else:
-                status = "retained"
-                sticky = False
-                reason = "Retained"
-        elif in_current and not in_target:
-            status = "dropped"
-            sticky = False
-            reason = "Dropped"
-        elif not in_current and in_target:
-            status = "new"
-            sticky = False
-            reason = "New"
-        else:
-            status = "none"
-            sticky = False
-            reason = "None"
-
-        positions_detail.append({
-            "symbol": symbol,
-            "current_weight": cw,
-            "target_weight": tw,
-            "status": status,
-            "sticky": sticky,
-            "reason": reason,
-        })
-
-    return {
-        "strategy": "fast_momentum",
-        "updated_at": pd.Timestamp.now(tz="UTC").isoformat(),
-        "equity": equity,
-        "current_weights": {s: round(w, 4) for s, w in sorted(current_weights.items()) if w > 0},
-        "target_weights": {s: round(w, 4) for s, w in sorted(target_weights.items()) if w != 0},
-        "positions": positions_detail,
-        "planned_orders": [
-            {
-                "symbol": o["symbol"],
-                "action": o["action"],
-                "quantity": o["quantity"],
-                "current_shares": o["current_shares"],
-                "target_shares": o["target_shares"],
-                "trade_dollars": round(float(o["trade_dollars"]), 2),
-                "latest_price": float(o["latest_price"]),
-            }
-            for o in planned_orders
-        ],
-        "stickiness": {
-            "delta": score_delta,
-            "enabled": score_delta > 0,
-        },
-        "summary": [
-            {"label": "Allocation", "value": metadata.get("allocation_mode", "N/A")},
-            {"label": "Exposure", "value": f"{sum(float(w) for w in target_weights.values()) * 100:.0f}%"},
-            {"label": "Positions", "value": str(len(current_positions))},
-            {"label": "Changes", "value": str(len(planned_orders))},
-        ],
-    }
-
-
-def _invest_spy_reason(symbol: str, weight: float, state: str, config: InvestSpyConfig) -> str:
-    if weight > 0 and symbol == config.spy_symbol:
-        return "SPY growth/pullback"
-    if weight > 0 and symbol in {item.upper() for item in config.equity_income_universe}:
-        return "Flat-market income"
-    if weight > 0 and symbol in {item.upper() for item in config.crisis_hedge_universe}:
-        return "Crisis hedge"
-    if weight > 0:
-        return "Defensive allocation"
-    if symbol == config.spy_symbol and state in {"FALLING", "CRISIS"}:
-        return "SPY state defensive"
-    if symbol in {item.upper() for item in config.equity_income_universe} and state != "FLAT":
-        return "Income waits for flat SPY"
-    if symbol in {item.upper() for item in config.crisis_hedge_universe} and state != "CRISIS":
-        return "Hedge waits for crisis"
-    return "Outside state allocation"
-
-
-def _invest_spy_signals_payload() -> dict[str, Any]:
-    config = get_config(strategy_id="invest_spy")
-    strategy_config = InvestSpyConfig.from_runtime_config(config)
-    symbols = strategy_config.symbols
-    data_client = create_data_client(config)
-    intraday_bars = get_intraday_bars(symbols, strategy_config.required_intraday_bars, config, data_client)
-    daily_bars = get_defensive_daily_bars(symbols, strategy_config.macro_trend_lookback_days, config, data_client)
-    sentiment_records = fetch_latest_news_sentiment(symbols, config)
-    sentiment, market_sentiment, _, providers = _defensive_momentum_sentiment_from_records(
-        symbols,
-        sentiment_records,
-        strategy_config.sentiment_lookback_minutes,
-    )
-    features = {
-        symbol: compute_invest_spy_price_features(symbol, intraday_bars.get(symbol, pd.DataFrame()), daily_bars.get(symbol, pd.DataFrame()), strategy_config)
-        for symbol in symbols
-    }
-    scores = compute_composite_scores(features, sentiment, strategy_config)
-    state = classify_spy_state(scores.get(strategy_config.spy_symbol, {}), sentiment.get(strategy_config.spy_symbol, market_sentiment), strategy_config)
-    weights = decide_invest_spy_weights(scores, state, strategy_config)
-    leaders = []
-    for symbol, row in scores.items():
-        weight = float(weights.get(symbol, 0.0))
-        components = row.get("components", {}) if isinstance(row.get("components"), dict) else {}
-        leaders.append(
-            {
-                "symbol": symbol,
-                "signal": "LONG" if weight > 0 else "FLAT",
-                "close": _json_number(row.get("close")),
-                "score": _json_number(row.get("score")),
-                "score_components": {key: _json_number(value) for key, value in components.items()},
-                "spy_state": state,
-                "realized_vol": _json_number(row.get("realized_volatility")),
-                "trend_ok": int(bool(row.get("macro_trend_ok"))),
-                "target_weight": _json_number(weight),
-                "reason": _invest_spy_reason(symbol, weight, state, strategy_config),
-            }
-        )
-    leaders.sort(key=lambda item: (item["signal"] != "LONG", -float(item.get("target_weight") or 0.0), -float(item.get("score") or 0.0)))
-    return {
-        "strategy": "invest_spy",
-        "wired": True,
-        "updated_at": pd.Timestamp.now(tz="UTC").isoformat(),
-        "summary": [
-            {"label": "SPY state", "value": state.title()},
-            {"label": "Exposure", "value": f"{sum(float(weight) for weight in weights.values()) * 100:.0f}%"},
-            {"label": "Sentiment", "value": ", ".join(providers) if providers else "No recent records"},
-            {"label": "Universe", "value": str(len(symbols))},
-        ],
-        "leaders": leaders,
     }
 
 
@@ -1168,23 +712,6 @@ def _flat_backtest(period: str, starting_equity: float | None = None) -> pd.Data
     ).set_index("timestamp")
 
 
-def _cron_value_matches(field: str, value: int) -> bool:
-    field = field.strip()
-    if field == "*":
-        return True
-    for part in field.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if "-" in part:
-            start_raw, end_raw = part.split("-", 1)
-            if start_raw.isdigit() and end_raw.isdigit() and int(start_raw) <= value <= int(end_raw):
-                return True
-        elif part.isdigit() and int(part) == value:
-            return True
-    return False
-
-
 def _frequency_runs_on_index(frequency: str, index: int) -> bool:
     schedule_every = 5 if frequency in {"weekly", "biweekly"} else 1
     if frequency == "biweekly":
@@ -1198,11 +725,10 @@ def _dca_runs_on_trade_date(plan: dict[str, Any], trade_date: pd.Timestamp, inde
     pattern = str(plan.get("schedule_pattern") or "").split()
     if len(pattern) == 5:
         _minute, _hour, day_of_month, month, day_of_week = pattern
-        cron_dow = 0 if trade_date.dayofweek == 6 else trade_date.dayofweek + 1
         return (
-            _cron_value_matches(month, int(trade_date.month))
-            and _cron_value_matches(day_of_month, int(trade_date.day))
-            and (_cron_value_matches(day_of_week, cron_dow) or (cron_dow == 0 and _cron_value_matches(day_of_week, 7)))
+            cron_field_matches(month, int(trade_date.month), min_value=1, max_value=12)
+            and cron_field_matches(day_of_month, int(trade_date.day), min_value=1, max_value=31)
+            and cron_day_of_week_matches(day_of_week, int(trade_date.dayofweek))
         )
     return _frequency_runs_on_index(str(plan.get("frequency") or "weekly"), index)
 

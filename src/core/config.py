@@ -551,6 +551,13 @@ class Config:
     alpaca_data_api_secret: str = ""
     alpaca_base_url: str = ALPACA_BASE_URL
     alpaca_data_feed: str = ALPACA_DATA_FEED
+    # Schwab OAuth: app key/secret from the developer portal, plus the refresh token from a
+    # one-time browser consent. Left blank until the Schwab app is approved.
+    schwab_app_key: str = ""
+    schwab_app_secret: str = ""
+    schwab_refresh_token: str = ""
+    schwab_account_number: str = ""
+    paper_starting_cash: float = 100_000.0
     history_extra_buffer_days: int = HISTORY_EXTRA_BUFFER_DAYS
     social_trends_csv: str = ALPHA_VANTAGE_NEWS_CSV
     tradables_csv: str = TRADABLES_CSV
@@ -733,6 +740,10 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
         alpaca_data_api_secret=alpaca_data_api_secret,
         alpaca_base_url=base_url,
         alpaca_data_feed=str(_config_value(account_config, "data_feed", "ALPACA_DATA_FEED", ALPACA_DATA_FEED)),
+        schwab_app_key=str(_config_value(account_config, "schwab_app_key", "SCHWAB_APP_KEY", "") or ""),
+        schwab_app_secret=str(_config_value(account_config, "schwab_app_secret", "SCHWAB_APP_SECRET", "") or ""),
+        schwab_refresh_token=str(_config_value(account_config, "schwab_refresh_token", "SCHWAB_REFRESH_TOKEN", "") or ""),
+        schwab_account_number=str(_config_value(account_config, "schwab_account_number", "SCHWAB_ACCOUNT_NUMBER", "") or ""),
         history_extra_buffer_days=_as_int(_config_value(algorithm, "history_extra_buffer_days", "HISTORY_EXTRA_BUFFER_DAYS", HISTORY_EXTRA_BUFFER_DAYS), HISTORY_EXTRA_BUFFER_DAYS),
         social_trends_csv=social_trends_csv,
         tradables_csv=tradables_csv,

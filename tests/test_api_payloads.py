@@ -3,6 +3,10 @@ from __future__ import annotations
 import pandas as pd
 
 from src.api import api_payloads as api_payloads
+from src.core import market_context
+from src.algorithms import fast_momentum as fast_momentum
+from src.algorithms import generic as generic
+from src.algorithms import invest_spy as invest_spy
 from src.core.config import Config
 from src.api.api_payloads import (
     backtest_payload,
@@ -176,24 +180,24 @@ def test_controls_payload_returns_persisted_choices() -> None:
 
 def test_fast_momentum_reason_uses_configured_defensive_symbols() -> None:
     row = {"symbol": "XYLD", "macro_trend_ok": True}
-    config = api_payloads.DefensiveMomentumConfig(defensive_universe=["BIL", "XYLD"])
+    config = fast_momentum.DefensiveMomentumConfig(defensive_universe=["BIL", "XYLD"])
 
-    reason = api_payloads._defensive_momentum_reason(row, 0.25, config)
+    reason = fast_momentum._defensive_momentum_reason(row, 0.25, config)
 
     assert reason == "Top Rank"
 
 
 def test_fast_momentum_reason_describes_risk_on_rank_cutoff() -> None:
-    config = api_payloads.DefensiveMomentumConfig(
+    config = fast_momentum.DefensiveMomentumConfig(
         risk_on_universe=["XSD", "AIQ"],
         defensive_universe=["BIL", "XYLD"],
         max_positions=4,
         min_risk_on_micro_return=0.0,
     )
 
-    assert api_payloads._defensive_momentum_reason({"symbol": "AIQ", "macro_trend_ok": True}, 0.0, config) == "No rank slot"
+    assert fast_momentum._defensive_momentum_reason({"symbol": "AIQ", "macro_trend_ok": True}, 0.0, config) == "No rank slot"
     assert (
-        api_payloads._defensive_momentum_reason({"symbol": "XSD", "macro_trend_ok": True, "micro_return": -0.001}, 0.0, config)
+        fast_momentum._defensive_momentum_reason({"symbol": "XSD", "macro_trend_ok": True, "micro_return": -0.001}, 0.0, config)
         == "Micro too low"
     )
 
@@ -596,7 +600,7 @@ def test_none_strategy_signals_summarize_dca_plan(monkeypatch) -> None:
 
 
 def test_defensive_momentum_signals_include_inactive_universe_rows(monkeypatch) -> None:
-    monkeypatch.setattr(api_payloads, "create_data_client", lambda config: object())
+    monkeypatch.setattr(market_context, "create_data_client", lambda config: object())
 
     def intraday(symbol: str) -> pd.DataFrame:
         step = 0.8 if symbol == "XSD" else -0.2 if symbol == "VXX" else 0.05
@@ -606,10 +610,10 @@ def test_defensive_momentum_signals_include_inactive_universe_rows(monkeypatch) 
         step = 0.5 if symbol in {"SPY", "XSD"} else -0.2 if symbol == "VXX" else 0.05
         return _strategy_bars([100 + index * step for index in range(220)])
 
-    monkeypatch.setattr(api_payloads, "get_intraday_bars", lambda symbols, *_args, **_kwargs: {symbol: intraday(symbol) for symbol in symbols})
-    monkeypatch.setattr(api_payloads, "get_defensive_daily_bars", lambda symbols, *_args, **_kwargs: {symbol: daily(symbol) for symbol in symbols})
+    monkeypatch.setattr(fast_momentum, "get_intraday_bars", lambda symbols, *_args, **_kwargs: {symbol: intraday(symbol) for symbol in symbols})
+    monkeypatch.setattr(fast_momentum, "get_daily_bars", lambda symbols, *_args, **_kwargs: {symbol: daily(symbol) for symbol in symbols})
     monkeypatch.setattr(
-        api_payloads,
+        fast_momentum,
         "fetch_latest_news_sentiment",
             lambda symbols, config: [
                 {"symbol": "SPY", "timestamp": pd.Timestamp.now(tz="UTC").isoformat(), "sentiment": 0.5, "provider": "stocktwits"},
@@ -629,15 +633,15 @@ def test_defensive_momentum_signals_include_inactive_universe_rows(monkeypatch) 
 
 def test_momentum_social_signals_include_all_tracked_universe_rows(monkeypatch) -> None:
     monkeypatch.setenv("SYMBOLS", "VTI,XBI,BIL")
-    monkeypatch.setattr(api_payloads, "create_data_client", lambda config: object())
+    monkeypatch.setattr(market_context, "create_data_client", lambda config: object())
 
     bars = {
         "VTI": _strategy_bars([100 + index * 0.16 for index in range(320)]),
         "XBI": _strategy_bars([110 - index * 0.03 for index in range(320)]),
         "BIL": _strategy_bars([100 + index * 0.01 for index in range(320)]),
     }
-    monkeypatch.setattr(api_payloads, "fetch_daily_bars", lambda symbols, *_args, **_kwargs: {symbol: bars[symbol] for symbol in symbols})
-    monkeypatch.setattr(api_payloads, "load_social_trends_csv", lambda csv, symbols: {symbol: 0 for symbol in symbols})
+    monkeypatch.setattr(market_context, "fetch_daily_bars", lambda symbols, *_args, **_kwargs: {symbol: bars[symbol] for symbol in symbols})
+    monkeypatch.setattr(generic, "load_social_trends_csv", lambda csv, symbols: {symbol: 0 for symbol in symbols})
 
     payload = strategy_signals_payload("momentum_social")
 
@@ -659,7 +663,8 @@ def test_dual_momentum_signals_include_all_tracked_universe_rows(monkeypatch) ->
         "BIL": _strategy_bars([100 + index * 0.01 for index in range(320)]),
         "QQQ": _strategy_bars([150 + index * 0.02 for index in range(320)]),
     }
-    monkeypatch.setattr(api_payloads, "fetch_daily_bars", lambda symbols, *_args, **_kwargs: {symbol: bars[symbol] for symbol in symbols})
+    monkeypatch.setattr(market_context, "create_data_client", lambda config: object())
+    monkeypatch.setattr(market_context, "fetch_daily_bars", lambda symbols, *_args, **_kwargs: {symbol: bars[symbol] for symbol in symbols})
 
     payload = strategy_signals_payload("dual_momentum")
 

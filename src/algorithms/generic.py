@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import BaseAlgorithm
+import pandas as pd
+
+from .base import BaseAlgorithm, json_number
 from ..connectors import fetch_latest_news_sentiment, merge_social_frames, news_records_to_social_frames
 from ..core.interfaces import AlgorithmContext, AlgorithmDecision, AlgorithmRequirements
 from ..core.portfolio import compute_target_weights
@@ -39,6 +41,35 @@ def _template_signal_map(rows: list[dict]) -> dict[str, dict[str, float | int]]:
         }
         for row in rows
     }
+
+
+
+def _with_reasons(
+    signals: dict[str, dict[str, Any]],
+    target_weights: dict[str, float],
+    config: Any,
+) -> dict[str, dict[str, Any]]:
+    """Attach a human-readable selection reason to each signal row.
+
+    The dashboard and the MCP agent both surface ``reason``; without it every row renders
+    blank.
+    """
+    annotated: dict[str, dict[str, Any]] = {}
+    for symbol, row in signals.items():
+        values = dict(row)
+        weight = float(target_weights.get(symbol, 0.0) or 0.0)
+        score = float(values.get("score", values.get("composite_score", 0.0)) or 0.0)
+        if weight > 0:
+            reason = "Selected"
+        elif int(values.get("signal", 0) or 0) <= 0:
+            reason = "No entry signal"
+        elif score < float(getattr(config, "min_composite_score", 0.0) or 0.0):
+            reason = "Score too low"
+        else:
+            reason = "No rank slot"
+        values["reason"] = reason
+        annotated[symbol] = values
+    return annotated
 
 
 class TemplateStrategyAlgorithm(BaseAlgorithm):
@@ -87,7 +118,7 @@ class TemplateStrategyAlgorithm(BaseAlgorithm):
             )
         return AlgorithmDecision(
             target_weights=target_weights,
-            signals=signals,
+            signals=_with_reasons(signals, target_weights, config),
             metadata={"strategy": self.algorithm_id},
             cash_buffer=config.cash_buffer,
             min_trade_dollars=config.min_trade_dollars,
@@ -117,6 +148,12 @@ class TemplateStrategyAlgorithm(BaseAlgorithm):
             volume_momentum_weight=config.volume_momentum_weight,
             min_composite_score=config.min_composite_score,
         )
+
+def _latest_sma(df: pd.DataFrame, window: int) -> float | None:
+    if df.empty or "close" not in df or len(df) < window:
+        return None
+    close = pd.to_numeric(df["close"], errors="coerce")
+    return json_number(close.rolling(window).mean().iloc[-1])
 
 
 class MomentumSocialAlgorithm(TemplateStrategyAlgorithm):
