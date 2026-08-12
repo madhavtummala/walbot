@@ -70,12 +70,6 @@ MARKET_DATA_CACHE_TTL_SECONDS = 1800
 INTRADAY_MARKET_DATA_CACHE_TTL_SECONDS = 900
 EOD_MARKET_DATA_CACHE_TTL_SECONDS = 1800
 NEWS_SENTIMENT_CACHE_TTL_SECONDS = 1800
-ALGORITHM_CHECK_SECONDS = 60
-DCA_CHECK_SECONDS = 300
-ALGORITHM_MARKET_DATA_REFRESH_MINUTES = 30
-ALGORITHM_RUN_JITTER_MINUTES = 0
-TRADING_START_TIME = "08:30"
-TRADING_END_TIME = "15:00"
 REQUIRE_TRADE_APPROVAL = False
 TRADE_APPROVAL_TIMEOUT_SECONDS = 300
 TRADE_APPROVAL_POLL_SECONDS = 5
@@ -89,15 +83,14 @@ OPTIONS_SWING_MIN_OPEN_INTEREST = 100
 OPTIONS_SWING_MAX_SPREAD_PCT = 0.20
 OPTIONS_SWING_STRIKE_RANGE_PCT = 0.15
 ALGORITHM_IDS = {
-    "momentum_social",
-    "trend_following",
-    "mean_reversion",
-    "breakout",
-    "risk_parity",
-    "dual_momentum",
+    "dca",
+    "bursty_dca",
     "fast_momentum",
-    "invest_spy",
+    "spy_rotation",
 }
+
+#: Used wherever no strategy was selected, and as the fallback for a retired id.
+DEFAULT_STRATEGY_ID = "fast_momentum"
 
 
 def _project_root() -> Path:
@@ -522,7 +515,7 @@ class Config:
     account_id: str = "default"
     account_label: str = "Default"
 
-    algorithm_id: str = "momentum_social"
+    algorithm_id: str = DEFAULT_STRATEGY_ID
     symbols: list[str] = field(default_factory=lambda: list(SYMBOLS))
     momentum_lookback_days: int = MOMENTUM_LOOKBACK_DAYS
     short_momentum_lookback_days: int = SHORT_MOMENTUM_LOOKBACK_DAYS
@@ -557,6 +550,8 @@ class Config:
     schwab_app_secret: str = ""
     schwab_refresh_token: str = ""
     schwab_account_number: str = ""
+    # Must byte-for-byte match a callback URL registered on the Schwab developer app.
+    schwab_callback_url: str = ""
     paper_starting_cash: float = 100_000.0
     history_extra_buffer_days: int = HISTORY_EXTRA_BUFFER_DAYS
     social_trends_csv: str = ALPHA_VANTAGE_NEWS_CSV
@@ -580,12 +575,6 @@ class Config:
     news_sentiment_cache_ttl_seconds: int = NEWS_SENTIMENT_CACHE_TTL_SECONDS
     sentiment_data_cache_ttl_seconds: int = NEWS_SENTIMENT_CACHE_TTL_SECONDS
     data_source_configs: dict[str, Any] = field(default_factory=dict)
-    algorithm_check_seconds: int = ALGORITHM_CHECK_SECONDS
-    dca_check_seconds: int = DCA_CHECK_SECONDS
-    algorithm_market_data_refresh_minutes: int = ALGORITHM_MARKET_DATA_REFRESH_MINUTES
-    algorithm_run_jitter_minutes: int = ALGORITHM_RUN_JITTER_MINUTES
-    trading_start_time: str = TRADING_START_TIME
-    trading_end_time: str = TRADING_END_TIME
     require_trade_approval: bool = REQUIRE_TRADE_APPROVAL
     trade_approval_timeout_seconds: int = TRADE_APPROVAL_TIMEOUT_SECONDS
     trade_approval_poll_seconds: int = TRADE_APPROVAL_POLL_SECONDS
@@ -616,29 +605,32 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
     universe = _section(raw_universe_config, "tradable_universe")
     raw_algorithms_config = load_algorithms_config()
     algorithm_configs = _algorithm_sections(raw_algorithms_config)
-    selected_strategy_id = str(strategy_id or "momentum_social").strip().lower()
+    # Imported here rather than at module scope: the algorithm registry reaches back into
+    # config through the algorithms it loads.
+    from ..algorithms.registry import LEGACY_ALGORITHM_IDS, canonical_algorithm_id
+
+    selected_strategy_id = canonical_algorithm_id(str(strategy_id or DEFAULT_STRATEGY_ID))
     algorithm = _section(algorithm_configs, selected_strategy_id)
-    raw_dca_bot_config = load_dca_config()
+    for legacy_id in LEGACY_ALGORITHM_IDS.get(selected_strategy_id, []):
+        # A renamed algorithm's tuning is still filed under its old id. Reading every retired
+        # id keeps saved tuning working through the rename instead of silently reverting to
+        # defaults -- ``spy_rotation`` has two, having been renamed twice.
+        if algorithm:
+            break
+        algorithm = _section(algorithm_configs, legacy_id)
     algorithm_bot = _section(raw_algorithm_bot_config, "algorithm_bot")
-    dca_bot = _section(raw_dca_bot_config, "dca_bot")
     runtime = {
         **_section(raw_algorithm_bot_config, "runtime"),
         **{
             key: value
             for key, value in algorithm_bot.items()
             if key in {
-                "algorithm_check_seconds",
-                "algorithm_market_data_refresh_minutes",
-                "algorithm_run_jitter_minutes",
                 "backtest_period",
-                "trading_start_time",
-                "trading_end_time",
                 "require_trade_approval",
                 "trade_approval_timeout_seconds",
                 "trade_approval_poll_seconds",
             }
         },
-        **{key: value for key, value in dca_bot.items() if key in {"dca_check_seconds"}},
     }
     raw_options_bot_config = load_options_bot_config()
     options = _section(raw_options_bot_config, "options")
@@ -744,6 +736,7 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
         schwab_app_secret=str(_config_value(account_config, "schwab_app_secret", "SCHWAB_APP_SECRET", "") or ""),
         schwab_refresh_token=str(_config_value(account_config, "schwab_refresh_token", "SCHWAB_REFRESH_TOKEN", "") or ""),
         schwab_account_number=str(_config_value(account_config, "schwab_account_number", "SCHWAB_ACCOUNT_NUMBER", "") or ""),
+        schwab_callback_url=str(_config_value(account_config, "schwab_callback_url", "SCHWAB_CALLBACK_URL", "") or ""),
         history_extra_buffer_days=_as_int(_config_value(algorithm, "history_extra_buffer_days", "HISTORY_EXTRA_BUFFER_DAYS", HISTORY_EXTRA_BUFFER_DAYS), HISTORY_EXTRA_BUFFER_DAYS),
         social_trends_csv=social_trends_csv,
         tradables_csv=tradables_csv,
@@ -816,34 +809,6 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
             NEWS_SENTIMENT_CACHE_TTL_SECONDS,
         ),
         data_source_configs=data_sources,
-        algorithm_check_seconds=_as_int(
-            _config_value(runtime, "algorithm_check_seconds", "ALGORITHM_CHECK_SECONDS", ALGORITHM_CHECK_SECONDS),
-            ALGORITHM_CHECK_SECONDS,
-        ),
-        dca_check_seconds=_as_int(
-            _config_value(runtime, "dca_check_seconds", "DCA_CHECK_SECONDS", DCA_CHECK_SECONDS),
-            DCA_CHECK_SECONDS,
-        ),
-        algorithm_market_data_refresh_minutes=_as_int(
-            _config_value(
-                runtime,
-                "algorithm_market_data_refresh_minutes",
-                "ALGORITHM_MARKET_DATA_REFRESH_MINUTES",
-                ALGORITHM_MARKET_DATA_REFRESH_MINUTES,
-            ),
-            ALGORITHM_MARKET_DATA_REFRESH_MINUTES,
-        ),
-        algorithm_run_jitter_minutes=_as_int(
-            _config_value(
-                runtime,
-                "algorithm_run_jitter_minutes",
-                "ALGORITHM_RUN_JITTER_MINUTES",
-                ALGORITHM_RUN_JITTER_MINUTES,
-            ),
-            ALGORITHM_RUN_JITTER_MINUTES,
-        ),
-        trading_start_time=str(_config_value(runtime, "trading_start_time", "TRADING_START_TIME", TRADING_START_TIME)),
-        trading_end_time=str(_config_value(runtime, "trading_end_time", "TRADING_END_TIME", TRADING_END_TIME)),
         require_trade_approval=_str_to_bool(
             str(_config_value(runtime, "require_trade_approval", "REQUIRE_TRADE_APPROVAL", REQUIRE_TRADE_APPROVAL)),
             REQUIRE_TRADE_APPROVAL,

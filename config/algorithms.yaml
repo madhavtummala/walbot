@@ -1,16 +1,14 @@
 algorithms:
-  momentum_social: {}
-  trend_following: {}
-  mean_reversion: {}
-  breakout: {}
-  risk_parity:
-    target_annual_vol: 0.14
-  dual_momentum:
-    momentum_lookback_days: 126
-    social_momentum_weight: 0.1
-    max_longs: 4
-    max_weight_per_symbol: 0.35
-    rebalance_threshold: 0.03
+  bursty_dca:
+    regime_ma_days: 200
+    percent_b_lookback: 20
+    percent_b_threshold: 0.0
+    rsi_lookback: 2
+    rsi_threshold: 10.0
+    # Both clamps are stated in multiples of the MONTHLY budget, not the per-run increment.
+    max_trade_multiple: 3.0
+    max_monthly_multiple: 3.0
+    value_averaging: true
   fast_momentum:
     risk_on_universe:
     - QQQM
@@ -36,6 +34,7 @@ algorithms:
     min_score_delta_to_replace: 0.10
     pullback_min_micro_return: -0.02
     min_risk_on_micro_return: 0.01
+  # Read as `spy_rotation`; the key is kept so saved tuning survives the renames.
   invest_spy:
     spy_symbol: SPY
     equity_income_universe:

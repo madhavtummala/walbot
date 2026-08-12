@@ -7,14 +7,8 @@ import math
 import pandas as pd
 
 from .base import BaseAlgorithm
-from .fast_momentum import (
-    apply_risk_guards,
-    compute_composite_scores,
-    get_daily_bars,
-    get_intraday_bars,
-    get_sentiment_snapshot,
-)
-from ..core.interfaces import AlgorithmContext, AlgorithmDecision, AlgorithmRequirements
+from .fast_momentum import apply_risk_guards, compute_composite_scores
+from ..core.interfaces import DAILY_AT_OPEN, AlgorithmContext, AlgorithmDecision, AlgorithmRequirements
 
 
 @dataclass(frozen=True)
@@ -72,7 +66,18 @@ class InvestSpyConfig:
     def from_runtime_config(cls, config: Any) -> "InvestSpyConfig":
         raw = {}
         if isinstance(getattr(config, "algorithm_configs", None), dict):
-            raw = config.algorithm_configs.get("invest_spy", {}) or {}
+            # Read every id this algorithm has had: it is ``spy_rotation`` now, but tuning
+            # saved earlier is filed under ``regime_rotation`` or ``invest_spy``, and the key
+            # on disk is still the oldest of the three.
+            sections = config.algorithm_configs
+            raw = next(
+                (
+                    sections[key]
+                    for key in ("spy_rotation", "regime_rotation", "invest_spy")
+                    if sections.get(key)
+                ),
+                {},
+            )
         if not isinstance(raw, dict):
             raw = {}
 
@@ -298,24 +303,29 @@ def decide_invest_spy_weights(
 
 
 def score_universe(
-    runtime_config: Any, data_client: Any, strategy_config: InvestSpyConfig
-) -> tuple[dict[str, dict[str, Any]], str, float]:
-    """Load data and score the universe. Pure market data -- no account state."""
-    symbols = strategy_config.symbols
-    intraday_bars = get_intraday_bars(symbols, strategy_config.required_intraday_bars, runtime_config, data_client)
-    daily_bars = get_daily_bars(symbols, strategy_config.macro_trend_lookback_days, runtime_config, data_client)
-    sentiment, market_sentiment = get_sentiment_snapshot(symbols, strategy_config.sentiment_lookback_minutes, runtime_config)
+    context: AlgorithmContext, strategy_config: InvestSpyConfig
+) -> tuple[dict[str, dict[str, Any]], str]:
+    """Score the universe and classify SPY, from the bars already in ``context``.
+
+    Takes the context rather than fetching, so the live runner and the backtester classify
+    the same regime from the same inputs instead of two separate implementations.
+    """
     features = {
-        symbol: compute_invest_spy_price_features(symbol, intraday_bars.get(symbol, pd.DataFrame()), daily_bars.get(symbol, pd.DataFrame()), strategy_config)
-        for symbol in symbols
+        symbol: compute_invest_spy_price_features(
+            symbol,
+            context.intraday_bars_by_symbol.get(symbol, pd.DataFrame()),
+            context.bars_by_symbol.get(symbol, pd.DataFrame()),
+            strategy_config,
+        )
+        for symbol in strategy_config.symbols
     }
-    scores = compute_composite_scores(features, sentiment, strategy_config)
+    scores = compute_composite_scores(features, context.sentiment_scores, strategy_config)
     state = classify_spy_state(
         scores.get(strategy_config.spy_symbol, {}),
-        sentiment.get(strategy_config.spy_symbol, market_sentiment),
+        context.sentiment_scores.get(strategy_config.spy_symbol, context.market_sentiment),
         strategy_config,
     )
-    return scores, state, market_sentiment
+    return scores, state
 
 
 def signals_from_scores(
@@ -348,11 +358,17 @@ def signals_from_scores(
 class InvestSpyAlgorithm(BaseAlgorithm):
     algorithm_id = "invest_spy"
 
+    #: Once per session. Every input is a daily bar, so a second run the same day reads the
+    #: same closes and can only churn the portfolio.
+    schedule = DAILY_AT_OPEN
+
     def requirements(self, config: Any, current_positions: dict[str, int]) -> AlgorithmRequirements:
         strategy_config = InvestSpyConfig.from_runtime_config(config)
         return AlgorithmRequirements(
             price_symbols=sorted(set(strategy_config.symbols) | set(current_positions)),
             daily_lookback_days=strategy_config.macro_trend_lookback_days,
+            intraday_lookback_bars=strategy_config.required_intraday_bars,
+            needs_sentiment=True,
             paper_only=True,
         )
 
@@ -368,21 +384,19 @@ class InvestSpyAlgorithm(BaseAlgorithm):
     def analyze(self, context: AlgorithmContext) -> AlgorithmDecision:
         """Score the universe and allocate, with no knowledge of what is held."""
         strategy_config = InvestSpyConfig.from_runtime_config(context.config)
-        scores, state, market_sentiment = score_universe(
-            context.config, context.extra.get("data_client"), strategy_config
-        )
+        scores, state = score_universe(context, strategy_config)
         raw_weights = decide_invest_spy_weights(scores, state, strategy_config)
         return AlgorithmDecision(
             target_weights=raw_weights,
             signals=signals_from_scores(scores, raw_weights),
             metadata={
                 "allocation_mode": state,
-                "market_sentiment": market_sentiment,
+                "market_sentiment": context.market_sentiment,
                 "spy_state": state,
             },
         )
 
-    def refine(
+    def refine_weights(
         self,
         target_weights: dict[str, float],
         signals: dict[str, dict[str, Any]],

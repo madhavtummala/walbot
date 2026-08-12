@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.core.config import get_config
-from src.core.interfaces import AlgorithmResult
+from src.core.interfaces import MODE_TARGET, AlgorithmResult, Intent
 from src.core.pipeline import (
     StaleResultError,
     UnknownBrokerageError,
@@ -27,6 +27,11 @@ def _result_payload(result: AlgorithmResult) -> dict[str, Any]:
     return {
         "strategy": result.strategy,
         "as_of": result.as_of.isoformat(),
+        "mode": result.mode,
+        "intents": [
+            {"symbol": intent.symbol, "kind": intent.kind, "value": round(intent.value, 6)}
+            for intent in result.intents
+        ],
         "target_weights": {symbol: round(weight, 6) for symbol, weight in result.target_weights.items()},
         "latest_prices": {symbol: round(price, 4) for symbol, price in result.latest_prices.items()},
         "signals": {
@@ -47,10 +52,15 @@ def _result_from_payload(payload: dict[str, Any]) -> AlgorithmResult:
     """Rebuild a step-1 result from the payload the agent was given."""
     return AlgorithmResult(
         strategy=str(payload.get("strategy") or DEFAULT_ALGORITHM),
+        intents=[
+            Intent(symbol=str(row["symbol"]).upper(), kind=str(row.get("kind") or "weight"), value=float(row["value"]))
+            for row in (payload.get("intents") or [])
+        ],
         target_weights={str(k).upper(): float(v) for k, v in (payload.get("target_weights") or {}).items()},
         signals=payload.get("signals") or {},
         latest_prices={str(k).upper(): float(v) for k, v in (payload.get("latest_prices") or {}).items()},
         metadata={"allocation_mode": payload.get("allocation_mode")},
+        mode=str(payload.get("mode") or MODE_TARGET),
         as_of=datetime.fromisoformat(payload["as_of"]) if payload.get("as_of") else datetime.now(timezone.utc),
     )
 

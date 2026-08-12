@@ -6,13 +6,21 @@ from typing import Any
 from ...core.config import load_dca_config, save_dca_config
 
 DCA_PLAN_SECTION = "dca_plan"
-DCA_MAX_ITEM_AMOUNT = 50.0
 
+#: Hard ceiling on a per-symbol budget. Every plan amount means **dollars per month, per
+#: symbol** -- the same meaning in DCA and Bursty DCA, so switching between them never
+#: silently changes the spend rate.
+DCA_MAX_ITEM_AMOUNT = 5_000.0
+
+#: Which variant runs the plan. Both accrue identically; Bursty adds a signal to the predicate.
+DCA_ALGORITHMS = ("dca", "bursty_dca")
+
+#: The plan carries **what to buy and how much**, and nothing else. Cadence lives on the
+#: algorithm class as a ``Schedule``, and whether it runs at all is ``algorithm_enabled``
+#: plus ``active_strategy`` in controls -- the same switch every other algorithm uses. A
+#: separate ``enabled`` here used to let DCA run on its own loop alongside another algorithm,
+#: which meant two loops could drive the same accrual state at different cadences.
 DEFAULT_DCA_PLAN: dict[str, Any] = {
-    "enabled": False,
-    "frequency": "weekly",
-    "schedule_pattern": "0 12 * * 1-5",
-    "next_run_date": "",
     "max_item_amount": DCA_MAX_ITEM_AMOUNT,
     "buy": {
         "amount": 100.0,
@@ -29,16 +37,7 @@ DEFAULT_DCA_PLAN: dict[str, Any] = {
     },
 }
 
-FREQUENCIES = {"daily", "weekly", "biweekly", "monthly"}
 BUCKETS = ("buy", "sell")
-
-
-def _as_bool(value: Any, default: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return default
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
@@ -65,10 +64,6 @@ def sanitize_dca_plan(plan: dict[str, Any] | None, universe_rows: list[dict[str,
 
     universe = _universe_lookup(universe_rows)
     sanitized = {
-        "enabled": _as_bool(raw_plan.get("enabled")),
-        "frequency": raw_plan.get("frequency") if raw_plan.get("frequency") in FREQUENCIES else "weekly",
-        "schedule_pattern": str(raw_plan.get("schedule_pattern") or DEFAULT_DCA_PLAN["schedule_pattern"])[:80],
-        "next_run_date": str(raw_plan.get("next_run_date") or ""),
         "max_item_amount": min(
             max(_as_float(raw_plan.get("max_item_amount"), default=DCA_MAX_ITEM_AMOUNT), 1.0),
             DCA_MAX_ITEM_AMOUNT,
@@ -130,11 +125,35 @@ def save_dca_plan(plan: dict[str, Any], universe_rows: list[dict[str, Any]], pat
     return sanitized
 
 
+def unknown_plan_symbols(universe_rows: list[dict[str, Any]] | None = None, path: str | None = None) -> list[str]:
+    """Plan symbols that are not in the tradable universe.
+
+    ``sanitize_dca_plan`` drops them, so without this a typo in a bucket is invisible: the row
+    simply never appears and the money is silently never spent.
+    """
+    if universe_rows is None:
+        from ...api.api_payloads import universe_payload
+
+        universe_rows = universe_payload()["rows"]
+    universe = _universe_lookup(universe_rows)
+    raw_plan = _raw_plan_from_config(load_dca_config(path))
+    unknown: list[str] = []
+    for bucket in BUCKETS:
+        for item in (raw_plan.get(bucket) or {}).get("items", []) or []:
+            symbol = str(item.get("symbol", "")).strip().upper()
+            if symbol and symbol not in universe and symbol not in unknown:
+                unknown.append(symbol)
+    return unknown
+
+
 def allocation_preview(plan: dict[str, Any]) -> list[dict[str, Any]]:
-    """Create planned DCA order rows from exact per-symbol dollar amounts."""
+    """Create planned DCA order rows from exact per-symbol dollar amounts.
+
+    Always rendered. The plan describes what would be bought; whether anything is actually
+    bought is the algorithm bot's switch, and a preview that vanished when the bot was off
+    could not be reviewed before turning it on.
+    """
     rows: list[dict[str, Any]] = []
-    if not plan.get("enabled"):
-        return rows
 
     for bucket in BUCKETS:
         bucket_plan = plan.get(bucket, {})
@@ -158,8 +177,6 @@ def allocation_preview(plan: dict[str, Any]) -> list[dict[str, Any]]:
                     "rank": index + 1,
                     "weight": weight,
                     "notional": notional,
-                    "frequency": plan.get("frequency", "weekly"),
-                    "next_run_date": plan.get("next_run_date", ""),
                 }
             )
     return rows

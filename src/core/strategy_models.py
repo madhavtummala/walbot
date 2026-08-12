@@ -8,14 +8,12 @@ import pandas as pd
 from src.data.signals.signals import compute_social_trend_score
 
 STRATEGY_LABELS = {
-    "momentum_social": "Momentum + Social",
-    "trend_following": "Trend Following",
-    "mean_reversion": "Mean Reversion",
-    "breakout": "Breakout",
-    "risk_parity": "Risk Parity",
-    "dual_momentum": "Dual Momentum",
+    "dca": "DCA",
+    "bursty_dca": "Bursty DCA",
     "fast_momentum": "Fast Momentum",
-    "invest_spy": "Invest SPY",
+    # Named for what it does: classify SPY into GROWING / FLAT / FALLING / CRISIS and rotate
+    # between growth, covered-call income, cash, and hedges.
+    "spy_rotation": "SPY Rotation",
 }
 
 DEFENSIVE_MOMENTUM_DEFENSIVE_SYMBOLS = {"BIL", "SHY", "SPTS", "IEF", "GOVT", "AGG", "BND", "IUSB", "STIP", "TLT", "GLD"}
@@ -315,45 +313,3 @@ def strategy_signal_rows(
         for symbol, df in bars_by_symbol.items()
     ]
     return _rank_strategy_rows(strategy, rows)
-
-
-def strategy_signal_rows_from_prepared(
-    strategy: str,
-    bars_by_symbol: dict[str, pd.DataFrame],
-    social_by_symbol: dict[str, pd.DataFrame] | None = None,
-    *,
-    social_lookback_days: int = 30,
-    social_weight: float = 0.0,
-) -> list[dict[str, Any]]:
-    rows = [
-        strategy_row_from_prepared(
-            strategy,
-            symbol,
-            df,
-            (social_by_symbol or {}).get(symbol),
-            social_lookback_days=social_lookback_days,
-            social_weight=social_weight,
-        )
-        for symbol, df in bars_by_symbol.items()
-    ]
-    return _rank_strategy_rows(strategy, rows)
-
-
-def weights_from_strategy_rows(
-    rows: list[dict[str, Any]],
-    symbols: list[str],
-    max_longs: int,
-    max_weight_per_symbol: float,
-    max_portfolio_exposure: float,
-) -> dict[str, float]:
-    weights = {symbol: 0.0 for symbol in symbols}
-    active = [row for row in rows if row["side"] in {"LONG", "SHORT"}]
-    if not active:
-        return weights
-
-    gross_slots = min(len(active), max(int(max_longs or len(active)), 1))
-    selected = active[:gross_slots]
-    raw_weight = min(max(float(max_weight_per_symbol), 0.01), max(float(max_portfolio_exposure), 0.0) / len(selected))
-    for row in selected:
-        weights[row["symbol"]] = raw_weight if row["side"] == "LONG" else -raw_weight
-    return weights

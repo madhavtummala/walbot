@@ -119,6 +119,29 @@ def compute_rsi(df: pd.DataFrame, *, price_column: str = "close", lookback: int 
     return rsi.fillna(50.0).rename("rsi")
 
 
+def compute_bollinger_percent_b(
+    df: pd.DataFrame,
+    *,
+    price_column: str = "close",
+    lookback: int = 20,
+    num_std: float = 2.0,
+) -> pd.Series:
+    """Return Bollinger %B: 0 at the lower band, 1 at the upper, negative below the lower band.
+
+    A flat window has no bands to speak of, so it reports 0.5 (mid-band) rather than dividing
+    by a zero width and calling every bar an extreme.
+    """
+    if df.empty or price_column not in df:
+        return pd.Series(dtype=float, name="percent_b")
+    prices = pd.to_numeric(df[price_column], errors="coerce")
+    period = max(int(lookback), 1)
+    middle = prices.rolling(period, min_periods=period).mean()
+    width = prices.rolling(period, min_periods=period).std(ddof=0) * float(num_std)
+    lower = middle - width
+    percent_b = (prices - lower) / (2 * width)
+    return percent_b.where(width > 0, 0.5).rename("percent_b")
+
+
 def compute_momentum_and_trend(
     df: pd.DataFrame,
     lookback_days: int,

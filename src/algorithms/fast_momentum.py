@@ -11,7 +11,7 @@ import pandas as pd
 
 from .base import BaseAlgorithm
 from ..connectors import fetch_intraday_market_bars, fetch_latest_news_sentiment
-from ..core.interfaces import AlgorithmContext, AlgorithmDecision, AlgorithmRequirements
+from ..core.interfaces import AlgorithmContext, AlgorithmDecision, AlgorithmRequirements, Schedule
 from ..data import fetch_daily_bars
 from ..data.state_store import load_state, save_state
 
@@ -542,19 +542,27 @@ def allocation_mode(target_weights: dict[str, float]) -> str:
 
 
 def score_universe(
-    runtime_config: Any, data_client: Any, strategy_config: DefensiveMomentumConfig
-) -> tuple[dict[str, dict[str, Any]], float]:
-    """Load bars and sentiment, then score every symbol. Pure market data -- no account state."""
-    symbols = strategy_config.symbols
-    intraday_bars = get_intraday_bars(symbols, strategy_config.required_intraday_bars, runtime_config, data_client)
-    daily_bars = get_daily_bars(symbols, strategy_config.required_daily_bars, runtime_config, data_client)
-    sentiment, market_sentiment = get_sentiment_snapshot(symbols, strategy_config.sentiment_lookback_minutes, runtime_config)
+    context: AlgorithmContext, strategy_config: DefensiveMomentumConfig
+) -> dict[str, dict[str, Any]]:
+    """Score every symbol from the bars already in ``context``.
 
-    features = {
-        symbol: compute_price_features(symbol, intraday_bars.get(symbol, pd.DataFrame()), daily_bars.get(symbol, pd.DataFrame()), strategy_config)
-        for symbol in symbols
-    }
-    return compute_composite_scores(features, sentiment, strategy_config), market_sentiment
+    Takes the context rather than fetching, so the live runner and the backtester score
+    identically -- the backtester supplies a point-in-time slice and gets the real algorithm
+    instead of a reimplementation of it.
+    """
+    return compute_composite_scores(
+        {
+            symbol: compute_price_features(
+                symbol,
+                context.intraday_bars_by_symbol.get(symbol, pd.DataFrame()),
+                context.bars_by_symbol.get(symbol, pd.DataFrame()),
+                strategy_config,
+            )
+            for symbol in strategy_config.symbols
+        },
+        context.sentiment_scores,
+        strategy_config,
+    )
 
 
 def apply_stickiness(
@@ -646,11 +654,17 @@ def signals_from_scores(
 class FastMomentumAlgorithm(BaseAlgorithm):
     algorithm_id = "fast_momentum"
 
+    #: Hourly through the session. Nano and micro momentum are computed from intraday bars,
+    #: so a once-a-day look would discard the signal this algorithm exists to trade.
+    schedule = Schedule()
+
     def requirements(self, config: Any, current_positions: dict[str, int]) -> AlgorithmRequirements:
         strategy_config = DefensiveMomentumConfig.from_runtime_config(config)
         return AlgorithmRequirements(
             price_symbols=sorted(set(strategy_config.symbols) | set(current_positions)),
             daily_lookback_days=strategy_config.required_daily_bars,
+            intraday_lookback_bars=strategy_config.required_intraday_bars,
+            needs_sentiment=True,
             paper_only=True,
         )
 
@@ -670,20 +684,18 @@ class FastMomentumAlgorithm(BaseAlgorithm):
         and equity, so they run in ``refine``.
         """
         strategy_config = DefensiveMomentumConfig.from_runtime_config(context.config)
-        scores, market_sentiment = score_universe(
-            context.config, context.extra.get("data_client"), strategy_config
-        )
+        scores = score_universe(context, strategy_config)
         raw_weights = decide_target_weights(scores, strategy_config)
         return AlgorithmDecision(
             target_weights=raw_weights,
             signals=signals_from_scores(scores, raw_weights, strategy_config),
             metadata={
                 "allocation_mode": allocation_mode(raw_weights),
-                "market_sentiment": market_sentiment,
+                "market_sentiment": context.market_sentiment,
             },
         )
 
-    def refine(
+    def refine_weights(
         self,
         target_weights: dict[str, float],
         signals: dict[str, dict[str, Any]],

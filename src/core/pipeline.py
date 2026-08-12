@@ -8,14 +8,17 @@ from src.algorithms.registry import get_algorithm_class
 from src.brokerages import BROKERAGE_REGISTRY
 from src.core.config import get_account_broker_type
 from src.core.interfaces import (
+    MODE_TARGET,
     AlgorithmContext,
     AlgorithmDecision,
     AlgorithmResult,
     Brokerage,
     PortfolioSnapshot,
+    intents_from_weights,
+    weights_from_intents,
 )
-from src.core.market_context import load_algorithm_context
-from src.core.orders import plan_position_orders, submit_planned_orders
+from src.core.market_context import build_algorithm_context
+from src.core.orders import plan_share_orders, resolve_target_shares, submit_planned_orders
 
 logger = logging.getLogger(__name__)
 
@@ -72,28 +75,21 @@ def run_algorithm(strategy: str, config, *, data_client: Any = None) -> Algorith
     """
     algorithm = get_algorithm_class(strategy).from_config(config)
     requirements = algorithm.requirements(config, {})
-    bars_by_symbol, sentiment_by_symbol, latest_prices, _ = load_algorithm_context(
-        config, requirements, {}, data_client
-    )
+    context = build_algorithm_context(config, requirements, data_client=data_client)
+    latest_prices = context.latest_prices
 
-    decision: AlgorithmDecision = algorithm.analyze(
-        AlgorithmContext(
-            config=config,
-            bars_by_symbol=bars_by_symbol,
-            sentiment_by_symbol=sentiment_by_symbol,
-            positions={},
-            latest_prices=latest_prices,
-            equity=0.0,
-            account_id=getattr(config, "account_id", ""),
-        )
-    )
+    decision: AlgorithmDecision = algorithm.analyze(context)
 
+    intents = [
+        intent for intent in decision.resolved_intents() if intent.kind != "weight" or intent.value
+    ]
     return AlgorithmResult(
         strategy=strategy,
-        target_weights={symbol: weight for symbol, weight in decision.target_weights.items() if weight},
+        intents=intents,
         signals=decision.signals,
         latest_prices=latest_prices,
         metadata={**decision.metadata, "requirements": requirements},
+        mode=decision.mode,
     )
 
 
@@ -133,7 +129,7 @@ def place_orders(
 ) -> dict[str, Any]:
     """Turn a step-1 result into submitted orders, given what the account currently holds.
 
-    ``target_weights`` overrides the result's own weights, which is how a reviewing agent
+    ``target_weights`` overrides the result's own intents, which is how a reviewing agent
     submits an edited portfolio; the set is the complete intended portfolio, so a held symbol
     left out of it is exited. Does no market-data fetching -- prices come from ``result``.
     """
@@ -143,8 +139,17 @@ def place_orders(
     snapshot = read_snapshot(config, brokerage)
     latest_prices = result.latest_prices
 
-    proposed = dict(result.target_weights if target_weights is None else target_weights)
-    unpriced = sorted(symbol for symbol in proposed if latest_prices.get(symbol, 0.0) <= 0)
+    mode = result.mode
+    if target_weights is None:
+        proposed = list(result.intents)
+    else:
+        # An edited weight set is by definition the whole intended portfolio.
+        proposed, mode = intents_from_weights(target_weights), MODE_TARGET
+
+    # ``shares`` intents carry their own quantity; everything else has to be priced to size.
+    unpriced = sorted(
+        {intent.symbol for intent in proposed if intent.kind != "shares" and latest_prices.get(intent.symbol, 0.0) <= 0}
+    )
     if unpriced:
         raise ValueError(
             f"No price available for {', '.join(unpriced)}. Step 2 does not fetch market data, "
@@ -152,21 +157,27 @@ def place_orders(
         )
 
     sizing = algorithm.sizing(config)
-    final_weights = algorithm.refine(proposed, result.signals, snapshot, latest_prices, config)
+    final_intents = algorithm.refine(proposed, result.signals, snapshot, latest_prices, config)
 
-    # Absent symbols are an explicit exit, so anything still held must be targeted at zero.
-    sized_weights = {symbol: 0.0 for symbol in snapshot.positions}
-    sized_weights.update(final_weights)
+    investable_equity = snapshot.equity * max(0.0, min(1.0, 1.0 - sizing["cash_buffer"]))
+    sized_shares = resolve_target_shares(
+        final_intents,
+        mode,
+        snapshot.positions,
+        latest_prices,
+        investable_equity,
+        supports_fractional_shares=getattr(brokerage, "supports_fractional_shares", False),
+    )
 
-    planned_orders = plan_position_orders(
+    planned_orders = plan_share_orders(
         latest_prices,
         snapshot.positions,
-        sized_weights,
+        sized_shares,
         snapshot.equity,
-        cash_buffer=sizing["cash_buffer"],
         min_trade_dollars=sizing["min_trade_dollars"],
         rebalance_threshold=sizing["rebalance_threshold"],
         supports_fractional_shares=getattr(brokerage, "supports_fractional_shares", False),
+        target_weights=weights_from_intents(final_intents),
     )
     order_results = submit_planned_orders(
         brokerage,
@@ -176,15 +187,27 @@ def place_orders(
         approval_poll_seconds=approval_poll_seconds,
     )
 
+    algorithm.settle(config, order_results, final_intents)
+
     rejected = [order for order in order_results if order.get("status") == "rejected"]
     submitted = [order for order in order_results if order.get("status") == "submitted"]
+    # Reported as the portfolio the sized orders actually land on, so an incremental run --
+    # whose intents describe a change rather than a destination -- reports something meaningful.
+    resulting_weights = PortfolioSnapshot(
+        positions={**snapshot.positions, **sized_shares}, equity=snapshot.equity
+    ).weights(latest_prices)
     return {
         "strategy": result.strategy,
+        "mode": mode,
         "status": _batch_status(order_results, submitted, rejected),
         "equity": snapshot.equity,
-        "proposed_weights": proposed,
-        "final_weights": final_weights,
-        "diff": weight_diff(snapshot.weights(latest_prices), sized_weights),
+        "proposed_weights": weights_from_intents(proposed),
+        "final_weights": resulting_weights,
+        "final_intents": [
+            {"symbol": intent.symbol, "kind": intent.kind, "value": intent.value}
+            for intent in final_intents
+        ],
+        "diff": weight_diff(snapshot.weights(latest_prices), resulting_weights),
         "planned_orders": planned_orders,
         "order_results": order_results,
         "rejected": [

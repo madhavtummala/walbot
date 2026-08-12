@@ -44,7 +44,7 @@ def main() -> None:
     args = parser.parse_args()
 
     uvicorn.run(
-        "src.web_app:app",
+        "src.api.web_app:app",
         host=args.host,
         port=args.port,
         reload=args.reload,

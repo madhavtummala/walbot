@@ -5,17 +5,14 @@ import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
-from math import floor
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from ..brokerages.alpaca_client import create_data_client, get_latest_price
-from src.core.config import get_config
-from src.core.cron import cron_matches
-from src.core.orders import submit_planned_orders
+from src.core.config import DEFAULT_STRATEGY_ID, get_config
 from src.core import pipeline
 from ..api.controls import load_controls
-from ..algorithms.dca import allocation_preview, load_dca_plan
+from ..algorithms.registry import get_algorithm_class
+from ..core.interfaces import Schedule, schedule_minutes
 from ..execution.live_runner import run_once
 from ..common.logging_utils import log_position_changes
 
@@ -129,7 +126,10 @@ class _RuntimeLoop:
 
 
 def _algorithm_enabled(controls: dict[str, Any]) -> bool:
-    return bool(controls.get("algorithm_enabled")) and str(controls.get("active_strategy") or "none") != "none"
+    # No sentinel strategy to screen out any more: every id names a real algorithm, so the
+    # power toggle is the whole answer. Options still has a "none" because it can be off
+    # while equities trade.
+    return bool(controls.get("algorithm_enabled"))
 
 
 def _options_enabled(controls: dict[str, Any]) -> bool:
@@ -139,14 +139,6 @@ def _options_enabled(controls: dict[str, Any]) -> bool:
         and str(controls.get("options_strategy") or "none") != "none"
         and not config.kill_switch
     )
-
-
-def _dca_enabled(_controls: dict[str, Any]) -> bool:
-    config = get_config()
-    from src.api.api_payloads import universe_payload
-
-    plan = load_dca_plan(universe_payload()["rows"])
-    return bool(plan.get("enabled")) and not config.kill_switch
 
 
 def _run_algorithm(account_id: str | None) -> None:
@@ -159,86 +151,27 @@ def _run_options(account_id: str | None) -> None:
     run_options_once(account_id=account_id)
 
 
-def _run_dca(account_id: str | None) -> None:
-    from src.api.api_payloads import universe_payload
+def _active_schedule(controls: dict[str, Any]) -> Schedule:
+    """The selected algorithm's declared cadence.
 
-    config = get_config(account_id=account_id)
-    if config.kill_switch:
-        logger.warning("Kill switch is enabled. Exiting DCA runtime without sending orders.")
-        return
-
-    plan = load_dca_plan(universe_payload()["rows"])
-    preview = allocation_preview(plan)
-    if not preview:
-        log_position_changes([])
-        return
-
-    brokerage = pipeline.resolve_brokerage(config)
-    if not brokerage.is_market_open():
-        logger.warning("Market is closed according to Alpaca clock. Exiting DCA runtime without sending orders.")
-        return
-
-    data_client = create_data_client(config)
-    planned_orders: list[dict[str, Any]] = []
-    for row in preview:
-        symbol = str(row["symbol"])
-        side = str(row["action"])
-        price = get_latest_price(symbol, data_client, data_feed=config.alpaca_data_feed)
-        quantity = floor(float(row["notional"]) / price) if price > 0 else 0
-        if quantity <= 0:
-            logger.info("Skipping DCA %s for %s because notional is below one share", side, symbol)
-            continue
-        planned_orders.append(
-            {
-                "symbol": symbol,
-                "action": side,
-                "quantity": quantity,
-                "notional": float(row["notional"]),
-                "trade_dollars": float(row["notional"]),
-            }
-        )
-
-    if not planned_orders:
-        log_position_changes([])
-        return
-
-    order_results = submit_planned_orders(
-        brokerage,
-        planned_orders,
-        require_approval=config.require_trade_approval,
-        approval_id=f"dca-{datetime.now(timezone.utc).strftime('%H%M%S')}",
-        approval_timeout_seconds=config.trade_approval_timeout_seconds,
-        approval_poll_seconds=config.trade_approval_poll_seconds,
-    )
-    log_position_changes(order_results)
-
-
-def _dca_run_key() -> str | None:
-    from src.api.api_payloads import universe_payload
-
-    plan = load_dca_plan(universe_payload()["rows"])
-    now = datetime.now(MARKET_TZ).replace(second=0, microsecond=0)
-    if not cron_matches(str(plan.get("schedule_pattern") or ""), now):
-        return None
-    return f"dca:{now.isoformat(timespec='minutes')}"
-
-
-def _parse_hhmm(value: str, default_minute: int) -> int:
+    Cadence is a property of the strategy, not of the deployment, so it is read off the class
+    rather than from config. An unknown strategy falls back to the base default, which only
+    matters for how often the idle loop wakes to re-read controls.
+    """
+    strategy = str(controls.get("active_strategy") or DEFAULT_STRATEGY_ID)
     try:
-        hour, minute = str(value or "").strip().split(":", 1)
-        parsed = (int(hour) * 60) + int(minute)
-    except (TypeError, ValueError):
-        return default_minute
-    return parsed if 0 <= parsed <= (23 * 60) + 59 else default_minute
+        return get_algorithm_class(strategy).schedule
+    except (KeyError, ValueError, TypeError):
+        return Schedule()
 
 
-def _is_regular_market_hours(now: datetime, start_time: str = "08:30", end_time: str = "15:00") -> bool:
+def _is_regular_market_hours(now: datetime, schedule: Schedule) -> bool:
     local_now = now.astimezone(MARKET_TZ) if now.tzinfo else now.replace(tzinfo=MARKET_TZ)
-    if local_now.weekday() >= 5:
+    if local_now.weekday() not in schedule.weekdays:
         return False
     minute_of_day = (local_now.hour * 60) + local_now.minute
-    start_minute = max(_parse_hhmm(start_time, MARKET_OPEN_MINUTE), MARKET_OPEN_MINUTE)
-    end_minute = min(_parse_hhmm(end_time, MARKET_CLOSE_MINUTE), MARKET_CLOSE_MINUTE)
+    start_minute = max(schedule_minutes(schedule.start_time, MARKET_OPEN_MINUTE), MARKET_OPEN_MINUTE)
+    end_minute = min(schedule_minutes(schedule.end_time, MARKET_CLOSE_MINUTE), MARKET_CLOSE_MINUTE)
     return start_minute <= minute_of_day < end_minute
 
 
@@ -250,23 +183,17 @@ def _algorithm_jitter_offset_minutes(bucket: datetime, refresh_minutes: int, jit
     return int.from_bytes(sha256(seed).digest()[:4], "big") % (jitter_minutes + 1)
 
 
-def _algorithm_bucket_key(
-    now: datetime,
-    refresh_minutes: int,
-    jitter_minutes: int = 0,
-    start_time: str = "08:30",
-    end_time: str = "15:00",
-) -> str | None:
-    if not _is_regular_market_hours(now, start_time, end_time):
+def _algorithm_bucket_key(now: datetime, schedule: Schedule) -> str | None:
+    if not _is_regular_market_hours(now, schedule):
         return None
-    refresh_minutes = max(int(refresh_minutes or 30), 1)
+    refresh_minutes = max(int(schedule.refresh_minutes or 30), 1)
     local_now = now.astimezone(MARKET_TZ) if now.tzinfo else now.replace(tzinfo=MARKET_TZ)
     minute_of_day = (local_now.hour * 60) + local_now.minute
-    start_minute = max(_parse_hhmm(start_time, MARKET_OPEN_MINUTE), MARKET_OPEN_MINUTE)
+    start_minute = max(schedule_minutes(schedule.start_time, MARKET_OPEN_MINUTE), MARKET_OPEN_MINUTE)
     bucket_minute = start_minute + (((minute_of_day - start_minute) // refresh_minutes) * refresh_minutes)
     bucket_hour, bucket_minute = divmod(bucket_minute, 60)
     bucket = local_now.replace(hour=bucket_hour, minute=bucket_minute, second=0, microsecond=0)
-    jitter_offset = _algorithm_jitter_offset_minutes(bucket, refresh_minutes, jitter_minutes)
+    jitter_offset = _algorithm_jitter_offset_minutes(bucket, refresh_minutes, schedule.jitter_minutes)
     scheduled = bucket + timedelta(minutes=jitter_offset)
     if local_now < scheduled:
         return None
@@ -274,37 +201,36 @@ def _algorithm_bucket_key(
 
 
 def _algorithm_run_key() -> str | None:
-    config = get_config()
-    return _algorithm_bucket_key(
-        datetime.now(MARKET_TZ),
-        config.algorithm_market_data_refresh_minutes,
-        config.algorithm_run_jitter_minutes,
-        config.trading_start_time,
-        config.trading_end_time,
-    )
+    return _algorithm_bucket_key(datetime.now(MARKET_TZ), _active_schedule(load_controls()))
 
 
 def _options_run_key() -> str | None:
-    return _algorithm_run_key()
+    """Options keep the base cadence: the swing algorithm is not in the equities registry, so
+    it has no ``Schedule`` of its own to read."""
+    return _algorithm_bucket_key(datetime.now(MARKET_TZ), Schedule())
 
 
 def _algorithm_check_seconds() -> int:
-    return get_config().algorithm_check_seconds
+    return _active_schedule(load_controls()).check_seconds
 
 
 def _options_check_seconds() -> int:
-    return get_config().algorithm_check_seconds
+    return Schedule().check_seconds
 
 
 def _options_account_id(controls: dict[str, Any]) -> str:
     return str(controls.get("options_trading_account_id") or controls.get("trading_account_id") or "")
 
 
-def _dca_check_seconds() -> int:
-    return get_config().dca_check_seconds
-
-
 class BotRuntime:
+    """Two loops, not three.
+
+    DCA used to get its own loop with its own cron, because it was not an algorithm. Now that
+    it is one, it runs on the equities loop like everything else and its cadence comes from
+    ``DCAAlgorithm.schedule``. Keeping the third loop would have let two schedulers drive the
+    same accrual state at once.
+    """
+
     def __init__(self) -> None:
         self.algorithm = _RuntimeLoop(
             "algorithm",
@@ -321,23 +247,19 @@ class BotRuntime:
             _options_run_key,
             _options_account_id,
         )
-        self.dca = _RuntimeLoop("dca", _dca_enabled, _run_dca, _dca_check_seconds, _dca_run_key)
 
     def start(self) -> None:
         self.algorithm.start()
         self.options.start()
-        self.dca.start()
 
     def stop(self) -> None:
         self.algorithm.stop()
         self.options.stop()
-        self.dca.stop()
 
     def snapshot(self) -> dict[str, Any]:
         return {
             "algorithm": self.algorithm.snapshot(),
             "options": self.options.snapshot(),
-            "dca": self.dca.snapshot(),
         }
 
 

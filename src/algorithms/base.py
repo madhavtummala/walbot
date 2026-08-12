@@ -3,7 +3,17 @@ from __future__ import annotations
 import logging
 import math
 from typing import Dict, Any, List
-from ..core.interfaces import AlgorithmDecision, AlgorithmPlugin, AlgorithmContext, AlgorithmRequirements, SignalView
+from ..core.interfaces import (
+    AlgorithmDecision,
+    AlgorithmPlugin,
+    AlgorithmContext,
+    AlgorithmRequirements,
+    Intent,
+    PortfolioSnapshot,
+    SignalView,
+    intents_from_weights,
+    weights_from_intents,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,31 +98,48 @@ class BaseAlgorithm(AlgorithmPlugin):
     def decide(self, context: AlgorithmContext) -> AlgorithmDecision:
         return AlgorithmDecision()
 
+    def refine(
+        self,
+        intents: List[Intent],
+        signals: Dict[str, Dict[str, Any]],
+        snapshot: PortfolioSnapshot,
+        latest_prices: Dict[str, float],
+        config: Any,
+    ) -> List[Intent]:
+        """Route weight intents through :meth:`refine_weights` and pass anything else through.
+
+        Allocation algorithms think in weight dicts, so they override ``refine_weights`` and
+        never see the intent wrapper. Algorithms that emit notional intents (DCA) override
+        ``refine`` itself.
+        """
+        weights = weights_from_intents(intents)
+        others = [intent for intent in intents if intent.kind != "weight"]
+        refined = self.refine_weights(weights, signals, snapshot, latest_prices, config)
+        return intents_from_weights(refined) + others
+
+    def refine_weights(
+        self,
+        target_weights: Dict[str, float],
+        signals: Dict[str, Dict[str, Any]],
+        snapshot: PortfolioSnapshot,
+        latest_prices: Dict[str, float],
+        config: Any,
+    ) -> Dict[str, float]:
+        """Weight-mode step 2: adjust proposed weights for what is already held."""
+        return dict(target_weights)
+
     def signal_view(self, config: Any, *, data_client: Any = None) -> SignalView:
         """Default dashboard view: run step 1 and map its proposal to rows.
 
         Uses ``analyze`` rather than ``decide`` so the dashboard never needs an account, and
         so it cannot hit the guards that divide by equity.
         """
-        from ..core.market_context import load_algorithm_context
+        from ..core.market_context import build_algorithm_context
 
-        requirements = self.requirements(config, {})
-        bars_by_symbol, sentiment_by_symbol, latest_prices, _ = load_algorithm_context(
-            config, requirements, {}, data_client
+        context = build_algorithm_context(
+            config, self.requirements(config, {}), data_client=data_client
         )
-        decision = self.analyze(
-            AlgorithmContext(
-                config=config,
-                bars_by_symbol=bars_by_symbol,
-                sentiment_by_symbol=sentiment_by_symbol,
-                positions={},
-                latest_prices=latest_prices,
-                equity=0.0,
-                account_id=getattr(config, "account_id", ""),
-                extra={"data_client": data_client},
-            )
-        )
-        return signal_view_from_decision(decision, latest_prices)
+        return signal_view_from_decision(self.analyze(context), context.latest_prices)
 
     def log_signal(self, symbol: str, signal_type: str, details: Dict[str, Any]):
         logger.info(f"[{self.algorithm_id}] {symbol} SIGNAL: {signal_type} | {details}")

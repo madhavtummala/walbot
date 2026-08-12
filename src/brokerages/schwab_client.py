@@ -94,7 +94,14 @@ class SchwabSession:
         rotated = str(payload.get("refresh_token") or "")
         if rotated and rotated != self._refresh_token:
             self._refresh_token = rotated
-            save_state(TOKEN_STATE_KEY, {"refresh_token": rotated})
+            # The 7-day clock runs from the original consent and a rotation does not restart
+            # it, so carry the recorded issue time across rather than stamping a new one.
+            stored = load_state(TOKEN_STATE_KEY, {}) or {}
+            issued_at = stored.get("issued_at") if isinstance(stored, dict) else None
+            record: dict[str, Any] = {"refresh_token": rotated}
+            if isinstance(issued_at, (int, float)):
+                record["issued_at"] = issued_at
+            save_state(TOKEN_STATE_KEY, record)
             logger.info("Schwab refresh token rotated and persisted")
 
     def access_token(self) -> str:

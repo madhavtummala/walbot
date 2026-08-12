@@ -1,7 +1,8 @@
 const SVG_NS = "http://www.w3.org/2000/svg";
 const BUCKET_NAMES = ["buy", "sell"];
-const MAX_AMOUNT = 50;
-const WHEEL_STEP = 5;
+const MAX_AMOUNT = 2000;
+const DCA_ALGORITHM_KEYS = ["dca", "bursty_dca"];
+const WHEEL_STEP = 25;
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 let BACKTEST_PERIOD = "4m";
 let BACKTEST_LABEL = "4M";
@@ -18,58 +19,22 @@ const DISABLED_COLORS = {
 
 const STRATEGIES = [
   {
-    key: "momentum_social",
-    name: "Momentum + Social",
+    key: "dca",
+    name: "DCA",
     status: "Live",
-    horizon: "Daily",
-    risk: "Medium",
-    logic: "Ranks the ETF universe every day, buys only names with positive medium-term momentum above the long moving average, then sizes positions by score, volatility, and portfolio caps.",
-    signals: ["N-day return", "21-day return", "Long SMA trend", "Social attention", "Sentiment/vendor score", "Volume z-score", "Realized volatility"],
-  },
-  {
-    key: "trend_following",
-    name: "Trend Following",
-    status: "Template",
-    horizon: "Daily",
-    risk: "Medium",
-    logic: "Stays with persistent uptrends and steps out when price loses the major trend, avoiding counter-trend entries.",
-    signals: ["Close vs 50/200 SMA", "Moving-average slope", "63-day return", "Trend gap", "Realized volatility"],
-  },
-  {
-    key: "mean_reversion",
-    name: "Mean Reversion",
-    status: "Template",
-    horizon: "Swing",
-    risk: "High",
-    logic: "Looks for short-term oversold pullbacks inside a larger uptrend, then exits as price reverts back toward its mean.",
-    signals: ["RSI reset", "20-day z-score", "Bollinger position", "200-day trend filter", "ATR stop distance"],
-  },
-  {
-    key: "breakout",
-    name: "Breakout",
-    status: "Template",
-    horizon: "Swing",
-    risk: "High",
-    logic: "Targets fresh range highs when participation expands, with position size tied to stop distance and volatility.",
-    signals: ["55-day high", "Volume expansion", "ATR compression", "Range width", "Trailing stop distance"],
-  },
-  {
-    key: "risk_parity",
-    name: "Risk Parity",
-    status: "Template",
-    horizon: "Portfolio",
+    horizon: "Continuous",
     risk: "Lower",
-    logic: "Balances portfolio risk so high-volatility assets receive smaller allocations and no single sleeve dominates drawdown.",
-    signals: ["20/60-day volatility", "Inverse-vol weight", "Correlation stress", "Drawdown guard", "Exposure cap"],
+    logic: "Accrues each symbol's monthly budget against elapsed wall-clock time and buys as soon as the accrued amount can clear a broker minimum, so the schedule controls only when it may act, never how much it spends.",
+    signals: ["Monthly budget", "Accrued amount", "Minimum executable trade", "Whole-share threshold"],
   },
   {
-    key: "dual_momentum",
-    name: "Dual Momentum",
-    status: "Template",
-    horizon: "Monthly",
+    key: "bursty_dca",
+    name: "Bursty DCA",
+    status: "Live",
+    horizon: "Continuous",
     risk: "Medium",
-    logic: "Rotates into the strongest assets only when they also clear an absolute momentum hurdle; otherwise it moves toward cash-like exposure.",
-    signals: ["6-month return", "12-month return", "Relative rank", "Absolute momentum hurdle", "Volatility filter"],
+    logic: "Accrues the same monthly budget as DCA but only deploys it into a dip: price must be above its 200-day moving average, and Bollinger %B or Connors RSI(2) must be stretched. Trade size follows a value-averaging path, clamped per trade and per month.",
+    signals: ["200-day regime gate", "Bollinger %B", "Connors RSI(2)", "Value-averaging path", "Trade and monthly clamps"],
   },
   {
     key: "fast_momentum",
@@ -81,78 +46,21 @@ const STRATEGIES = [
     signals: ["Nano momentum", "Micro momentum", "Meso trend", "Macro trend", "Pullback bonus"],
   },
   {
-    key: "invest_spy",
-    name: "Invest SPY",
+    key: "spy_rotation",
+    name: "SPY Rotation",
     status: "Live",
     horizon: "Intraday",
     risk: "Medium",
-    logic: "Classifies SPY as growing, pulling back, flat, falling, or crisis using micro, meso, macro, and sentiment signals, then rotates among SPY, XYLD, defensive assets, and capped hedges.",
+    logic: "Classifies SPY as growing, flat, falling, or crisis using micro, meso, macro, and sentiment signals, then rotates among growth, covered-call income, cash, and capped hedges.",
     signals: ["SPY state", "Micro/meso/macro", "Sentiment", "XYLD flat state", "SH/VXX crisis hedge"],
   },
 ];
 
-const OPTIONS_STRATEGIES = [
-  {
-    key: "options_swing_dual_momentum",
-    name: "Swing Dual Momentum",
-    risk: "Directional",
-    description: "Uses dual-momentum ETF signals to buy 30-60 DTE calls for bullish underlyings or puts for bearish underlyings, with premium and liquidity caps.",
-    config: ["Dual momentum underlyings", "Long calls/puts only", "30-60 DTE", "0.35-0.65 delta", "Premium capped"],
-  },
-  {
-    key: "covered_call",
-    name: "Covered Call",
-    risk: "Income",
-    description: "Sell calls against owned shares to collect premium, accepting capped upside.",
-    config: ["Underlying position", "30-45 DTE", "0.20-0.35 delta short call", "Roll rule before assignment"],
-  },
-  {
-    key: "cash_secured_put",
-    name: "Cash-Secured Put",
-    risk: "Entry",
-    description: "Sell puts only when willing to buy the underlying at the strike.",
-    config: ["Cash reserved for assignment", "20-45 DTE", "0.15-0.30 delta put", "Max allocation per symbol"],
-  },
-  {
-    key: "protective_put",
-    name: "Protective Put",
-    risk: "Hedge",
-    description: "Buy puts to define downside risk on an equity or ETF holding.",
-    config: ["Hedge ratio", "Expiry matching risk window", "Acceptable premium budget", "Strike near loss limit"],
-  },
-  {
-    key: "put_spread",
-    name: "Defined-Risk Put Spread",
-    risk: "Directional",
-    description: "Use a vertical spread to express bullish or bearish views with capped loss.",
-    config: ["Long and short strikes", "Debit/credit limit", "DTE", "Profit-taking and stop rules"],
-  },
-  {
-    key: "iron_condor",
-    name: "Iron Condor",
-    risk: "Neutral",
-    description: "Sell an out-of-the-money call spread and put spread when expecting range-bound movement.",
-    config: ["IV rank threshold", "Short strike deltas", "Wing width", "Exit at profit target or tested side"],
-  },
-];
+//: A saved strategy id that is unknown (or the retired "none") lands here.
+const DEFAULT_ALGORITHM_KEY = "dca";
 
-const NONE_ALGORITHM = {
-  key: "none",
-  name: "None",
-  status: "Idle",
-  horizon: BACKTEST_LABEL,
-  risk: "Flat",
-  logic: "Disables algorithmic trading and leaves the right-side snapshot focused on DCA activity or a flat cached baseline.",
-  signals: ["DCA schedule", "Planned buys", "Flat exposure"],
-};
-
-const NONE_OPTIONS = {
-  key: "none",
-  name: "None",
-  risk: "Idle",
-  description: "No options strategy is active.",
-  config: ["Options trading disabled"],
-};
+//: Strategies driven by the DCA plan, so a plan edit invalidates their cached views.
+const DCA_STRATEGY_KEYS = ["dca", "bursty_dca"];
 
 const state = {
   status: null,
@@ -160,10 +68,7 @@ const state = {
   controls: {
     trading_account_id: "",
     algorithm_enabled: false,
-    options_trading_enabled: false,
-    active_strategy: "momentum_social",
-    options_strategy: "none",
-    options_trading_account_id: "",
+    active_strategy: "fast_momentum",
   },
   accounts: [],
   bot: null,
@@ -188,7 +93,7 @@ const state = {
   universeApplying: false,
   deckWheelLocked: false,
   renderedAlgorithmDeckKey: "",
-  renderedOptionsDeckKey: "",
+  schwabAuth: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -247,16 +152,14 @@ function num(value, digits = 2) {
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
+// DCA is live when it is the selected algorithm and the algorithm bot is on -- the same
+// condition as any other strategy, now that it runs on the shared loop.
 function isDcaEnabled() {
-  return Boolean(state.dca?.plan?.enabled);
+  return isAlgorithmTradingEnabled() && DCA_ALGORITHM_KEYS.includes(activeAlgorithmKey());
 }
 
 function isAlgorithmTradingEnabled() {
-  return Boolean(state.controls?.algorithm_enabled) && activeAlgorithmKey() !== "none";
-}
-
-function isOptionsTradingEnabled() {
-  return Boolean(state.controls?.options_trading_enabled) && activeOptionsKey() !== "none";
+  return Boolean(state.controls?.algorithm_enabled);
 }
 
 function bucketColor(bucketName) {
@@ -287,7 +190,7 @@ function assignedSymbols(bucketName) {
 }
 
 function itemRadius(amount) {
-  return 18 + Math.sqrt(clamp(amount, 0, MAX_AMOUNT)) * 3.45;
+  return 18 + Math.sqrt(clamp(amount, 0, MAX_AMOUNT) / MAX_AMOUNT) * 24.4;
 }
 
 function svgEl(tag, attrs = {}) {
@@ -714,6 +617,7 @@ function resizeNodeToAmount(node, amount) {
   node.amount = clamp(Math.round(amount / WHEEL_STEP) * WHEEL_STEP, 0, MAX_AMOUNT);
   node.radius = itemRadius(node.amount);
   syncNodeToPlan(node);
+  schedulePlanSave();
 }
 
 function selectedDcaNode() {
@@ -905,6 +809,7 @@ function commitSymbolEntry() {
   });
   setBucketItems(draft.bucketName, state.dca.plan[draft.bucketName].items);
   renderDca();
+  schedulePlanSave();
   showToast(`${row.symbol} added`);
 }
 
@@ -914,6 +819,7 @@ function removeSymbol(bucketName, symbol) {
     bucketItems(bucketName).filter((item) => item.symbol !== symbol),
   );
   renderDca();
+  schedulePlanSave();
 }
 
 function moveAsset(node) {
@@ -928,14 +834,13 @@ function moveAsset(node) {
   found.item.amount = node.amount;
   state.dca.plan[node.bucketName].items.push(found.item);
   BUCKET_NAMES.forEach((bucketName) => setBucketItems(bucketName, bucketItems(bucketName)));
+  schedulePlanSave();
 }
 
 function renderControls() {
-  $("#cronPattern").value = state.dca?.plan?.schedule_pattern || "0 12 * * 1-5";
-  renderScheduleDescription();
+  renderPlanSummary();
   renderAlgorithmPower();
   renderAlgorithmDeck();
-  renderOptionsDeck();
   updateFeatureToggles();
 }
 
@@ -961,43 +866,17 @@ function formatDateTick(date, zoom) {
 }
 
 function algorithmChoices() {
-  return [NONE_ALGORITHM, ...STRATEGIES];
-}
-
-function optionsChoices() {
-  return [NONE_OPTIONS, ...OPTIONS_STRATEGIES];
+  return STRATEGIES;
 }
 
 function strategyByKey(strategyKey) {
-  return algorithmChoices().find((choice) => choice.key === strategyKey) || NONE_ALGORITHM;
-}
-
-function optionsUnderlyingStrategyKey(optionsKey = activeOptionsKey()) {
-  if (optionsKey === "options_swing_dual_momentum") return "dual_momentum";
-  return "none";
-}
-
-function optionsSignalChoice() {
-  const selected = optionsChoices().find((choice) => choice.key === activeOptionsKey()) || NONE_OPTIONS;
-  const underlyingKey = optionsUnderlyingStrategyKey(selected.key);
-  const underlying = strategyByKey(underlyingKey);
-  if (underlyingKey === "none") return selected;
-  return {
-    ...underlying,
-    name: selected.name,
-    logic: selected.description,
-    signals: underlying.signals || selected.config || [],
-  };
+  return algorithmChoices().find((choice) => choice.key === strategyKey) || STRATEGIES[0];
 }
 
 function activeAlgorithmKey() {
-  const key = state.controls?.active_strategy || "none";
-  return algorithmChoices().some((choice) => choice.key === key) ? key : "none";
-}
-
-function activeOptionsKey() {
-  const key = state.controls?.options_strategy || "none";
-  return optionsChoices().some((choice) => choice.key === key) ? key : "none";
+  const key = state.controls?.active_strategy || DEFAULT_ALGORITHM_KEY;
+  // A saved "none" predates DCA being selectable; it always meant "just run DCA".
+  return algorithmChoices().some((choice) => choice.key === key) ? key : DEFAULT_ALGORITHM_KEY;
 }
 
 function deckClass(offset) {
@@ -1153,10 +1032,7 @@ async function applyUniverseProposal() {
     state.dca.plan.max_item_amount = MAX_AMOUNT;
     renderDca();
     renderAlgorithmDeck();
-    renderOptionsSignals();
     loadSignals(activeAlgorithmKey());
-    const optionsSignalKey = optionsUnderlyingStrategyKey();
-    if (optionsSignalKey !== "none" && optionsSignalKey !== activeAlgorithmKey()) loadSignals(optionsSignalKey);
     loadCachedBacktestsForDeck();
     showToast("Universe applied");
   } catch (error) {
@@ -1168,7 +1044,7 @@ async function applyUniverseProposal() {
 }
 
 async function loadCachedBacktestsForDeck() {
-  const keys = [...new Set([...algorithmChoices().map((strategy) => strategy.key), optionsUnderlyingStrategyKey()].filter(Boolean))];
+  const keys = algorithmChoices().map((strategy) => strategy.key);
   for (const strategyKey of keys) {
     if (!state.backtests[strategyKey] && !state.backtestLoading[strategyKey]) {
       await loadBacktest(strategyKey, false, { cacheOnly: true });
@@ -1184,7 +1060,6 @@ async function ensureSignals(strategyKey) {
 async function loadSignals(strategyKey) {
   state.signalLoading[strategyKey] = true;
   renderAlgorithmSignals();
-  renderOptionsSignals();
   try {
     state.signals[strategyKey] = await api(`/api/strategy-signals?strategy=${encodeURIComponent(strategyKey)}`, {
       timeoutMs: 60000,
@@ -1194,7 +1069,6 @@ async function loadSignals(strategyKey) {
   } finally {
     state.signalLoading[strategyKey] = false;
     renderAlgorithmSignals();
-    renderOptionsSignals();
   }
 }
 
@@ -1212,7 +1086,7 @@ function formatSignalDetail(strategyKey, row) {
     ];
     return details.join(" / ");
   }
-  if (strategyKey === "invest_spy") {
+  if (strategyKey === "spy_rotation") {
     const details = [];
     if (row.reason) details.push(row.reason);
     if (row.spy_state) details.push(`SPY ${String(row.spy_state).toLowerCase()}`);
@@ -1232,11 +1106,9 @@ function formatSignalDetail(strategyKey, row) {
     const close = row.close ? ` / Close ${money(row.close, 2)}` : "";
     return `${row.reason}${close}`;
   }
-  if (strategyKey === "momentum_social") {
-    return `Price ${num(row.price_score, 2)} / Social ${num(row.social_score, 2)} / Volume ${num(row.volume_score, 2)}`;
-  }
-  if (strategyKey === "none") {
-    return `Weight ${percent(row.target_weight)} / ${row.trend_ok ? "Enabled" : "Inactive"}`;
+  if (DCA_ALGORITHM_KEYS.includes(strategyKey)) {
+    const budget = `${money(row.monthly_budget, 0)}/month`;
+    return `${budget} / Accrued ${money(row.accrued, 2)} of ${money(row.min_executable, 2)}`;
   }
   if (row.close) {
     return `Close ${money(row.close, 2)}`;
@@ -1250,7 +1122,13 @@ function signedNum(value, digits = 2) {
 }
 
 function formatSignalHeadline(strategyKey, row) {
-  if (strategyKey === "fast_momentum" || strategyKey === "invest_spy") {
+  if (DCA_ALGORITHM_KEYS.includes(strategyKey)) {
+    const parts = [row.side || row.signal || "Signal", row.reason || ""];
+    if (row.close) parts.push(`Close ${money(row.close, 2)}`);
+    if (row.warning) parts.push(row.warning);
+    return parts.filter(Boolean).join(" / ");
+  }
+  if (strategyKey === "fast_momentum" || strategyKey === "spy_rotation") {
     const parts = [
       row.side || row.signal || "Signal",
       `Score ${num(row.score, 2)}`,
@@ -1436,7 +1314,6 @@ async function selectAlgorithmStrategy(strategyKey) {
   }
   if (strategyKey === activeAlgorithmKey()) return;
   state.controls.active_strategy = strategyKey;
-  if (strategyKey === "none") state.controls.algorithm_enabled = false;
   renderAlgorithmDeck();
   renderAlgorithmPower();
   const savePromise = saveControlsOnly({ renderDecks: false });
@@ -1477,158 +1354,11 @@ function selectRelativeAlgorithm(direction) {
   if (next && next.key !== activeAlgorithmKey()) selectAlgorithmStrategy(next.key);
 }
 
-function renderOptionsDeck() {
-  const deck = $("#optionsDeck");
-  if (!deck) return;
-  const choices = optionsChoices();
-  const activeKey = activeOptionsKey();
-  const activeIndex = Math.max(0, choices.findIndex((choice) => choice.key === activeKey));
-  const renderKey = `${activeKey}:${choices.length}`;
-  deck.classList.toggle("locked", isOptionsTradingEnabled());
-  deck.setAttribute("aria-disabled", String(isOptionsTradingEnabled()));
-  if (state.renderedOptionsDeckKey === renderKey && deck.children.length) {
-    renderOptionsInsight();
-    return;
-  }
-  state.renderedOptionsDeckKey = renderKey;
-  deck.innerHTML = choices.map((strategy, index) => {
-    const offset = index - activeIndex;
-    return `
-      <article class="deckCard optionsDeckCard ${deckClass(offset)} ${toneClass(index + 2)}" data-options-strategy="${escapeHtml(strategy.key)}" aria-current="${offset === 0 ? "true" : "false"}">
-        <header class="deckHeader">
-          <div>
-            <span class="deckKicker">${offset === 0 ? "Active" : "Available"}</span>
-            <h2>${escapeHtml(strategy.name)}</h2>
-          </div>
-        </header>
-        <p>${escapeHtml(strategy.description)}</p>
-        <div class="strategyMeta">
-          <span>${escapeHtml(strategy.risk)}</span>
-          ${strategy.config.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
-        </div>
-      </article>
-    `;
-  }).join("");
-  renderOptionsInsight();
-}
-
-async function selectOptionsStrategy(strategyKey) {
-  if (isOptionsTradingEnabled()) {
-    showToast("Turn options bot off before changing strategies");
-    return;
-  }
-  if (strategyKey === activeOptionsKey()) return;
-  state.controls.options_strategy = strategyKey;
-  if (strategyKey === "none") state.controls.options_trading_enabled = false;
-  renderOptionsDeck();
-  renderOptionsPower();
-  const signalKey = optionsUnderlyingStrategyKey(strategyKey);
-  const savePromise = saveControlsOnly({ renderDecks: false });
-  await Promise.all([savePromise, signalKey === "none" ? Promise.resolve() : ensureSignals(signalKey)]);
-}
-
-function shiftOptionsDeck(direction) {
-  if (isOptionsTradingEnabled()) {
-    showToast("Turn options bot off before changing strategies");
-    return;
-  }
-  const choices = optionsChoices();
-  const index = Math.max(0, choices.findIndex((choice) => choice.key === activeOptionsKey()));
-  const nextIndex = clamp(index + direction, 0, choices.length - 1);
-  if (nextIndex === index) return; // at ends, no movement or animation
-  if (!canShiftDeck()) return;
-  const deck = $("#optionsDeck");
-  if (deck) deck.setAttribute("data-shift", direction > 0 ? "down" : "up");
-  selectRelativeOptions(direction);
-  if (deck) window.setTimeout(() => deck.removeAttribute("data-shift"), 760);
-}
-
-function selectRelativeOptions(direction) {
-  if (isOptionsTradingEnabled()) return;
-  const choices = optionsChoices();
-  const index = Math.max(0, choices.findIndex((choice) => choice.key === activeOptionsKey()));
-  const nextIndex = clamp(index + direction, 0, choices.length - 1);
-  const next = choices[nextIndex];
-  if (next && next.key !== activeOptionsKey()) selectOptionsStrategy(next.key);
-}
-
-function renderOptionsInsight() {
-  const card = $("#optionsSignalCard");
-  const strategyKey = optionsUnderlyingStrategyKey();
-  if (strategyKey === "none") {
-    if (!card) return;
-    const selected = optionsChoices().find((choice) => choice.key === activeOptionsKey()) || NONE_OPTIONS;
-    card.innerHTML = `
-      <span class="deckKicker">Options Setup</span>
-      <h2>${escapeHtml(selected.name)}</h2>
-      <p>${escapeHtml(selected.description)}</p>
-      <div class="signalRows">
-        ${(selected.config || []).map((item) => `
-          <article>
-            <strong>${escapeHtml(item)}</strong>
-            <span>${selected.key === "none" ? "Inactive" : "Review before enabling"}</span>
-          </article>
-        `).join("")}
-      </div>
-    `;
-    return;
-  }
-  renderSignalBacktestCard({
-    card,
-    strategyKey,
-    selected: optionsSignalChoice(),
-    kicker: "Underlying Signals",
-    backtestChartId: "optionsBacktestChart",
-    universeLabel: "Options underlying universe",
-  });
-}
-
-const renderOptionsSignals = renderOptionsInsight;
-
-function renderOptionsPower() {
-  const enabled = isOptionsTradingEnabled();
-  const button = $("#optionsPowerToggle");
-  const panel = $("#optionsRunPanel");
-  const deck = $("#optionsDeck");
-  const select = $("#optionsTradingAccount");
-  if (button) {
-    button.setAttribute("aria-pressed", String(enabled));
-    button.classList.toggle("on", enabled);
-    button.disabled = activeOptionsKey() === "none";
-    button.innerHTML = '<span aria-hidden="true">&#9211;</span>';
-  }
-  if (panel) panel.classList.toggle("is-on", enabled);
-  if (deck) {
-    deck.classList.toggle("locked", enabled);
-    deck.setAttribute("aria-disabled", String(enabled));
-  }
-  document.querySelectorAll('[data-deck="options"]').forEach((button) => {
-    button.disabled = enabled;
-  });
-  if (select) {
-    const accounts = state.accounts.length
-      ? state.accounts
-      : [{ id: state.controls?.options_trading_account_id || state.controls?.trading_account_id || "default", label: "Default" }];
-    const activeAccount = state.controls?.options_trading_account_id || state.controls?.trading_account_id || accounts[0]?.id || "";
-    select.innerHTML = accounts.map((account) => `
-      <option value="${escapeHtml(account.id)}"${account.id === activeAccount ? " selected" : ""}>
-        ${escapeHtml(account.label || account.id)}
-      </option>
-    `).join("");
-    select.disabled = enabled;
-  }
-}
-
 function updateFeatureToggles() {
-  const enabled = isDcaEnabled();
-  const button = $("#scheduleToggle");
+  // DCA has no switch of its own any more: it runs when it is the selected algorithm and the
+  // algorithm bot is on, like every other strategy.
   const panel = $("#schedulePanel");
-  if (button) {
-    button.setAttribute("aria-pressed", String(enabled));
-    button.classList.toggle("on", enabled);
-    button.innerHTML = '<span aria-hidden="true">&#9211;</span>';
-  }
-  if (panel) panel.classList.toggle("is-on", enabled);
+  if (panel) panel.classList.toggle("is-on", isDcaEnabled());
 }
 
 function renderAlgorithmPower() {
@@ -1640,7 +1370,7 @@ function renderAlgorithmPower() {
   if (button) {
     button.setAttribute("aria-pressed", String(enabled));
     button.classList.toggle("on", enabled);
-    button.disabled = activeAlgorithmKey() === "none";
+    button.disabled = false;
     button.innerHTML = '<span aria-hidden="true">&#9211;</span>';
   }
   if (panel) panel.classList.toggle("is-on", enabled);
@@ -1854,49 +1584,44 @@ function backtestPositions(positions) {
     .sort((left, right) => Math.abs(right[1]) - Math.abs(left[1]));
 }
 
-function activateAlgorithmView() {
-  renderAlgorithmDeck();
-  const activeKey = activeAlgorithmKey();
-  ensureSignals(activeKey);
-}
-
 function percent(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "--";
   return `${(Number(value) * 100).toFixed(1)}%`;
 }
 
-function renderScheduleDescription() {
-  const pattern = $("#cronPattern").value.trim();
-  const descriptions = {
-    "0 12 * * 1-5": "Weekdays at 12:00 PM",
-    "0 9 * * 1-5": "Weekdays at 9:00 AM",
-    "0 12 * * 1": "Mondays at 12:00 PM",
-    "0 12 1 * *": "First day monthly at 12:00 PM",
-  };
-  $("#cronDescription").textContent = descriptions[pattern] || "Cron-style schedule pattern";
+function renderPlanSummary() {
+  const element = $("#planSummary");
+  if (!element) return;
+  const total = BUCKET_NAMES.reduce(
+    (sum, bucketName) => sum + bucketItems(bucketName).reduce((inner, item) => inner + Number(item.amount || 0), 0),
+    0,
+  );
+  // Cadence is declared on the algorithm class, so the only thing to state here is the rate.
+  element.textContent = total > 0
+    ? `$${total.toLocaleString()}/month across ${bucketItems("buy").length + bucketItems("sell").length} symbols`
+    : "Dollars per month, per symbol.";
 }
 
-function switchTab(tabName) {
-  document.querySelectorAll(".tab").forEach((button) => {
-    button.classList.toggle("active", button.dataset.tab === tabName);
-  });
-  document.querySelectorAll(".tabPanel").forEach((panel) => {
-    panel.classList.toggle("active", panel.id === `${tabName}Tab`);
-  });
-  if (tabName === "dca") renderDca();
-  if (tabName === "algorithm") activateAlgorithmView();
-  if (tabName === "options") {
-    renderOptionsDeck();
-    renderOptionsPower();
-    const signalKey = optionsUnderlyingStrategyKey();
-    if (signalKey !== "none") ensureSignals(signalKey);
-  }
+//: Wheel and pinch fire continuously, so plan edits coalesce into one POST once the gesture
+//: settles rather than one per tick.
+const PLAN_SAVE_DEBOUNCE_MS = 500;
+
+function schedulePlanSave() {
+  window.clearTimeout(schedulePlanSave.timer);
+  schedulePlanSave.timer = window.setTimeout(() => {
+    // Saving swaps in the server's copy of the plan and re-renders the board, which would
+    // yank it out from under a gesture that is still going. Wait for the hands to come off.
+    if (state.drag || state.pinch || state.boardPinch) {
+      schedulePlanSave();
+      return;
+    }
+    savePlan();
+  }, PLAN_SAVE_DEBOUNCE_MS);
 }
 
 async function savePlan(quiet = true) {
   if (!state.dca?.plan) return;
   syncNodesToPlan();
-  state.dca.plan.schedule_pattern = $("#cronPattern").value.trim() || "0 12 * * 1-5";
   try {
     const [dcaPayload, controlsPayload] = await Promise.all([
       api("/api/dca", { method: "POST", body: JSON.stringify({ plan: state.dca.plan }), timeoutMs: 5000 }),
@@ -1904,8 +1629,12 @@ async function savePlan(quiet = true) {
     ]);
     state.dca = dcaPayload;
     state.controls = controlsPayload.controls;
-    delete state.backtests.none;
-    delete state.signals.none;
+    // The plan is an input to both DCA strategies, so their cached views are now stale.
+    // This used to clear "none", which was where the DCA view lived before it was selectable.
+    DCA_STRATEGY_KEYS.forEach((key) => {
+      delete state.backtests[key];
+      delete state.signals[key];
+    });
     renderDca();
     if (!quiet) showToast("Saved");
   } catch (error) {
@@ -1926,29 +1655,84 @@ async function saveControlsOnly(options = {}) {
     state.bot = payload.bot || state.bot;
     updateFeatureToggles();
     renderAlgorithmPower();
-    renderOptionsPower();
     if (renderDecks) {
       renderAlgorithmDeck();
-      renderOptionsDeck();
     } else {
       renderAlgorithmSignals();
-      renderOptionsInsight();
     }
   } catch (error) {
     showToast(error.message);
   }
 }
 
-function wireEvents() {
-  document.querySelectorAll(".tab").forEach((button) => {
-    button.addEventListener("click", () => switchTab(button.dataset.tab));
+const SCHWAB_AUTH_POLL_MS = 5 * 60 * 1000;
+
+async function loadSchwabAuth() {
+  try {
+    state.schwabAuth = await api("/api/schwab/auth", { timeoutMs: 5000 });
+  } catch (error) {
+    state.schwabAuth = null;
+  }
+  renderSchwabAuth();
+}
+
+function renderSchwabAuth() {
+  const pill = $("#schwabAuthPill");
+  if (!pill) return;
+  const auth = state.schwabAuth;
+  // Nothing to act on until Schwab is wired up, so stay out of the way entirely.
+  if (!auth || !auth.configured) {
+    pill.hidden = true;
+    return;
+  }
+  const labels = {
+    ok: "Schwab connected",
+    warning: "Schwab expiring soon",
+    expired: "Schwab expired - reconnect",
+    missing: "Connect Schwab",
+  };
+  pill.hidden = false;
+  pill.classList.remove("is-ok", "is-warning", "is-expired", "is-missing");
+  pill.classList.add(`is-${auth.state}`);
+  pill.querySelector(".authLabel").textContent = labels[auth.state] || "Schwab";
+  pill.title = auth.detail || "";
+}
+
+async function connectSchwab() {
+  // Open synchronously inside the click so the popup blocker treats it as user-initiated,
+  // then point it at Schwab once the authorize URL comes back.
+  const popup = window.open("", "schwabAuth", "width=560,height=760");
+  try {
+    const payload = await api("/api/schwab/auth/start", { method: "POST", timeoutMs: 8000 });
+    if (popup) popup.location = payload.authorize_url;
+    else showToast("Allow popups to authorize Schwab.");
+  } catch (error) {
+    popup?.close();
+    showToast(`Could not start Schwab authorization: ${error.message}`);
+  }
+}
+
+function wireSchwabAuth() {
+  $("#schwabAuthPill")?.addEventListener("click", connectSchwab);
+  window.addEventListener("message", (event) => {
+    if (event.data?.type !== "schwab-auth") return;
+    showToast(event.data.ok ? "Schwab connected." : "Schwab authorization failed.");
+    loadSchwabAuth();
   });
+  // The popup may be closed by hand without ever reporting back, so re-check on return.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) loadSchwabAuth();
+  });
+  window.setInterval(loadSchwabAuth, SCHWAB_AUTH_POLL_MS);
+}
+
+function wireEvents() {
+  wireSchwabAuth();
   $("#algorithmDeck")?.addEventListener("click", (event) => {
     const card = event.target.closest("[data-strategy]");
     if (card) selectAlgorithmStrategy(card.dataset.strategy);
   });
   $("#algorithmSignalCard")?.addEventListener("click", handleSignalCardClick);
-  $("#optionsSignalCard")?.addEventListener("click", handleSignalCardClick);
   $("#algorithmDeck")?.addEventListener("wheel", (event) => {
     event.preventDefault();
     shiftAlgorithmDeck(event.deltaY > 0 ? 1 : -1);
@@ -1957,45 +1741,7 @@ function wireEvents() {
     if (event.key === "ArrowDown") selectRelativeAlgorithm(1);
     if (event.key === "ArrowUp") selectRelativeAlgorithm(-1);
   });
-  $("#optionsDeck")?.addEventListener("click", (event) => {
-    const card = event.target.closest("[data-options-strategy]");
-    if (card) selectOptionsStrategy(card.dataset.optionsStrategy);
-  });
-  $("#optionsDeck")?.addEventListener("wheel", (event) => {
-    event.preventDefault();
-    shiftOptionsDeck(event.deltaY > 0 ? 1 : -1);
-  }, { passive: false });
-  $("#optionsDeck")?.addEventListener("keydown", (event) => {
-    if (event.key === "ArrowDown") selectRelativeOptions(1);
-    if (event.key === "ArrowUp") selectRelativeOptions(-1);
-  });
-  $("#optionsPowerToggle")?.addEventListener("click", () => {
-    if (activeOptionsKey() === "none") {
-      state.controls.options_trading_enabled = false;
-      renderOptionsPower();
-      return;
-    }
-    state.controls.options_trading_enabled = !state.controls.options_trading_enabled;
-    renderOptionsPower();
-    saveControlsOnly({ renderDecks: false });
-  });
-  $("#optionsTradingAccount")?.addEventListener("change", (event) => {
-    state.controls.options_trading_account_id = event.target.value;
-    renderOptionsPower();
-    saveControlsOnly({ renderDecks: false });
-  });
-  $("#scheduleToggle")?.addEventListener("click", () => {
-    if (!state.dca?.plan) return;
-    state.dca.plan.enabled = !state.dca.plan.enabled;
-    renderDca();
-    savePlan();
-  });
   $("#algorithmPowerToggle")?.addEventListener("click", () => {
-    if (activeAlgorithmKey() === "none") {
-      state.controls.algorithm_enabled = false;
-      renderAlgorithmPower();
-      return;
-    }
     state.controls.algorithm_enabled = !state.controls.algorithm_enabled;
     renderAlgorithmPower();
     saveControlsOnly({ renderDecks: false });
@@ -2005,8 +1751,6 @@ function wireEvents() {
     renderAlgorithmPower();
     saveControlsOnly({ renderDecks: false });
   });
-  $("#cronPattern")?.addEventListener("input", renderScheduleDescription);
-  $("#cronPattern")?.addEventListener("change", () => savePlan());
   $("#symbolEntry")?.addEventListener("keydown", (event) => {
     if (event.key === "Enter") commitSymbolEntry();
     if (event.key === "Escape") hideSymbolEntry();
@@ -2022,7 +1766,6 @@ function wireEvents() {
       const target = event.currentTarget;
       const direction = Number(target.dataset.direction || 0);
       if (target.dataset.deck === "algorithm") shiftAlgorithmDeck(direction);
-      if (target.dataset.deck === "options") shiftOptionsDeck(direction);
     });
   });
   window.addEventListener("resize", () => {
@@ -2076,9 +1819,10 @@ function handleSignalCardClick(event) {
 
 async function init() {
   wireEvents();
+  // Deliberately not awaited or bundled with the loads below: a Schwab hiccup must not stop
+  // the rest of the dashboard from rendering.
+  loadSchwabAuth();
   renderAlgorithmDeck();
-  renderOptionsDeck();
-  renderOptionsPower();
   renderStaticBubbles();
   try {
     const [statusPayload, universePayload, dcaPayload, controlsPayload] = await Promise.all([
@@ -2097,9 +1841,8 @@ async function init() {
     state.dca.plan.max_item_amount = MAX_AMOUNT;
     renderDca();
     renderAlgorithmDeck();
-    renderOptionsDeck();
-    renderOptionsPower();
-    renderOptionsSignals();
+    // One page now, so the algorithm view is always visible and its signals always needed.
+    ensureSignals(activeAlgorithmKey());
     loadCachedBacktestsForDeck();
   } catch (error) {
     showToast(`Could not load DCA data: ${error.message}`);

@@ -1,57 +1,66 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
-from typing import Any
 
 from src.core import bot_runtime as bot_runtime
-from src.core import pipeline as pipeline
-from src.core.cron import cron_matches
+from src.core.interfaces import DAILY_AT_OPEN, Schedule, describe_schedule
 
-
-def test_cron_matches_multiple_hours_in_same_day() -> None:
-    assert cron_matches("0 9-11 * * 1-5", datetime(2026, 5, 21, 9, 0))
-    assert cron_matches("0 9-11 * * 1-5", datetime(2026, 5, 21, 10, 0))
-    assert not cron_matches("0 9-11 * * 1-5", datetime(2026, 5, 21, 10, 30))
-
-
-def test_cron_matches_steps_and_lists() -> None:
-    assert cron_matches("*/15 9,10 * * 1-5", datetime(2026, 5, 21, 10, 45))
-    assert not cron_matches("*/15 9,10 * * 1-5", datetime(2026, 5, 21, 11, 45))
+HOURLY = Schedule()
+HALF_HOURLY = Schedule(refresh_minutes=30, jitter_minutes=0)
 
 
 def test_regular_market_hours_are_central_weekdays() -> None:
-    assert bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 8, 30))
-    assert bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 14, 59))
-    assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 8, 29))
-    assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 15, 0))
-    assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 23, 10, 0))
+    assert bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 8, 30), HOURLY)
+    assert bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 14, 59), HOURLY)
+    assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 8, 29), HOURLY)
+    assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 15, 0), HOURLY)
+    assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 23, 10, 0), HOURLY)
 
 
-def test_regular_market_hours_honor_configured_window() -> None:
-    assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 9, 29), "09:30", "14:00")
-    assert bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 9, 30), "09:30", "14:00")
-    assert bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 13, 59), "09:30", "14:00")
-    assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 14, 0), "09:30", "14:00")
+def test_regular_market_hours_honor_the_schedule_window() -> None:
+    window = Schedule(refresh_minutes=30, jitter_minutes=0, start_time="09:30", end_time="14:00")
+    assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 9, 29), window)
+    assert bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 9, 30), window)
+    assert bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 13, 59), window)
+    assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 14, 0), window)
+
+
+def test_schedule_weekdays_gate_the_run() -> None:
+    """The part ``refresh_minutes`` cannot express: a cadence coarser than daily."""
+    mondays = replace(DAILY_AT_OPEN, jitter_minutes=0, weekdays=(0,))
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 18, 9, 0), mondays)  # Monday
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 19, 9, 0), mondays) is None  # Tuesday
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 0), mondays) is None  # Friday
+
+
+def test_daily_at_open_yields_one_bucket_per_session() -> None:
+    """A refresh at or above the session length collapses to a single run per day."""
+    daily = replace(DAILY_AT_OPEN, jitter_minutes=0)
+    morning = bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 0), daily)
+    afternoon = bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 14, 30), daily)
+    assert morning == afternoon == "algorithm:2026-05-22T08:30-05:00"
 
 
 def test_algorithm_bucket_key_uses_refresh_window() -> None:
-    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 8, 31), 30) == (
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 8, 31), HALF_HOURLY) == (
         "algorithm:2026-05-22T08:30-05:00"
     )
-    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 8, 59), 30) == (
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 8, 59), HALF_HOURLY) == (
         "algorithm:2026-05-22T08:30-05:00"
     )
-    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 0), 30) == (
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 0), HALF_HOURLY) == (
         "algorithm:2026-05-22T09:00-05:00"
     )
-    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 23, 9, 0), 30) is None
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 23, 9, 0), HALF_HOURLY) is None
 
 
 def test_algorithm_bucket_key_anchors_to_market_open_for_hourly_runs() -> None:
-    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 0), 60) == (
+    hourly = Schedule(jitter_minutes=0)
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 0), hourly) == (
         "algorithm:2026-05-22T08:30-05:00"
     )
-    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 30), 60) == (
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 30), hourly) == (
         "algorithm:2026-05-22T09:30-05:00"
     )
 
@@ -59,54 +68,59 @@ def test_algorithm_bucket_key_anchors_to_market_open_for_hourly_runs() -> None:
 def test_algorithm_bucket_key_waits_for_jitter_offset(monkeypatch) -> None:
     monkeypatch.setattr(bot_runtime, "_algorithm_jitter_offset_minutes", lambda *_args: 4)
 
-    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 8, 33), 60, 5) is None
-    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 8, 34), 60, 5) == (
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 8, 33), HOURLY) is None
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 8, 34), HOURLY) == (
         "algorithm:2026-05-22T08:30-05:00"
     )
 
 
-def test_algorithm_bucket_key_anchors_to_configured_start() -> None:
-    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 45), 30, 0, "09:30", "14:00") == (
+def test_algorithm_bucket_key_anchors_to_the_scheduled_start() -> None:
+    window = Schedule(refresh_minutes=30, jitter_minutes=0, start_time="09:30", end_time="14:00")
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 45), window) == (
         "algorithm:2026-05-22T09:30-05:00"
     )
-    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 29), 30, 0, "09:30", "14:00") is None
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 29), window) is None
 
 
-def test_run_dca_submits_shares_through_shared_order_path(monkeypatch) -> None:
-    class Config:
-        kill_switch = False
-        require_trade_approval = False
-        alpaca_data_feed = "iex"
-        trade_approval_timeout_seconds = 300
-        trade_approval_poll_seconds = 5
+# --------------------------------------------------------------------------------------
+# Cadence comes from the selected algorithm's class, not from config.
+# --------------------------------------------------------------------------------------
 
-    class FakeBrokerage:
-        def is_market_open(self) -> bool:
-            return True
 
-        def submit_order(self, request) -> dict[str, Any]:
-            return {"order_id": f"dca-{request.symbol}"}
+def test_active_schedule_reads_the_selected_algorithms_class() -> None:
+    assert bot_runtime._active_schedule({"active_strategy": "dca"}).weekdays == (0,)
+    assert bot_runtime._active_schedule({"active_strategy": "bursty_dca"}) == DAILY_AT_OPEN
+    assert bot_runtime._active_schedule({"active_strategy": "fast_momentum"}).refresh_minutes == 60
 
-    captured: dict[str, Any] = {}
 
-    monkeypatch.setattr(bot_runtime, "get_config", lambda **kw: Config())
-    monkeypatch.setattr("src.api.api_payloads.universe_payload", lambda: {"rows": []})
-    monkeypatch.setattr(bot_runtime, "load_dca_plan", lambda rows: {"enabled": True})
-    monkeypatch.setattr(
-        bot_runtime, "allocation_preview", lambda plan: [{"symbol": "AAA", "action": "buy", "notional": 300.0}]
-    )
-    monkeypatch.setattr(pipeline, "resolve_brokerage", lambda config: FakeBrokerage())
-    monkeypatch.setattr(bot_runtime, "create_data_client", lambda config: object())
-    monkeypatch.setattr(bot_runtime, "get_latest_price", lambda symbol, client, data_feed=None: 100.0)
-    monkeypatch.setattr(bot_runtime, "log_position_changes", lambda results: captured.update({"results": results}))
+def test_active_schedule_falls_back_for_an_unknown_strategy() -> None:
+    """Only affects how often the idle loop re-reads controls, so a default is safe here."""
+    assert bot_runtime._active_schedule({"active_strategy": "retired_thing"}) == Schedule()
 
-    bot_runtime._run_dca(account_id=None)
 
-    assert len(captured["results"]) == 1
-    order = captured["results"][0]
-    assert order["symbol"] == "AAA"
-    assert order["quantity"] == 3  # floor(300 / 100)
-    assert order["order_id"] == "dca-AAA"
+def test_active_schedule_treats_a_saved_none_as_dca() -> None:
+    assert bot_runtime._active_schedule({"active_strategy": "none"}).weekdays == (0,)
+
+
+def test_dca_is_rarer_than_bursty_dca() -> None:
+    """Same budget either way -- accrual is wall-clock -- so this only changes trade size."""
+    from src.algorithms.dca.bot import DCAAlgorithm
+    from src.algorithms.dca.bursty import BurstyDCAAlgorithm
+
+    assert DCAAlgorithm.schedule.weekdays == (0,)
+    assert BurstyDCAAlgorithm.schedule.weekdays == (0, 1, 2, 3, 4)
+
+
+def test_runtime_has_no_dca_loop_of_its_own() -> None:
+    """Two schedulers driving one accrual state was the hazard this collapse removes."""
+    assert not hasattr(bot_runtime.bot_runtime, "dca")
+    assert set(bot_runtime.bot_runtime.snapshot()) == {"algorithm", "options"}
+
+
+def test_describe_schedule_renders_the_cadence_for_the_dashboard() -> None:
+    assert describe_schedule(replace(DAILY_AT_OPEN, weekdays=(0,))) == "Mondays at 08:30"
+    assert describe_schedule(DAILY_AT_OPEN) == "Weekdays at 08:30"
+    assert describe_schedule(Schedule()) == "Weekdays, every 60m from 08:30 to 15:00"
 
 
 def test_options_enabled_requires_strategy_and_kill_switch_off(monkeypatch) -> None:

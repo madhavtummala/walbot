@@ -13,7 +13,6 @@ UNIVERSE = [
 def test_sanitize_dca_plan_keeps_only_universe_symbols() -> None:
     plan = {
         "enabled": True,
-        "frequency": "daily",
         "buy": {"amount": 100, "items": [{"symbol": "SPY"}, {"symbol": "BAD"}]},
         "sell": {"amount": 50, "items": [{"symbol": "QQQ"}, {"symbol": "SPY"}]},
     }
@@ -28,7 +27,6 @@ def test_allocation_preview_uses_exact_item_amounts() -> None:
     plan = sanitize_dca_plan(
         {
             "enabled": True,
-            "frequency": "weekly",
             "max_item_amount": 50,
             "buy": {
                 "items": [
@@ -77,17 +75,22 @@ def test_sanitize_dca_plan_drops_dashboard_layout_fields() -> None:
     assert plan["buy"]["items"][0] == {"symbol": "SPY", "amount": 40.0}
 
 
-def test_sanitize_dca_plan_preserves_schedule_pattern() -> None:
+def test_sanitize_dca_plan_drops_scheduling_and_enablement_keys() -> None:
+    """Cadence lives on the algorithm class and the switch is the algorithm bot's, so a plan
+    carrying either would be a second source of truth that nothing reads."""
     plan = sanitize_dca_plan(
         {
+            "enabled": True,
             "schedule_pattern": "0 9 * * 1-5",
+            "next_run_date": "2026-01-01",
+            "algorithm": "bursty_dca",
             "buy": {"items": [{"symbol": "SPY", "amount": 40}]},
             "sell": {"items": []},
         },
         UNIVERSE,
     )
 
-    assert plan["schedule_pattern"] == "0 9 * * 1-5"
+    assert set(plan) == {"max_item_amount", "buy", "sell"}
 
 
 def test_save_and_load_dca_plan_uses_yaml_section(tmp_path) -> None:
@@ -95,8 +98,6 @@ def test_save_and_load_dca_plan_uses_yaml_section(tmp_path) -> None:
 
     saved = save_dca_plan(
         {
-            "enabled": True,
-            "schedule_pattern": "0 10 * * 1-5",
             "buy": {"items": [{"symbol": "SPY", "amount": 40}]},
             "sell": {"items": []},
         },
@@ -116,8 +117,6 @@ def test_save_and_load_dca_plan_uses_dca_bot_file(tmp_path, monkeypatch) -> None
 
     saved = save_dca_plan(
         {
-            "enabled": True,
-            "schedule_pattern": "0 10 * * 1-5",
             "buy": {"items": [{"symbol": "SPY", "amount": 40}]},
             "sell": {"items": []},
         },

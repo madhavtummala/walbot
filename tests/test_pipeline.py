@@ -5,10 +5,21 @@ from typing import Any
 
 import pytest
 
+from src.algorithms.base import BaseAlgorithm
 from src.algorithms.fast_momentum import DefensiveMomentumConfig, apply_stickiness
+from src.algorithms.registry import register_algorithm
 from src.core import pipeline
 from src.core.config import Config
-from src.core.interfaces import AlgorithmResult, PortfolioSnapshot
+from src.core.interfaces import AlgorithmResult, Intent, PortfolioSnapshot
+
+
+class PassthroughAlgorithm(BaseAlgorithm):
+    """The thinnest possible plugin, so these tests exercise the pipeline and not a strategy."""
+
+    algorithm_id = "passthrough"
+
+
+register_algorithm("passthrough", PassthroughAlgorithm)
 
 
 class RecordingBrokerage:
@@ -35,7 +46,7 @@ class RecordingBrokerage:
 
 def _result(**overrides) -> AlgorithmResult:
     defaults = {
-        "strategy": "risk_parity",
+        "strategy": "passthrough",
         "target_weights": {"AAA": 0.5},
         "signals": {"AAA": {"score": 1.0}},
         "latest_prices": {"AAA": 100.0},
@@ -168,4 +179,4 @@ def test_exposure_capped_algorithms_do_not_apply_the_cash_buffer_twice() -> None
         assert sizing["cash_buffer"] == 0.0, strategy
 
     # A strategy that does not cap exposure still honours the account buffer.
-    assert get_algorithm_class("momentum_social").from_config(config).sizing(config)["cash_buffer"] == 0.02
+    assert PassthroughAlgorithm.from_config(config).sizing(config)["cash_buffer"] == 0.02

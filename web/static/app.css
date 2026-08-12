@@ -51,34 +51,79 @@ main {
   padding: 12px clamp(10px, 1.6vw, 24px) 30px;
 }
 
-#tabs {
-  width: min(520px, 100%);
+.authPill {
+  width: min(220px, 100%);
   margin: 0 auto 8px;
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
-  padding: 5px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 6px 14px;
   border: 1px solid var(--line);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.36);
+  background: rgba(255, 255, 255, 0.64);
+  box-shadow: 0 18px 46px rgba(17, 24, 39, 0.08);
   backdrop-filter: blur(14px);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  cursor: pointer;
 }
 
-.tab {
-  min-height: 38px;
-  border-radius: 999px;
-  background: transparent;
-  box-shadow: none;
+.authPill[hidden] {
+  display: none;
 }
 
-.tab.active {
-  color: #ffffff;
-  border-color: rgba(17, 24, 39, 0.12);
-  background: #111827;
+.authDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: 0 0 auto;
 }
 
-#algorithmRunPanel,
-.runPanel {
+.authPill.is-ok {
+  border-color: rgba(5, 122, 85, 0.32);
+  background: rgba(220, 252, 231, 0.7);
+  color: var(--good);
+}
+
+.authPill.is-ok .authDot {
+  background: var(--good);
+}
+
+.authPill.is-warning {
+  border-color: rgba(180, 120, 10, 0.36);
+  background: rgba(254, 243, 199, 0.82);
+  color: #92400e;
+}
+
+.authPill.is-warning .authDot {
+  background: #d97706;
+  animation: authPulse 1.9s ease-in-out infinite;
+}
+
+.authPill.is-expired,
+.authPill.is-missing {
+  border-color: rgba(180, 35, 24, 0.34);
+  background: rgba(254, 226, 226, 0.82);
+  color: var(--bad);
+}
+
+.authPill.is-expired .authDot,
+.authPill.is-missing .authDot {
+  background: var(--bad);
+  animation: authPulse 1.9s ease-in-out infinite;
+}
+
+@keyframes authPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+#algorithmRunPanel {
   width: min(220px, 100%);
   margin: 0 auto 8px;
   position: relative;
@@ -95,15 +140,13 @@ main {
   backdrop-filter: blur(14px);
 }
 
-#algorithmRunPanel.is-on,
-.runPanel.is-on {
+#algorithmRunPanel.is-on {
   border-color: rgba(5, 122, 85, 0.36);
   background: rgba(220, 252, 231, 0.78);
   box-shadow: 0 20px 52px rgba(5, 122, 85, 0.13);
 }
 
-#tradingAccount,
-#optionsTradingAccount {
+#tradingAccount {
   width: 100%;
   min-width: 0;
   padding: 8px 32px 8px 11px;
@@ -115,18 +158,9 @@ main {
   font-weight: 850;
 }
 
-#tradingAccount:disabled,
-#optionsTradingAccount:disabled {
+#tradingAccount:disabled {
   color: var(--muted);
   opacity: 0.72;
-}
-
-.tabPanel {
-  display: none;
-}
-
-.tabPanel.active {
-  display: block;
 }
 
 #schedulePanel {
@@ -135,10 +169,8 @@ main {
   position: relative;
   z-index: 4;
   display: grid;
-  grid-template-columns: 30px 120px auto;
-  gap: 3px;
-  align-items: center;
-  padding: 8px 10px;
+  justify-items: center;
+  padding: 8px 16px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.64);
@@ -156,32 +188,7 @@ main {
   box-shadow: 0 20px 52px rgba(5, 122, 85, 0.13);
 }
 
-#schedulePanel label {
-  font-size: 12px;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
-#cronPattern {
-  width: 100%;
-  min-width: 0;
-  padding: 8px 11px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  background: rgba(255, 255, 255, 0.45);
-  transition: all 160ms ease;
-}
-
-#cronPattern:focus {
-  outline: none;
-  border-color: rgba(52, 87, 213, 0.6);
-  background: rgba(255, 255, 255, 0.82);
-  box-shadow: 0 0 0 3px rgba(52, 87, 213, 0.1);
-}
-
-#cronDescription {
+#planSummary {
   margin: 0;
   color: var(--muted);
   font-size: 12px;
@@ -968,12 +975,6 @@ body.dca-off .asset.live circle {
   border: 0;
 }
 
-@media (min-width: 1000px) {
-  #schedulePanel {
-    grid-template-columns: 30px 120px auto;
-  }
-}
-
 label {
   display: flex;
   align-items: center;
@@ -1361,13 +1362,11 @@ h2 {
   }
 
   #schedulePanel {
-    grid-template-columns: 30px minmax(0, 1fr);
     border-radius: 18px;
     margin-bottom: -8px;
   }
 
-  #cronDescription {
-    grid-column: 1 / -1;
+  #planSummary {
     white-space: normal;
   }
 

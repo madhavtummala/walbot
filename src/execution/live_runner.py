@@ -2,20 +2,17 @@ from __future__ import annotations
 import logging
 from ..api.controls import load_controls
 from ..core import pipeline
-from ..core.config import get_config
+from ..core.config import DEFAULT_STRATEGY_ID, get_config
 from ..common.logging_utils import configure_logging, log_signals, log_portfolio, log_orders, log_position_changes
 from ..core.strategy_models import STRATEGY_LABELS
+from ..algorithms.registry import canonical_algorithm_id
 
 logger = logging.getLogger(__name__)
 
 
 def run_once(account_id: str | None = None) -> None:
     controls = load_controls()
-    strategy = str(controls.get("active_strategy") or "momentum_social").lower()
-    if strategy == "none":
-        logger.warning("No algorithm strategy is selected. Exiting without sending orders.")
-        return
-
+    strategy = canonical_algorithm_id(controls.get("active_strategy") or DEFAULT_STRATEGY_ID)
     config = (
         get_config(account_id=account_id, strategy_id=strategy)
         if account_id
