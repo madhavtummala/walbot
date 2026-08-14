@@ -553,7 +553,9 @@ def test_defensive_momentum_signals_include_inactive_universe_rows(monkeypatch) 
     own fetch helpers, which the signal view no longer calls, so the assertions silently ran
     against whatever the live cache held and flipped whenever the market moved.
     """
+    from src.algorithms.fast_momentum import DefensiveMomentumConfig
     from src.core import market_context
+    from src.core.config import get_config
     from src.core.interfaces import AlgorithmContext
 
     def intraday(symbol: str) -> pd.DataFrame:
@@ -578,11 +580,16 @@ def test_defensive_momentum_signals_include_inactive_universe_rows(monkeypatch) 
 
     payload = strategy_signals_payload("fast_momentum")
 
+    # Derived from the configured universes rather than hard-coded, so editing them in
+    # walbot.yaml does not silently break this.
+    strategy_config = DefensiveMomentumConfig.from_runtime_config(get_config(strategy_id="fast_momentum"))
+    defensive = strategy_config.defensive_universe[0]
+
     by_symbol = {row["symbol"]: row for row in payload["leaders"]}
-    assert {"XSD", "BIL"} <= set(by_symbol)
+    assert {"XSD", defensive} <= set(by_symbol)
     assert by_symbol["XSD"]["signal"] == "LONG", "the steepest riser should be held"
     assert "score_components" in by_symbol["XSD"]
     assert payload["summary"][0]["value"] == "Dynamic rank"
-    assert by_symbol["BIL"]["reason"]
+    assert by_symbol[defensive]["reason"], "an unheld symbol still explains itself"
 
 

@@ -381,3 +381,19 @@ def test_schwab_auth_payload_reports_whether_the_connector_is_wired_up() -> None
     assert "connector_enabled" in payload
     # connectors.yaml lists schwab in both ladders.
     assert payload["connector_enabled"] is True
+
+
+def test_the_bot_pill_describes_the_algorithms_not_the_container() -> None:
+    """Running an MCP server alongside the dashboard says nothing about what is switched on.
+
+    The pill used to read "MCP mode" whenever the container was started with --mcp, even with
+    every algorithm off. What runs is a per-binding fact: on with a frequency, or on and
+    parked on "mcp" awaiting an external request.
+    """
+    app_js, _, _ = _assets()
+
+    summary = app_js[app_js.index("function runtimeSummary"):]
+    assert 'runtime_mode === "mcp"' not in summary
+    assert "const armed = bindings().filter((binding) => binding.enabled);" in summary
+    assert "const status = deploymentStatus(armed);" in summary
+    assert '"Bot off"' in summary
