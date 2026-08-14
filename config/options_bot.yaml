@@ -1,6 +1,6 @@
 options_bot:
   enabled: false
-  strategy: options_swing_dual_momentum
+  strategy: none
   account_id: paper
 options:
   swing_dte_min: 30

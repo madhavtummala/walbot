@@ -5,77 +5,44 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Walbot</title>
-  <link rel="stylesheet" href="/static/app.css?v=20260529-position-tooltip" />
+  <link rel="stylesheet" href="/static/app.css?v=20260813-sidebar" />
 </head>
 
 <body>
-  <main>
-    <nav id="tabs" aria-label="Trading controls">
-      <button class="tab active" type="button" data-tab="dca">DCA</button>
-      <button class="tab" type="button" data-tab="algorithm">Algorithm</button>
-      <button class="tab" type="button" data-tab="options">Options</button>
+  <button class="navToggle" id="navToggle" type="button" aria-label="Toggle navigation"
+    aria-expanded="false">&#9776;</button>
+
+  <div class="shell">
+    <nav class="sidebar" id="sidebar" aria-label="Main">
+      <a class="brand" href="#/algo/dca/overview">Walbot</a>
+
+      <section class="navGroup" aria-label="Algorithms">
+        <span class="navGroupLabel">Algorithms</span>
+        <ul class="navList" id="algorithmNav"></ul>
+      </section>
+
+      <section class="navGroup" aria-label="Accounts">
+        <span class="navGroupLabel">Accounts</span>
+        <ul class="navList" id="accountNav"></ul>
+      </section>
+
+      <section class="navGroup" aria-label="Watchlist">
+        <span class="navGroupLabel">
+          Watchlist
+          <button class="navAdd" id="addWatchButton" type="button" aria-label="Add ticker">+</button>
+        </span>
+        <ul class="navList" id="watchlist"></ul>
+      </section>
+
+      <div class="navFooter" id="navFooter"></div>
     </nav>
 
-    <section class="tabPanel active" id="dcaTab" aria-label="DCA setup">
-      <section id="schedulePanel" aria-label="DCA scheduling">
-        <button class="iconButton powerButton" id="scheduleToggle" type="button" aria-label="Toggle DCA schedule"
-          aria-pressed="false" title="DCA schedule">
-          <span aria-hidden="true">&#9211;</span>
-        </button>
-        <input type="text" id="cronPattern" placeholder="0 12 * * 1-5" aria-label="Cron pattern for DCA scheduling" />
-        <p id="cronDescription">Weekdays at 12:00 PM</p>
-      </section>
-      <svg id="bubbleBoard" role="img" aria-label="Interactive buy and sell DCA bubbles"></svg>
-    </section>
-
-    <section class="tabPanel" id="algorithmTab" aria-label="Algorithm setup">
-      <section id="algorithmRunPanel" aria-label="Algorithm runtime">
-        <button class="iconButton powerButton" id="algorithmPowerToggle" type="button"
-          aria-label="Toggle algorithm trading" aria-pressed="false" title="Algorithm trading">
-          <span aria-hidden="true">&#9211;</span>
-        </button>
-        <select id="tradingAccount" aria-label="Trading account"></select>
-      </section>
-      <section class="deckPanel" id="algorithmPanel">
-        <div class="deckFrame">
-          <div class="deckControls" aria-hidden="true">
-            <button class="deckArrow" type="button" data-deck="algorithm" data-direction="-1"
-              aria-label="Previous algorithm">▲</button>
-            <button class="deckArrow" type="button" data-deck="algorithm" data-direction="1"
-              aria-label="Next algorithm">▼</button>
-          </div>
-          <section class="cardDeck" id="algorithmDeck" aria-label="Algorithm strategy cards" tabindex="0"></section>
-        </div>
-        <aside class="sideCard" id="algorithmSignalCard" aria-label="Current algorithm signals"></aside>
-      </section>
-    </section>
-
-    <section class="tabPanel" id="optionsTab" aria-label="Options setup">
-      <section class="runPanel" id="optionsRunPanel" aria-label="Options runtime">
-        <button class="iconButton powerButton" id="optionsPowerToggle" type="button"
-          aria-label="Toggle options trading" aria-pressed="false" title="Options trading">
-          <span aria-hidden="true">&#9211;</span>
-        </button>
-        <select id="optionsTradingAccount" aria-label="Options trading account"></select>
-      </section>
-      <section class="deckPanel" id="optionsPanel">
-        <div class="deckFrame">
-          <div class="deckControls" aria-hidden="true">
-            <button class="deckArrow" type="button" data-deck="options" data-direction="-1"
-              aria-label="Previous options">▲</button>
-            <button class="deckArrow" type="button" data-deck="options" data-direction="1"
-              aria-label="Next options">▼</button>
-          </div>
-          <section class="cardDeck" id="optionsDeck" aria-label="Options strategy cards" tabindex="0"></section>
-        </div>
-        <aside class="sideCard" id="optionsSignalCard" aria-label="Selected options strategy details"></aside>
-      </section>
-    </section>
-  </main>
+    <main class="content" id="content" tabindex="-1"></main>
+  </div>
 
   <input id="symbolEntry" autocomplete="off" autocapitalize="characters" spellcheck="false" />
   <output id="toast" aria-live="polite"></output>
-  <script src="/static/app.js?v=20260529-position-tooltip"></script>
+  <script src="/static/app.js?v=20260813-sidebar"></script>
 </body>
 
 </html>

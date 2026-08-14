@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import logging
 import re
-from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from dataclasses import asdict
 from pathlib import Path
@@ -12,47 +12,36 @@ from typing import Any
 import pandas as pd
 
 from ..connectors.sentiment.alpha_vantage import collect_alpha_vantage_news, write_social_trends_csv
-from ..brokerages.alpaca_client import create_data_client, create_trading_client, get_account_equity, get_positions
+from alpaca.trading.enums import QueryOrderStatus
+from alpaca.trading.requests import GetOrdersRequest
+
+from ..brokerages.alpaca_client import create_data_client, create_trading_client
+from ..brokerages.providers.paper import PaperBrokerage
+from ..brokerages.schwab_auth import auth_status, begin_authorization, complete_authorization
 from ..data import fetch_daily_bars
 from ..execution.backtest import calculate_performance_metrics
+from ..execution.replay import replay
 from ..core.bot_runtime import bot_runtime
-from ..core.config import get_config, save_universe_symbols
-from ..algorithms.registry import get_algorithm_class
-from ..connectors import (
-    fetch_latest_news_sentiment,
-    merge_social_frames,
-    news_records_to_social_frames,
+from ..core.config import (
+    DEFAULT_STRATEGY_ID,
+    get_account_broker_type,
+    get_config,
+    load_accounts_config,
+    save_accounts_config,
+    load_algorithms_config,
+    save_algorithms_config,
+    save_universe_symbols,
 )
+from ..algorithms.explainers import explainer_for
+from ..algorithms.registry import LEGACY_ALGORITHM_IDS, canonical_algorithm_id, get_algorithm_class
 from src.api.controls import load_controls, save_controls
-from ..algorithms.dca import allocation_preview, load_dca_plan, save_dca_plan
-from ..core.portfolio import compute_target_weights
-from ..data.signals.signals import compute_signals_for_universe
+from ..algorithms.dca import DCA_ALGORITHMS, allocation_preview, load_dca_plan, save_dca_plan
+from ..data.order_journal import load_order_journal
 from ..data.social import load_social_trends_csv
+from ..core.market_context import load_latest_prices
 from ..data.duckdb_store import read_market_bars
 from ..data.state_store import load_state, save_state
-from ..core.strategy_models import (
-    STRATEGY_LABELS,
-    prepared_strategy_frame,
-    strategy_signal_rows,
-    strategy_signal_rows_from_prepared,
-    weights_from_strategy_rows,
-)
-from ..algorithms.fast_momentum import (
-    DefensiveMomentumConfig,
-    build_defensive_momentum_targets,
-    compute_composite_scores,
-    compute_price_features,
-    decide_target_weights,
-    get_daily_bars as get_defensive_daily_bars,
-    get_intraday_bars,
-)
-from ..algorithms.invest_spy import (
-    InvestSpyConfig,
-    classify_spy_state,
-    compute_invest_spy_price_features,
-    decide_invest_spy_weights,
-)
-from ..core.orders import plan_position_orders
+from ..core.strategy_models import STRATEGY_LABELS, prepared_strategy_frame
 from ..data.universe import load_tradable_names, resolve_project_path
 from ..data.universe_selector import candidate_specs_by_symbol, preferred_symbols, recommend_universe_rows
 
@@ -112,8 +101,8 @@ def _display_path(path: Path) -> str:
 
 def status_payload() -> dict[str, Any]:
     controls = load_controls()
-    strategy = str(controls.get("active_strategy") or "momentum_social")
-    config = get_config(strategy_id=strategy if strategy != "none" else None)
+    strategy = str(controls.get("active_strategy") or DEFAULT_STRATEGY_ID)
+    config = get_config(strategy_id=strategy)
     social_info = _file_info(config.social_trends_csv)
     social_rows = 0
     social_symbols: set[str] = set()
@@ -279,11 +268,12 @@ def apply_universe_payload(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def dca_payload() -> dict[str, Any]:
+def dca_payload(account_id: str = "") -> dict[str, Any]:
     universe = universe_payload()["rows"]
-    plan = load_dca_plan(universe)
+    plan = load_dca_plan(universe, account_id=account_id)
     available = [row for row in universe if row["enabled"]]
     return {
+        "account_id": account_id,
         "plan": plan,
         "available": available,
         "preview": allocation_preview(plan),
@@ -292,13 +282,368 @@ def dca_payload() -> dict[str, Any]:
 
 def save_dca_payload(body: dict[str, Any]) -> dict[str, Any]:
     universe = universe_payload()["rows"]
-    plan = save_dca_plan(body.get("plan", body), universe)
+    account_id = str(body.get("account_id") or "")
+    plan = save_dca_plan(body.get("plan", body), universe, account_id=account_id)
     available = [row for row in universe if row["enabled"]]
     return {
+        "account_id": account_id,
         "plan": plan,
         "available": available,
         "preview": allocation_preview(plan),
     }
+
+
+def algorithm_config_payload(strategy: str) -> dict[str, Any]:
+    """The saved tuning for one algorithm, read from the key it actually lives under."""
+    strategy = canonical_algorithm_id(strategy)[:80]
+    sections = load_algorithms_config().get("algorithms") or {}
+    if not isinstance(sections, dict):
+        sections = {}
+    key = strategy if strategy in sections else next(
+        (legacy for legacy in LEGACY_ALGORITHM_IDS.get(strategy, []) if legacy in sections), strategy
+    )
+    values = sections.get(key) if isinstance(sections.get(key), dict) else {}
+    return {
+        "strategy": strategy,
+        # Surfaced so the dashboard can say which key on disk a value came from: several
+        # algorithms are still filed under a retired id.
+        "config_key": key,
+        "config": values,
+        "explainer": explainer_for(strategy),
+    }
+
+
+def save_algorithm_config_payload(strategy: str, values: Any) -> dict[str, Any]:
+    strategy = canonical_algorithm_id(strategy)[:80]
+    # A list or scalar here means the caller sent the wrong shape. Coercing it to {} would
+    # quietly erase every tuned value for this algorithm, so refuse instead.
+    if not isinstance(values, dict):
+        raise ValueError("Algorithm config must be a JSON object.")
+    raw = load_algorithms_config()
+    sections = raw.setdefault("algorithms", {})
+    if not isinstance(sections, dict):
+        sections = {}
+        raw["algorithms"] = sections
+    # Write back to the key it was read from, so retired ids keep their tuning rather than
+    # gaining a second, silently-ignored copy under the canonical name.
+    key = strategy if strategy in sections else next(
+        (legacy for legacy in LEGACY_ALGORITHM_IDS.get(strategy, []) if legacy in sections), strategy
+    )
+    sections[key] = values
+    save_algorithms_config(raw)
+    return algorithm_config_payload(strategy)
+
+
+def positions_payload(account_id: str = "") -> dict[str, Any]:
+    """Live holdings and P/L for one account.
+
+    Per account rather than per algorithm: the broker reports a single blended position per
+    symbol, so two bindings trading the same account cannot be told apart here.
+    """
+    config = get_config(account_id=account_id) if account_id else get_config()
+    payload: dict[str, Any] = {
+        "account_id": config.account_id,
+        "account_label": config.account_label,
+        "equity": None,
+        "cash": None,
+        "day_pl": None,
+        "day_pl_percent": None,
+        "total_pl": None,
+        "rows": [],
+        "error": "",
+    }
+    # The local paper account keeps its own book and has no broker to ask.
+    if get_account_broker_type(config.account_id) == "paper":
+        return {**payload, **_paper_positions(config)}
+    try:
+        client = create_trading_client(config)
+        account = client.get_account()
+        equity = float(getattr(account, "equity", 0.0) or 0.0)
+        last_equity = float(getattr(account, "last_equity", 0.0) or 0.0)
+        payload["equity"] = equity
+        payload["cash"] = float(getattr(account, "cash", 0.0) or 0.0)
+        if last_equity:
+            payload["day_pl"] = equity - last_equity
+            payload["day_pl_percent"] = (equity - last_equity) / last_equity
+        rows = []
+        total_pl = 0.0
+        for position in client.get_all_positions():
+            unrealized = float(getattr(position, "unrealized_pl", 0.0) or 0.0)
+            total_pl += unrealized
+            rows.append(
+                {
+                    "symbol": str(getattr(position, "symbol", "")),
+                    "qty": float(getattr(position, "qty", 0.0) or 0.0),
+                    "avg_entry_price": float(getattr(position, "avg_entry_price", 0.0) or 0.0),
+                    "market_value": float(getattr(position, "market_value", 0.0) or 0.0),
+                    "unrealized_pl": unrealized,
+                    "unrealized_plpc": float(getattr(position, "unrealized_plpc", 0.0) or 0.0),
+                }
+            )
+        rows.sort(key=lambda row: abs(row["market_value"]), reverse=True)
+        payload["rows"] = rows
+        payload["total_pl"] = total_pl
+    except Exception as error:  # noqa: BLE001 - a broker outage must not blank the dashboard
+        logger.warning("Could not load positions for %s: %s", config.account_id, error)
+        payload["error"] = str(error)
+    return payload
+
+
+#: Fields a deployment target carries. Secrets are deliberately absent: accounts reference the
+#: *names* of environment variables, so the dashboard can wire up a target without ever handling
+#: an API key. Setting the secret stays a deploy-time action on the host.
+ACCOUNT_FIELDS = ("label", "broker", "base_url", "data_feed", "api_key_env", "api_secret_env")
+
+
+def _account_items(raw: dict[str, Any]) -> dict[str, Any]:
+    accounts = raw.get("accounts") if isinstance(raw.get("accounts"), dict) else {}
+    items = accounts.get("items") if isinstance(accounts.get("items"), dict) else {}
+    return items
+
+
+def accounts_payload() -> dict[str, Any]:
+    """Every deployment target, with whether its credentials are actually present."""
+    raw = load_accounts_config()
+    items = _account_items(raw)
+    controls = load_controls()
+    deployed: dict[str, list[str]] = {}
+    for binding in controls.get("bindings") or []:
+        deployed.setdefault(str(binding.get("account_id") or ""), []).append(str(binding.get("strategy") or ""))
+
+    rows = []
+    for account_id, section in items.items():
+        section = section if isinstance(section, dict) else {}
+        key_env = str(section.get("api_key_env") or "")
+        secret_env = str(section.get("api_secret_env") or "")
+        missing = [name for name in (key_env, secret_env) if name and not os.getenv(name)]
+        rows.append(
+            {
+                "id": str(account_id),
+                "label": str(section.get("label") or account_id),
+                "broker": str(section.get("broker") or "alpaca"),
+                "base_url": str(section.get("base_url") or ""),
+                "data_feed": str(section.get("data_feed") or ""),
+                "api_key_env": key_env,
+                "api_secret_env": secret_env,
+                "credentials_ready": not missing,
+                "missing_env": missing,
+                "deployments": sorted(set(deployed.get(str(account_id), []))),
+            }
+        )
+    rows.sort(key=lambda row: row["id"])
+    return {"default": str(raw.get("default") or ""), "rows": rows}
+
+
+def save_account_payload(body: dict[str, Any]) -> dict[str, Any]:
+    account_id = str(body.get("id") or "").strip()[:80]
+    if not account_id:
+        raise ValueError("A deployment target needs an id.")
+    if not account_id.replace("_", "").replace("-", "").isalnum():
+        raise ValueError("Target id may only contain letters, numbers, dashes, and underscores.")
+
+    raw = load_accounts_config()
+    accounts = raw.setdefault("accounts", {})
+    if not isinstance(accounts, dict):
+        accounts = {}
+        raw["accounts"] = accounts
+    items = accounts.setdefault("items", {})
+    if not isinstance(items, dict):
+        items = {}
+        accounts["items"] = items
+
+    section = items.get(account_id) if isinstance(items.get(account_id), dict) else {}
+    for field_name in ACCOUNT_FIELDS:
+        if field_name in body:
+            section[field_name] = str(body.get(field_name) or "")
+    section.setdefault("broker", "alpaca")
+    items[account_id] = section
+    if not raw.get("default"):
+        raw["default"] = account_id
+    save_accounts_config(raw)
+    return accounts_payload()
+
+
+def delete_account_payload(account_id: str) -> dict[str, Any]:
+    account_id = str(account_id or "").strip()
+    raw = load_accounts_config()
+    items = _account_items(raw)
+    if account_id not in items:
+        raise ValueError(f"No deployment target named {account_id}.")
+    if len(items) <= 1:
+        raise ValueError("Keep at least one deployment target.")
+
+    controls = load_controls()
+    in_use = [b for b in (controls.get("bindings") or []) if str(b.get("account_id")) == account_id]
+    if in_use:
+        # Deleting a target out from under a running deployment would leave it pointed at an
+        # account that no longer resolves, which fails at order time rather than here.
+        raise ValueError(f"{account_id} still has {len(in_use)} deployment(s). Remove them first.")
+
+    items.pop(account_id)
+    if str(raw.get("default") or "") == account_id:
+        raw["default"] = next(iter(items), "")
+    save_accounts_config(raw)
+    return accounts_payload()
+
+
+def _paper_positions(config: Any) -> dict[str, Any]:
+    """Holdings and P/L from the local paper book.
+
+    ``day_pl`` stays None: the book has no notion of yesterday's close, and inventing one
+    would put a number on the dashboard that nothing backs.
+    """
+    try:
+        book = PaperBrokerage(config).book()
+    except Exception as error:  # noqa: BLE001 - a corrupt book must not blank the page
+        logger.warning("Could not read the paper book for %s: %s", config.account_id, error)
+        return {"error": str(error)}
+    rows = book.get("rows") or []
+    return {
+        "equity": float(book.get("equity") or 0.0),
+        "cash": float(book.get("cash") or 0.0),
+        "total_pl": sum(float(row["unrealized_pl"]) for row in rows),
+        "rows": rows,
+    }
+
+
+def _paper_activity(config: Any, limit: int) -> dict[str, Any]:
+    """Order history for the local paper book, from the bot's own journal.
+
+    The paper brokerage fills immediately and keeps no order log, so the journal written at
+    submission is the whole record -- which is complete here, since nothing but this bot can
+    trade a local book.
+    """
+    rows = []
+    for entry in load_order_journal(account_id=config.account_id, limit=limit):
+        rows.append(
+            {
+                "symbol": entry.get("symbol", ""),
+                "side": entry.get("side", ""),
+                "status": entry.get("status", ""),
+                "qty": entry.get("quantity"),
+                "filled_qty": entry.get("quantity") if entry.get("status") == "submitted" else 0.0,
+                "filled_avg_price": entry.get("price") or None,
+                "submitted_at": entry.get("submitted_at", ""),
+            }
+        )
+    return {"rows": rows}
+
+
+def account_activity_payload(account_id: str = "", limit: int = 40) -> dict[str, Any]:
+    """Recent broker orders for one account.
+
+    Read straight from the brokerage rather than a local mirror: the broker is the only source
+    that knows about fills, partial fills, and cancels after submission. The local paper book
+    is the exception -- there is no broker, so the bot's own journal is the record.
+    """
+    config = get_config(account_id=account_id) if account_id else get_config()
+    payload: dict[str, Any] = {"account_id": config.account_id, "rows": [], "error": ""}
+    if get_account_broker_type(config.account_id) == "paper":
+        return {**payload, **_paper_activity(config, limit)}
+    try:
+        client = create_trading_client(config)
+        try:
+            orders = client.get_orders(filter=GetOrdersRequest(status=QueryOrderStatus.ALL, limit=limit))
+        except Exception:  # noqa: BLE001 - older SDKs reject the filter; fall back to open orders
+            orders = client.get_orders()
+        rows = []
+        for order in orders:
+            submitted = getattr(order, "submitted_at", None) or getattr(order, "created_at", None)
+            rows.append(
+                {
+                    "symbol": str(getattr(order, "symbol", "")),
+                    "side": _enum_value(getattr(order, "side", "")),
+                    "status": _enum_value(getattr(order, "status", "")),
+                    "qty": _as_float(getattr(order, "qty", None)),
+                    "filled_qty": _as_float(getattr(order, "filled_qty", None)),
+                    "filled_avg_price": _as_float(getattr(order, "filled_avg_price", None)),
+                    "submitted_at": submitted.isoformat() if hasattr(submitted, "isoformat") else str(submitted or ""),
+                }
+            )
+        rows.sort(key=lambda row: row["submitted_at"], reverse=True)
+        payload["rows"] = rows[:limit]
+    except Exception as error:  # noqa: BLE001 - a broker outage must not blank the page
+        logger.warning("Could not load activity for %s: %s", config.account_id, error)
+        payload["error"] = str(error)
+    return payload
+
+
+def algorithm_activity_payload(strategy: str = "", limit: int = 40) -> dict[str, Any]:
+    """Orders this bot placed for one algorithm, from its own journal.
+
+    The counterpart to account_activity_payload: the broker knows the fill, only the bot knows
+    which algorithm asked for it. Neither view replaces the other.
+    """
+    strategy_id = canonical_algorithm_id(strategy) if strategy else ""
+    return {
+        "strategy": strategy_id,
+        "rows": load_order_journal(strategy=strategy_id, limit=limit),
+    }
+
+
+def _enum_value(value: Any) -> str:
+    return str(getattr(value, "value", value) or "")
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+#: Watchlist symbols live in the state store, not a config file: it is a per-user view
+#: preference rather than something that changes how an algorithm trades.
+WATCHLIST_STATE_KEY = "watchlist"
+DEFAULT_WATCHLIST = ["SPY", "QQQ", "GLD", "TLT"]
+
+
+def _watchlist_symbols() -> list[str]:
+    stored = load_state(WATCHLIST_STATE_KEY, None)
+    if not isinstance(stored, list):
+        return list(DEFAULT_WATCHLIST)
+    return [str(symbol).strip().upper()[:10] for symbol in stored if str(symbol).strip()]
+
+
+def watchlist_payload() -> dict[str, Any]:
+    """Watchlist tickers with their latest price and move since the previous close."""
+    symbols = _watchlist_symbols()
+    rows: list[dict[str, Any]] = [{"symbol": symbol, "price": None, "change": None} for symbol in symbols]
+    if not symbols:
+        return {"symbols": symbols, "rows": rows}
+
+    config = get_config()
+    prices: dict[str, float] = {}
+    try:
+        prices = load_latest_prices(symbols, config, create_data_client(config))
+    except Exception as error:  # noqa: BLE001 - a quote outage must not blank the sidebar
+        logger.warning("Could not price watchlist: %s", error)
+
+    for row in rows:
+        price = float(prices.get(row["symbol"], 0.0) or 0.0)
+        row["price"] = price or None
+        # Previous close comes from the cached daily bars, so the sidebar costs no extra call.
+        try:
+            bars = read_market_bars("eod_market_data", None, row["symbol"], "1d", lookback_bars=2)
+            if price and not bars.empty and len(bars) >= 1:
+                previous = float(bars["close"].iloc[-2] if len(bars) >= 2 else bars["close"].iloc[-1])
+                if previous:
+                    row["change"] = (price - previous) / previous
+        except Exception:  # noqa: BLE001 - a missing bar just means no percentage
+            continue
+    return {"symbols": symbols, "rows": rows}
+
+
+def save_watchlist_payload(symbols: Any) -> dict[str, Any]:
+    if not isinstance(symbols, list):
+        raise ValueError("Watchlist must be a list of symbols.")
+    cleaned: list[str] = []
+    for symbol in symbols:
+        ticker = str(symbol or "").strip().upper()[:10]
+        if ticker and ticker not in cleaned:
+            cleaned.append(ticker)
+    save_state(WATCHLIST_STATE_KEY, cleaned[:30])
+    return watchlist_payload()
 
 
 def controls_payload() -> dict[str, Any]:
@@ -313,10 +658,21 @@ def controls_payload() -> dict[str, Any]:
     }
 
 
+def schwab_auth_payload() -> dict[str, Any]:
+    return auth_status(get_config())
+
+
+def start_schwab_auth_payload() -> dict[str, Any]:
+    return begin_authorization(get_config())
+
+
+def complete_schwab_auth_payload(code: str, state: str) -> dict[str, Any]:
+    complete_authorization(get_config(), code=code, returned_state=state)
+    return schwab_auth_payload()
+
+
 def save_controls_payload(body: dict[str, Any]) -> dict[str, Any]:
     raw_controls = body.get("controls", body)
-    if str(raw_controls.get("active_strategy") or "none") == "none":
-        raw_controls = {**raw_controls, "algorithm_enabled": False}
     if str(raw_controls.get("options_strategy") or "none") == "none":
         raw_controls = {**raw_controls, "options_trading_enabled": False}
     controls = save_controls(raw_controls)
@@ -374,497 +730,23 @@ def _json_number(value: Any) -> float | None:
     return round(parsed, 2)
 
 
-def _latest_signal_bars(strategy: str = "momentum_social") -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame]]:
+def strategy_signals_payload(strategy: str = DEFAULT_STRATEGY_ID) -> dict[str, Any]:
+    """Dashboard signal payload: dispatch to the algorithm's own ``signal_view``.
+
+    ``none`` used to fall back to the DCA plan's view, because DCA was not selectable in the
+    deck and would otherwise have had nowhere to render. DCA is an ordinary algorithm now, so
+    a saved ``none`` simply resolves to it.
+    """
+    strategy = canonical_algorithm_id(strategy or DEFAULT_STRATEGY_ID)[:80]
     config = get_config(strategy_id=strategy)
-    data_client = create_data_client(config)
-    bars_by_symbol = fetch_daily_bars(
-        config.symbols,
-        max(260, config.momentum_lookback_days),
-        ma_days=max(200, config.long_ma_days),
-        extra_buffer_days=config.history_extra_buffer_days,
-        alpaca_data_client=data_client,
-        data_feed=config.alpaca_data_feed,
-        include_latest=True,
-        config=config,
-    )
-    social_by_symbol = merge_social_frames(
-        load_social_trends_csv(config.social_trends_csv, config.symbols),
-        news_records_to_social_frames(fetch_latest_news_sentiment(config.symbols, config)),
-    )
-    return bars_by_symbol, social_by_symbol
-
-
-def _sanitize_social_frames(social_by_symbol: dict[str, Any]) -> dict[str, pd.DataFrame | None]:
-    return {
-        symbol: frame if isinstance(frame, pd.DataFrame) else None
-        for symbol, frame in social_by_symbol.items()
-    }
-
-
-def _latest_sma(df: pd.DataFrame, window: int) -> float | None:
-    if df.empty or "close" not in df or len(df) < window:
-        return None
-    close = pd.to_numeric(df["close"], errors="coerce")
-    return _json_number(close.rolling(window).mean().iloc[-1])
-
-
-def strategy_signals_payload(strategy: str = "momentum_social") -> dict[str, Any]:
-    strategy = (strategy or "none").lower()[:80]
-    if strategy == "none":
-        plan = load_dca_plan(universe_payload()["rows"])
-        preview = allocation_preview(plan)
-        return {
-            "strategy": strategy,
-            "wired": True,
-            "updated_at": pd.Timestamp.now(tz="UTC").isoformat(),
-            "summary": [
-                {"label": "Mode", "value": "DCA" if plan.get("enabled") else "Flat"},
-                {"label": "Schedule", "value": plan.get("schedule_pattern", "--")},
-                {"label": "Planned", "value": f"${sum(float(row.get('notional', 0.0)) for row in preview):.0f}"},
-            ],
-            "leaders": [
-                {
-                    "symbol": row["symbol"],
-                    "signal": row["action"].upper(),
-                    "score": _json_number(row.get("weight")),
-                    "target_weight": _json_number(row.get("weight")),
-                    "ret_N": None,
-                    "social_score": None,
-                    "trend_ok": 1,
-                }
-                for row in preview[:5]
-            ],
-        }
-
-    if strategy == "fast_momentum":
-        return _defensive_momentum_signals_payload()
-    if strategy == "invest_spy":
-        return _invest_spy_signals_payload()
-
-    if strategy != "momentum_social":
-        config = get_config(strategy_id=strategy)
-        bars_by_symbol, social_by_symbol = _latest_signal_bars(strategy)
-        leaders = strategy_signal_rows(
-            strategy,
-            bars_by_symbol,
-            social_by_symbol=social_by_symbol if strategy == "dual_momentum" else None,
-            social_lookback_days=config.social_lookback_days,
-            social_weight=config.social_momentum_weight if strategy == "dual_momentum" else 0.0,
-        )
-        long_count = sum(1 for row in leaders if row["signal"] == "LONG")
-        short_count = sum(1 for row in leaders if row["signal"] == "SHORT")
-        gross_count = max(long_count + short_count, 1)
-        for row in leaders:
-            row["target_weight"] = (1 / gross_count) if row["signal"] == "LONG" else (-1 / gross_count) if row["signal"] == "SHORT" else 0.0
-        return {
-            "strategy": strategy,
-            "wired": True,
-            "updated_at": pd.Timestamp.now(tz="UTC").isoformat(),
-            "summary": [
-                {"label": "Long", "value": str(long_count)},
-                {"label": "Short", "value": str(short_count)},
-                {"label": "Model", "value": STRATEGY_LABELS.get(strategy, strategy.replace("_", " ").title())},
-            ],
-            "leaders": leaders,
-        }
-
-    config = get_config(strategy_id=strategy)
-    data_client = create_data_client(config)
-    bars_by_symbol = fetch_daily_bars(
-        config.symbols,
-        config.momentum_lookback_days,
-        ma_days=config.long_ma_days,
-        extra_buffer_days=config.history_extra_buffer_days,
-        alpaca_data_client=data_client,
-        data_feed=config.alpaca_data_feed,
-        include_latest=True,
-        config=config,
-    )
-    social_by_symbol = _sanitize_social_frames(
-        merge_social_frames(
-            load_social_trends_csv(config.social_trends_csv, config.symbols),
-            news_records_to_social_frames(fetch_latest_news_sentiment(config.symbols, config)),
-        )
-    )
-    signals = compute_signals_for_universe(
-        bars_by_symbol,
-        config.momentum_lookback_days,
-        config.long_ma_days,
-        short_lookback_days=config.short_momentum_lookback_days,
-        volume_lookback_days=config.volume_lookback_days,
-        social_by_symbol=social_by_symbol,
-        social_lookback_days=config.social_lookback_days,
-        price_momentum_weight=config.price_momentum_weight,
-        social_momentum_weight=config.social_momentum_weight,
-        volume_momentum_weight=config.volume_momentum_weight,
-        min_composite_score=config.min_composite_score,
-    )
-    weights = compute_target_weights(
-        signals,
-        config.max_weight_per_symbol,
-        max_portfolio_exposure=config.max_portfolio_exposure,
-        max_longs=config.max_longs,
-        target_annual_vol=config.target_annual_vol,
-    )
-    ranked = sorted(
-        signals.items(),
-        key=lambda item: (int(item[1].get("signal", 0)), float(item[1].get("score", 0.0) or 0.0)),
-        reverse=True,
-    )
-    active = [item for item in ranked if int(item[1].get("signal", 0))]
-    leaders = [
-        {
-            "symbol": symbol,
-            "signal": "LONG" if int(values.get("signal", 0)) else "FLAT",
-            "close": _json_number(values.get("close")),
-            "sma_20": _latest_sma(bars_by_symbol.get(symbol, pd.DataFrame()), 20),
-            "sma_50": _latest_sma(bars_by_symbol.get(symbol, pd.DataFrame()), 50),
-            "sma_long": _json_number(values.get("sma_long")),
-            "score": _json_number(values.get("score")),
-            "price_score": _json_number(values.get("price_score")),
-            "social_score": _json_number(values.get("social_score")),
-            "volume_score": _json_number(values.get("volume_score")),
-            "ret_N": _json_number(values.get("ret_N")),
-            "ret_short": _json_number(values.get("ret_short")),
-            "realized_vol": _json_number(values.get("realized_vol")),
-            "trend_ok": int(values.get("trend_ok", 0)),
-            "target_weight": _json_number(weights.get(symbol, 0.0)),
-            "reason": "Positive composite momentum above long trend" if int(values.get("signal", 0)) else "Watching for trend and score confirmation",
-        }
-        for symbol, values in ranked
-    ]
+    algorithm = get_algorithm_class(strategy).from_config(config)
+    view = algorithm.signal_view(config)
     return {
         "strategy": strategy,
-        "wired": True,
+        "wired": view.wired,
         "updated_at": pd.Timestamp.now(tz="UTC").isoformat(),
-        "summary": [
-            {"label": "Active buys", "value": str(len(active))},
-            {"label": "Universe", "value": str(len(signals))},
-            {"label": "Exposure", "value": f"{sum(weights.values()) * 100:.0f}%"},
-        ],
-        "leaders": leaders,
-    }
-
-
-def _defensive_momentum_sentiment_from_records(
-    symbols: list[str],
-    records: list[dict[str, Any]],
-    lookback_minutes: int,
-) -> tuple[dict[str, float], float, dict[str, dict[str, Any]], list[str]]:
-    cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=max(lookback_minutes, 1))
-    by_symbol: dict[str, list[float]] = {symbol.upper(): [] for symbol in symbols}
-    metadata: dict[str, dict[str, Any]] = {
-        symbol.upper(): {"sentiment_records": 0, "sentiment_providers": []}
-        for symbol in symbols
-    }
-    providers: set[str] = set()
-    for record in records:
-        symbol = str(record.get("symbol", "")).upper()
-        if symbol not in by_symbol:
-            continue
-        timestamp = pd.to_datetime(record.get("timestamp"), utc=True, errors="coerce")
-        if not pd.isna(timestamp) and timestamp < cutoff:
-            continue
-        try:
-            sentiment = float(record.get("social_score", record.get("sentiment", 0.0)))
-        except (TypeError, ValueError):
-            sentiment = 0.0
-        provider = str(record.get("provider") or "").strip().lower()
-        if provider:
-            providers.add(provider)
-            if provider not in metadata[symbol]["sentiment_providers"]:
-                metadata[symbol]["sentiment_providers"].append(provider)
-        metadata[symbol]["sentiment_records"] += 1
-        by_symbol[symbol].append(max(-1.0, min(1.0, sentiment)))
-
-    symbol_sentiment = {
-        symbol: (sum(values) / len(values) if values else 0.0)
-        for symbol, values in by_symbol.items()
-    }
-    market_sentiment = symbol_sentiment.get("SPY")
-    if market_sentiment is None:
-        values = list(symbol_sentiment.values())
-        market_sentiment = sum(values) / len(values) if values else 0.0
-    return symbol_sentiment, float(market_sentiment), metadata, sorted(providers)
-
-
-def _defensive_momentum_reason(
-    row: dict[str, Any],
-    weight: float,
-    strategy_config: DefensiveMomentumConfig,
-) -> str:
-    symbol = str(row.get("symbol", "")).upper()
-    if weight > 0:
-        return "Top Rank"
-    if not bool(row.get("macro_trend_ok")):
-        return "Macro negative"
-    score_floor = strategy_config.min_risk_on_score if symbol in {item.upper() for item in strategy_config.risk_on_universe} else strategy_config.min_defensive_score
-    if float(row.get("score", 0.0)) < score_floor:
-        return "Score too low"
-    if symbol in {item.upper() for item in strategy_config.risk_on_universe} and float(row.get("micro_return", 0.0)) < strategy_config.min_risk_on_micro_return:
-        return "Micro too low"
-    return "No rank slot"
-
-
-def _defensive_momentum_signals_payload() -> dict[str, Any]:
-    config = get_config(strategy_id="fast_momentum")
-    strategy_config = DefensiveMomentumConfig.from_runtime_config(config)
-    symbols = strategy_config.symbols
-    data_client = create_data_client(config)
-    intraday_bars = get_intraday_bars(symbols, strategy_config.required_intraday_bars, config, data_client)
-    daily_bars = get_defensive_daily_bars(symbols, strategy_config.required_daily_bars, config, data_client)
-    sentiment_records = fetch_latest_news_sentiment(symbols, config)
-    sentiment, market_sentiment, _, providers = _defensive_momentum_sentiment_from_records(
-        symbols,
-        sentiment_records,
-        strategy_config.sentiment_lookback_minutes,
-    )
-    features = {
-        symbol: compute_price_features(symbol, intraday_bars.get(symbol, pd.DataFrame()), daily_bars.get(symbol, pd.DataFrame()), strategy_config)
-        for symbol in symbols
-    }
-    scores = compute_composite_scores(features, sentiment, strategy_config)
-    weights = decide_target_weights(scores, strategy_config)
-    allocation_mode = "Dynamic rank" if any(float(weight) > 0 for weight in weights.values()) else "Cash"
-    leaders = []
-    for symbol, row in scores.items():
-        weight = float(weights.get(symbol, 0.0))
-        components = row.get("components", {}) if isinstance(row.get("components"), dict) else {}
-        leaders.append(
-            {
-                "symbol": symbol,
-                "signal": "LONG" if weight > 0 else "FLAT",
-                "close": _json_number(row.get("close")),
-                "score": _json_number(row.get("score")),
-                "score_components": {key: _json_number(value) for key, value in components.items()},
-                "allocation_mode": allocation_mode,
-                "realized_vol": _json_number(row.get("realized_volatility")),
-                "trend_ok": int(bool(row.get("macro_trend_ok"))),
-                "target_weight": _json_number(weight),
-                "reason": _defensive_momentum_reason(row, weight, strategy_config),
-            }
-        )
-    leaders.sort(key=lambda item: (item["signal"] != "LONG", -float(item.get("target_weight") or 0.0), -float(item.get("score") or 0.0)))
-    return {
-        "strategy": "fast_momentum",
-        "wired": True,
-        "updated_at": pd.Timestamp.now(tz="UTC").isoformat(),
-        "summary": [
-            {"label": "Allocation", "value": allocation_mode},
-            {"label": "Exposure", "value": f"{sum(float(weight) for weight in weights.values()) * 100:.0f}%"},
-            {"label": "Sentiment", "value": ", ".join(providers) if providers else "No recent records"},
-            {"label": "Universe", "value": str(len(symbols))},
-        ],
-        "leaders": leaders,
-    }
-
-
-def defensive_momentum_portfolio_preview() -> dict[str, Any]:
-    """Compute what the fast momentum algorithm would do given current positions and stickiness.
-
-    Fetches live market data and current brokerage positions, applies the full algorithm
-    (including the min_score_delta_to_replace incumbency bonus), and returns the planned
-    portfolio changes alongside the current state.
-    """
-    config = get_config(strategy_id="fast_momentum")
-    data_client = create_data_client(config)
-    trading_client = create_trading_client(config)
-    current_positions = get_positions(trading_client)
-    account_equity = get_account_equity(trading_client)
-    equity = float(account_equity)
-    strategy_config = DefensiveMomentumConfig.from_runtime_config(config)
-
-    latest_prices: dict[str, float] = {}
-    for symbol in strategy_config.symbols:
-        bars = get_intraday_bars([symbol], strategy_config.required_intraday_bars, config, data_client)
-        df = bars.get(symbol)
-        if df is not None and not df.empty and "close" in df.columns:
-            price = float(df["close"].iloc[-1])
-            if price > 0:
-                latest_prices[symbol] = price
-    for symbol in set(current_positions) - set(latest_prices):
-        bars = get_intraday_bars([symbol], 2, config, data_client)
-        df = bars.get(symbol)
-        if df is not None and not df.empty and "close" in df.columns:
-            price = float(df["close"].iloc[-1])
-            if price > 0:
-                latest_prices[symbol] = price
-
-    target_weights, signals, metadata = build_defensive_momentum_targets(
-        config,
-        data_client,
-        current_positions,
-        latest_prices,
-        equity,
-    )
-
-    current_weights = {
-        symbol: (shares * latest_prices.get(symbol, 0.0)) / max(equity, 1.0)
-        for symbol, shares in current_positions.items()
-        if latest_prices.get(symbol, 0.0) > 0
-    }
-
-    score_delta = max(strategy_config.min_score_delta_to_replace, 0.0)
-    scores_data = metadata.get("scores", {})
-    all_scored = [
-        (s, float(scores_data[s].get("score", 0.0)))
-        for s in strategy_config.symbols
-        if s in scores_data
-    ]
-    without_bonus_top = set(
-        s for s, _ in sorted(all_scored, key=lambda x: -x[1])[:max(strategy_config.max_positions, 0)]
-    )
-    current_held = {s for s, w in current_weights.items() if w > 0}
-    target_set = {s for s, w in target_weights.items() if w > 0}
-
-    planned_orders = plan_position_orders(
-        latest_prices=latest_prices,
-        current_positions=current_positions,
-        target_weights=target_weights,
-        equity=equity,
-        cash_buffer=0.0,
-        min_trade_dollars=strategy_config.per_trade_value_min,
-        rebalance_threshold=strategy_config.rebalance_threshold,
-    )
-
-    positions_detail = []
-    for symbol in strategy_config.symbols:
-        cw = round(current_weights.get(symbol, 0.0), 4)
-        tw = round(target_weights.get(symbol, 0.0), 4)
-        in_current = symbol in current_held
-        in_target = symbol in target_set
-
-        if in_current and in_target:
-            if score_delta > 0 and symbol not in without_bonus_top:
-                status = "retained"
-                sticky = True
-                reason = "Sticky"
-            else:
-                status = "retained"
-                sticky = False
-                reason = "Retained"
-        elif in_current and not in_target:
-            status = "dropped"
-            sticky = False
-            reason = "Dropped"
-        elif not in_current and in_target:
-            status = "new"
-            sticky = False
-            reason = "New"
-        else:
-            status = "none"
-            sticky = False
-            reason = "None"
-
-        positions_detail.append({
-            "symbol": symbol,
-            "current_weight": cw,
-            "target_weight": tw,
-            "status": status,
-            "sticky": sticky,
-            "reason": reason,
-        })
-
-    return {
-        "strategy": "fast_momentum",
-        "updated_at": pd.Timestamp.now(tz="UTC").isoformat(),
-        "equity": equity,
-        "current_weights": {s: round(w, 4) for s, w in sorted(current_weights.items()) if w > 0},
-        "target_weights": {s: round(w, 4) for s, w in sorted(target_weights.items()) if w != 0},
-        "positions": positions_detail,
-        "planned_orders": [
-            {
-                "symbol": o["symbol"],
-                "action": o["action"],
-                "quantity": o["quantity"],
-                "current_shares": o["current_shares"],
-                "target_shares": o["target_shares"],
-                "trade_dollars": round(float(o["trade_dollars"]), 2),
-                "latest_price": float(o["latest_price"]),
-            }
-            for o in planned_orders
-        ],
-        "stickiness": {
-            "delta": score_delta,
-            "enabled": score_delta > 0,
-        },
-        "summary": [
-            {"label": "Allocation", "value": metadata.get("allocation_mode", "N/A")},
-            {"label": "Exposure", "value": f"{sum(float(w) for w in target_weights.values()) * 100:.0f}%"},
-            {"label": "Positions", "value": str(len(current_positions))},
-            {"label": "Changes", "value": str(len(planned_orders))},
-        ],
-    }
-
-
-def _invest_spy_reason(symbol: str, weight: float, state: str, config: InvestSpyConfig) -> str:
-    if weight > 0 and symbol == config.spy_symbol:
-        return "SPY growth/pullback"
-    if weight > 0 and symbol in {item.upper() for item in config.equity_income_universe}:
-        return "Flat-market income"
-    if weight > 0 and symbol in {item.upper() for item in config.crisis_hedge_universe}:
-        return "Crisis hedge"
-    if weight > 0:
-        return "Defensive allocation"
-    if symbol == config.spy_symbol and state in {"FALLING", "CRISIS"}:
-        return "SPY state defensive"
-    if symbol in {item.upper() for item in config.equity_income_universe} and state != "FLAT":
-        return "Income waits for flat SPY"
-    if symbol in {item.upper() for item in config.crisis_hedge_universe} and state != "CRISIS":
-        return "Hedge waits for crisis"
-    return "Outside state allocation"
-
-
-def _invest_spy_signals_payload() -> dict[str, Any]:
-    config = get_config(strategy_id="invest_spy")
-    strategy_config = InvestSpyConfig.from_runtime_config(config)
-    symbols = strategy_config.symbols
-    data_client = create_data_client(config)
-    intraday_bars = get_intraday_bars(symbols, strategy_config.required_intraday_bars, config, data_client)
-    daily_bars = get_defensive_daily_bars(symbols, strategy_config.macro_trend_lookback_days, config, data_client)
-    sentiment_records = fetch_latest_news_sentiment(symbols, config)
-    sentiment, market_sentiment, _, providers = _defensive_momentum_sentiment_from_records(
-        symbols,
-        sentiment_records,
-        strategy_config.sentiment_lookback_minutes,
-    )
-    features = {
-        symbol: compute_invest_spy_price_features(symbol, intraday_bars.get(symbol, pd.DataFrame()), daily_bars.get(symbol, pd.DataFrame()), strategy_config)
-        for symbol in symbols
-    }
-    scores = compute_composite_scores(features, sentiment, strategy_config)
-    state = classify_spy_state(scores.get(strategy_config.spy_symbol, {}), sentiment.get(strategy_config.spy_symbol, market_sentiment), strategy_config)
-    weights = decide_invest_spy_weights(scores, state, strategy_config)
-    leaders = []
-    for symbol, row in scores.items():
-        weight = float(weights.get(symbol, 0.0))
-        components = row.get("components", {}) if isinstance(row.get("components"), dict) else {}
-        leaders.append(
-            {
-                "symbol": symbol,
-                "signal": "LONG" if weight > 0 else "FLAT",
-                "close": _json_number(row.get("close")),
-                "score": _json_number(row.get("score")),
-                "score_components": {key: _json_number(value) for key, value in components.items()},
-                "spy_state": state,
-                "realized_vol": _json_number(row.get("realized_volatility")),
-                "trend_ok": int(bool(row.get("macro_trend_ok"))),
-                "target_weight": _json_number(weight),
-                "reason": _invest_spy_reason(symbol, weight, state, strategy_config),
-            }
-        )
-    leaders.sort(key=lambda item: (item["signal"] != "LONG", -float(item.get("target_weight") or 0.0), -float(item.get("score") or 0.0)))
-    return {
-        "strategy": "invest_spy",
-        "wired": True,
-        "updated_at": pd.Timestamp.now(tz="UTC").isoformat(),
-        "summary": [
-            {"label": "SPY state", "value": state.title()},
-            {"label": "Exposure", "value": f"{sum(float(weight) for weight in weights.values()) * 100:.0f}%"},
-            {"label": "Sentiment", "value": ", ".join(providers) if providers else "No recent records"},
-            {"label": "Universe", "value": str(len(symbols))},
-        ],
-        "leaders": leaders,
+        "summary": view.summary,
+        "leaders": view.leaders,
     }
 
 
@@ -982,11 +864,9 @@ def _save_backtest_cache(cache: dict[str, Any], path: str = BACKTEST_CACHE_PATH)
 
 
 def _cache_key(strategy: str, period: str, dca_plan: dict[str, Any]) -> str:
-    config = get_config(strategy_id=strategy if strategy != "none" else None)
+    config = get_config(strategy_id=strategy)
     selected_algorithm_config = (
-        config.algorithm_configs.get(strategy, {})
-        if strategy != "none" and isinstance(config.algorithm_configs, dict)
-        else {}
+        config.algorithm_configs.get(strategy, {}) if isinstance(config.algorithm_configs, dict) else {}
     )
     algorithm_config = {
         "symbols": config.symbols,
@@ -1013,8 +893,8 @@ def _cache_key(strategy: str, period: str, dca_plan: dict[str, Any]) -> str:
         "strategy": strategy,
         "period": period,
         "data_feed": config.alpaca_data_feed,
-        "algorithm_config": algorithm_config if strategy != "none" else {},
-        "dca_plan": dca_plan if strategy == "none" else {},
+        "algorithm_config": algorithm_config,
+        "dca_plan": dca_plan if strategy in DCA_ALGORITHMS else {},
     }
     encoded = json.dumps(cache_basis, sort_keys=True, default=str).encode("utf-8")
     return sha256(encoded).hexdigest()
@@ -1088,7 +968,7 @@ def _backtest_response(
     cached: bool = False,
     updated_at: str | None = None,
 ) -> dict[str, Any]:
-    sizing_config = get_config(strategy_id=strategy if strategy != "none" else None)
+    sizing_config = get_config(strategy_id=strategy)
     if history_df.empty:
         raise RuntimeError("Backtest did not produce any equity history.")
     history_df = history_df.copy()
@@ -1156,163 +1036,6 @@ def _backtest_response(
     }
 
 
-def _flat_backtest(period: str, starting_equity: float | None = None) -> pd.DataFrame:
-    starting_equity = _backtest_starting_equity() if starting_equity is None else float(starting_equity)
-    start = _period_start(period)
-    end = pd.Timestamp.now(tz="UTC")
-    dates = pd.bdate_range(start=start, end=end, tz="UTC")
-    if len(dates) < 2:
-        dates = pd.DatetimeIndex([start, end])
-    return pd.DataFrame(
-        [{"timestamp": date, "equity": starting_equity, "cash": starting_equity, "invested": 0.0} for date in dates]
-    ).set_index("timestamp")
-
-
-def _cron_value_matches(field: str, value: int) -> bool:
-    field = field.strip()
-    if field == "*":
-        return True
-    for part in field.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if "-" in part:
-            start_raw, end_raw = part.split("-", 1)
-            if start_raw.isdigit() and end_raw.isdigit() and int(start_raw) <= value <= int(end_raw):
-                return True
-        elif part.isdigit() and int(part) == value:
-            return True
-    return False
-
-
-def _frequency_runs_on_index(frequency: str, index: int) -> bool:
-    schedule_every = 5 if frequency in {"weekly", "biweekly"} else 1
-    if frequency == "biweekly":
-        schedule_every = 10
-    elif frequency == "monthly":
-        schedule_every = 21
-    return index % schedule_every == 0
-
-
-def _dca_runs_on_trade_date(plan: dict[str, Any], trade_date: pd.Timestamp, index: int) -> bool:
-    pattern = str(plan.get("schedule_pattern") or "").split()
-    if len(pattern) == 5:
-        _minute, _hour, day_of_month, month, day_of_week = pattern
-        cron_dow = 0 if trade_date.dayofweek == 6 else trade_date.dayofweek + 1
-        return (
-            _cron_value_matches(month, int(trade_date.month))
-            and _cron_value_matches(day_of_month, int(trade_date.day))
-            and (_cron_value_matches(day_of_week, cron_dow) or (cron_dow == 0 and _cron_value_matches(day_of_week, 7)))
-        )
-    return _frequency_runs_on_index(str(plan.get("frequency") or "weekly"), index)
-
-
-def _dca_backtest(
-    plan: dict[str, Any],
-    period: str,
-    starting_equity: float | None = None,
-) -> pd.DataFrame:
-    starting_equity = _backtest_starting_equity() if starting_equity is None else float(starting_equity)
-    preview = [row for row in allocation_preview(plan) if row["action"] == "buy" and row["notional"] > 0]
-    if not plan.get("enabled") or not preview:
-        return _flat_backtest(period, starting_equity)
-
-    config = get_config()
-    symbols = sorted({row["symbol"] for row in preview})
-    data_client = create_data_client(config)
-    bars_by_symbol = fetch_daily_bars(
-        symbols,
-        lookback_days=_period_row_count(period) + 10,
-        ma_days=0,
-        extra_buffer_days=10,
-        alpaca_data_client=data_client,
-        data_feed=config.alpaca_data_feed,
-        config=config,
-    )
-    history_by_symbol: dict[str, pd.DataFrame] = {}
-    for symbol, df in bars_by_symbol.items():
-        if df.empty:
-            continue
-        work_df = df.copy()
-        work_df["timestamp"] = pd.to_datetime(work_df["timestamp"], utc=True)
-        history_by_symbol[symbol] = work_df.sort_values("timestamp").set_index("timestamp")
-    if not history_by_symbol:
-        raise RuntimeError("No historical bars were available for the DCA backtest.")
-
-    start = _period_start(period)
-    common_dates = sorted(set.intersection(*(set(df.index) for df in history_by_symbol.values())))
-    common_dates = [date for date in common_dates if date >= start]
-    if not common_dates:
-        raise RuntimeError("No common trading dates were available for the DCA backtest period.")
-
-    cash = starting_equity
-    shares = {symbol: 0.0 for symbol in history_by_symbol}
-    invested_cash = 0.0
-    records: list[dict[str, Any]] = []
-
-    for index, trade_date in enumerate(common_dates):
-        order_count = 0
-        order_value = 0.0
-        planned_order_value = 0.0
-        skipped_order_value = 0.0
-        scheduled_order_count = 0
-        skipped_order_count = 0
-        close_prices = {
-            symbol: float(history_by_symbol[symbol].loc[trade_date, "close"])
-            for symbol in history_by_symbol
-            if trade_date in history_by_symbol[symbol].index
-        }
-        if _dca_runs_on_trade_date(plan, trade_date, index):
-            for row in preview:
-                symbol = row["symbol"]
-                price = close_prices.get(symbol)
-                notional = float(row["notional"])
-                if notional > 0:
-                    scheduled_order_count += 1
-                    planned_order_value += notional
-                if not price or price <= 0 or notional <= 0:
-                    skipped_order_count += 1
-                    skipped_order_value += notional
-                    continue
-                if cash < notional:
-                    skipped_order_count += 1
-                    skipped_order_value += notional
-                    continue
-                shares[symbol] = shares.get(symbol, 0.0) + notional / price
-                cash -= notional
-                invested_cash += notional
-                order_count += 1
-                order_value += notional
-
-        market_value = sum(shares.get(symbol, 0.0) * price for symbol, price in close_prices.items())
-        positions_value = {
-            symbol: shares.get(symbol, 0.0) * price
-            for symbol, price in close_prices.items()
-            if abs(shares.get(symbol, 0.0) * price) > 0.005
-        }
-        records.append(
-            {
-                "timestamp": trade_date,
-                "equity": cash + market_value,
-                "cash": cash,
-                "invested": market_value,
-                "positions": positions_value,
-                "dca_contributions": invested_cash,
-                "turnover": order_value,
-                "order_count": order_count,
-                "scheduled_order_count": scheduled_order_count,
-                "skipped_order_count": skipped_order_count,
-                "planned_order_value": planned_order_value,
-                "skipped_order_value": skipped_order_value,
-                "gross_exposure": market_value,
-                "long_value": market_value,
-                "short_value": 0.0,
-            }
-        )
-
-    return pd.DataFrame(records).set_index("timestamp").sort_index()
-
-
 def _strategy_history_bars(strategy: str, period: str, config) -> dict[str, pd.DataFrame]:
     algorithm = get_algorithm_class(strategy).from_config(config)
     requirements = algorithm.requirements(config, {})
@@ -1329,23 +1052,6 @@ def _strategy_history_bars(strategy: str, period: str, config) -> dict[str, pd.D
     )
 
 
-def _history_price_at(
-    df: pd.DataFrame,
-    timestamp: pd.Timestamp,
-    column: str,
-    *,
-    fallback_column: str | None = None,
-) -> float:
-    value = df.loc[timestamp, column] if column in df.columns else pd.NA
-    if isinstance(value, pd.Series):
-        value = value.dropna().iloc[-1] if not value.dropna().empty else pd.NA
-    if pd.isna(value) and fallback_column:
-        value = df.loc[timestamp, fallback_column] if fallback_column in df.columns else pd.NA
-        if isinstance(value, pd.Series):
-            value = value.dropna().iloc[-1] if not value.dropna().empty else pd.NA
-    return float(value) if not pd.isna(value) else 0.0
-
-
 def _configured_intraday_providers(config) -> list[str]:
     providers = [
         str(provider).strip().lower()
@@ -1355,351 +1061,69 @@ def _configured_intraday_providers(config) -> list[str]:
     return providers or ["yfinance"]
 
 
-def _read_backtest_intraday_bars(
-    symbol: str,
-    signal_date: pd.Timestamp,
-    *,
-    config,
-    lookback_bars: int,
-    bar_minutes: int,
-) -> pd.DataFrame:
-    timeframe = f"{int(bar_minutes)}m"
-    providers = _configured_intraday_providers(config)
-    intraday_end = signal_date + pd.Timedelta(hours=20)
-    for provider in providers:
-        try:
-            bars = read_market_bars(
-                "intraday_market_data",
-                provider,
-                symbol,
-                timeframe,
-                lookback_bars=lookback_bars,
-                end=intraday_end,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Fast Momentum backtest intraday cache read failed provider=%s symbol=%s signal_date=%s timeframe=%s lookback=%s: %s",
-                provider,
-                symbol,
-                signal_date.isoformat(),
-                timeframe,
-                lookback_bars,
-                exc,
-            )
-            continue
-        if not bars.empty:
-            logger.debug(
-                "Fast Momentum backtest intraday cache hit provider=%s symbol=%s signal_date=%s rows=%s",
-                provider,
-                symbol,
-                signal_date.isoformat(),
-                len(bars),
-            )
-            return bars
-        logger.debug(
-            "Fast Momentum backtest intraday cache miss provider=%s symbol=%s signal_date=%s timeframe=%s lookback=%s",
-            provider,
-            symbol,
-            signal_date.isoformat(),
-            timeframe,
-            lookback_bars,
-        )
-    logger.warning(
-        "Fast Momentum backtest intraday cache miss symbol=%s signal_date=%s providers=%s; nano/micro returns will be 0",
-        symbol,
-        signal_date.isoformat(),
-        ",".join(providers),
-    )
-    return pd.DataFrame()
-
-
-def _strategy_backtest(
-    strategy: str,
-    period: str,
-    starting_equity: float | None = None,
-) -> pd.DataFrame:
-    starting_equity = _backtest_starting_equity() if starting_equity is None else float(starting_equity)
-    config = get_config(strategy_id=strategy)
-    invest_spy_config = InvestSpyConfig.from_runtime_config(config) if strategy == "invest_spy" else None
-    defensive_strategy_config = DefensiveMomentumConfig.from_runtime_config(config) if strategy == "fast_momentum" else None
-    bars_by_symbol = _strategy_history_bars(strategy, period, config)
-    history_by_symbol: dict[str, pd.DataFrame] = {}
-    for symbol, df in bars_by_symbol.items():
-        work = prepared_strategy_frame(df)
-        if work.empty:
-            continue
-        work["timestamp"] = pd.to_datetime(work["timestamp"], utc=True)
-        history_by_symbol[symbol] = work.sort_values("timestamp").set_index("timestamp")
-    if not history_by_symbol:
-        raise RuntimeError("No historical bars were available for the strategy backtest.")
-
-    start = _period_start(period)
-    common_dates = sorted(set.intersection(*(set(df.index) for df in history_by_symbol.values())))
-    common_dates = [date for date in common_dates if date >= start]
-    if len(common_dates) < 2:
-        all_common_dates = sorted(set.intersection(*(set(df.index) for df in history_by_symbol.values())))
-        common_dates = all_common_dates[-_period_row_count(period):]
-    if len(common_dates) < 2:
-        raise RuntimeError("No common trading dates were available for the strategy backtest period.")
-
-    cash = starting_equity
-    positions = {symbol: 0.0 for symbol in history_by_symbol}
-    records: list[dict[str, Any]] = []
-    max_exposure = min(
-        max(float(
-            invest_spy_config.max_gross_exposure
-            if invest_spy_config
-            else defensive_strategy_config.max_gross_exposure
-            if defensive_strategy_config
-            else config.max_portfolio_exposure
-        ), 0.0),
-        max(1.0 - max(float(config.cash_buffer), 0.0), 0.0),
-        1.0,
-    )
-    max_per_symbol = min(
-        max(float(
-            invest_spy_config.max_single_position_weight
-            if invest_spy_config
-            else defensive_strategy_config.max_single_position_weight
-            if defensive_strategy_config
-            else config.max_weight_per_symbol
-        ), 0.01),
-        1.0,
-    )
-    max_longs = max(int(defensive_strategy_config.max_positions if defensive_strategy_config else config.max_longs), 0)
-
-    signal_indexes = list(range(1, len(common_dates)))
-    social_by_symbol = (
-        load_social_trends_csv(config.social_trends_csv, list(history_by_symbol))
-        if strategy == "momentum_social"
-        else {}
-    )
-
-    def weights_for_index(index: int) -> tuple[int, dict[str, float]]:
-        signal_date = common_dates[index - 1]
-        if strategy == "momentum_social":
-            snapshots = {symbol: df.loc[:signal_date].reset_index() for symbol, df in history_by_symbol.items()}
-            signals = compute_signals_for_universe(
-                snapshots,
-                config.momentum_lookback_days,
-                config.long_ma_days,
-                short_lookback_days=config.short_momentum_lookback_days,
-                volume_lookback_days=config.volume_lookback_days,
-                social_by_symbol=social_by_symbol,
-                social_lookback_days=config.social_lookback_days,
-                price_momentum_weight=config.price_momentum_weight,
-                social_momentum_weight=config.social_momentum_weight,
-                volume_momentum_weight=config.volume_momentum_weight,
-                min_composite_score=config.min_composite_score,
-            )
-            weights = compute_target_weights(
-                signals,
-                config.max_weight_per_symbol,
-                max_portfolio_exposure=max_exposure,
-                max_longs=config.max_longs,
-                target_annual_vol=config.target_annual_vol,
-            )
-            return index, weights
-
-        if invest_spy_config:
-            snapshots = {symbol: df.loc[:signal_date].reset_index() for symbol, df in history_by_symbol.items()}
-            features = {
-                symbol: compute_invest_spy_price_features(symbol, snapshots.get(symbol, pd.DataFrame()), snapshots.get(symbol, pd.DataFrame()), invest_spy_config)
-                for symbol in history_by_symbol
-            }
-            scores = compute_composite_scores(features, {}, invest_spy_config)
-            state = classify_spy_state(scores.get(invest_spy_config.spy_symbol, {}), 0.0, invest_spy_config)
-            return index, decide_invest_spy_weights(scores, state, invest_spy_config)
-
-        if strategy == "fast_momentum" and defensive_strategy_config:
-            snapshots = {symbol: df.loc[:signal_date].reset_index() for symbol, df in history_by_symbol.items()}
-            intraday_by_symbol = {
-                symbol: _read_backtest_intraday_bars(
-                    symbol,
-                    signal_date,
-                    config=config,
-                    lookback_bars=defensive_strategy_config.required_intraday_bars,
-                    bar_minutes=15,
-                )
-                for symbol in snapshots
-            }
-
-            features = {
-                symbol: compute_price_features(symbol, intraday_by_symbol.get(symbol, pd.DataFrame()), snapshots.get(symbol, pd.DataFrame()), defensive_strategy_config)
-                for symbol in history_by_symbol
-            }
-            scores = compute_composite_scores(features, {}, defensive_strategy_config)
-            return index, decide_target_weights(scores, defensive_strategy_config)
-
-        snapshots = {symbol: df.loc[:signal_date] for symbol, df in history_by_symbol.items()}
-        decisions = strategy_signal_rows_from_prepared(strategy, snapshots)
-        return index, weights_from_strategy_rows(
-            decisions,
-            list(history_by_symbol),
-            max_longs=max_longs,
-            max_weight_per_symbol=max_per_symbol,
-            max_portfolio_exposure=max_exposure,
-        )
-
-    if len(signal_indexes) > 1 and strategy != "fast_momentum":
-        max_workers = min(8, len(signal_indexes))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            weights_by_index = dict(executor.map(weights_for_index, signal_indexes))
-    else:
-        weights_by_index = dict(weights_for_index(index) for index in signal_indexes)
-
-    for index in signal_indexes:
-        signal_date = common_dates[index - 1]
-        trade_date = common_dates[index]
-        weights = {
-            symbol: max(float(weights_by_index[index].get(symbol, 0.0)), 0.0)
-            for symbol in history_by_symbol
-        }
-        total_weight = sum(weights.values())
-        if total_weight > max_exposure and total_weight > 0:
-            scale = max_exposure / total_weight
-            weights = {symbol: weight * scale for symbol, weight in weights.items()}
-
-        open_prices = {symbol: _history_price_at(df, trade_date, "open", fallback_column="close") for symbol, df in history_by_symbol.items()}
-        # Use adjusted_close for valuation if available to capture dividends
-        close_prices = {
-            symbol: _history_price_at(df, trade_date, "adjusted_close", fallback_column="close")
-            for symbol, df in history_by_symbol.items()
-        }
-        equity_at_open = cash + sum(positions.get(symbol, 0.0) * open_prices[symbol] for symbol in history_by_symbol)
-        target_positions = {
-            symbol: (equity_at_open * weights.get(symbol, 0.0)) / open_prices[symbol]
-            if open_prices[symbol] > 0
-            else 0.0
-            for symbol in history_by_symbol
-        }
-        turnover = 0.0
-        costs = 0.0
-        order_count = 0
-        transaction_cost_rate = config.transaction_cost_bps / 10_000
-
-        sell_diffs = {
-            symbol: target_shares - positions.get(symbol, 0.0)
-            for symbol, target_shares in target_positions.items()
-            if target_shares < positions.get(symbol, 0.0)
-        }
-        buy_diffs = {
-            symbol: target_shares - positions.get(symbol, 0.0)
-            for symbol, target_shares in target_positions.items()
-            if target_shares > positions.get(symbol, 0.0)
-        }
-
-        for symbol, diff in sell_diffs.items():
-            notional = abs(diff) * open_prices[symbol]
-            if notional <= 1e-9:
-                continue
-            cost = notional * transaction_cost_rate
-            cash += notional - cost
-            costs += cost
-            turnover += notional
-            order_count += 1
-            positions[symbol] = target_positions[symbol]
-
-        for symbol, desired_diff in buy_diffs.items():
-            price = open_prices[symbol]
-            diff = desired_diff
-            notional = diff * price
-            cost = notional * transaction_cost_rate
-            if notional + cost > cash:
-                diff = max(cash / (price * (1 + transaction_cost_rate)), 0.0)
-                notional = diff * price
-                cost = notional * transaction_cost_rate
-            if diff <= 1e-9 or notional <= 1e-9:
-                continue
-            cash -= notional + cost
-            if abs(cash) <= 1e-7:
-                cash = 0.0
-            costs += cost
-            turnover += notional
-            order_count += 1
-            positions[symbol] = positions.get(symbol, 0.0) + diff
-
-        values = {symbol: positions.get(symbol, 0.0) * close_prices[symbol] for symbol in history_by_symbol}
-        invested = sum(values.values())
-        long_value = sum(value for value in values.values() if value > 0)
-        short_value = abs(sum(value for value in values.values() if value < 0))
-        gross_exposure = long_value + short_value
-        equity = cash + invested
-        records.append(
-            {
-                "timestamp": trade_date,
-                "signal_timestamp": signal_date,
-                "equity": equity,
-                "cash": cash,
-                "invested": invested,
-                "positions": {
-                    symbol: value
-                    for symbol, value in values.items()
-                    if abs(value) > 0.005
-                },
-                "turnover": turnover,
-                "transaction_costs": costs,
-                "order_count": order_count,
-                "gross_exposure": gross_exposure,
-                "long_value": long_value,
-                "short_value": short_value,
-                **{f"weight_{symbol}": weights.get(symbol, 0.0) for symbol in history_by_symbol},
-                **{f"shares_{symbol}": positions.get(symbol, 0.0) for symbol in history_by_symbol},
-            }
-        )
-
-    return pd.DataFrame(records).set_index("timestamp").sort_index()
-
-
 def _compute_backtest(
     strategy: str,
     period: str,
     dca_plan: dict[str, Any],
 ) -> dict[str, Any]:
-    starting_equity = _backtest_starting_equity()
-    if strategy == "none":
-        if dca_plan.get("enabled"):
-            history_df = _dca_backtest(dca_plan, period, starting_equity=starting_equity)
-            return _backtest_response(
-                history_df,
-                strategy=strategy,
-                label="None / DCA",
-                period=period,
-                source="dca",
-            )
-        return _backtest_response(
-            _flat_backtest(period, starting_equity=starting_equity),
-            strategy=strategy,
-            label="None",
-            period=period,
-            source="flat",
-        )
+    """Backtest by replaying the algorithm itself.
 
-    history_df = _strategy_backtest(strategy, period, starting_equity=starting_equity)
+    One path for every algorithm. There is no per-strategy branch here any more: whatever the
+    algorithm declares in ``requirements()`` is what the replay loads, and whatever ``analyze``
+    decides is what gets traded -- so a backtest cannot test different logic than the runtime.
+    """
+    starting_equity = _backtest_starting_equity()
+    config = get_config(strategy_id=strategy)
+    algorithm = get_algorithm_class(strategy).from_config(config)
+    schedule = algorithm.schedule
+
+    daily_history: dict[str, pd.DataFrame] = {}
+    for symbol, frame in _strategy_history_bars(strategy, period, config).items():
+        work = prepared_strategy_frame(frame)
+        if work.empty:
+            continue
+        work["timestamp"] = pd.to_datetime(work["timestamp"], utc=True)
+        daily_history[symbol] = work.sort_values("timestamp").set_index("timestamp")
+    if not daily_history:
+        raise RuntimeError("No historical bars were available for the backtest.")
+
     start = _period_start(period)
-    if history_df.index.tz is None:
-        start = start.tz_localize(None)
-    period_df = history_df.loc[history_df.index >= start]
-    if len(period_df) >= 2:
-        history_df = period_df
-    else:
-        history_df = history_df.tail(_period_row_count(period))
-    return _backtest_response(
+    trade_dates = sorted(set.intersection(*(set(df.index) for df in daily_history.values())))
+    in_period = [date for date in trade_dates if date >= start]
+    trade_dates = in_period if len(in_period) >= 2 else trade_dates[-_period_row_count(period):]
+    if len(trade_dates) < 2:
+        raise RuntimeError("No common trading dates were available for the backtest period.")
+
+    history_df, coverage = replay(
+        algorithm,
+        config,
+        daily_history=daily_history,
+        trade_dates=trade_dates,
+        should_run=lambda date: int(date.dayofweek) in schedule.weekdays,
+        starting_equity=starting_equity,
+        intraday_providers=_configured_intraday_providers(config),
+    )
+    payload = _backtest_response(
         history_df,
         strategy=strategy,
-        label=strategy.replace("_", " ").title(),
+        label=STRATEGY_LABELS.get(strategy, strategy.replace("_", " ").title()),
         period=period,
         source="algorithm",
     )
+    # Surfaced, not buried: a window the intraday cache cannot reach scores every symbol near
+    # zero, which would otherwise read as a poor strategy rather than an unsupported window.
+    payload["coverage"] = coverage.as_dict()
+    return payload
 
 
 def backtest_payload(body: dict[str, Any] | None = None) -> dict[str, Any]:
     body = body or {}
     period = str(body.get("period") or _default_backtest_period()).lower()
-    strategy = str(body.get("strategy") or "momentum_social").lower()[:80]
+    strategy = canonical_algorithm_id(str(body.get("strategy") or DEFAULT_STRATEGY_ID))[:80]
     refresh = bool(body.get("refresh"))
     cache_only = bool(body.get("cache_only") or body.get("cacheOnly"))
-    dca_plan = load_dca_plan(universe_payload()["rows"])
+    account_id = str(body.get("account_id") or "")
+    dca_plan = load_dca_plan(universe_payload()["rows"], account_id=account_id)
     key = _cache_key(strategy, period, dca_plan)
     cache = _load_backtest_cache()
 

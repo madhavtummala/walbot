@@ -1,0 +1,80 @@
+# Sample Caddy site block for the Walbot dashboard.
+#
+# This is one site to add to a Caddyfile that already serves other services -- paste the
+# block below alongside them rather than replacing the file. Caddy runs on the host here
+# (a Raspberry Pi) and the container publishes only to loopback, so the proxy target is
+# 127.0.0.1 rather than a container name.
+#
+# The dashboard has no authentication of its own and every endpoint is privileged: the API
+# can arm live trading, rewrite the DCA plan, and delete accounts. So the rule is simple --
+# everything is behind auth except the one path Schwab's browser redirect has to reach.
+#
+# /schwab/callback is safe to leave open: the token exchange rejects a code whose `state`
+# this server did not issue, and the exchange itself needs the client secret. A stranger
+# hitting that URL gets an error page and nothing else. It has to be reachable without a
+# password because Schwab's redirect arrives as a plain browser navigation with no
+# credentials -- an auth prompt there would break the consent flow.
+
+trading.dune-plex.duckdns.org {
+	encode zstd gzip
+
+	# --- public: the OAuth landing page only -------------------------------------------
+	handle /schwab/callback* {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	# --- everything else: dashboard + API ----------------------------------------------
+	handle {
+		# Generate the hash with: caddy hash-password
+		basic_auth {
+			madhav $2a$14$REPLACE_WITH_THE_OUTPUT_OF_caddy_hash_password
+		}
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+	}
+
+	log {
+		output file /var/log/caddy/walbot.log
+	}
+}
+
+# --- Notes ------------------------------------------------------------------------------
+#
+# 1. Set on the container (see docker-compose.yml):
+#
+#      SCHWAB_CALLBACK_URL=https://trading.dune-plex.duckdns.org/schwab/callback
+#      CORS_ALLOW_ORIGINS=https://trading.dune-plex.duckdns.org
+#
+#    The API is same-origin with the dashboard, so it needs no cross-origin access. The
+#    default is "*", which would let any site you visit script requests at this API through
+#    your browser -- basic_auth does not stop that once the browser has cached credentials.
+#
+# 2. Schwab must have this exact URL registered as a callback. Loopback callbacks
+#    (https://127.0.0.1:PORT) are registrable but were rejected at the authorize step, so
+#    this public URL is the only working consent path -- which is why the callback handle
+#    above must stay outside the auth block.
+#
+# 3. Once this is live, the dashboard's own Schwab pill completes consent end to end: the
+#    popup lands back on the same origin. src/brokerages/schwab_local_auth.py is only for
+#    the loopback flow and is not needed here.
+#
+# 4. If Caddy runs as a container instead of on the host, put both on one Docker network
+#    and use `reverse_proxy walbot:8000`, dropping the port publish from compose entirely.
+#
+# 5. Stronger than basic auth, if you want SSO or TOTP: run tinyauth/Authelia and swap the
+#    basic_auth block for `forward_auth`, keeping the /schwab/callback handle exempt exactly
+#    as it is above.
+#
+#      handle {
+#        forward_auth 127.0.0.1:3000 {
+#          uri /api/auth/caddy
+#          copy_headers Remote-User
+#        }
+#        reverse_proxy 127.0.0.1:8000
+#      }

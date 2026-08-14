@@ -13,6 +13,8 @@ from src.brokerages.alpaca_client import (
 )
 
 class AlpacaBrokerage(BaseBrokerage):
+    supports_fractional_shares = True
+
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         # Assuming config is a dict with keys like 'alpaca_api_key', etc.
@@ -29,7 +31,7 @@ class AlpacaBrokerage(BaseBrokerage):
             "is_market_open": is_market_open(self.client)
         }
 
-    def get_positions(self) -> Dict[str, int]:
+    def get_positions(self) -> Dict[str, float]:
         return get_positions(self.client)
 
     def submit_order(self, request: OrderRequest) -> Dict[str, Any]:

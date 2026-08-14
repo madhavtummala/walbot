@@ -13,7 +13,6 @@ def test_get_config_reads_yaml_accounts_and_knobs(tmp_path, monkeypatch) -> None
         """
 runtime:
   kill_switch: true
-  algorithm_check_seconds: 45
   backtest_period: 4m
 social:
   trends_csv: data/custom_social.csv
@@ -23,7 +22,7 @@ social:
     algorithms_path.write_text(
         """
 algorithms:
-  momentum_social:
+  fast_momentum:
     momentum_lookback_days: 42
     max_longs: 3
 """,
@@ -98,7 +97,6 @@ data_sources:
     assert config.kill_switch is True
     assert config.backtest_period == "4m"
     assert config.social_trends_csv == "data/custom_social.csv"
-    assert config.algorithm_check_seconds == 45
     assert config.market_data_provider_order == ["finnhub", "alpaca"]
     assert config.market_data_cache_ttl_seconds == 15
     assert config.intraday_market_data_provider_order == ["yfinance"]
@@ -109,7 +107,7 @@ data_sources:
     assert config.sentiment_data_provider_order == ["stocktwits"]
     assert config.news_sentiment_cache_ttl_seconds == 20
     assert config.sentiment_data_cache_ttl_seconds == 20
-    assert "momentum_social" in config.algorithm_configs
+    assert "fast_momentum" in config.algorithm_configs
     assert config.account_options == [
         {"id": "paper", "label": "Paper Desk"},
         {"id": "second", "label": "Second Desk"},
@@ -302,11 +300,6 @@ def test_get_config_reads_split_bot_and_universe_files(tmp_path, monkeypatch) ->
 runtime:
   kill_switch: false
 algorithm_bot:
-  algorithm_check_seconds: 30
-  algorithm_market_data_refresh_minutes: 10
-  algorithm_run_jitter_minutes: 3
-  trading_start_time: "09:30"
-  trading_end_time: "14:00"
   require_trade_approval: true
   trade_approval_timeout_seconds: 120
   trade_approval_poll_seconds: 2
@@ -329,13 +322,7 @@ options:
 """,
         encoding="utf-8",
     )
-    dca_bot_path.write_text(
-        """
-dca_bot:
-  dca_check_seconds: 90
-""",
-        encoding="utf-8",
-    )
+    dca_bot_path.write_text("dca_bot: {}\n", encoding="utf-8")
     universe_path.write_text(
         """
 tradable_universe:
@@ -363,13 +350,7 @@ tradable_universe:
     assert config.symbols == ["SPY", "QQQ", "GLD"]
     assert config.momentum_lookback_days == 126
     assert config.max_longs == 4
-    assert config.algorithm_check_seconds == 30
-    assert config.algorithm_market_data_refresh_minutes == 10
-    assert config.algorithm_run_jitter_minutes == 3
-    assert config.trading_start_time == "09:30"
-    assert config.trading_end_time == "14:00"
     assert config.require_trade_approval is True
     assert config.trade_approval_timeout_seconds == 120
     assert config.trade_approval_poll_seconds == 2
-    assert config.dca_check_seconds == 90
     assert config.options_swing_dte_min == 35

@@ -8,13 +8,16 @@ def test_sanitize_controls_defaults_and_bools() -> None:
 
     assert controls == {
         "trading_account_id": "",
-        "equities": {"enabled": False, "strategy": "momentum_social"},
+        "equities": {"enabled": False, "strategy": "fast_momentum"},
         "options": {"enabled": False, "strategy": "none", "account_id": ""},
-        "algorithm": {"enabled": False, "strategy": "momentum_social"},
+        "algorithm": {"enabled": False, "strategy": "fast_momentum"},
         "options_trading": {"enabled": False, "strategy": "none", "account_id": ""},
         "algorithm_enabled": False,
         "options_trading_enabled": False,
-        "active_strategy": "momentum_social",
+        "bindings": [
+            {"id": "b1", "strategy": "fast_momentum", "account_id": "", "enabled": False, "frequency": "1hr"},
+        ],
+        "active_strategy": "fast_momentum",
         "options_strategy": "none",
         "options_trading_account_id": "",
     }
@@ -85,6 +88,24 @@ def test_new_equities_and_options_sections_load() -> None:
     assert controls["options_trading_account_id"] == "paper-options"
 
 
+def test_migrating_none_lands_in_the_off_state(tmp_path) -> None:
+    """A config saved as "none" could hold enabled: true while the dashboard showed off."""
+    controls_path = tmp_path / "algorithm_bot.yaml"
+    controls_path.write_text(
+        """
+algorithm_bot:
+  enabled: true
+  strategy: none
+""",
+        encoding="utf-8",
+    )
+
+    loaded = load_controls(path=str(controls_path))
+
+    assert loaded["active_strategy"] == "dca"
+    assert loaded["algorithm_enabled"] is False
+
+
 def test_load_controls_reads_structured_bot_yaml(tmp_path) -> None:
     controls_path = tmp_path / "algorithm_bot.yaml"
     controls_path.write_text(
@@ -101,5 +122,8 @@ options_bot:
 
     loaded = load_controls(path=str(controls_path))
 
-    assert loaded["active_strategy"] == "none"
+    # "none" is a retired equity id that now resolves to DCA; the power toggle is what
+    # keeps the bot idle. Options keeps its own "none" because it can be off independently.
+    assert loaded["active_strategy"] == "dca"
     assert loaded["algorithm_enabled"] is False
+    assert loaded["options_strategy"] == "none"

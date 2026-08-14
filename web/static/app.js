@@ -1,10 +1,15 @@
 const SVG_NS = "http://www.w3.org/2000/svg";
 const BUCKET_NAMES = ["buy", "sell"];
-const MAX_AMOUNT = 50;
-const WHEEL_STEP = 5;
+const MAX_AMOUNT = 2000;
+const DCA_ALGORITHM_KEYS = ["dca", "bursty_dca"];
+const WHEEL_STEP = 25;
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 let BACKTEST_PERIOD = "4m";
 let BACKTEST_LABEL = "4M";
+
+//: Selectable backtest windows. The configured default from status still wins on first load;
+//: this only lets you look at a different window without editing config.
+const BACKTEST_PERIOD_CHOICES = ["1m", "2m", "3m", "4m", "6m", "12m", "24m"];
 
 const ENABLED_COLORS = {
   buy: "#024c4a",
@@ -18,61 +23,28 @@ const DISABLED_COLORS = {
 
 const STRATEGIES = [
   {
-    key: "momentum_social",
-    name: "Momentum + Social",
+    key: "dca",
+    blurb: "Buys each symbol's monthly budget as soon as it clears the broker minimum.",
+    name: "DCA",
     status: "Live",
-    horizon: "Daily",
-    risk: "Medium",
-    logic: "Ranks the ETF universe every day, buys only names with positive medium-term momentum above the long moving average, then sizes positions by score, volatility, and portfolio caps.",
-    signals: ["N-day return", "21-day return", "Long SMA trend", "Social attention", "Sentiment/vendor score", "Volume z-score", "Realized volatility"],
-  },
-  {
-    key: "trend_following",
-    name: "Trend Following",
-    status: "Template",
-    horizon: "Daily",
-    risk: "Medium",
-    logic: "Stays with persistent uptrends and steps out when price loses the major trend, avoiding counter-trend entries.",
-    signals: ["Close vs 50/200 SMA", "Moving-average slope", "63-day return", "Trend gap", "Realized volatility"],
-  },
-  {
-    key: "mean_reversion",
-    name: "Mean Reversion",
-    status: "Template",
-    horizon: "Swing",
-    risk: "High",
-    logic: "Looks for short-term oversold pullbacks inside a larger uptrend, then exits as price reverts back toward its mean.",
-    signals: ["RSI reset", "20-day z-score", "Bollinger position", "200-day trend filter", "ATR stop distance"],
-  },
-  {
-    key: "breakout",
-    name: "Breakout",
-    status: "Template",
-    horizon: "Swing",
-    risk: "High",
-    logic: "Targets fresh range highs when participation expands, with position size tied to stop distance and volatility.",
-    signals: ["55-day high", "Volume expansion", "ATR compression", "Range width", "Trailing stop distance"],
-  },
-  {
-    key: "risk_parity",
-    name: "Risk Parity",
-    status: "Template",
-    horizon: "Portfolio",
+    horizon: "Continuous",
     risk: "Lower",
-    logic: "Balances portfolio risk so high-volatility assets receive smaller allocations and no single sleeve dominates drawdown.",
-    signals: ["20/60-day volatility", "Inverse-vol weight", "Correlation stress", "Drawdown guard", "Exposure cap"],
+    logic: "Accrues each symbol's monthly budget against elapsed wall-clock time and buys as soon as the accrued amount can clear a broker minimum, so the schedule controls only when it may act, never how much it spends.",
+    signals: ["Monthly budget", "Accrued amount", "Minimum executable trade", "Whole-share threshold"],
   },
   {
-    key: "dual_momentum",
-    name: "Dual Momentum",
-    status: "Template",
-    horizon: "Monthly",
+    key: "bursty_dca",
+    blurb: "Same monthly budget as DCA, but only deployed into a dip above the 200-day.",
+    name: "Bursty DCA",
+    status: "Live",
+    horizon: "Continuous",
     risk: "Medium",
-    logic: "Rotates into the strongest assets only when they also clear an absolute momentum hurdle; otherwise it moves toward cash-like exposure.",
-    signals: ["6-month return", "12-month return", "Relative rank", "Absolute momentum hurdle", "Volatility filter"],
+    logic: "Accrues the same monthly budget as DCA but only deploys it into a dip: price must be above its 200-day moving average, and Bollinger %B or Connors RSI(2) must be stretched. Trade size follows a value-averaging path, clamped per trade and per month.",
+    signals: ["200-day regime gate", "Bollinger %B", "Connors RSI(2)", "Value-averaging path", "Trade and monthly clamps"],
   },
   {
     key: "fast_momentum",
+    blurb: "Ranks risk-on and defensive ETFs on multi-horizon momentum, then sizes with caps.",
     name: "Fast Momentum",
     status: "Live",
     horizon: "Intraday",
@@ -81,78 +53,32 @@ const STRATEGIES = [
     signals: ["Nano momentum", "Micro momentum", "Meso trend", "Macro trend", "Pullback bonus"],
   },
   {
-    key: "invest_spy",
-    name: "Invest SPY",
+    key: "dual_momentum",
+    blurb: "Relative momentum picks the leaders; absolute momentum decides if it may hold any.",
+    name: "Dual Momentum",
+    status: "Paper",
+    horizon: "Intraday",
+    risk: "Medium",
+    logic: "Gates risk-on exposure on a benchmark trend and breadth regime, requires each ETF to clear its own absolute-trend test before it is ranked, times entries with a separate fast signal, and scales weights toward a portfolio volatility target.",
+    signals: ["Regime gate", "Breadth", "Absolute eligibility", "Slow rank", "Entry timing", "Vol target"],
+  },
+  {
+    key: "spy_rotation",
+    blurb: "Classifies the SPY regime, then rotates between growth, income, cash, and hedges.",
+    name: "SPY Rotation",
     status: "Live",
     horizon: "Intraday",
     risk: "Medium",
-    logic: "Classifies SPY as growing, pulling back, flat, falling, or crisis using micro, meso, macro, and sentiment signals, then rotates among SPY, XYLD, defensive assets, and capped hedges.",
+    logic: "Classifies SPY as growing, flat, falling, or crisis using micro, meso, macro, and sentiment signals, then rotates among growth, covered-call income, cash, and capped hedges.",
     signals: ["SPY state", "Micro/meso/macro", "Sentiment", "XYLD flat state", "SH/VXX crisis hedge"],
   },
 ];
 
-const OPTIONS_STRATEGIES = [
-  {
-    key: "options_swing_dual_momentum",
-    name: "Swing Dual Momentum",
-    risk: "Directional",
-    description: "Uses dual-momentum ETF signals to buy 30-60 DTE calls for bullish underlyings or puts for bearish underlyings, with premium and liquidity caps.",
-    config: ["Dual momentum underlyings", "Long calls/puts only", "30-60 DTE", "0.35-0.65 delta", "Premium capped"],
-  },
-  {
-    key: "covered_call",
-    name: "Covered Call",
-    risk: "Income",
-    description: "Sell calls against owned shares to collect premium, accepting capped upside.",
-    config: ["Underlying position", "30-45 DTE", "0.20-0.35 delta short call", "Roll rule before assignment"],
-  },
-  {
-    key: "cash_secured_put",
-    name: "Cash-Secured Put",
-    risk: "Entry",
-    description: "Sell puts only when willing to buy the underlying at the strike.",
-    config: ["Cash reserved for assignment", "20-45 DTE", "0.15-0.30 delta put", "Max allocation per symbol"],
-  },
-  {
-    key: "protective_put",
-    name: "Protective Put",
-    risk: "Hedge",
-    description: "Buy puts to define downside risk on an equity or ETF holding.",
-    config: ["Hedge ratio", "Expiry matching risk window", "Acceptable premium budget", "Strike near loss limit"],
-  },
-  {
-    key: "put_spread",
-    name: "Defined-Risk Put Spread",
-    risk: "Directional",
-    description: "Use a vertical spread to express bullish or bearish views with capped loss.",
-    config: ["Long and short strikes", "Debit/credit limit", "DTE", "Profit-taking and stop rules"],
-  },
-  {
-    key: "iron_condor",
-    name: "Iron Condor",
-    risk: "Neutral",
-    description: "Sell an out-of-the-money call spread and put spread when expecting range-bound movement.",
-    config: ["IV rank threshold", "Short strike deltas", "Wing width", "Exit at profit target or tested side"],
-  },
-];
+//: A saved strategy id that is unknown (or the retired "none") lands here.
+const DEFAULT_ALGORITHM_KEY = "dca";
 
-const NONE_ALGORITHM = {
-  key: "none",
-  name: "None",
-  status: "Idle",
-  horizon: BACKTEST_LABEL,
-  risk: "Flat",
-  logic: "Disables algorithmic trading and leaves the right-side snapshot focused on DCA activity or a flat cached baseline.",
-  signals: ["DCA schedule", "Planned buys", "Flat exposure"],
-};
-
-const NONE_OPTIONS = {
-  key: "none",
-  name: "None",
-  risk: "Idle",
-  description: "No options strategy is active.",
-  config: ["Options trading disabled"],
-};
+//: Strategies driven by the DCA plan, so a plan edit invalidates their cached views.
+const DCA_STRATEGY_KEYS = ["dca", "bursty_dca"];
 
 const state = {
   status: null,
@@ -160,12 +86,9 @@ const state = {
   controls: {
     trading_account_id: "",
     algorithm_enabled: false,
-    options_trading_enabled: false,
-    active_strategy: "momentum_social",
-    options_strategy: "none",
-    options_trading_account_id: "",
+    active_strategy: "fast_momentum",
   },
-  accounts: [],
+  accounts: { rows: [] },
   bot: null,
   dca: null,
   layout: null,
@@ -187,8 +110,18 @@ const state = {
   universeRefreshing: false,
   universeApplying: false,
   deckWheelLocked: false,
-  renderedAlgorithmDeckKey: "",
-  renderedOptionsDeckKey: "",
+  schwabAuth: null,
+  renderedBindingKey: "",
+  algorithmConfigs: {},
+  algorithmConfigLoading: {},
+  watchlist: null,
+  watchDrag: null,
+  positions: {},
+  positionsLoading: {},
+  activity: {},
+  activityLoading: {},
+  algorithmActivity: {},
+  algorithmActivityLoading: {},
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -247,18 +180,8 @@ function num(value, digits = 2) {
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
-function isDcaEnabled() {
-  return Boolean(state.dca?.plan?.enabled);
-}
-
-function isAlgorithmTradingEnabled() {
-  return Boolean(state.controls?.algorithm_enabled) && activeAlgorithmKey() !== "none";
-}
-
-function isOptionsTradingEnabled() {
-  return Boolean(state.controls?.options_trading_enabled) && activeOptionsKey() !== "none";
-}
-
+// DCA is live when it is the selected algorithm and the algorithm bot is on -- the same
+// condition as any other strategy, now that it runs on the shared loop.
 function bucketColor(bucketName) {
   return isDcaEnabled() ? ENABLED_COLORS[bucketName] : DISABLED_COLORS[bucketName];
 }
@@ -287,7 +210,7 @@ function assignedSymbols(bucketName) {
 }
 
 function itemRadius(amount) {
-  return 18 + Math.sqrt(clamp(amount, 0, MAX_AMOUNT)) * 3.45;
+  return 18 + Math.sqrt(clamp(amount, 0, MAX_AMOUNT) / MAX_AMOUNT) * 24.4;
 }
 
 function svgEl(tag, attrs = {}) {
@@ -306,11 +229,12 @@ function textEl(attrs, content) {
 
 function calculateLayout() {
   const svg = $("#bubbleBoard");
+  if (!svg) return;
   const width = svg.clientWidth || 1200;
   const height = svg.clientHeight || 720;
   const stacked = width < 760;
-  const baseR = stacked ? Math.min(width * 0.35, height * 0.19, 210) : Math.min(width * 0.2, height * 0.36, 292);
-  const maxR = stacked ? Math.min(width * 0.43, height * 0.24, 260) : Math.min(width * 0.27, height * 0.44, 365);
+  const baseR = stacked ? Math.min(width * 0.31, height * 0.17, 185) : Math.min(width * 0.18, height * 0.32, 257);
+  const maxR = stacked ? Math.min(width * 0.38, height * 0.21, 229) : Math.min(width * 0.24, height * 0.39, 321);
 
   state.layout = {
     width,
@@ -343,14 +267,6 @@ function pointFromPosition(position, bucket, radius) {
   return {
     x: bucket.cx + clamp(Number(position?.x || 0), -1, 1) * usable,
     y: bucket.cy + clamp(Number(position?.y || 0), -1, 1) * usable,
-  };
-}
-
-function pointToPosition(point, bucket, radius) {
-  const usable = Math.max(bucket.r - radius - 18, 1);
-  return {
-    x: clamp((point.x - bucket.cx) / usable, -1, 1),
-    y: clamp((point.y - bucket.cy) / usable, -1, 1),
   };
 }
 
@@ -485,7 +401,7 @@ function syncNodesToPlan() {
 }
 
 function renderBoard() {
-  if (!state.dca?.plan) return;
+  if (!state.dca?.plan || !$("#bubbleBoard")) return;
   window.cancelAnimationFrame(state.animationId);
   document.body.classList.toggle("dca-off", !isDcaEnabled());
   calculateLayout();
@@ -714,6 +630,7 @@ function resizeNodeToAmount(node, amount) {
   node.amount = clamp(Math.round(amount / WHEEL_STEP) * WHEEL_STEP, 0, MAX_AMOUNT);
   node.radius = itemRadius(node.amount);
   syncNodeToPlan(node);
+  schedulePlanSave();
 }
 
 function selectedDcaNode() {
@@ -905,6 +822,7 @@ function commitSymbolEntry() {
   });
   setBucketItems(draft.bucketName, state.dca.plan[draft.bucketName].items);
   renderDca();
+  schedulePlanSave();
   showToast(`${row.symbol} added`);
 }
 
@@ -914,6 +832,7 @@ function removeSymbol(bucketName, symbol) {
     bucketItems(bucketName).filter((item) => item.symbol !== symbol),
   );
   renderDca();
+  schedulePlanSave();
 }
 
 function moveAsset(node) {
@@ -928,21 +847,12 @@ function moveAsset(node) {
   found.item.amount = node.amount;
   state.dca.plan[node.bucketName].items.push(found.item);
   BUCKET_NAMES.forEach((bucketName) => setBucketItems(bucketName, bucketItems(bucketName)));
-}
-
-function renderControls() {
-  $("#cronPattern").value = state.dca?.plan?.schedule_pattern || "0 12 * * 1-5";
-  renderScheduleDescription();
-  renderAlgorithmPower();
-  renderAlgorithmDeck();
-  renderOptionsDeck();
-  updateFeatureToggles();
+  schedulePlanSave();
 }
 
 function renderDca() {
   if (!state.dca?.plan) return;
   syncNodesToPlan();
-  renderControls();
   renderBoard();
 }
 
@@ -961,56 +871,104 @@ function formatDateTick(date, zoom) {
 }
 
 function algorithmChoices() {
-  return [NONE_ALGORITHM, ...STRATEGIES];
+  return STRATEGIES;
 }
 
-function optionsChoices() {
-  return [NONE_OPTIONS, ...OPTIONS_STRATEGIES];
+//: Bindings are pairs of algorithm and account. Signals and backtests are keyed by strategy,
+//: so two bindings on the same strategy share those views; the account only changes execution.
+function bindings() {
+  return state.controls?.bindings || [];
+}
+
+function primaryDcaBindingId() {
+  return bindings().find((binding) => DCA_ALGORITHM_KEYS.includes(binding.strategy))?.id || "";
+}
+
+function bindingById(bindingId) {
+  return bindings().find((binding) => String(binding.id) === String(bindingId)) || null;
+}
+
+function isDcaEnabled() {
+  // The bubbles are one shared plan, so any live DCA binding lights them up.
+  return bindings().some((binding) => binding.enabled && DCA_ALGORITHM_KEYS.includes(binding.strategy));
+}
+
+function configFieldKind(value) {
+  if (typeof value === "boolean") return "bool";
+  if (typeof value === "number") return "number";
+  if (typeof value === "string") return "string";
+  if (Array.isArray(value) && value.every((item) => typeof item !== "object" || item === null)) return "list";
+  return "json";
+}
+
+function renderConfigField(key, value, doc) {
+  const kind = configFieldKind(value);
+  const help = doc
+    ? `<em class="fieldWhat">${escapeHtml(doc.what)}</em><em class="fieldEffect">${escapeHtml(doc.effect)}</em>`
+    : "";
+  const label = `<span title="${escapeHtml(key)}">${escapeHtml(key)}</span>${help}`;
+  const attrs = `data-config-key="${escapeHtml(key)}" data-config-kind="${kind}"`;
+  if (kind === "bool") {
+    return `<label class="configField">${label}
+      <input type="checkbox" ${attrs}${value ? " checked" : ""} />
+    </label>`;
+  }
+  if (kind === "number") {
+    // `any` keeps fractional knobs like 0.95 editable; integers still type naturally.
+    return `<label class="configField">${label}
+      <input type="number" step="any" ${attrs} value="${escapeHtml(String(value))}" />
+    </label>`;
+  }
+  if (kind === "string") {
+    return `<label class="configField">${label}
+      <input type="text" ${attrs} value="${escapeHtml(value)}" />
+    </label>`;
+  }
+  if (kind === "list") {
+    return `<label class="configField configField--wide">${label}
+      <textarea rows="2" ${attrs}>${escapeHtml(value.join(", "))}</textarea>
+    </label>`;
+  }
+  // Nested structures have no sensible widget, so they keep a JSON box of their own.
+  return `<label class="configField configField--wide">${label}
+    <textarea rows="3" ${attrs}>${escapeHtml(JSON.stringify(value, null, 1))}</textarea>
+  </label>`;
+}
+
+function collectConfigValues(host) {
+  const values = {};
+  host.querySelectorAll("[data-config-key]").forEach((field) => {
+    const key = field.dataset.configKey;
+    const kind = field.dataset.configKind;
+    if (kind === "bool") {
+      values[key] = field.checked;
+      return;
+    }
+    if (kind === "number") {
+      const parsed = Number(field.value);
+      if (Number.isNaN(parsed)) throw new Error(`${key} must be a number`);
+      values[key] = parsed;
+      return;
+    }
+    if (kind === "list") {
+      values[key] = field.value.split(/[\s,]+/).map((item) => item.trim()).filter(Boolean);
+      return;
+    }
+    if (kind === "json") {
+      try {
+        values[key] = JSON.parse(field.value);
+      } catch (error) {
+        throw new Error(`${key} is not valid JSON`);
+      }
+      return;
+    }
+    values[key] = field.value;
+  });
+  return values;
 }
 
 function strategyByKey(strategyKey) {
-  return algorithmChoices().find((choice) => choice.key === strategyKey) || NONE_ALGORITHM;
-}
-
-function optionsUnderlyingStrategyKey(optionsKey = activeOptionsKey()) {
-  if (optionsKey === "options_swing_dual_momentum") return "dual_momentum";
-  return "none";
-}
-
-function optionsSignalChoice() {
-  const selected = optionsChoices().find((choice) => choice.key === activeOptionsKey()) || NONE_OPTIONS;
-  const underlyingKey = optionsUnderlyingStrategyKey(selected.key);
-  const underlying = strategyByKey(underlyingKey);
-  if (underlyingKey === "none") return selected;
-  return {
-    ...underlying,
-    name: selected.name,
-    logic: selected.description,
-    signals: underlying.signals || selected.config || [],
-  };
-}
-
-function activeAlgorithmKey() {
-  const key = state.controls?.active_strategy || "none";
-  return algorithmChoices().some((choice) => choice.key === key) ? key : "none";
-}
-
-function activeOptionsKey() {
-  const key = state.controls?.options_strategy || "none";
-  return optionsChoices().some((choice) => choice.key === key) ? key : "none";
-}
-
-function deckClass(offset) {
-  if (offset === 0) return "active";
-  if (offset === -1) return "before";
-  if (offset === 1) return "after";
-  if (offset === 2) return "farAfter";
-  if (offset === -2) return "farBefore";
-  return "hidden";
-}
-
-function toneClass(index) {
-  return `tone-${index % 5}`;
+  return algorithmChoices().find((choice) => choice.key === strategyKey) || STRATEGIES[0];
 }
 
 function isBacktestPayload(payload) {
@@ -1037,59 +995,12 @@ function configureBacktestPeriod(period) {
   BACKTEST_LABEL = label;
 }
 
-function renderAlgorithmDeck() {
-  const deck = $("#algorithmDeck");
-  if (!deck) return;
-  const choices = algorithmChoices();
-  const activeKey = activeAlgorithmKey();
-  const activeIndex = Math.max(0, choices.findIndex((choice) => choice.key === activeKey));
-  const renderKey = `${activeKey}:${choices.length}`;
-  deck.classList.toggle("locked", isAlgorithmTradingEnabled());
-  deck.setAttribute("aria-disabled", String(isAlgorithmTradingEnabled()));
-  if (state.renderedAlgorithmDeckKey === renderKey && deck.children.length) {
-    renderAlgorithmSignals();
-    return;
-  }
-  state.renderedAlgorithmDeckKey = renderKey;
-  deck.innerHTML = choices.map((strategy, index) => {
-    const offset = index - activeIndex;
-    const signalPreview = (strategy.signals || []).slice(0, 5);
-    const extraSignalCount = Math.max(0, (strategy.signals || []).length - signalPreview.length);
-    return `
-      <article class="deckCard ${deckClass(offset)} ${toneClass(index)}" data-strategy="${escapeHtml(strategy.key)}" aria-current="${offset === 0 ? "true" : "false"}">
-        <header class="deckHeader">
-          <div>
-            <span class="deckKicker">${offset === 0 ? "Selected" : "Available"}</span>
-            <h2>${escapeHtml(strategy.name)}</h2>
-          </div>
-        </header>
-        <section class="strategyLogic" aria-label="${escapeHtml(strategy.name)} logic">
-          <span>Logic</span>
-          <p>${escapeHtml(strategy.logic)}</p>
-        </section>
-        <section class="strategySignals" aria-label="${escapeHtml(strategy.name)} signals">
-          <span>Signals</span>
-          <ul>
-            ${signalPreview.map((signal) => `<li>${escapeHtml(signal)}</li>`).join("")}
-            ${extraSignalCount ? `<li>+${extraSignalCount} more</li>` : ""}
-          </ul>
-        </section>
-        <div class="strategyMeta">
-          <span>${escapeHtml(strategy.status)}</span>
-          <span>${escapeHtml(strategy.horizon)}</span>
-          <span>${escapeHtml(strategy.risk)}</span>
-        </div>
-      </article>
-    `;
-  }).join("");
-  renderAlgorithmSignals();
-}
-
 async function loadBacktest(strategyKey, refresh, options = {}) {
   const cacheOnly = Boolean(options.cacheOnly);
+  let changed = false;
   if (!cacheOnly) state.backtestLoading[strategyKey] = true;
   if (!cacheOnly && state.backtests[strategyKey]?.error) delete state.backtests[strategyKey];
-  if (!cacheOnly) renderAlgorithmDeck();
+  if (!cacheOnly) render();
   try {
     const payload = await api("/api/backtest", {
       method: "POST",
@@ -1098,25 +1009,30 @@ async function loadBacktest(strategyKey, refresh, options = {}) {
     });
     if (isBacktestPayload(payload)) {
       state.backtests[strategyKey] = payload;
+      changed = true;
     } else if (payload?.error) {
       if (!cacheOnly) {
         state.backtests[strategyKey] = { error: payload.error };
+        changed = true;
       }
     }
   } catch (error) {
     if (!cacheOnly) {
       state.backtests[strategyKey] = { error: error.message };
+      changed = true;
     }
   } finally {
     if (!cacheOnly) state.backtestLoading[strategyKey] = false;
-    if (!cacheOnly) renderAlgorithmDeck();
-    renderAlgorithmSignals();
+    // Every render of the Backtest tab probes the cache, and this used to re-render whatever
+    // the probe found -- including "nothing". Repainting the page for a result that changed
+    // no state is what closed the period dropdown the instant it was opened.
+    if (changed || !cacheOnly) render();
   }
 }
 
 async function recommendUniverse() {
   state.universeRefreshing = true;
-  renderAlgorithmSignals();
+  render();
   try {
     const payload = await api("/api/universe/recommend", {
       method: "POST",
@@ -1129,7 +1045,7 @@ async function recommendUniverse() {
     showToast(error.message);
   } finally {
     state.universeRefreshing = false;
-    renderAlgorithmSignals();
+    render();
   }
 }
 
@@ -1137,7 +1053,7 @@ async function applyUniverseProposal() {
   const rows = state.universeProposal?.rows || [];
   if (!rows.length || state.universeApplying) return;
   state.universeApplying = true;
-  renderAlgorithmSignals();
+  render();
   try {
     const payload = await api("/api/universe/apply", {
       method: "POST",
@@ -1148,31 +1064,22 @@ async function applyUniverseProposal() {
     state.universeProposal = null;
     state.signals = {};
     state.backtests = {};
-    const dcaPayload = await api("/api/dca", { timeoutMs: 5000 });
+    const dcaPayload = await api(
+      `/api/dca?account_id=${encodeURIComponent(state.dca?.account_id || bindings()[0]?.account_id || "")}`,
+      { timeoutMs: 5000 },
+    );
     state.dca = dcaPayload;
     state.dca.plan.max_item_amount = MAX_AMOUNT;
     renderDca();
-    renderAlgorithmDeck();
-    renderOptionsSignals();
-    loadSignals(activeAlgorithmKey());
-    const optionsSignalKey = optionsUnderlyingStrategyKey();
-    if (optionsSignalKey !== "none" && optionsSignalKey !== activeAlgorithmKey()) loadSignals(optionsSignalKey);
-    loadCachedBacktestsForDeck();
+    render();
+    // The universe change invalidates every algorithm's view, so reload the one on screen.
+    loadSignals(currentRoute().id);
     showToast("Universe applied");
   } catch (error) {
     showToast(error.message);
   } finally {
     state.universeApplying = false;
-    renderAlgorithmSignals();
-  }
-}
-
-async function loadCachedBacktestsForDeck() {
-  const keys = [...new Set([...algorithmChoices().map((strategy) => strategy.key), optionsUnderlyingStrategyKey()].filter(Boolean))];
-  for (const strategyKey of keys) {
-    if (!state.backtests[strategyKey] && !state.backtestLoading[strategyKey]) {
-      await loadBacktest(strategyKey, false, { cacheOnly: true });
-    }
+    render();
   }
 }
 
@@ -1183,8 +1090,7 @@ async function ensureSignals(strategyKey) {
 
 async function loadSignals(strategyKey) {
   state.signalLoading[strategyKey] = true;
-  renderAlgorithmSignals();
-  renderOptionsSignals();
+  render();
   try {
     state.signals[strategyKey] = await api(`/api/strategy-signals?strategy=${encodeURIComponent(strategyKey)}`, {
       timeoutMs: 60000,
@@ -1193,8 +1099,7 @@ async function loadSignals(strategyKey) {
     state.signals[strategyKey] = { error: error.message };
   } finally {
     state.signalLoading[strategyKey] = false;
-    renderAlgorithmSignals();
-    renderOptionsSignals();
+    render();
   }
 }
 
@@ -1212,7 +1117,21 @@ function formatSignalDetail(strategyKey, row) {
     ];
     return details.join(" / ");
   }
-  if (strategyKey === "invest_spy") {
+  // Each layer that could have stopped this symbol, in the order it is applied -- the point
+  // of the algorithm is that you can see which gate rejected a name, not just its score.
+  if (strategyKey === "dual_momentum") {
+    const details = [
+      row.reason || "Signal pending",
+      `Regime ${row.regime_risk_on ? "risk-on" : "risk-off"} (breadth ${percent(row.regime_breadth)})`,
+      `Eligible ${row.eligible ? "yes" : "no"}`,
+      row.rank ? `Rank ${row.rank}` : "Unranked",
+      `Timing ${row.timing ? "go" : "wait"} (${signedNum(row.momentum_change, 2)})`,
+      `Vol ${percent(row.annual_volatility)} / scale ${num(row.vol_scale, 2)}`,
+    ];
+    if (row.close) details.push(`Close ${money(row.close, 2)}`);
+    return details.join(" / ");
+  }
+  if (strategyKey === "spy_rotation") {
     const details = [];
     if (row.reason) details.push(row.reason);
     if (row.spy_state) details.push(`SPY ${String(row.spy_state).toLowerCase()}`);
@@ -1232,11 +1151,9 @@ function formatSignalDetail(strategyKey, row) {
     const close = row.close ? ` / Close ${money(row.close, 2)}` : "";
     return `${row.reason}${close}`;
   }
-  if (strategyKey === "momentum_social") {
-    return `Price ${num(row.price_score, 2)} / Social ${num(row.social_score, 2)} / Volume ${num(row.volume_score, 2)}`;
-  }
-  if (strategyKey === "none") {
-    return `Weight ${percent(row.target_weight)} / ${row.trend_ok ? "Enabled" : "Inactive"}`;
+  if (DCA_ALGORITHM_KEYS.includes(strategyKey)) {
+    const budget = `${money(row.monthly_budget, 0)}/month`;
+    return `${budget} / Accrued ${money(row.accrued, 2)} of ${money(row.min_executable, 2)}`;
   }
   if (row.close) {
     return `Close ${money(row.close, 2)}`;
@@ -1250,7 +1167,13 @@ function signedNum(value, digits = 2) {
 }
 
 function formatSignalHeadline(strategyKey, row) {
-  if (strategyKey === "fast_momentum" || strategyKey === "invest_spy") {
+  if (DCA_ALGORITHM_KEYS.includes(strategyKey)) {
+    const parts = [row.side || row.signal || "Signal", row.reason || ""];
+    if (row.close) parts.push(`Close ${money(row.close, 2)}`);
+    if (row.warning) parts.push(row.warning);
+    return parts.filter(Boolean).join(" / ");
+  }
+  if (strategyKey === "fast_momentum" || strategyKey === "spy_rotation" || strategyKey === "dual_momentum") {
     const parts = [
       row.side || row.signal || "Signal",
       `Score ${num(row.score, 2)}`,
@@ -1328,84 +1251,6 @@ function renderUniverseProposalRows() {
   `;
 }
 
-function renderSignalBacktestCard({
-  card,
-  strategyKey,
-  selected,
-  kicker = "Position Signals",
-  backtestChartId = "activeBacktestChart",
-  universeLabel = "Algorithm universe",
-}) {
-  if (!card) return;
-  const payload = state.signals[strategyKey];
-  const backtest = state.backtests[strategyKey];
-  const loading = Boolean(state.signalLoading[strategyKey]);
-  const backtestLoading = Boolean(state.backtestLoading[strategyKey]);
-  const signalInputs = (selected.signals || []).slice(0, 5);
-  const backtestCaption = backtestCaptionText(backtest, backtestLoading);
-  const equityCaption = backtestEquityText(backtest);
-  const orderCaption = backtestOrderText(backtest);
-  const refreshAttrs = backtestLoading ? 'disabled aria-busy="true"' : "";
-  const universeAttrs = state.universeRefreshing ? 'disabled aria-busy="true"' : "";
-  const allLeaders = payload?.leaders || [];
-  const activeLeaders = allLeaders.filter((row) => (row.side === "LONG" || row.side === "SHORT" || row.signal === "LONG" || row.signal === "SHORT"));
-  const inactiveLeaders = allLeaders.filter((row) => !activeLeaders.includes(row));
-  const visibleLeaders = [...activeLeaders, ...inactiveLeaders];
-  const signalRowsHtml = state.universeProposal || state.universeRefreshing
-    ? renderUniverseProposalRows()
-    : loading
-      ? "<p>Fetching live signal snapshot.</p>"
-      : payload?.error
-        ? `<p>${escapeHtml(payload.error)}</p>`
-        : visibleLeaders.length
-          ? visibleLeaders.map((row) => `
-            <article>
-              <strong>${escapeHtml(row.symbol)}</strong>
-              <span>${escapeHtml(formatSignalHeadline(strategyKey, row))}</span>
-              <span>${escapeHtml(formatSignalDetail(strategyKey, row))}</span>
-            </article>
-          `).join("")
-          : renderSignalFallbackRows(selected, payload, signalInputs);
-  card.innerHTML = `
-    <header class="signalHeader">
-      <div>
-        <span class="deckKicker">${escapeHtml(kicker)}</span>
-      </div>
-      <div class="signalActions">
-        <button class="refreshUniverse" type="button" data-refresh-universe ${universeAttrs}>Refresh Universe</button>
-        <button class="refreshBacktest" type="button" data-refresh-backtest="${escapeHtml(strategyKey)}" ${refreshAttrs}>Backtest</button>
-      </div>
-    </header>
-    <div class="signalBody">
-      <div class="signalRows">
-        ${signalRowsHtml}
-      </div>
-      <section class="cachedBacktest" aria-label="Cached ${BACKTEST_LABEL} backtest">
-        <div class="cachedBacktestHeader">
-          <span>${BACKTEST_LABEL} Backtest</span>
-          <strong>${escapeHtml(backtestStatusLabel(backtest, backtestLoading))}</strong>
-        </div>
-        <svg class="deckChart" id="${escapeHtml(backtestChartId)}" role="img" aria-label="${BACKTEST_LABEL} backtest chart"></svg>
-        ${backtestCaption ? `<p>${escapeHtml(backtestCaption)}</p>` : ""}
-        ${equityCaption ? `<p>${escapeHtml(equityCaption)}</p>` : ""}
-        ${orderCaption ? `<p>${escapeHtml(orderCaption)}</p>` : ""}
-      </section>
-    </div>
-  `;
-  renderBacktestChart(backtest, $(`#${backtestChartId}`));
-}
-
-function renderAlgorithmSignals() {
-  renderSignalBacktestCard({
-    card: $("#algorithmSignalCard"),
-    strategyKey: activeAlgorithmKey(),
-    selected: strategyByKey(activeAlgorithmKey()),
-    kicker: "Position Signals",
-    backtestChartId: "activeBacktestChart",
-    universeLabel: "Algorithm universe",
-  });
-}
-
 function renderSignalFallbackRows(selected, payload, signalInputs) {
   const isTemplate = payload?.wired === false;
   const heading = isTemplate ? "Template signal model" : "No active live rows";
@@ -1427,242 +1272,6 @@ function renderSignalFallbackRows(selected, payload, signalInputs) {
       </article>
     `).join("")}
   `;
-}
-
-async function selectAlgorithmStrategy(strategyKey) {
-  if (isAlgorithmTradingEnabled()) {
-    showToast("Turn algorithm off before changing strategies");
-    return;
-  }
-  if (strategyKey === activeAlgorithmKey()) return;
-  state.controls.active_strategy = strategyKey;
-  if (strategyKey === "none") state.controls.algorithm_enabled = false;
-  renderAlgorithmDeck();
-  renderAlgorithmPower();
-  const savePromise = saveControlsOnly({ renderDecks: false });
-  await Promise.all([savePromise, ensureSignals(strategyKey)]);
-}
-
-function canShiftDeck() {
-  if (state.deckWheelLocked) return false;
-  state.deckWheelLocked = true;
-  window.setTimeout(() => {
-    state.deckWheelLocked = false;
-  }, 760);
-  return true;
-}
-
-function shiftAlgorithmDeck(direction) {
-  if (isAlgorithmTradingEnabled()) {
-    showToast("Turn algorithm off before changing strategies");
-    return;
-  }
-  const choices = algorithmChoices();
-  const index = Math.max(0, choices.findIndex((choice) => choice.key === activeAlgorithmKey()));
-  const nextIndex = clamp(index + direction, 0, choices.length - 1);
-  if (nextIndex === index) return; // at ends, no movement or animation
-  if (!canShiftDeck()) return;
-  const deck = $("#algorithmDeck");
-  if (deck) deck.setAttribute("data-shift", direction > 0 ? "down" : "up");
-  selectRelativeAlgorithm(direction);
-  if (deck) window.setTimeout(() => deck.removeAttribute("data-shift"), 760);
-}
-
-function selectRelativeAlgorithm(direction) {
-  if (isAlgorithmTradingEnabled()) return;
-  const choices = algorithmChoices();
-  const index = Math.max(0, choices.findIndex((choice) => choice.key === activeAlgorithmKey()));
-  const nextIndex = clamp(index + direction, 0, choices.length - 1);
-  const next = choices[nextIndex];
-  if (next && next.key !== activeAlgorithmKey()) selectAlgorithmStrategy(next.key);
-}
-
-function renderOptionsDeck() {
-  const deck = $("#optionsDeck");
-  if (!deck) return;
-  const choices = optionsChoices();
-  const activeKey = activeOptionsKey();
-  const activeIndex = Math.max(0, choices.findIndex((choice) => choice.key === activeKey));
-  const renderKey = `${activeKey}:${choices.length}`;
-  deck.classList.toggle("locked", isOptionsTradingEnabled());
-  deck.setAttribute("aria-disabled", String(isOptionsTradingEnabled()));
-  if (state.renderedOptionsDeckKey === renderKey && deck.children.length) {
-    renderOptionsInsight();
-    return;
-  }
-  state.renderedOptionsDeckKey = renderKey;
-  deck.innerHTML = choices.map((strategy, index) => {
-    const offset = index - activeIndex;
-    return `
-      <article class="deckCard optionsDeckCard ${deckClass(offset)} ${toneClass(index + 2)}" data-options-strategy="${escapeHtml(strategy.key)}" aria-current="${offset === 0 ? "true" : "false"}">
-        <header class="deckHeader">
-          <div>
-            <span class="deckKicker">${offset === 0 ? "Active" : "Available"}</span>
-            <h2>${escapeHtml(strategy.name)}</h2>
-          </div>
-        </header>
-        <p>${escapeHtml(strategy.description)}</p>
-        <div class="strategyMeta">
-          <span>${escapeHtml(strategy.risk)}</span>
-          ${strategy.config.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
-        </div>
-      </article>
-    `;
-  }).join("");
-  renderOptionsInsight();
-}
-
-async function selectOptionsStrategy(strategyKey) {
-  if (isOptionsTradingEnabled()) {
-    showToast("Turn options bot off before changing strategies");
-    return;
-  }
-  if (strategyKey === activeOptionsKey()) return;
-  state.controls.options_strategy = strategyKey;
-  if (strategyKey === "none") state.controls.options_trading_enabled = false;
-  renderOptionsDeck();
-  renderOptionsPower();
-  const signalKey = optionsUnderlyingStrategyKey(strategyKey);
-  const savePromise = saveControlsOnly({ renderDecks: false });
-  await Promise.all([savePromise, signalKey === "none" ? Promise.resolve() : ensureSignals(signalKey)]);
-}
-
-function shiftOptionsDeck(direction) {
-  if (isOptionsTradingEnabled()) {
-    showToast("Turn options bot off before changing strategies");
-    return;
-  }
-  const choices = optionsChoices();
-  const index = Math.max(0, choices.findIndex((choice) => choice.key === activeOptionsKey()));
-  const nextIndex = clamp(index + direction, 0, choices.length - 1);
-  if (nextIndex === index) return; // at ends, no movement or animation
-  if (!canShiftDeck()) return;
-  const deck = $("#optionsDeck");
-  if (deck) deck.setAttribute("data-shift", direction > 0 ? "down" : "up");
-  selectRelativeOptions(direction);
-  if (deck) window.setTimeout(() => deck.removeAttribute("data-shift"), 760);
-}
-
-function selectRelativeOptions(direction) {
-  if (isOptionsTradingEnabled()) return;
-  const choices = optionsChoices();
-  const index = Math.max(0, choices.findIndex((choice) => choice.key === activeOptionsKey()));
-  const nextIndex = clamp(index + direction, 0, choices.length - 1);
-  const next = choices[nextIndex];
-  if (next && next.key !== activeOptionsKey()) selectOptionsStrategy(next.key);
-}
-
-function renderOptionsInsight() {
-  const card = $("#optionsSignalCard");
-  const strategyKey = optionsUnderlyingStrategyKey();
-  if (strategyKey === "none") {
-    if (!card) return;
-    const selected = optionsChoices().find((choice) => choice.key === activeOptionsKey()) || NONE_OPTIONS;
-    card.innerHTML = `
-      <span class="deckKicker">Options Setup</span>
-      <h2>${escapeHtml(selected.name)}</h2>
-      <p>${escapeHtml(selected.description)}</p>
-      <div class="signalRows">
-        ${(selected.config || []).map((item) => `
-          <article>
-            <strong>${escapeHtml(item)}</strong>
-            <span>${selected.key === "none" ? "Inactive" : "Review before enabling"}</span>
-          </article>
-        `).join("")}
-      </div>
-    `;
-    return;
-  }
-  renderSignalBacktestCard({
-    card,
-    strategyKey,
-    selected: optionsSignalChoice(),
-    kicker: "Underlying Signals",
-    backtestChartId: "optionsBacktestChart",
-    universeLabel: "Options underlying universe",
-  });
-}
-
-const renderOptionsSignals = renderOptionsInsight;
-
-function renderOptionsPower() {
-  const enabled = isOptionsTradingEnabled();
-  const button = $("#optionsPowerToggle");
-  const panel = $("#optionsRunPanel");
-  const deck = $("#optionsDeck");
-  const select = $("#optionsTradingAccount");
-  if (button) {
-    button.setAttribute("aria-pressed", String(enabled));
-    button.classList.toggle("on", enabled);
-    button.disabled = activeOptionsKey() === "none";
-    button.innerHTML = '<span aria-hidden="true">&#9211;</span>';
-  }
-  if (panel) panel.classList.toggle("is-on", enabled);
-  if (deck) {
-    deck.classList.toggle("locked", enabled);
-    deck.setAttribute("aria-disabled", String(enabled));
-  }
-  document.querySelectorAll('[data-deck="options"]').forEach((button) => {
-    button.disabled = enabled;
-  });
-  if (select) {
-    const accounts = state.accounts.length
-      ? state.accounts
-      : [{ id: state.controls?.options_trading_account_id || state.controls?.trading_account_id || "default", label: "Default" }];
-    const activeAccount = state.controls?.options_trading_account_id || state.controls?.trading_account_id || accounts[0]?.id || "";
-    select.innerHTML = accounts.map((account) => `
-      <option value="${escapeHtml(account.id)}"${account.id === activeAccount ? " selected" : ""}>
-        ${escapeHtml(account.label || account.id)}
-      </option>
-    `).join("");
-    select.disabled = enabled;
-  }
-}
-
-function updateFeatureToggles() {
-  const enabled = isDcaEnabled();
-  const button = $("#scheduleToggle");
-  const panel = $("#schedulePanel");
-  if (button) {
-    button.setAttribute("aria-pressed", String(enabled));
-    button.classList.toggle("on", enabled);
-    button.innerHTML = '<span aria-hidden="true">&#9211;</span>';
-  }
-  if (panel) panel.classList.toggle("is-on", enabled);
-}
-
-function renderAlgorithmPower() {
-  const enabled = isAlgorithmTradingEnabled();
-  const button = $("#algorithmPowerToggle");
-  const panel = $("#algorithmRunPanel");
-  const select = $("#tradingAccount");
-  const deck = $("#algorithmDeck");
-  if (button) {
-    button.setAttribute("aria-pressed", String(enabled));
-    button.classList.toggle("on", enabled);
-    button.disabled = activeAlgorithmKey() === "none";
-    button.innerHTML = '<span aria-hidden="true">&#9211;</span>';
-  }
-  if (panel) panel.classList.toggle("is-on", enabled);
-  if (deck) {
-    deck.classList.toggle("locked", enabled);
-    deck.setAttribute("aria-disabled", String(enabled));
-  }
-  document.querySelectorAll('[data-deck="algorithm"]').forEach((button) => {
-    button.disabled = enabled;
-  });
-  if (select) {
-    const accounts = state.accounts.length
-      ? state.accounts
-      : [{ id: state.controls?.trading_account_id || "default", label: "Default" }];
-    const activeAccount = state.controls?.trading_account_id || accounts[0]?.id || "";
-    select.innerHTML = accounts.map((account) => `
-      <option value="${escapeHtml(account.id)}"${account.id === activeAccount ? " selected" : ""}>
-        ${escapeHtml(account.label || account.id)}
-      </option>
-    `).join("");
-    select.disabled = enabled;
-  }
 }
 
 function renderBacktestChart(payload, svg) {
@@ -1854,283 +1463,53 @@ function backtestPositions(positions) {
     .sort((left, right) => Math.abs(right[1]) - Math.abs(left[1]));
 }
 
-function activateAlgorithmView() {
-  renderAlgorithmDeck();
-  const activeKey = activeAlgorithmKey();
-  ensureSignals(activeKey);
-}
-
 function percent(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "--";
   return `${(Number(value) * 100).toFixed(1)}%`;
 }
 
-function renderScheduleDescription() {
-  const pattern = $("#cronPattern").value.trim();
-  const descriptions = {
-    "0 12 * * 1-5": "Weekdays at 12:00 PM",
-    "0 9 * * 1-5": "Weekdays at 9:00 AM",
-    "0 12 * * 1": "Mondays at 12:00 PM",
-    "0 12 1 * *": "First day monthly at 12:00 PM",
-  };
-  $("#cronDescription").textContent = descriptions[pattern] || "Cron-style schedule pattern";
-}
+//: Wheel and pinch fire continuously, so plan edits coalesce into one POST once the gesture
+//: settles rather than one per tick.
+const PLAN_SAVE_DEBOUNCE_MS = 500;
 
-function switchTab(tabName) {
-  document.querySelectorAll(".tab").forEach((button) => {
-    button.classList.toggle("active", button.dataset.tab === tabName);
-  });
-  document.querySelectorAll(".tabPanel").forEach((panel) => {
-    panel.classList.toggle("active", panel.id === `${tabName}Tab`);
-  });
-  if (tabName === "dca") renderDca();
-  if (tabName === "algorithm") activateAlgorithmView();
-  if (tabName === "options") {
-    renderOptionsDeck();
-    renderOptionsPower();
-    const signalKey = optionsUnderlyingStrategyKey();
-    if (signalKey !== "none") ensureSignals(signalKey);
-  }
+function schedulePlanSave() {
+  window.clearTimeout(schedulePlanSave.timer);
+  schedulePlanSave.timer = window.setTimeout(() => {
+    // Saving swaps in the server's copy of the plan and re-renders the board, which would
+    // yank it out from under a gesture that is still going. Wait for the hands to come off.
+    if (state.drag || state.pinch || state.boardPinch) {
+      schedulePlanSave();
+      return;
+    }
+    savePlan();
+  }, PLAN_SAVE_DEBOUNCE_MS);
 }
 
 async function savePlan(quiet = true) {
   if (!state.dca?.plan) return;
   syncNodesToPlan();
-  state.dca.plan.schedule_pattern = $("#cronPattern").value.trim() || "0 12 * * 1-5";
   try {
     const [dcaPayload, controlsPayload] = await Promise.all([
-      api("/api/dca", { method: "POST", body: JSON.stringify({ plan: state.dca.plan }), timeoutMs: 5000 }),
+      api("/api/dca", {
+        method: "POST",
+        body: JSON.stringify({ plan: state.dca.plan, account_id: state.dca?.account_id || "" }),
+        timeoutMs: 5000,
+      }),
       api("/api/controls", { method: "POST", body: JSON.stringify({ controls: state.controls }), timeoutMs: 5000 }),
     ]);
     state.dca = dcaPayload;
     state.controls = controlsPayload.controls;
-    delete state.backtests.none;
-    delete state.signals.none;
+    // The plan is an input to both DCA strategies, so their cached views are now stale.
+    // This used to clear "none", which was where the DCA view lived before it was selectable.
+    DCA_STRATEGY_KEYS.forEach((key) => {
+      delete state.backtests[key];
+      delete state.signals[key];
+    });
     renderDca();
     if (!quiet) showToast("Saved");
   } catch (error) {
     showToast(error.message);
   }
-}
-
-async function saveControlsOnly(options = {}) {
-  const renderDecks = options.renderDecks !== false;
-  try {
-    const payload = await api("/api/controls", {
-      method: "POST",
-      body: JSON.stringify({ controls: state.controls }),
-      timeoutMs: 5000,
-    });
-    state.controls = payload.controls;
-    state.accounts = payload.accounts || state.accounts;
-    state.bot = payload.bot || state.bot;
-    updateFeatureToggles();
-    renderAlgorithmPower();
-    renderOptionsPower();
-    if (renderDecks) {
-      renderAlgorithmDeck();
-      renderOptionsDeck();
-    } else {
-      renderAlgorithmSignals();
-      renderOptionsInsight();
-    }
-  } catch (error) {
-    showToast(error.message);
-  }
-}
-
-function wireEvents() {
-  document.querySelectorAll(".tab").forEach((button) => {
-    button.addEventListener("click", () => switchTab(button.dataset.tab));
-  });
-  $("#algorithmDeck")?.addEventListener("click", (event) => {
-    const card = event.target.closest("[data-strategy]");
-    if (card) selectAlgorithmStrategy(card.dataset.strategy);
-  });
-  $("#algorithmSignalCard")?.addEventListener("click", handleSignalCardClick);
-  $("#optionsSignalCard")?.addEventListener("click", handleSignalCardClick);
-  $("#algorithmDeck")?.addEventListener("wheel", (event) => {
-    event.preventDefault();
-    shiftAlgorithmDeck(event.deltaY > 0 ? 1 : -1);
-  }, { passive: false });
-  $("#algorithmDeck")?.addEventListener("keydown", (event) => {
-    if (event.key === "ArrowDown") selectRelativeAlgorithm(1);
-    if (event.key === "ArrowUp") selectRelativeAlgorithm(-1);
-  });
-  $("#optionsDeck")?.addEventListener("click", (event) => {
-    const card = event.target.closest("[data-options-strategy]");
-    if (card) selectOptionsStrategy(card.dataset.optionsStrategy);
-  });
-  $("#optionsDeck")?.addEventListener("wheel", (event) => {
-    event.preventDefault();
-    shiftOptionsDeck(event.deltaY > 0 ? 1 : -1);
-  }, { passive: false });
-  $("#optionsDeck")?.addEventListener("keydown", (event) => {
-    if (event.key === "ArrowDown") selectRelativeOptions(1);
-    if (event.key === "ArrowUp") selectRelativeOptions(-1);
-  });
-  $("#optionsPowerToggle")?.addEventListener("click", () => {
-    if (activeOptionsKey() === "none") {
-      state.controls.options_trading_enabled = false;
-      renderOptionsPower();
-      return;
-    }
-    state.controls.options_trading_enabled = !state.controls.options_trading_enabled;
-    renderOptionsPower();
-    saveControlsOnly({ renderDecks: false });
-  });
-  $("#optionsTradingAccount")?.addEventListener("change", (event) => {
-    state.controls.options_trading_account_id = event.target.value;
-    renderOptionsPower();
-    saveControlsOnly({ renderDecks: false });
-  });
-  $("#scheduleToggle")?.addEventListener("click", () => {
-    if (!state.dca?.plan) return;
-    state.dca.plan.enabled = !state.dca.plan.enabled;
-    renderDca();
-    savePlan();
-  });
-  $("#algorithmPowerToggle")?.addEventListener("click", () => {
-    if (activeAlgorithmKey() === "none") {
-      state.controls.algorithm_enabled = false;
-      renderAlgorithmPower();
-      return;
-    }
-    state.controls.algorithm_enabled = !state.controls.algorithm_enabled;
-    renderAlgorithmPower();
-    saveControlsOnly({ renderDecks: false });
-  });
-  $("#tradingAccount")?.addEventListener("change", (event) => {
-    state.controls.trading_account_id = event.target.value;
-    renderAlgorithmPower();
-    saveControlsOnly({ renderDecks: false });
-  });
-  $("#cronPattern")?.addEventListener("input", renderScheduleDescription);
-  $("#cronPattern")?.addEventListener("change", () => savePlan());
-  $("#symbolEntry")?.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") commitSymbolEntry();
-    if (event.key === "Escape") hideSymbolEntry();
-  });
-  $("#symbolEntry")?.addEventListener("input", () => {
-    if (!state.draft) return;
-    state.draft.symbol = $("#symbolEntry").value.trim().toUpperCase().slice(0, 6);
-    renderBoard();
-  });
-  $("#symbolEntry")?.addEventListener("blur", () => window.setTimeout(commitSymbolEntry, 80));
-  document.querySelectorAll(".deckArrow").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      const target = event.currentTarget;
-      const direction = Number(target.dataset.direction || 0);
-      if (target.dataset.deck === "algorithm") shiftAlgorithmDeck(direction);
-      if (target.dataset.deck === "options") shiftOptionsDeck(direction);
-    });
-  });
-  window.addEventListener("resize", () => {
-    renderDca();
-  });
-  // Allow keyboard delete/backspace to remove the currently selected bubble
-  window.addEventListener("keydown", (event) => {
-    const target = event.target;
-    const tag = target && target.tagName && target.tagName.toLowerCase();
-    if (tag === "input" || tag === "textarea" || target.isContentEditable) return;
-    if ((event.key === "Delete" || event.key === "Backspace") && state.selected) {
-      // find the bucket that contains the selected symbol
-      const fromItems = BUCKET_NAMES.flatMap((bucketName) =>
-        bucketItems(bucketName).map((item) => ({ bucketName, item })),
-      );
-      const found = fromItems.find(({ item }) => item.symbol === state.selected);
-      if (found) {
-        removeSymbol(found.bucketName, state.selected);
-        state.selected = null;
-        return;
-      }
-      // fallback: if plan not yet loaded or item not found in plan, remove from rendered nodes
-      const nodeIndex = state.nodes.findIndex((n) => n.symbol === state.selected);
-      if (nodeIndex !== -1) {
-        state.nodes.splice(nodeIndex, 1);
-        state.selected = null;
-        renderBoard();
-      }
-    }
-  });
-}
-
-function handleSignalCardClick(event) {
-  const universeButton = event.target.closest("[data-refresh-universe]");
-  if (universeButton) {
-    recommendUniverse();
-    return;
-  }
-  const applyUniverseButton = event.target.closest("[data-apply-universe]");
-  if (applyUniverseButton) {
-    applyUniverseProposal();
-    return;
-  }
-  const refreshButton = event.target.closest("[data-refresh-backtest]");
-  if (!refreshButton) return;
-  const strategyKey = refreshButton.dataset.refreshBacktest;
-  delete state.signals[strategyKey];
-  loadSignals(strategyKey);
-  loadBacktest(strategyKey, true);
-}
-
-async function init() {
-  wireEvents();
-  renderAlgorithmDeck();
-  renderOptionsDeck();
-  renderOptionsPower();
-  renderStaticBubbles();
-  try {
-    const [statusPayload, universePayload, dcaPayload, controlsPayload] = await Promise.all([
-      api("/api/status", { timeoutMs: 5000 }),
-      api("/api/universe", { timeoutMs: 5000 }),
-      api("/api/dca", { timeoutMs: 5000 }),
-      api("/api/controls", { timeoutMs: 5000 }),
-    ]);
-    state.status = statusPayload;
-    configureBacktestPeriod(statusPayload.config?.backtest_period);
-    state.universe = universePayload.rows || [];
-    state.dca = dcaPayload;
-    state.controls = controlsPayload.controls || state.controls;
-    state.accounts = controlsPayload.accounts || [];
-    state.bot = controlsPayload.bot || statusPayload.bot || null;
-    state.dca.plan.max_item_amount = MAX_AMOUNT;
-    renderDca();
-    renderAlgorithmDeck();
-    renderOptionsDeck();
-    renderOptionsPower();
-    renderOptionsSignals();
-    loadCachedBacktestsForDeck();
-  } catch (error) {
-    showToast(`Could not load DCA data: ${error.message}`);
-    return;
-  }
-}
-
-function renderStaticBubbles() {
-  calculateLayout();
-  const svg = $("#bubbleBoard");
-  svg.setAttribute("viewBox", `0 0 ${state.layout.width} ${state.layout.height}`);
-  svg.replaceChildren();
-  BUCKET_NAMES.forEach((bucketName) => {
-    const bucket = state.layout.buckets[bucketName];
-    const color = DISABLED_COLORS[bucketName];
-    svg.appendChild(svgEl("circle", {
-      class: `bucket-blob ${bucketName}`,
-      cx: bucket.cx,
-      cy: bucket.cy,
-      r: bucket.r,
-      fill: color,
-      stroke: shadeColor(color, -30),
-    }));
-    svg.appendChild(textEl({
-      class: "bucket-label",
-      x: bucket.cx,
-      y: bucket.cy,
-      "text-anchor": "middle",
-      fill: color,
-    }, bucket.label));
-  });
 }
 
 function shadeColor(color, percent) {
@@ -2141,6 +1520,1069 @@ function shadeColor(color, percent) {
   const green = clamp(((number >> 8) & 0xff) + amount, 0, 255);
   const blue = clamp((number & 0xff) + amount, 0, 255);
   return `#${(0x1000000 + red * 0x10000 + green * 0x100 + blue).toString(16).slice(1)}`;
+}
+
+
+// =========================================================================================
+// Shell: sidebar + hash router. Each algorithm gets a full page whose tabs follow the
+// lifecycle -- see what it does, tune it, test it, debug it, deploy it. Deployment targets
+// (accounts) get their own pages, so "where does this run" is a first-class question.
+// =========================================================================================
+
+//: Overview answers "what is this and what has it done": the explainer panels plus the
+//: bot's own order journal, which is the only per-algorithm record of activity there is.
+//: Broker holdings live on the account page instead -- see renderAccountPage.
+const TABS = [
+  { id: "overview", label: "Overview" },
+  { id: "signals", label: "Signals" },
+  { id: "tune", label: "Tune" },
+  { id: "backtest", label: "Backtest" },
+];
+
+const DEFAULT_TAB = TABS[0].id;
+
+function currentRoute() {
+  const raw = (window.location.hash || "").replace(/^#\/?/, "");
+  const parts = raw.split("/").filter(Boolean);
+  if (parts[0] === "algo" && parts[1]) {
+    const tab = TABS.some((tab) => tab.id === parts[2]) ? parts[2] : DEFAULT_TAB;
+    return { page: "algo", id: decodeURIComponent(parts[1]), tab };
+  }
+  if ((parts[0] === "account" || parts[0] === "target") && parts[1]) {
+    return { page: "account", id: decodeURIComponent(parts[1]), tab: "" };
+  }
+  return { page: "algo", id: DEFAULT_ALGORITHM_KEY, tab: DEFAULT_TAB };
+}
+
+function deploymentsFor(strategyKey) {
+  return bindings().filter((binding) => binding.strategy === strategyKey);
+}
+
+//: One algorithm runs against at most one account, so a deployment is singular. That keeps
+//: P/L attributable: the broker blends positions per account, and with one algorithm per
+//: account the account's numbers *are* this algorithm's numbers.
+function deploymentFor(strategyKey) {
+  return deploymentsFor(strategyKey)[0] || null;
+}
+
+function accountRows() {
+  return state.accounts?.rows || [];
+}
+
+function accountLabel(accountId) {
+  return accountRows().find((row) => row.id === accountId)?.label || accountId || "unassigned";
+}
+
+// -- sidebar -----------------------------------------------------------------------------
+
+//: One colour rule for the whole dashboard: an algorithm is green when it is switched on and
+//: on a clock, orange when it is switched on but waiting for the MCP agent to drive it, and
+//: dark when it is off. Accounts and the bot pill both derive from this rather than each
+//: inventing their own reading -- "deployed but paused" used to show amber, which looked
+//: identical to "the agent is driving it".
+function deploymentStatus(deployments) {
+  const armed = (deployments || []).filter((deployment) => deployment.enabled);
+  if (armed.some((deployment) => normalizeBindingFrequency(deployment.frequency) !== "mcp")) return "live";
+  if (armed.length) return "idle";
+  return "off";
+}
+
+function renderSidebar() {
+  const route = currentRoute();
+  const algorithmNav = $("#algorithmNav");
+  if (algorithmNav) {
+    algorithmNav.innerHTML = algorithmChoices().map((strategy) => {
+      const deployments = deploymentsFor(strategy.key);
+      const active = route.page === "algo" && route.id === strategy.key;
+      const status = deploymentStatus(deployments);
+      return `
+        <li>
+          <a class="navItem${active ? " is-active" : ""}" href="#/algo/${escapeHtml(strategy.key)}/${escapeHtml(route.page === "algo" ? route.tab : DEFAULT_TAB)}">
+            <span class="statusDot is-${status}" aria-hidden="true"></span>
+            <span class="navItemLabel">${escapeHtml(strategy.name)}</span>
+            ${deployments.length ? `<span class="navBadge">${deployments.length}</span>` : ""}
+          </a>
+        </li>`;
+    }).join("");
+  }
+
+  renderAccountNav();
+  renderWatchlist();
+  renderNavFooter();
+}
+
+//: Accounts sit under the algorithms because that is the reading order of the question the
+//: sidebar answers: what runs, and what is it doing to the money. The number shown is day
+//: P/L, which is the only figure the broker reports without a cost-basis round trip.
+function renderAccountNav() {
+  const host = $("#accountNav");
+  if (!host) return;
+  const rows = accountRows();
+  if (!rows.length) {
+    host.innerHTML = `<li><span class="navEmpty">No accounts yet</span></li>`;
+    return;
+  }
+  const route = currentRoute();
+  host.innerHTML = rows.map((account) => {
+    const deployed = bindings().filter((binding) => binding.account_id === account.id);
+    // An account is only as live as the algorithms pointed at it, and it cannot be live at
+    // all without credentials.
+    const status = account.credentials_ready ? deploymentStatus(deployed) : "off";
+    const active = route.page === "account" && route.id === account.id;
+    const positions = state.positions[account.id];
+    const pl = positions && !positions.error ? positions.day_pl : null;
+    const stat = pl === null || pl === undefined
+      ? `<span class="navStat is-muted">--</span>`
+      : `<span class="navStat ${pl >= 0 ? "gain" : "loss"}">${escapeHtml(money(pl, 2))}</span>`;
+    const title = account.credentials_ready
+      ? `${account.label} · ${deployed.length ? `runs ${deployed.map((binding) => strategyByKey(binding.strategy).name).join(", ")}` : "no algorithm deployed"}`
+      : `${account.label} · credentials missing`;
+    const inner = `
+      <span class="statusDot is-${status}" aria-hidden="true"></span>
+      <span class="navItemLabel">${escapeHtml(account.label)}</span>
+      ${stat}`;
+    return `
+      <li>
+        <a class="navItem navItem--stat${active ? " is-active" : ""}" href="#/account/${escapeHtml(account.id)}" title="${escapeHtml(title)}">${inner}</a>
+      </li>`;
+  }).join("");
+  // The sidebar is the only place an idle account's P/L shows, so it pulls its own numbers.
+  rows.filter((account) => account.credentials_ready).forEach((account) => ensurePositions(account.id));
+}
+
+function renderWatchlist() {
+  const host = $("#watchlist");
+  if (!host) return;
+  const rows = state.watchlist?.rows || [];
+  if (!rows.length) {
+    host.innerHTML = `<li><span class="navEmpty">No tickers yet</span></li>`;
+    return;
+  }
+  host.innerHTML = rows.map((row) => `
+    <li>
+      <div class="watchRow" draggable="true" data-watch="${escapeHtml(row.symbol)}">
+        <span class="watchGrip" aria-hidden="true">⠿</span>
+        <span class="watchSymbol">${escapeHtml(row.symbol)}</span>
+        <span class="watchPrice">${row.price === null || row.price === undefined ? "--" : escapeHtml(money(row.price, 2))}</span>
+        <span class="watchChange ${(row.change || 0) >= 0 ? "gain" : "loss"}">${row.change === null || row.change === undefined ? "" : escapeHtml(percent(row.change))}</span>
+        <button class="watchRemove" type="button" data-remove-watch aria-label="Remove ${escapeHtml(row.symbol)}">&times;</button>
+      </div>
+    </li>`).join("");
+}
+
+function reorderWatchlist(fromSymbol, toSymbol) {
+  const current = [...(state.watchlist?.symbols || [])];
+  const from = current.indexOf(fromSymbol);
+  const to = current.indexOf(toSymbol);
+  if (from < 0 || to < 0 || from === to) return;
+  current.splice(to, 0, current.splice(from, 1)[0]);
+  // Paint the new order immediately; the save reconciles it.
+  state.watchlist = { ...state.watchlist, symbols: current, rows: current.map((symbol) =>
+    (state.watchlist.rows || []).find((row) => row.symbol === symbol) || { symbol, price: null, change: null }) };
+  renderWatchlist();
+  saveWatchlist(current);
+}
+
+function wireWatchlistDrag() {
+  const host = $("#watchlist");
+  if (!host) return;
+  host.addEventListener("dragstart", (event) => {
+    const row = event.target.closest("[data-watch]");
+    if (!row) return;
+    state.watchDrag = row.dataset.watch;
+    row.classList.add("is-dragging");
+    event.dataTransfer.effectAllowed = "move";
+    // Firefox refuses to start a drag without data on the transfer.
+    event.dataTransfer.setData("text/plain", row.dataset.watch);
+  });
+  host.addEventListener("dragover", (event) => {
+    if (!state.watchDrag) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  });
+  host.addEventListener("drop", (event) => {
+    const row = event.target.closest("[data-watch]");
+    if (!row || !state.watchDrag) return;
+    event.preventDefault();
+    reorderWatchlist(state.watchDrag, row.dataset.watch);
+    state.watchDrag = null;
+  });
+  host.addEventListener("dragend", () => {
+    state.watchDrag = null;
+    host.querySelectorAll(".is-dragging").forEach((node) => node.classList.remove("is-dragging"));
+  });
+}
+
+async function loadWatchlist() {
+  try {
+    state.watchlist = await api("/api/watchlist", { timeoutMs: 12000 });
+  } catch (error) {
+    state.watchlist = { rows: [] };
+  }
+  renderWatchlist();
+}
+
+function normalizeWatchlistSymbol(symbol) {
+  return String(symbol ?? "").trim().toUpperCase().slice(0, 10);
+}
+
+async function saveWatchlist(symbols) {
+  const normalized = [...new Set((Array.isArray(symbols) ? symbols : []).map(normalizeWatchlistSymbol).filter(Boolean))];
+  try {
+    state.watchlist = await api("/api/watchlist", {
+      method: "POST",
+      body: JSON.stringify({ symbols: normalized }),
+      timeoutMs: 12000,
+    });
+  } catch (error) {
+    showToast(error.message);
+  }
+  renderWatchlist();
+}
+
+function addWatchTicker() {
+  const symbol = window.prompt("Ticker to watch");
+  if (!symbol) return;
+  const current = state.watchlist?.symbols || [];
+  saveWatchlist([...current, symbol]);
+}
+
+function removeWatchTicker(symbol) {
+  const current = state.watchlist?.symbols || [];
+  saveWatchlist(current.filter((entry) => entry !== symbol));
+}
+
+function renderNavFooter() {
+  const footer = $("#navFooter");
+  if (!footer) return;
+  const auth = state.schwabAuth;
+  // Only present when Schwab is actually configured: a connector nobody set up is not a
+  // status worth a permanent row. The dot carries the state, so the row says only what it
+  // is; the tooltip holds the detail for when the colour is not enough.
+  const authRow = auth?.configured
+    ? `<button class="navHealth is-${escapeHtml(auth.state)}" type="button" id="schwabAuthPill"
+         title="${escapeHtml(auth.detail || "")}">
+         <span class="statusDot is-${auth.state === "ok" ? "live" : auth.state === "warning" ? "idle" : "off"}" aria-hidden="true"></span>
+         <span class="navHealthLabel">Schwab API</span>
+       </button>`
+    : "";
+  const runtime = runtimeSummary();
+  footer.innerHTML = `${authRow}
+    <span class="navHealth is-muted" title="${escapeHtml(runtime.detail)}">
+      <span class="statusDot is-${runtime.status}" aria-hidden="true"></span>
+      <span class="navHealthLabel">${escapeHtml(runtime.label)}</span>
+      <span class="navHealthNote">${escapeHtml(runtime.note)}</span>
+    </span>`;
+}
+
+//: Every deployment gets its own scheduler loop, so the runtime has one state *per binding*.
+//: Reading the first of them -- which is what this did -- reported "paused" whenever the one
+//: armed algorithm happened not to be first in the dict.
+function runtimeSummary() {
+  const bot = state.bot || {};
+  const loops = Object.values(bot.bindings || {});
+  if (!loops.length && bot.algorithm) loops.push(bot.algorithm);
+
+  if (state.status?.runtime_mode === "mcp") {
+    return { status: "off", label: "MCP mode", note: "agent-driven", detail: "Scheduler disabled; the MCP agent drives runs." };
+  }
+
+  const running = loops.filter((loop) => loop.running);
+  const armed = bindings().filter((binding) => binding.enabled);
+  // The bot pill takes the same colour as the algorithms: green while anything is on a
+  // clock, orange when everything that is on is waiting for the agent instead.
+  const status = deploymentStatus(armed);
+  const scheduled = armed.filter((binding) => normalizeBindingFrequency(binding.frequency) !== "mcp");
+  const agentDriven = armed.filter((binding) => normalizeBindingFrequency(binding.frequency) === "mcp");
+  const lastRun = loops
+    .map((loop) => loop.last_finished_at)
+    .filter(Boolean)
+    .sort()
+    .pop() || "";
+  const error = loops.map((loop) => loop.last_error).filter(Boolean)[0] || "";
+
+  const label = running.length
+    ? `Bot running${running.length > 1 ? ` (${running.length})` : ""}`
+    : status === "live"
+      ? `Bot scheduled${scheduled.length > 1 ? ` (${scheduled.length})` : ""}`
+      : status === "idle"
+        ? "Bot agent-driven"
+        : "Bot off";
+  const note = lastRun ? formatActivityTime(lastRun) : "";
+  const detail = error
+    ? error
+    : [
+        scheduled.length
+          ? `Scheduled: ${scheduled.map((binding) => `${strategyByKey(binding.strategy).name} every ${normalizeBindingFrequency(binding.frequency)}`).join(", ")}`
+          : "",
+        agentDriven.length
+          ? `Agent-driven: ${agentDriven.map((binding) => strategyByKey(binding.strategy).name).join(", ")}`
+          : "",
+        armed.length ? "" : "No algorithm is switched on",
+        lastRun ? `Last run ${formatActivityTime(lastRun)}` : "No run yet",
+      ].filter(Boolean).join(" · ");
+  return { status, label, note, detail };
+}
+
+// -- page frame --------------------------------------------------------------------------
+
+function pageHeader({ title, subtitle, meta = "", actions = "" }) {
+  return `
+    <header class="pageHead">
+      <div class="pageHeadMain">
+        <h1>${escapeHtml(title)}</h1>
+        ${subtitle ? `<p>${escapeHtml(subtitle)}</p>` : ""}
+      </div>
+      <div class="pageHeadSide">${meta}${actions}</div>
+    </header>`;
+}
+
+function tabBar(strategyKey, activeTab) {
+  return `<nav class="tabBar" aria-label="Sections">
+    ${TABS.map((tab) => `
+      <a class="tabLink${tab.id === activeTab ? " is-active" : ""}" href="#/algo/${escapeHtml(strategyKey)}/${tab.id}">${escapeHtml(tab.label)}</a>
+    `).join("")}
+  </nav>`;
+}
+
+function render() {
+  const route = currentRoute();
+  renderSidebar();
+  const content = $("#content");
+  if (!content) return;
+  // Rebuilding the body under an open <select> closes it mid-click, and under a focused
+  // input it discards what is being typed. While the user is holding a control, leave the
+  // body alone -- the next state change repaints it.
+  const active = document.activeElement;
+  if (active && active.matches?.("select, input, textarea") && content.contains?.(active)) return;
+  if (route.page === "account") renderAccountPage(content, route.id);
+  else renderAlgorithmPage(content, route.id, route.tab);
+  closeNavOnMobile();
+}
+
+// -- algorithm page ----------------------------------------------------------------------
+
+function normalizeBindingFrequency(value) {
+  const candidate = String(value ?? "1hr").trim().toLowerCase();
+  return ["15m", "30m", "1hr", "2hr", "1d", "mcp"].includes(candidate) ? candidate : "1hr";
+}
+
+function renderAlgorithmPage(content, strategyKey, tab) {
+  const strategy = strategyByKey(strategyKey);
+  const deployments = deploymentsFor(strategy.key);
+  const deployment = deploymentFor(strategy.key);
+  // Every account is offered to every algorithm. Sharing one account between algorithms is
+  // allowed; it only costs attribution, which the overview says plainly when it happens.
+  const options = accountRows();
+  const frequencyOptions = ["15m", "30m", "1hr", "2hr", "1d", "mcp"];
+  const savedFrequency = normalizeBindingFrequency(deployment?.frequency || "1hr");
+  const actions = options.length
+    ? `<div class="deployControl"${deployment ? ` data-binding="${escapeHtml(deployment.id)}"` : ""}>
+         <button class="ctl powerButton${deployment?.enabled ? " on" : ""}" type="button" data-role="power"
+           aria-pressed="${Boolean(deployment?.enabled)}" aria-label="Toggle trading"
+           title="${deployment?.enabled ? "Pause" : "Start"} trading"><span aria-hidden="true">&#9211;</span></button>
+         <select class="ctl" id="deployTargetSelect" aria-label="Account"${deployment?.enabled ? " disabled" : ""}>
+           ${options.map((account) => `<option value="${escapeHtml(account.id)}"${account.id === deployment?.account_id ? " selected" : ""}>${escapeHtml(account.label)}</option>`).join("")}
+         </select>
+         <select class="ctl" id="deployFrequencySelect" aria-label="Frequency" data-binding="${escapeHtml(deployment?.id || "")}" ${!deployment ? "disabled" : ""}>
+           ${frequencyOptions.map((value) => `<option value="${escapeHtml(value)}"${savedFrequency === value ? " selected" : ""}>${escapeHtml(value)}</option>`).join("")}
+         </select>
+       </div>`
+    : `<span class="pill is-idle">No account available</span>`;
+
+  content.innerHTML = `
+    ${pageHeader({ title: strategy.name, subtitle: strategy.blurb, actions })}
+    ${tabBar(strategy.key, tab)}
+    <div class="tabBody" id="tabBody"></div>`;
+
+  const body = $("#tabBody");
+  if (tab === "overview") renderOverviewTab(body, strategy, deployment);
+  if (tab === "signals") renderSignalsTab(body, strategy);
+  if (tab === "tune") renderTuneTab(body, strategy);
+  if (tab === "backtest") renderBacktestTab(body, strategy);
+}
+
+// -- account page ------------------------------------------------------------------------
+
+//: Holdings and orders live here rather than on the algorithm because the broker reports
+//: them per account and knows nothing about which algorithm -- or which hand-placed order --
+//: produced them. Attributing an account's blended P/L to one algorithm would be a lie.
+function renderAccountPage(content, accountId) {
+  const account = accountRows().find((row) => row.id === accountId);
+  if (!account) {
+    content.innerHTML = `
+      ${pageHeader({ title: accountId, subtitle: "Unknown account" })}
+      <section class="card"><p class="emptyState">No account with this id is configured.</p></section>`;
+    return;
+  }
+
+  const positions = state.positions[account.id];
+  const activity = state.activity[account.id];
+  const deployed = bindings().filter((binding) => binding.account_id === account.id);
+  const status = deploymentStatus(deployed);
+  const busy = Boolean(state.positionsLoading[account.id] || state.activityLoading[account.id]);
+  const meta = `<span class="pill is-${status}">${
+    status === "live" ? "Trading" : status === "idle" ? "Agent-driven" : deployed.length ? "Deployed, paused" : "No algorithm"}</span>`;
+  const actions = `<button class="ctl" type="button" id="refreshAccountButton" data-account="${escapeHtml(account.id)}"
+    ${busy ? "disabled" : ""}>${busy ? "Refreshing." : "Refresh"}</button>`;
+
+  content.innerHTML = `
+    ${pageHeader({
+      title: account.label,
+      subtitle: `${account.broker}${account.data_feed ? ` · ${account.data_feed}` : ""} · ${account.id}`,
+      meta,
+      actions,
+    })}
+    <div class="pageBody">
+    <section class="card">
+      <div class="metricRow">
+        <div class="metric"><span>Equity</span><strong>${positions ? escapeHtml(money(positions.equity, 2)) : "--"}</strong></div>
+        <div class="metric"><span>Cash</span><strong>${positions ? escapeHtml(money(positions.cash, 2)) : "--"}</strong></div>
+        <div class="metric"><span>Day P/L</span><strong class="${(positions?.day_pl || 0) >= 0 ? "gain" : "loss"}">${
+          // A local book has no yesterday to compare against, so it reports no day figure.
+          positions?.day_pl === null || positions?.day_pl === undefined
+            ? "--"
+            : `${escapeHtml(money(positions.day_pl, 2))} (${escapeHtml(percent(positions.day_pl_percent))})`}</strong></div>
+        <div class="metric"><span>Open P/L</span><strong class="${(positions?.total_pl || 0) >= 0 ? "gain" : "loss"}">${
+          positions ? escapeHtml(money(positions.total_pl, 2)) : "--"}</strong></div>
+      </div>
+      ${!account.credentials_ready
+        ? `<p class="cardHint">Credentials missing: set <code>${escapeHtml(account.missing_env.join("</code> and <code>"))}</code> in <code>.env</code> and restart. It cannot trade until then.</p>`
+        : `<p class="cardHint">${account.broker === "paper"
+            // No broker holds this money, so the usual "including your own orders" caveat
+            // would be nonsense here: nothing but this bot can touch a local book.
+            ? "A local book, not a broker. Orders fill instantly at the last price the algorithm saw, and no real money moves."
+            : "Everything the broker reports for this account, including orders you placed yourself."}${
+            deployed.length ? ` Algorithms running here: ${deployed.map((binding) => strategyByKey(binding.strategy).name).join(", ")}.` : ""}</p>`}
+      ${deployed.length ? `<div class="chipRow">${deployed.map((binding) => `
+        <a class="chip is-link" href="#/algo/${escapeHtml(binding.strategy)}/${DEFAULT_TAB}">${escapeHtml(strategyByKey(binding.strategy).name)}</a>`).join("")}</div>` : ""}
+    </section>
+    <div class="cardGrid">
+      <section class="card">
+        <div class="cardHead">
+          <h2>Positions</h2>
+          <span class="cardHint">${positions?.rows?.length ? `${positions.rows.length} open` : ""}</span>
+        </div>
+        ${accountPositionsTable(positions)}
+      </section>
+      <section class="card">
+        <div class="cardHead">
+          <h2>Recent orders</h2>
+          <span class="cardHint">${activity?.rows?.length ? `${activity.rows.length} shown` : ""}</span>
+        </div>
+        ${accountOrdersTable(activity)}
+      </section>
+    </div>
+    </div>`;
+
+  if (account.credentials_ready) {
+    ensurePositions(account.id);
+    ensureActivity(account.id);
+  }
+}
+
+function accountPositionsTable(positions) {
+  if (positions?.error) return `<p class="emptyState">${escapeHtml(positions.error)}</p>`;
+  if (!positions) return `<p class="emptyState">Loading positions.</p>`;
+  if (!positions.rows?.length) return `<p class="emptyState">No open positions.</p>`;
+  return `
+    <div class="tableWrap is-scroll">
+      <table class="dataTable">
+        <thead>
+          <tr><th>Symbol</th><th class="num">Qty</th><th class="num">Avg</th><th class="num">Value</th><th class="num">P/L</th></tr>
+        </thead>
+        <tbody>
+          ${positions.rows.map((row) => `
+            <tr>
+              <td><strong>${escapeHtml(row.symbol)}</strong></td>
+              <td class="num">${escapeHtml(num(row.qty, row.qty % 1 ? 3 : 0))}</td>
+              <td class="num">${escapeHtml(money(row.avg_entry_price, 2))}</td>
+              <td class="num">${escapeHtml(money(row.market_value, 2))}</td>
+              <td class="num ${row.unrealized_pl >= 0 ? "gain" : "loss"}">${escapeHtml(money(row.unrealized_pl, 2))}
+                <span class="tableNote">${escapeHtml(percent(row.unrealized_plpc))}</span></td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function accountOrdersTable(activity) {
+  if (activity?.error) return `<p class="emptyState">${escapeHtml(activity.error)}</p>`;
+  if (!activity) return `<p class="emptyState">Loading activity.</p>`;
+  if (!activity.rows?.length) return `<p class="emptyState">No orders yet.</p>`;
+  return `
+    <div class="tableWrap is-scroll">
+      <table class="dataTable">
+        <thead>
+          <tr><th>Time</th><th>Symbol</th><th>Side</th><th>Detail</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          ${activity.rows.map((row) => `
+            <tr>
+              <td class="nowrap">${escapeHtml(formatActivityTime(row.submitted_at))}</td>
+              <td><strong>${escapeHtml(row.symbol)}</strong></td>
+              <td><span class="side is-${escapeHtml(row.side)}">${escapeHtml(row.side)}</span></td>
+              <td>${escapeHtml(formatActivityDetail(row))}</td>
+              <td class="tableNote">${escapeHtml(row.status)}</td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+//: The cached copies are what make the sidebar cheap, so a manual refresh has to drop them
+//: before asking again -- ensurePositions treats "already present" as "nothing to do".
+function refreshAccount(accountId) {
+  delete state.positions[accountId];
+  delete state.activity[accountId];
+  ensurePositions(accountId);
+  ensureActivity(accountId);
+  render();
+}
+
+
+function explainerCard(strategy) {
+  const explainer = state.algorithmConfigs[strategy.key]?.explainer;
+  if (!explainer?.summary) return "";
+  return `
+    <section class="card">
+      <h2>How it decides</h2>
+      <p class="cardBody">${escapeHtml(explainer.summary)}</p>
+      ${explainer.formula?.length
+        ? `<pre class="formula">${explainer.formula.map((line) => escapeHtml(line)).join("\n")}</pre>`
+        : ""}
+      ${explainer.behavior ? `<p class="cardBody">${escapeHtml(explainer.behavior)}</p>` : ""}
+    </section>`;
+}
+
+function renderTuneTab(body, strategy) {
+  const isDca = DCA_ALGORITHM_KEYS.includes(strategy.key);
+  ensureAlgorithmConfig(strategy.key);
+  body.innerHTML = `
+    ${explainerCard(strategy)}
+    <section class="card tuneCard">
+      <div class="cardHead">
+        <h2>Configuration</h2>
+        <span class="cardHint" id="tuneHint"></span>
+      </div>
+      <div class="tuneBody" id="tuneBody"></div>
+      ${isDca ? "" : `<div class="cardActions"><button class="ctl" type="button" id="saveConfigButton">Save changes</button></div>`}
+    </section>`;
+  const host = $("#tuneBody");
+  if (isDca) renderDcaTuner(host, strategy);
+  else renderConfigForm(host, strategy);
+}
+
+function renderDcaTuner(host, strategy) {
+  const hint = $("#tuneHint");
+  const plan = state.algorithmConfigs[strategy.key]?.explainer?.parameters?.__plan__;
+  if (hint) hint.textContent = `Dollars per month, per symbol · ${accountLabel(state.dca?.account_id)}`;
+  host.innerHTML = `<svg class="bubbleBoard" id="bubbleBoard" role="img"
+    aria-label="Interactive buy and sell budget bubbles"></svg>
+    <p class="cardHint">${escapeHtml(plan?.effect || "")} Scroll a bubble to change its budget, drag between buckets, double-click to add. Saves automatically.</p>`;
+  renderDca();
+}
+
+function renderConfigForm(host, strategy) {
+  const entry = state.algorithmConfigs[strategy.key];
+  const hint = $("#tuneHint");
+  if (!entry) {
+    host.innerHTML = `<p class="emptyState">Loading configuration.</p>`;
+    ensureAlgorithmConfig(strategy.key);
+    return;
+  }
+  if (hint) hint.textContent = `config/algorithms.yaml · ${entry.config_key || strategy.key}`;
+  const fields = Object.entries(entry.config || {});
+  const docs = entry.explainer?.parameters || {};
+  host.innerHTML = fields.length
+    ? `<div class="configForm">${fields.map(([key, value]) => renderConfigField(key, value, docs[key])).join("")}</div>`
+    : `<p class="emptyState">This algorithm has no tunable parameters.</p>`;
+}
+
+function renderBacktestTab(body, strategy) {
+  const backtest = state.backtests[strategy.key];
+  const loading = Boolean(state.backtestLoading[strategy.key]);
+  body.innerHTML = `
+    <section class="card">
+      <div class="cardHead">
+        <h2>Backtest</h2>
+        <div class="cardHeadActions">
+          <select class="ctl" id="backtestPeriodSelect" aria-label="Backtest period">
+            ${BACKTEST_PERIOD_CHOICES.map((period) => `
+              <option value="${escapeHtml(period)}"${period === BACKTEST_PERIOD ? " selected" : ""}>${escapeHtml(backtestPeriodLabel(period))}</option>
+            `).join("")}
+          </select>
+          <button class="ctl is-primary" type="button" id="runBacktestButton" ${loading ? "disabled" : ""}>
+            ${loading ? "Running." : "Run backtest"}
+          </button>
+        </div>
+      </div>
+      <div class="metricRow">
+        <div class="metric"><span>Return</span><strong class="${(backtest?.total_return || 0) >= 0 ? "gain" : "loss"}">${backtest ? escapeHtml(percent(backtest.total_return)) : "--"}</strong></div>
+        <div class="metric"><span>Ending equity</span><strong>${backtest ? escapeHtml(money(backtest.ending_equity)) : "--"}</strong></div>
+        <div class="metric"><span>Orders</span><strong>${backtest?.orders?.total_orders ?? "--"}</strong></div>
+        <div class="metric"><span>Status</span><strong>${escapeHtml(backtestStatusLabel(backtest, loading))}</strong></div>
+      </div>
+      <svg class="chartLarge" id="backtestChart" role="img" aria-label="Backtest equity curve"></svg>
+      ${[backtestCaptionText(backtest, loading), backtestEquityText(backtest), backtestOrderText(backtest)]
+        .filter(Boolean)
+        .map((line) => `<p class="cardHint">${escapeHtml(line)}</p>`)
+        .join("")}
+    </section>`;
+  renderBacktestChart(backtest, $("#backtestChart"));
+  if (!backtest && !loading) loadBacktest(strategy.key, false, { cacheOnly: true });
+}
+
+function renderOverviewTab(body, strategy, deployment) {
+  const backtest = state.backtests[strategy.key];
+  body.innerHTML = `
+    <div class="cardGrid">
+      <section class="card">
+        <h2>How it works</h2>
+        <p class="cardBody">${escapeHtml(strategy.logic)}</p>
+        <div class="chipRow">
+          ${(strategy.signals || []).map((signal) => `<span class="chip">${escapeHtml(signal)}</span>`).join("")}
+        </div>
+      </section>
+      <section class="card">
+        <h2>At a glance</h2>
+        <dl class="factList">
+          <div><dt>Horizon</dt><dd>${escapeHtml(strategy.horizon)}</dd></div>
+          <div><dt>Risk</dt><dd>${escapeHtml(strategy.risk)}</dd></div>
+          <div><dt>Account</dt><dd>${deployment
+            ? `<a class="factLink" href="#/account/${escapeHtml(deployment.account_id)}">${escapeHtml(accountLabel(deployment.account_id))}</a>`
+            : "none"}</dd></div>
+          <div><dt>${escapeHtml(BACKTEST_LABEL)} backtest</dt><dd>${backtest ? escapeHtml(percent(backtest.total_return)) : "--"}</dd></div>
+        </dl>
+      </section>
+    </div>
+    <section class="card">
+      <div class="cardHead">
+        <h2>Orders this algorithm placed</h2>
+        <div class="cardHeadActions">
+          ${deployment ? `<span class="cardHint">on <a class="factLink" href="#/account/${escapeHtml(deployment.account_id)}">${escapeHtml(accountLabel(deployment.account_id))}</a></span>` : ""}
+          <button class="ctl" type="button" id="refreshAlgoOrdersButton">Refresh</button>
+        </div>
+      </div>
+      ${algorithmOrdersTable(state.algorithmActivity[strategy.key])}
+    </section>`;
+  ensureAlgorithmActivity(strategy.key);
+}
+
+function renderSignalsTab(body, strategy) {
+  const payload = state.signals[strategy.key];
+  const loading = Boolean(state.signalLoading[strategy.key]);
+  const leaders = payload?.leaders || [];
+  body.innerHTML = `
+    <section class="card">
+      <div class="cardHead">
+        <h2>Live signals</h2>
+        <div class="cardHeadActions">
+          <button class="ctl" type="button" id="refreshUniverseButton" ${state.universeRefreshing ? "disabled" : ""}>Refresh universe</button>
+          <button class="ctl" type="button" id="refreshSignalsButton" ${loading ? "disabled" : ""}>${loading ? "Loading." : "Refresh"}</button>
+        </div>
+      </div>
+      ${(payload?.summary || []).length ? `<div class="metricRow">
+        ${payload.summary.map((item) => `<div class="metric"><span>${escapeHtml(item.label)}</span><strong>${escapeHtml(item.value)}</strong></div>`).join("")}
+      </div>` : ""}
+      <div class="signalRows" id="signalRows">
+        ${state.universeProposal || state.universeRefreshing
+          ? renderUniverseProposalRows()
+          : loading
+            ? `<p class="emptyState">Fetching live signal snapshot.</p>`
+            : payload?.error
+              ? `<p class="emptyState">${escapeHtml(payload.error)}</p>`
+              : leaders.length
+                ? leaders.map((row) => `
+                  <article>
+                    <strong>${escapeHtml(row.symbol)}</strong>
+                    <span>${escapeHtml(formatSignalHeadline(strategy.key, row))}</span>
+                    <span>${escapeHtml(formatSignalDetail(strategy.key, row))}</span>
+                  </article>`).join("")
+                : renderSignalFallbackRows(strategy, payload, (strategy.signals || []).slice(0, 5))}
+      </div>
+    </section>`;
+  if (!payload && !loading) ensureSignals(strategy.key);
+}
+
+//: The bot's own journal, not the broker's feed: it is the only record that knows which
+//: algorithm asked for an order, so it is the one view that is honestly per-algorithm.
+function algorithmOrdersTable(journal) {
+  if (journal?.error) return `<p class="emptyState">${escapeHtml(journal.error)}</p>`;
+  if (!journal) return `<p class="emptyState">Loading orders.</p>`;
+  if (!journal.rows?.length) {
+    return `<p class="emptyState">No orders placed yet. This lists what the bot submitted for this algorithm, so orders you place yourself appear only on the account page.</p>`;
+  }
+  return `
+    <div class="tableWrap is-scroll">
+      <table class="dataTable">
+        <thead>
+          <tr><th>Time</th><th>Symbol</th><th>Side</th><th class="num">Qty</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          ${journal.rows.map((row) => `
+            <tr>
+              <td class="nowrap">${escapeHtml(formatActivityTime(row.submitted_at))}</td>
+              <td><strong>${escapeHtml(row.symbol)}</strong></td>
+              <td><span class="side is-${escapeHtml(orderSideClass(row.side))}">${escapeHtml(row.side)}</span></td>
+              <td class="num">${escapeHtml(row.quantity ? num(row.quantity, row.quantity % 1 ? 3 : 0) : "--")}</td>
+              <td class="tableNote" title="${escapeHtml(row.reason || "")}">${escapeHtml(row.status)}</td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+// The journal records the algorithm's verb ("add"/"trim"), which has to map onto the two
+// colours the side chip knows about.
+function orderSideClass(side) {
+  const value = String(side || "").toLowerCase();
+  if (value === "buy" || value === "add") return "buy";
+  if (value === "sell" || value === "trim") return "sell";
+  return "none";
+}
+
+// -- target page -------------------------------------------------------------------------
+
+// -- data ---------------------------------------------------------------------------------
+
+async function ensureAlgorithmConfig(strategyKey) {
+  if (state.algorithmConfigs[strategyKey] || state.algorithmConfigLoading[strategyKey]) return;
+  state.algorithmConfigLoading[strategyKey] = true;
+  try {
+    state.algorithmConfigs[strategyKey] = await api(
+      `/api/algorithm-config?strategy=${encodeURIComponent(strategyKey)}`, { timeoutMs: 8000 });
+  } catch (error) {
+    state.algorithmConfigs[strategyKey] = { error: error.message, config: {} };
+  } finally {
+    state.algorithmConfigLoading[strategyKey] = false;
+    render();
+  }
+}
+
+function formatActivityDetail(row) {
+  const filled = Number(row.filled_qty || 0);
+  if (filled > 0 && row.filled_avg_price) {
+    return `${num(filled, filled % 1 ? 3 : 0)} @ ${money(row.filled_avg_price, 2)}`;
+  }
+  const qty = Number(row.qty || 0);
+  return qty ? `${num(qty, qty % 1 ? 3 : 0)} requested` : "--";
+}
+
+function formatActivityTime(value) {
+  if (!value) return "--";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value).slice(0, 16);
+  return date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+async function ensureActivity(accountId) {
+  const key = accountId || "";
+  if (state.activity[key] || state.activityLoading[key]) return;
+  state.activityLoading[key] = true;
+  try {
+    state.activity[key] = await api(`/api/activity?account_id=${encodeURIComponent(key)}`, { timeoutMs: 15000 });
+  } catch (error) {
+    state.activity[key] = { error: error.message, rows: [] };
+  } finally {
+    state.activityLoading[key] = false;
+    render();
+  }
+}
+
+async function ensureAlgorithmActivity(strategyKey) {
+  if (state.algorithmActivity[strategyKey] || state.algorithmActivityLoading[strategyKey]) return;
+  state.algorithmActivityLoading[strategyKey] = true;
+  try {
+    state.algorithmActivity[strategyKey] = await api(
+      `/api/algorithm-activity?strategy=${encodeURIComponent(strategyKey)}`, { timeoutMs: 8000 });
+  } catch (error) {
+    state.algorithmActivity[strategyKey] = { error: error.message, rows: [] };
+  } finally {
+    state.algorithmActivityLoading[strategyKey] = false;
+    render();
+  }
+}
+
+async function ensurePositions(accountId) {
+  const key = accountId || "";
+  if (state.positions[key] || state.positionsLoading[key]) return;
+  state.positionsLoading[key] = true;
+  try {
+    state.positions[key] = await api(`/api/positions?account_id=${encodeURIComponent(key)}`, { timeoutMs: 15000 });
+  } catch (error) {
+    state.positions[key] = { error: error.message, rows: [] };
+  } finally {
+    state.positionsLoading[key] = false;
+    render();
+  }
+}
+
+async function loadAccounts() {
+  try {
+    state.accounts = await api("/api/accounts", { timeoutMs: 6000 });
+  } catch (error) {
+    state.accounts = { rows: [] };
+  }
+}
+
+async function saveCurrentConfig(strategyKey) {
+  const host = $("#tuneBody");
+  if (!host) return;
+  let values;
+  try {
+    values = collectConfigValues(host);
+  } catch (error) {
+    showToast(error.message);
+    return;
+  }
+  try {
+    state.algorithmConfigs[strategyKey] = await api("/api/algorithm-config", {
+      method: "POST",
+      body: JSON.stringify({ strategy: strategyKey, config: values }),
+      timeoutMs: 8000,
+    });
+    // Tuning feeds the backtest cache key, so the cached curve no longer describes this config.
+    delete state.backtests[strategyKey];
+    delete state.signals[strategyKey];
+    showToast("Configuration saved");
+    render();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+async function saveBindings() {
+  try {
+    const payload = await api("/api/controls", {
+      method: "POST",
+      body: JSON.stringify({ controls: state.controls }),
+      timeoutMs: 6000,
+    });
+    state.controls = payload.controls;
+    state.bot = payload.bot || state.bot;
+    await loadAccounts();
+  } catch (error) {
+    showToast(error.message);
+  }
+  render();
+}
+
+async function setDeploymentAccount(strategyKey, accountId) {
+  const deployment = deploymentFor(strategyKey);
+  if (deployment) {
+    if (deployment.account_id === accountId) return;
+    deployment.account_id = accountId;
+    await saveBindings();
+    return;
+  }
+  await deployTo(strategyKey, accountId);
+}
+
+async function setDeploymentFrequency(bindingId, frequency) {
+  const binding = bindingById(bindingId);
+  if (!binding) return;
+  binding.frequency = normalizeBindingFrequency(frequency);
+  await saveBindings();
+}
+
+async function deployTo(strategyKey, accountId) {
+  const used = new Set(bindings().map((binding) => String(binding.id)));
+  let index = 1;
+  while (used.has(`b${index}`)) index += 1;
+  bindings().push({ id: `b${index}`, strategy: strategyKey, account_id: accountId, enabled: false, frequency: "1hr" });
+  await saveBindings();
+  showToast(`Deployed to ${accountLabel(accountId)}`);
+}
+
+async function toggleDeployment(bindingId) {
+  const binding = bindingById(bindingId);
+  if (!binding) return;
+  binding.enabled = !binding.enabled;
+  await saveBindings();
+}
+
+async function removeDeployment(bindingId) {
+  if (bindings().length <= 1) {
+    showToast("Keep at least one deployment");
+    return;
+  }
+  state.controls.bindings = bindings().filter((binding) => String(binding.id) !== String(bindingId));
+  await saveBindings();
+}
+
+async function loadSchwabAuth() {
+  try {
+    state.schwabAuth = await api("/api/schwab/auth", { timeoutMs: 5000 });
+  } catch (error) {
+    state.schwabAuth = null;
+  }
+  renderNavFooter();
+}
+
+//: The footer claims to show what the runtime is doing right now, so it cannot rely on the
+//: snapshot taken at page load -- a run that started an hour ago would still read "armed".
+async function refreshRuntimeStatus() {
+  try {
+    const payload = await api("/api/status", { timeoutMs: 5000 });
+    state.status = payload;
+    state.bot = payload.bot || state.bot;
+  } catch (error) {
+    return;
+  }
+  renderNavFooter();
+}
+
+async function connectSchwab() {
+  const popup = window.open("", "schwabAuth", "width=560,height=760");
+  try {
+    const payload = await api("/api/schwab/auth/start", { method: "POST", timeoutMs: 8000 });
+    if (popup) popup.location = payload.authorize_url;
+    else showToast("Allow popups to authorize Schwab.");
+  } catch (error) {
+    popup?.close();
+    showToast(`Could not start Schwab authorization: ${error.message}`);
+  }
+}
+
+// -- events -------------------------------------------------------------------------------
+
+function closeNavOnMobile() {
+  if (window.innerWidth > 900) return;
+  $("#sidebar")?.classList.remove("is-open");
+  $("#navToggle")?.setAttribute("aria-expanded", "false");
+}
+
+function wireEvents() {
+  window.addEventListener("hashchange", render);
+  window.addEventListener("resize", () => {
+    if ($("#bubbleBoard")) renderDca();
+  });
+
+  $("#navToggle")?.addEventListener("click", () => {
+    const sidebar = $("#sidebar");
+    const open = sidebar?.classList.toggle("is-open");
+    $("#navToggle")?.setAttribute("aria-expanded", String(Boolean(open)));
+  });
+  $("#addWatchButton")?.addEventListener("click", addWatchTicker);
+  wireWatchlistDrag();
+  $("#watchlist")?.addEventListener("click", (event) => {
+    const row = event.target.closest("[data-watch]");
+    if (row && event.target.closest("[data-remove-watch]")) removeWatchTicker(row.dataset.watch);
+  });
+
+  // Delegated: page bodies are replaced wholesale on every render.
+  $("#content")?.addEventListener("click", (event) => {
+    const route = currentRoute();
+    const refreshAccountButton = event.target.closest("#refreshAccountButton");
+    if (refreshAccountButton) return refreshAccount(refreshAccountButton.dataset.account);
+    if (event.target.closest("#saveConfigButton")) return saveCurrentConfig(route.id);
+    if (event.target.closest("#runBacktestButton")) return loadBacktest(route.id, true);
+    if (event.target.closest("#refreshSignalsButton")) {
+      delete state.signals[route.id];
+      return loadSignals(route.id);
+    }
+    if (event.target.closest("#refreshAlgoOrdersButton")) {
+      delete state.algorithmActivity[route.id];
+      return ensureAlgorithmActivity(route.id);
+    }
+    if (event.target.closest("#refreshUniverseButton")) return recommendUniverse();
+    if (event.target.closest("[data-apply-universe]")) return applyUniverseProposal();
+    if (event.target.closest('[data-role="power"]')) {
+      const deployment = deploymentFor(route.id);
+      // Arming with no deployment yet means deploying to whatever the picker shows.
+      if (deployment) return toggleDeployment(deployment.id);
+      const target = $("#deployTargetSelect")?.value;
+      if (target) return deployTo(route.id, target).then(() => toggleDeployment(deploymentFor(route.id)?.id));
+      return;
+    }
+  });
+
+  $("#content")?.addEventListener("change", (event) => {
+    if (event.target.id === "deployTargetSelect") {
+      setDeploymentAccount(currentRoute().id, event.target.value);
+      return;
+    }
+    if (event.target.id === "deployFrequencySelect") {
+      const bindingId = event.target.dataset.binding;
+      if (bindingId) setDeploymentFrequency(bindingId, event.target.value);
+      return;
+    }
+    if (event.target.id === "backtestPeriodSelect") {
+      configureBacktestPeriod(event.target.value);
+      render();
+      loadBacktest(currentRoute().id, false, { cacheOnly: true });
+    }
+  });
+
+  $("#navFooter")?.addEventListener("click", (event) => {
+    if (event.target.closest("#schwabAuthPill")) connectSchwab();
+  });
+
+  $("#symbolEntry")?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") commitSymbolEntry();
+    if (event.key === "Escape") hideSymbolEntry();
+  });
+  $("#symbolEntry")?.addEventListener("input", () => {
+    if (!state.draft) return;
+    state.draft.symbol = $("#symbolEntry").value.trim().toUpperCase().slice(0, 6);
+    renderBoard();
+  });
+  $("#symbolEntry")?.addEventListener("blur", () => window.setTimeout(commitSymbolEntry, 80));
+
+  window.addEventListener("keydown", (event) => {
+    const tag = event.target?.tagName?.toLowerCase();
+    if (tag === "input" || tag === "textarea" || event.target?.isContentEditable) return;
+    if ((event.key === "Delete" || event.key === "Backspace") && state.selected) {
+      const found = BUCKET_NAMES.flatMap((bucketName) =>
+        bucketItems(bucketName).map((item) => ({ bucketName, item })),
+      ).find(({ item }) => item.symbol === state.selected);
+      if (found) {
+        removeSymbol(found.bucketName, state.selected);
+        state.selected = null;
+      }
+    }
+  });
+
+  window.addEventListener("message", (event) => {
+    if (event.data?.type !== "schwab-auth") return;
+    showToast(event.data.ok ? "Schwab connected." : "Schwab authorization failed.");
+    loadSchwabAuth();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    loadSchwabAuth();
+    refreshRuntimeStatus();
+  });
+  window.setInterval(loadSchwabAuth, 5 * 60 * 1000);
+  window.setInterval(refreshRuntimeStatus, 60 * 1000);
+}
+
+async function init() {
+  wireEvents();
+  loadSchwabAuth();
+  loadWatchlist();
+  render();
+  try {
+    const [statusPayload, universePayload, controlsPayload] = await Promise.all([
+      api("/api/status", { timeoutMs: 5000 }),
+      api("/api/universe", { timeoutMs: 5000 }),
+      api("/api/controls", { timeoutMs: 5000 }),
+    ]);
+    state.status = statusPayload;
+    configureBacktestPeriod(statusPayload.config?.backtest_period);
+    state.universe = universePayload.rows || [];
+    state.controls = controlsPayload.controls || state.controls;
+    state.bot = controlsPayload.bot || statusPayload.bot || null;
+    await loadAccounts();
+    // Plans are per account, so the plan to load is only knowable once controls are in.
+    const dcaAccount = bindingById(primaryDcaBindingId())?.account_id || "";
+    state.dca = await api(`/api/dca?account_id=${encodeURIComponent(dcaAccount)}`, { timeoutMs: 5000 });
+    state.dca.plan.max_item_amount = MAX_AMOUNT;
+  } catch (error) {
+    showToast(`Could not load dashboard: ${error.message}`);
+  }
+  render();
 }
 
 init();

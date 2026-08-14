@@ -2,29 +2,45 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
+from html import escape
 from pathlib import Path
 from typing import Any, AsyncIterator
 
-from fastapi import Body, FastAPI, Query
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.api.api_payloads import (
+    account_activity_payload,
+    accounts_payload,
+    algorithm_activity_payload,
+    algorithm_config_payload,
     apply_universe_payload,
     backtest_payload,
+    complete_schwab_auth_payload,
     controls_payload,
     dca_payload,
     recommend_universe_payload,
     refresh_social_payload,
     save_controls_payload,
+    delete_account_payload,
+    save_account_payload,
+    save_algorithm_config_payload,
+    save_watchlist_payload,
     save_dca_payload,
+    schwab_auth_payload,
+    positions_payload,
     social_payload,
+    start_schwab_auth_payload,
     status_payload,
     strategy_signals_payload,
     universe_payload,
+    watchlist_payload,
 )
+from ..brokerages.schwab_client import SchwabAuthError
 from ..core.bot_runtime import bot_runtime
+from ..core.config import DEFAULT_STRATEGY_ID
 from ..common.logging_utils import configure_logging, demote_uvicorn_access_logs_to_debug
 
 
@@ -113,8 +129,8 @@ def apply_universe(body: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.get("/api/dca")
-def dca() -> dict[str, Any]:
-    return dca_payload()
+def dca(account_id: str = Query(default="", max_length=80)) -> dict[str, Any]:
+    return dca_payload(account_id=account_id)
 
 
 @app.post("/api/dca")
@@ -138,7 +154,7 @@ def social(limit: int = Query(default=250, ge=1, le=5000)) -> dict[str, Any]:
 
 
 @app.get("/api/strategy-signals")
-def strategy_signals(strategy: str = Query(default="momentum_social", max_length=80)) -> dict[str, Any]:
+def strategy_signals(strategy: str = Query(default=DEFAULT_STRATEGY_ID, max_length=80)) -> dict[str, Any]:
     return strategy_signals_payload(strategy=strategy)
 
 
@@ -150,3 +166,137 @@ def refresh_social(body: dict[str, Any]) -> dict[str, Any]:
 @app.post("/api/backtest")
 def backtest(body: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
     return backtest_payload(body)
+
+
+@app.get("/api/watchlist")
+def watchlist() -> dict[str, Any]:
+    return watchlist_payload()
+
+
+@app.post("/api/watchlist")
+def save_watchlist(body: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return save_watchlist_payload(body.get("symbols"))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.get("/api/accounts")
+def accounts() -> dict[str, Any]:
+    return accounts_payload()
+
+
+@app.post("/api/accounts")
+def save_account(body: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return save_account_payload(body)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.delete("/api/accounts/{account_id}")
+def delete_account(account_id: str) -> dict[str, Any]:
+    try:
+        return delete_account_payload(account_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.get("/api/algorithm-config")
+def algorithm_config(strategy: str = Query(default=DEFAULT_STRATEGY_ID, max_length=80)) -> dict[str, Any]:
+    return algorithm_config_payload(strategy)
+
+
+@app.post("/api/algorithm-config")
+def save_algorithm_config(body: dict[str, Any]) -> dict[str, Any]:
+    try:
+        # Passing a non-object through as {} would silently wipe the saved tuning, so the
+        # bad shape has to reach save_algorithm_config_payload and be rejected there.
+        return save_algorithm_config_payload(
+            str(body.get("strategy") or DEFAULT_STRATEGY_ID),
+            body.get("config"),
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.get("/api/activity")
+def activity(
+    account_id: str = Query(default="", max_length=80),
+    limit: int = Query(default=40, ge=1, le=200),
+) -> dict[str, Any]:
+    return account_activity_payload(account_id=account_id, limit=limit)
+
+
+@app.get("/api/algorithm-activity")
+def algorithm_activity(
+    strategy: str = Query(default=DEFAULT_STRATEGY_ID, max_length=80),
+    limit: int = Query(default=40, ge=1, le=200),
+) -> dict[str, Any]:
+    return algorithm_activity_payload(strategy=strategy, limit=limit)
+
+
+@app.get("/api/positions")
+def positions(account_id: str = Query(default="", max_length=80)) -> dict[str, Any]:
+    return positions_payload(account_id)
+
+
+@app.get("/api/schwab/auth")
+def schwab_auth() -> dict[str, Any]:
+    return schwab_auth_payload()
+
+
+@app.post("/api/schwab/auth/start")
+def start_schwab_auth() -> dict[str, Any]:
+    try:
+        return start_schwab_auth_payload()
+    except SchwabAuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.get("/schwab/callback", include_in_schema=False)
+def schwab_callback(
+    code: str = Query(default=""),
+    state: str = Query(default=""),
+    error: str = Query(default=""),
+) -> HTMLResponse:
+    """Land the Schwab consent redirect and trade the code for a refresh token.
+
+    Schwab drives the browser here, so the reply has to be a page rather than JSON. It hands
+    the outcome back to the dashboard tab that opened it and then gets out of the way.
+    """
+    if error:
+        return _callback_page(False, f"Schwab denied the request: {error}")
+    try:
+        status = complete_schwab_auth_payload(code=code, state=state)
+    except SchwabAuthError as auth_error:
+        return _callback_page(False, str(auth_error))
+    except Exception as unexpected:  # noqa: BLE001 - surface the cause on the page, not a 500
+        return _callback_page(False, f"Schwab token exchange failed: {unexpected}")
+    return _callback_page(True, status.get("detail") or "Schwab connected.")
+
+
+def _callback_page(ok: bool, message: str) -> HTMLResponse:
+    body = f"""<!doctype html>
+<meta charset="utf-8" />
+<title>Schwab authorization</title>
+<style>
+  body {{ margin: 0; min-height: 100vh; display: grid; place-items: center;
+         font-family: Inter, system-ui, -apple-system, sans-serif; background: #eef1fb; color: #111827; }}
+  .card {{ padding: 28px 34px; border-radius: 18px; background: #fff; text-align: center;
+           box-shadow: 0 24px 70px rgba(17, 24, 39, 0.12); max-width: 420px; }}
+  .mark {{ font-size: 34px; }}
+  p {{ margin: 10px 0 0; color: #657084; font-size: 14px; line-height: 1.5; }}
+</style>
+<div class="card">
+  <div class="mark">{"&#10003;" if ok else "&#10007;"}</div>
+  <h2>{"Schwab connected" if ok else "Authorization failed"}</h2>
+  <p>{escape(message)}</p>
+  <p>You can close this tab.</p>
+</div>
+<script>
+  try {{ window.opener && window.opener.postMessage({{ type: "schwab-auth", ok: {str(ok).lower()} }}, "*"); }} catch (e) {{}}
+  {"setTimeout(function () { window.close(); }, 1200);" if ok else ""}
+</script>
+"""
+    return HTMLResponse(body, status_code=200 if ok else 400)

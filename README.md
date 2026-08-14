@@ -108,6 +108,38 @@ Current config files:
 - `config/dca_bot.yaml` - DCA scheduler and DCA plan.
 - `config/universe.yaml` - dashboard/tradable universe and master ETF list path.
 
+## Schwab Authorization
+
+Schwab uses three-legged OAuth. The dashboard drives the whole consent flow, so no manual
+copy-paste of authorization codes is needed.
+
+Set these alongside the other environment variables:
+
+```bash
+SCHWAB_APP_KEY=...
+SCHWAB_APP_SECRET=...
+SCHWAB_CALLBACK_URL=https://your-host/schwab/callback
+SCHWAB_ACCOUNT_NUMBER=...
+```
+
+`SCHWAB_CALLBACK_URL` must match a callback URL registered on the Schwab developer app
+byte-for-byte, and Schwab requires HTTPS. Behind a TLS reverse proxy, point it at this app's
+`/schwab/callback` route.
+
+Once set, a status pill appears at the top of the dashboard:
+
+- **green** - authorized, more than 36 hours of refresh-token life left
+- **amber** - expires within 36 hours
+- **red** - expired, or never authorized
+
+Click the pill to authorize. A popup carries you through Schwab login and consent, the
+callback route exchanges the code for a refresh token, and the pill turns green.
+
+Schwab refresh tokens expire **7 days** after the consent that minted them. Refreshing an
+access token does not extend that window, so this is a weekly click. Leave
+`SCHWAB_REFRESH_TOKEN` unset — the token lives in the state store under `schwab_oauth_token`
+along with its issue time, and a stale env value would override it.
+
 Warm or refresh the local YFinance market-data cache:
 
 ```bash

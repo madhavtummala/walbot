@@ -50,14 +50,17 @@ def get_account_equity(trading_client: TradingClient) -> float:
     return float(account.equity)
 
 
-def get_positions(trading_client: TradingClient) -> dict[str, int]:
+def get_positions(trading_client: TradingClient) -> dict[str, float]:
+    """Return held quantities by symbol, preserving fractional shares as reported."""
     positions = trading_client.get_all_positions()
-    parsed: dict[str, int] = {}
+    parsed: dict[str, float] = {}
     for position in positions:
         try:
-            parsed[position.symbol] = int(float(position.qty))
+            quantity = float(position.qty)
         except (TypeError, ValueError):
-            parsed[position.symbol] = 0
+            quantity = 0.0
+        # Whole holdings stay ints so downstream formatting and equality are unchanged.
+        parsed[position.symbol] = int(quantity) if quantity.is_integer() else quantity
     return parsed
 
 
@@ -305,12 +308,12 @@ def get_historical_intraday_bars(
     return bars_by_symbol
 
 
-def submit_market_order(trading_client: TradingClient, symbol: str, side: str, qty: int):
+def submit_market_order(trading_client: TradingClient, symbol: str, side: str, qty: float):
     side = side.lower()
     if side not in {"buy", "sell"}:
         raise ValueError("side must be 'buy' or 'sell'")
     if qty <= 0:
-        raise ValueError("qty must be a positive integer")
+        raise ValueError("qty must be a positive quantity")
     order = MarketOrderRequest(
         symbol=symbol,
         qty=qty,

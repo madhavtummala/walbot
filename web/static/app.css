@@ -43,68 +43,14 @@ body.dca-off {
   --bg-b: #f4f2ef;
 }
 
-main {
-  width: 100%;
-  min-height: 100vh;
-  min-height: 100svh;
-  margin: 0;
-  padding: 12px clamp(10px, 1.6vw, 24px) 30px;
-}
-
-#tabs {
-  width: min(520px, 100%);
-  margin: 0 auto 8px;
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
-  padding: 5px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.36);
-  backdrop-filter: blur(14px);
-}
-
-.tab {
-  min-height: 38px;
-  border-radius: 999px;
-  background: transparent;
-  box-shadow: none;
-}
-
-.tab.active {
-  color: #ffffff;
-  border-color: rgba(17, 24, 39, 0.12);
-  background: #111827;
-}
-
-#algorithmRunPanel,
-.runPanel {
-  width: min(220px, 100%);
-  margin: 0 auto 8px;
-  position: relative;
-  z-index: 5;
-  display: grid;
-  grid-template-columns: 30px minmax(130px, 1fr);
-  gap: 6px;
-  align-items: center;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.64);
-  box-shadow: 0 18px 46px rgba(17, 24, 39, 0.08);
-  backdrop-filter: blur(14px);
-}
-
-#algorithmRunPanel.is-on,
-.runPanel.is-on {
-  border-color: rgba(5, 122, 85, 0.36);
-  background: rgba(220, 252, 231, 0.78);
-  box-shadow: 0 20px 52px rgba(5, 122, 85, 0.13);
+@keyframes authPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
 }
 
 #tradingAccount,
-#optionsTradingAccount {
-  width: 100%;
+#algorithmSelect {
+  width: auto;
   min-width: 0;
   padding: 8px 32px 8px 11px;
   border: 1px solid var(--line);
@@ -116,222 +62,9 @@ main {
 }
 
 #tradingAccount:disabled,
-#optionsTradingAccount:disabled {
+#algorithmSelect:disabled {
   color: var(--muted);
   opacity: 0.72;
-}
-
-.tabPanel {
-  display: none;
-}
-
-.tabPanel.active {
-  display: block;
-}
-
-#schedulePanel {
-  width: min(325px, 100%);
-  margin: 0 auto -18px;
-  position: relative;
-  z-index: 4;
-  display: grid;
-  grid-template-columns: 30px 120px auto;
-  gap: 3px;
-  align-items: center;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.64);
-  box-shadow: 0 18px 46px rgba(17, 24, 39, 0.08);
-  backdrop-filter: blur(14px);
-  transition:
-    background 180ms ease,
-    border-color 180ms ease,
-    box-shadow 180ms ease;
-}
-
-#schedulePanel.is-on {
-  border-color: rgba(5, 122, 85, 0.36);
-  background: rgba(220, 252, 231, 0.78);
-  box-shadow: 0 20px 52px rgba(5, 122, 85, 0.13);
-}
-
-#schedulePanel label {
-  font-size: 12px;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
-#cronPattern {
-  width: 100%;
-  min-width: 0;
-  padding: 8px 11px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  background: rgba(255, 255, 255, 0.45);
-  transition: all 160ms ease;
-}
-
-#cronPattern:focus {
-  outline: none;
-  border-color: rgba(52, 87, 213, 0.6);
-  background: rgba(255, 255, 255, 0.82);
-  box-shadow: 0 0 0 3px rgba(52, 87, 213, 0.1);
-}
-
-#cronDescription {
-  margin: 0;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 850;
-  white-space: nowrap;
-}
-
-.deckPanel {
-  width: min(880px, 100%);
-  min-height: 520px;
-  margin: 0 auto;
-  display: grid;
-  grid-template-columns: minmax(380px, 420px) minmax(380px, 420px);
-  gap: 18px;
-  align-content: start;
-  justify-content: center;
-  padding: 52px 0 18px;
-}
-
-.deckFrame {
-  display: flex;
-  align-items: center;
-}
-
-.deckControls {
-  display: grid;
-  gap: 10px;
-  justify-items: center;
-  margin-right: 10px;
-}
-
-.deckArrow {
-  min-width: 38px;
-  min-height: 38px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.85);
-  color: var(--ink);
-  font-size: 16px;
-  font-weight: 900;
-  cursor: pointer;
-  transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
-}
-
-.deckArrow:hover {
-  background: rgba(255, 255, 255, 1);
-  border-color: rgba(52, 87, 213, 0.4);
-}
-
-.deckArrow:active {
-  transform: translateY(1px) scale(0.98);
-}
-
-.deckArrow:disabled {
-  cursor: not-allowed;
-  opacity: 0.45;
-}
-
-.cardDeck {
-  width: min(420px, 100%);
-  height: 420px;
-  max-width: 100%;
-  margin: 0 auto;
-  position: relative;
-  outline: none;
-  touch-action: pan-y;
-  overflow: hidden;
-  display: block;
-}
-
-.cardDeck.locked {
-  cursor: not-allowed;
-}
-
-.cardDeck.locked .deckCard {
-  cursor: not-allowed;
-}
-
-.deckCard {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 50%;
-  transform: translateY(-50%) scale(1);
-  transform-origin: center;
-  min-width: 0;
-  min-height: 340px;
-  display: grid;
-  gap: 12px;
-  align-content: start;
-  padding: 16px;
-  border: 1px solid rgba(17, 24, 39, 0.15);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.62);
-  box-shadow: 0 22px 56px rgba(17, 24, 39, 0.08);
-  backdrop-filter: blur(16px);
-  cursor: pointer;
-  overflow: hidden;
-  transition:
-    transform 420ms cubic-bezier(0.3, 0.78, 0.2, 1),
-    opacity 420ms cubic-bezier(0.3, 0.78, 0.2, 1),
-    box-shadow 420ms ease,
-    background 420ms ease;
-  will-change: transform, opacity;
-}
-
-.deckCard::before {
-  content: "";
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 5px;
-  background: var(--accent, #3457d5);
-  opacity: 0.9;
-}
-
-.deckCard.active {
-  z-index: 6;
-  box-shadow: 0 28px 80px rgba(17, 24, 39, 0.18);
-  cursor: default;
-  opacity: 1;
-}
-
-.deckCard.before {
-  z-index: 3;
-  opacity: 0.72;
-  transform: translateY(calc(-50% - 120px)) scale(0.95);
-}
-
-.deckCard.farBefore {
-  z-index: 2;
-  opacity: 0.42;
-  transform: translateY(calc(-50% - 220px)) scale(0.9);
-}
-
-.deckCard.after {
-  z-index: 4;
-  opacity: 0.72;
-  transform: translateY(calc(-50% + 120px)) scale(0.95);
-}
-
-.deckCard.farAfter {
-  z-index: 2;
-  opacity: 0.42;
-  transform: translateY(calc(-50% + 220px)) scale(0.9);
-}
-
-.deckCard.hidden {
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(calc(-50% + 420px)) scale(0.86);
 }
 
 /* Slide keyframes for vertical carousel transitions */
@@ -384,43 +117,6 @@ main {
 }
 
 /* Apply directional animations when deck has data-shift attribute */
-.cardDeck[data-shift="down"] .deckCard.active {
-  animation: slideInFromBelow 720ms cubic-bezier(0.3, 0.78, 0.2, 1) both;
-}
-
-.cardDeck[data-shift="down"] .deckCard.before {
-  animation: slideOutUp 420ms cubic-bezier(0.3, 0.78, 0.2, 1) both;
-}
-
-.cardDeck[data-shift="down"] .deckCard.after {
-  /* subtle settle for the card moving up into 'after' */
-  animation: none;
-}
-
-.cardDeck[data-shift="up"] .deckCard.active {
-  animation: slideInFromAbove 720ms cubic-bezier(0.3, 0.78, 0.2, 1) both;
-}
-
-.cardDeck[data-shift="up"] .deckCard.after {
-  animation: slideOutDown 720ms cubic-bezier(0.3, 0.78, 0.2, 1) both;
-}
-
-.cardDeck[data-shift="up"] .deckCard.before {
-  /* subtle settle for the card moving down into 'before' */
-  animation: none;
-}
-
-.deckCard h2 {
-  font-size: clamp(20px, 2vw, 28px);
-}
-
-.deckCard p {
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 1.45;
-  font-weight: 700;
-}
-
 .strategyMeta span,
 .metricPill {
   display: inline-flex;
@@ -434,40 +130,167 @@ main {
   font-weight: 900;
 }
 
-.sideCard {
-  min-height: 420px;
-  align-self: start;
-  padding: 16px;
-  border: 1px solid rgba(17, 24, 39, 0.12);
-  border-radius: 10px;
-  background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.86), rgba(255, 255, 255, 0.58)),
-    linear-gradient(135deg, rgba(5, 122, 85, 0.08), rgba(52, 87, 213, 0.06));
-  box-shadow: 0 24px 64px rgba(17, 24, 39, 0.1);
-  backdrop-filter: blur(16px);
-  display: grid;
-  grid-template-rows: auto 1fr;
-  gap: 14px;
+/* The backtest chart is the fixed element: 300px tall, 58% wide. Everything else -- the
+   control row, the blurb, the scrolling signal list -- sizes itself around it. */
+:root {
+  --backtest-height: 340px;
+  /* One cap for every scrolling list panel: signals, holdings, broker orders, the bot's
+     own order journal. Viewport-relative so a short window does not lose the page below. */
+  --panel-scroll: min(46vh, 420px);
+  /* Every boxed tile inside a card -- a metric, a tunable field -- uses this, so tiles on
+     different pages line up instead of drifting a pixel or two apart. */
+  --tile-pad: 9px 11px;
 }
 
-.sideCard h2 {
-  font-size: clamp(18px, 2vw, 24px);
-  line-height: 1.05;
+/* Each column is a group of header + content in the DOM, so on mobile the heading stays
+   attached to what it labels. On desktop the group dissolves into the panel grid
+   (display: contents) and its two children are placed on the shared header/content rows,
+   which keeps the three headers aligned no matter how tall each one is. */
+/* One control look: buttons, selects, and the power toggle all share this. */
+.ctl {
+  min-width: 0;
+  height: 30px;
+  /* The base button rule sets min-height: 42px, which would otherwise win over height. */
+  min-height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
 }
 
-.sideCard>p {
-  margin-top: 10px;
+.ctl.powerButton,
+.ctl.removeBinding {
+  width: 30px;
+  padding: 0;
+}
+
+/* Armed and trading: the one piece of state worth spotting from across the room. */
+.ctl.powerButton.on {
+  border-color: rgba(5, 122, 85, 0.45);
+  background: rgba(220, 252, 231, 0.95);
+  color: var(--good);
+  box-shadow: 0 0 0 3px rgba(5, 122, 85, 0.12);
+}
+
+.ctl.powerButton.on:hover:not(:disabled) {
+  border-color: rgba(5, 122, 85, 0.6);
+  background: rgba(209, 250, 229, 1);
+}
+
+select.ctl {
+  flex: 1 1 auto;
+  padding-right: 20px;
+}
+
+.ctl:hover:not(:disabled) {
+  border-color: rgba(17, 24, 39, 0.28);
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.ctl:disabled {
   color: var(--muted);
-  font-size: 13px;
-  font-weight: 700;
-  line-height: 1.45;
+  opacity: 0.72;
+  cursor: default;
 }
 
-.signalBody {
-  overflow: hidden;
+.signalRows {
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+[data-role="config"] {
+  min-height: 0;
   display: grid;
-  gap: 12px;
-  max-height: calc(100vh - 260px);
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 4px;
+}
+
+.configForm {
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  padding-right: 4px;
+}
+
+.configField {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 74px;
+  gap: 6px;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.configField>span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.configField--wide {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+}
+
+.configField input,
+.configField textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.78);
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.configField textarea {
+  resize: vertical;
+  line-height: 1.4;
+}
+
+.configField input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  justify-self: start;
+  padding: 0;
+}
+
+.gain {
+  color: var(--good);
+}
+
+.loss {
+  color: var(--bad);
+}
+
+.signalTitle h2 {
+  margin: 2px 0 0;
+  font-size: clamp(17px, 1.8vw, 21px);
+  line-height: 1.1;
+}
+
+.signalTitle p {
+  margin: 3px 0 0;
+  max-width: 62ch;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
 }
 
 .signalSummary {
@@ -550,39 +373,6 @@ main {
   background: linear-gradient(135deg, rgba(190, 18, 60, 0.12), rgba(255, 255, 255, 0.7));
 }
 
-.deckHeader {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 12px;
-}
-
-.deckKicker {
-  display: block;
-  margin-bottom: 4px;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 900;
-  text-transform: uppercase;
-}
-
-.deckCard h2,
-.deckCard p {
-  margin: 0;
-}
-
-.deckCard h2 {
-  font-size: clamp(20px, 2.4vw, 28px);
-  line-height: 1.05;
-}
-
-.deckCard p {
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 1.45;
-  font-weight: 700;
-}
-
 .strategyMeta {
   display: flex;
   flex-wrap: wrap;
@@ -604,7 +394,8 @@ main {
 
 .deckChart {
   width: 100%;
-  height: 220px;
+  height: 100%;
+  min-height: 0;
   display: block;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -614,43 +405,29 @@ main {
 }
 
 .cachedBacktest {
-  display: grid;
-  gap: 6px;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow: hidden;
   padding-top: 2px;
+}
+
+.cachedBacktest .deckChart {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+}
+
+.cachedBacktest .cachedBacktestHeader,
+.cachedBacktest p {
+  flex: 0 0 auto;
 }
 
 .deckSummary p {
   margin: 0;
-}
-
-.sideCard {
-  min-height: 410px;
-  align-self: start;
-  padding: 18px;
-  border: 1px solid rgba(17, 24, 39, 0.12);
-  border-radius: 8px;
-  background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.78), rgba(255, 255, 255, 0.52)),
-    linear-gradient(135deg, rgba(5, 122, 85, 0.1), rgba(52, 87, 213, 0.08));
-  box-shadow: 0 24px 64px rgba(17, 24, 39, 0.1);
-  backdrop-filter: blur(16px);
-}
-
-.sideCard h2,
-.sideCard p {
-  margin: 0;
-}
-
-.sideCard h2 {
-  font-size: clamp(20px, 2.4vw, 30px);
-  line-height: 1;
-}
-
-.sideCard>p {
-  margin-top: 10px;
-  color: var(--muted);
-  font-weight: 750;
-  line-height: 1.45;
 }
 
 .signalSummary {
@@ -661,16 +438,7 @@ main {
 }
 
 .signalHeader {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 10px;
-  align-items: center;
-}
-
-.signalHeader .deckKicker {
-  margin-bottom: 0;
-  font-size: 14px;
-  line-height: 1;
+  display: block;
 }
 
 .signalSummary p {
@@ -701,11 +469,13 @@ main {
   gap: 8px;
 }
 
+/* No box of its own, just a rule between rows -- so it sits flush with the card's heading
+   rather than indented under it. */
 .signalRows article {
   min-width: 0;
   display: grid;
   gap: 3px;
-  padding: 10px 8px;
+  padding: 10px 0;
   border-bottom: 1px solid var(--line);
 }
 
@@ -769,19 +539,6 @@ main {
   overflow-wrap: anywhere;
 }
 
-.signalBody .signalRows {
-  max-height: 230px;
-  overflow-y: auto;
-  padding-right: 2px;
-}
-
-.signalBody .signalRows>p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 13px;
-  font-weight: 750;
-}
-
 .cachedBacktestHeader {
   display: flex;
   align-items: center;
@@ -803,16 +560,17 @@ main {
   line-height: 1.35;
 }
 
-#bubbleBoard {
+.bubbleBoard {
   width: 100%;
-  height: min(66vh, 720px);
-  min-height: 500px;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
   display: block;
   touch-action: pan-y pinch-zoom;
   overscroll-behavior: contain;
 }
 
-#bubbleBoard.resize-mode {
+.bubbleBoard.resize-mode {
   touch-action: none;
 }
 
@@ -968,12 +726,6 @@ body.dca-off .asset.live circle {
   border: 0;
 }
 
-@media (min-width: 1000px) {
-  #schedulePanel {
-    grid-template-columns: 30px 120px auto;
-  }
-}
-
 label {
   display: flex;
   align-items: center;
@@ -1020,55 +772,6 @@ button:hover {
 
 button:active {
   transform: translateY(1px) scale(0.99);
-}
-
-.iconButton {
-  width: 30px;
-  min-width: 30px;
-  min-height: 34px;
-  padding: 0;
-  font-size: 19px;
-}
-
-.powerButton {
-  border: 0;
-  background: transparent;
-  box-shadow: none;
-}
-
-.powerButton:hover {
-  border-color: transparent;
-  background: transparent;
-  box-shadow: none;
-}
-
-.powerButton.on {
-  color: var(--good);
-  background: transparent;
-  box-shadow: none;
-}
-
-.refreshBacktest {
-  min-width: 86px;
-  min-height: 32px;
-  padding: 0 10px;
-  font-size: 12px;
-}
-
-.signalActions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 6px;
-}
-
-.refreshUniverse,
-.refreshBacktest,
-.applyUniverse {
-  min-width: 82px;
-  min-height: 32px;
-  padding: 0 10px;
-  font-size: 12px;
 }
 
 .universeProposalHeader,
@@ -1295,93 +998,969 @@ h2 {
   }
 }
 
-@media (max-width: 760px) {
-  main {
-    width: 100%;
-    padding: 8px 9px 24px;
+
+/* =======================================================================================
+   Shell: fixed sidebar, scrolling content. One page per algorithm, one per deployment
+   target, so navigation answers "which product" and "which target" independently.
+   ======================================================================================= */
+
+.shell {
+  min-height: 100vh;
+  min-height: 100svh;
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+}
+
+.sidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  height: 100svh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 16px 12px;
+  border-right: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.5);
+  backdrop-filter: blur(16px);
+}
+
+.brand {
+  padding: 0 8px;
+  color: var(--ink);
+  font-size: 17px;
+  font-weight: 900;
+  letter-spacing: -0.01em;
+  text-decoration: none;
+}
+
+.navGroup {
+  display: grid;
+  gap: 6px;
+}
+
+.navGroupLabel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.navAdd {
+  width: 22px;
+  min-height: 22px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.navList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 2px;
+}
+
+.navItem {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 7px 8px;
+  border-radius: 9px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.navItem:hover {
+  background: rgba(17, 24, 39, 0.05);
+}
+
+.navItem.is-active {
+  background: rgba(17, 24, 39, 0.9);
+  color: #fff;
+}
+
+.navItemLabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.navBadge {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(17, 24, 39, 0.1);
+  font-size: 10px;
+  font-weight: 850;
+}
+
+.navItem.is-active .navBadge {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.navEmpty {
+  padding: 6px 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.navFooter {
+  margin-top: auto;
+  display: grid;
+  gap: 4px;
+}
+
+.navHealth {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  text-align: left;
+  cursor: pointer;
+}
+
+.navHealth.is-muted {
+  cursor: default;
+}
+
+.navHealthLabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.navHealthNote {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 750;
+  opacity: 0.8;
+}
+
+.navHealth:not(.is-muted):hover {
+  background: rgba(17, 24, 39, 0.05);
+}
+
+.statusDot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.statusDot.is-live {
+  background: var(--good);
+}
+
+.statusDot.is-idle {
+  background: #d97706;
+}
+
+.statusDot.is-off {
+  background: rgba(17, 24, 39, 0.25);
+}
+
+.navToggle {
+  display: none;
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  z-index: 40;
+  width: 38px;
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.92);
+  font-size: 16px;
+  cursor: pointer;
+}
+
+/* -- content ---------------------------------------------------------------------------- */
+
+.content {
+  min-width: 0;
+  padding: 20px clamp(14px, 2.4vw, 34px) 40px;
+}
+
+.pageHead {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.pageHead h1 {
+  margin: 0;
+  font-size: clamp(20px, 2.4vw, 27px);
+  font-weight: 900;
+  letter-spacing: -0.015em;
+}
+
+.pageHead p {
+  margin: 4px 0 0;
+  max-width: 68ch;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.pageHeadSide {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.pill {
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.7);
+  font-size: 11px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.pill.is-live {
+  border-color: rgba(5, 122, 85, 0.34);
+  background: rgba(220, 252, 231, 0.8);
+  color: var(--good);
+}
+
+.pill.is-idle {
+  border-color: rgba(180, 120, 10, 0.3);
+  background: rgba(254, 243, 199, 0.8);
+  color: #92400e;
+}
+
+.pill.is-off {
+  border-color: rgba(180, 35, 24, 0.28);
+  background: rgba(254, 226, 226, 0.75);
+  color: var(--bad);
+}
+
+.tabBar {
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.tabLink {
+  padding: 9px 13px;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.tabLink:hover {
+  color: var(--ink);
+}
+
+.tabLink.is-active {
+  border-bottom-color: var(--ink);
+  color: var(--ink);
+}
+
+/* Every page stacks its cards through one of these, so the gap between cards is the same
+   whether the page has tabs (.tabBody) or not (.pageBody). */
+.tabBody,
+.pageBody {
+  display: grid;
+  gap: 14px;
+}
+
+.cardGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  /* Cards size to their content: a stretched card leaves dead space under a short table
+     while the one beside it scrolls, which reads as a rendering bug rather than a choice. */
+  align-items: start;
+  gap: 14px;
+}
+
+.card {
+  min-width: 0;
+  padding: 15px 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.66);
+  box-shadow: 0 18px 44px rgba(17, 24, 39, 0.07);
+  backdrop-filter: blur(14px);
+}
+
+.card h2 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 850;
+  letter-spacing: 0.02em;
+}
+
+.cardHead {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.cardHead h2 {
+  margin: 0;
+}
+
+.cardHeadActions {
+  display: flex;
+  gap: 6px;
+}
+
+.cardHint {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.cardBody {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.5;
+}
+
+.cardActions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.chipRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 11px;
+}
+
+.chip {
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.6);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.chip.is-link {
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.chip.is-link:hover {
+  background: rgba(17, 24, 39, 0.06);
+}
+
+.factLink {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--line);
+  text-underline-offset: 2px;
+}
+
+/* Holdings and orders are dense, repetitive rows: a table reads them in far less vertical
+   space than the stacked cards this replaced. */
+.tableWrap {
+  overflow-x: auto;
+}
+
+/* These lists grow without bound -- a long position book or a busy order day would push
+   everything below them off the page, so each panel scrolls inside its own card. One shared
+   height for every scrolling panel, so signals and holdings cut off at the same place. */
+.tableWrap.is-scroll {
+  overflow-y: auto;
+  max-height: var(--panel-scroll);
+}
+
+.tableWrap.is-scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  /* Near-opaque: the card behind it is translucent, so rows would otherwise read through. */
+  background: rgba(248, 249, 252, 0.97);
+}
+
+.dataTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.dataTable th {
+  padding: 0 6px 5px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: 0.05em;
+  text-align: left;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.dataTable td {
+  padding: 5px 6px;
+  border-top: 1px solid var(--line);
+  font-weight: 750;
+  vertical-align: baseline;
+}
+
+.dataTable th.num,
+.dataTable td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.dataTable td.nowrap {
+  white-space: nowrap;
+}
+
+/* Flush with the card's heading at both edges: cell padding inside the table only, never
+   at its outer edge. */
+.dataTable th:first-child,
+.dataTable td:first-child {
+  padding-left: 0;
+}
+
+.dataTable th:last-child,
+.dataTable td:last-child {
+  padding-right: 0;
+}
+
+.dataTable .tableNote {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.dataTable td.num .tableNote {
+  display: block;
+}
+
+.factList {
+  margin: 0;
+  display: grid;
+  gap: 7px;
+}
+
+.factList div {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.factList dt {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.factList dd {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.factList code {
+  font-size: 11px;
+}
+
+.metricRow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 9px;
+  margin-bottom: 12px;
+}
+
+.metric {
+  display: grid;
+  gap: 2px;
+  padding: var(--tile-pad);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.metric span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.metric strong {
+  font-size: 16px;
+  font-weight: 850;
+  letter-spacing: -0.01em;
+}
+
+.emptyState {
+  margin: 0;
+  padding: 14px 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.deployRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.deployChip {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.deployChip:hover {
+  border-color: rgba(17, 24, 39, 0.28);
+}
+
+.deployment:first-of-type {
+  border-top: 0;
+}
+
+.deploymentTarget {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 850;
+  text-decoration: none;
+}
+
+.tuneCard .bubbleBoard {
+  height: min(52vh, 460px);
+}
+
+.tuneBody .configForm {
+  max-height: none;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 12px;
+}
+
+/* Full page to work with, so stop squeezing values into a 74px column. */
+.tuneBody .configField {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+  align-items: start;
+  padding: var(--tile-pad);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.tuneBody .configField>span {
+  white-space: normal;
+  font-size: 11px;
+}
+
+.tuneBody .configField input,
+.tuneBody .configField textarea {
+  padding: 6px 8px;
+  font-size: 13px;
+}
+
+.tuneBody .configField input[type="checkbox"] {
+  width: 17px;
+  height: 17px;
+}
+
+.chartLarge {
+  width: 100%;
+  height: min(46vh, 380px);
+  display: block;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 6px;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.tabBody .signalRows {
+  max-height: var(--panel-scroll);
+  overflow-y: auto;
+}
+
+
+.statBlock {
+  display: grid;
+  gap: 2px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.statLabel {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.statValue {
+  font-size: 17px;
+  font-weight: 900;
+  letter-spacing: -0.015em;
+}
+
+.statSplit {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.navItem--stat {
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.navStat {
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.navItem--stat.is-active .navStat,
+.navItem--stat.is-active .gain,
+.navItem--stat.is-active .loss {
+  color: #fff;
+}
+
+.navItem--stat .navItemLabel {
+  font-weight: 700;
+}
+
+.navStat.is-muted {
+  color: var(--muted);
+}
+
+.navItem.is-inert {
+  cursor: default;
+}
+
+.navItem.is-inert:hover {
+  background: transparent;
+}
+
+#globalStats {
+  display: grid;
+  gap: 6px;
+}
+
+.ctl.is-primary {
+  border-color: rgba(17, 24, 39, 0.2);
+  background: #111827;
+  color: #fff;
+}
+
+.ctl.is-primary:hover:not(:disabled) {
+  background: #000;
+}
+
+.deployment {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
+
+.deployment:first-of-type {
+  border-top: 0;
+}
+
+.side {
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: rgba(17, 24, 39, 0.08);
+  font-size: 10px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.side.is-buy {
+  background: rgba(220, 252, 231, 0.9);
+  color: var(--good);
+}
+
+.side.is-sell {
+  background: rgba(254, 226, 226, 0.9);
+  color: var(--bad);
+}
+
+
+.watchRow {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto 46px 18px;
+  cursor: grab;
+  gap: 6px;
+  align-items: center;
+  padding: 5px 8px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.watchRow:hover {
+  background: rgba(17, 24, 39, 0.05);
+}
+
+.watchRow.is-dragging {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+
+.watchGrip {
+  color: rgba(17, 24, 39, 0.28);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.watchSymbol {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 850;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.watchPrice {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+}
+
+.watchChange {
+  font-size: 11px;
+  font-weight: 850;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.watchRemove {
+  width: 18px;
+  min-height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.watchRow:hover .watchRemove {
+  opacity: 1;
+}
+
+.watchRemove:hover {
+  border: 0;
+  background: rgba(180, 35, 24, 0.12);
+  box-shadow: none;
+  color: var(--bad);
+}
+
+.deployControl {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+
+.deployTarget {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+  font-weight: 850;
+}
+
+
+.formula {
+  margin: 10px 0 0;
+  padding: 11px 13px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(17, 24, 39, 0.045);
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.65;
+  white-space: pre;
+}
+
+.fieldWhat,
+.fieldEffect {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 650;
+  line-height: 1.4;
+}
+
+.fieldWhat {
+  color: var(--muted);
+}
+
+.fieldEffect {
+  color: rgba(17, 24, 39, 0.52);
+}
+
+.splitRows {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px;
+}
+
+.splitRows .colLabel {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.tuneBody .configField>span {
+  font-weight: 850;
+}
+
+/* ---------------------------------------------------------------------------------------
+   Mobile: the sidebar becomes an overlay drawer and the content takes the full width.
+   --------------------------------------------------------------------------------------- */
+
+@media (max-width: 900px) {
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  #bubbleBoard {
-    height: 690px;
-    min-height: 690px;
+  .navToggle {
+    display: block;
   }
 
-  .deckPanel {
-    grid-template-columns: 1fr;
-    gap: 14px;
-    justify-items: center;
-    padding-top: 28px;
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 30;
+    width: 244px;
+    transform: translateX(-100%);
+    transition: transform 180ms ease;
+    box-shadow: 0 24px 70px rgba(17, 24, 39, 0.18);
+    background: rgba(255, 255, 255, 0.97);
   }
 
-  .deckFrame {
-    width: min(520px, 100%);
-    display: grid;
-    grid-template-columns: 40px minmax(0, 420px) 40px;
-    gap: 10px;
-    justify-content: center;
+  .sidebar.is-open {
+    transform: translateX(0);
   }
 
-  .deckControls {
-    grid-column: 1;
-    margin-right: 0;
+  .content {
+    padding: 58px 12px 32px;
   }
 
-  .cardDeck {
-    grid-column: 2;
+  .cardGrid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .sideCard {
-    width: min(420px, 100%);
-    min-height: 0;
-    justify-self: center;
+  .tuneCard .bubbleBoard {
+    height: 58vh;
   }
 
-  .cardDeck {
-    min-height: 470px;
+  .chartLarge {
+    height: 300px;
+  }
+}
+
+@media (max-width: 620px) {
+  .ctl {
+    height: 34px;
+    padding: 0 11px;
+    font-size: 12px;
   }
 
-  .deckCard {
-    padding: 15px;
+  .configField input,
+  .configField textarea {
+    /* 16px keeps iOS Safari from zooming the viewport on focus. */
+    font-size: 16px;
   }
 
-  .deckCard.after {
-    transform: translateY(190px) scale(0.96);
+  .metricRow {
+    grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));
   }
-
-  .deckCard.farAfter {
-    transform: translateY(282px) scale(0.9);
-  }
-
-  .deckHeader {
-    grid-template-columns: 1fr;
-  }
-
-  .metricGrid {
-    grid-template-columns: 1fr;
-  }
-
-  #schedulePanel {
-    grid-template-columns: 30px minmax(0, 1fr);
-    border-radius: 18px;
-    margin-bottom: -8px;
-  }
-
-  #cronDescription {
-    grid-column: 1 / -1;
-    white-space: normal;
-  }
-
 }
 
 @media (max-width: 430px) {
-  main {
-    width: 100%;
-    padding-inline: 6px;
+  .content {
+    padding-inline: 8px;
   }
 
-  #bubbleBoard {
-    height: 640px;
-    min-height: 640px;
+  .configField {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
   }
 
+  .configField>span {
+    white-space: normal;
+  }
 }
