@@ -397,3 +397,6 @@ def test_the_bot_pill_describes_the_algorithms_not_the_container() -> None:
     assert "const armed = bindings().filter((binding) => binding.enabled);" in summary
     assert "const status = deploymentStatus(armed);" in summary
     assert '"Bot off"' in summary
+    # The dot carries it; the words only repeated the colour, so they live in the tooltip.
+    assert "escapeHtml(runtime.label)" not in app_js
+    assert "escapeHtml(runtime.note)" not in app_js
