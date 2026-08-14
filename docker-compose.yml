@@ -12,7 +12,8 @@ services:
       KILL_SWITCH: ${KILL_SWITCH:-true}
       CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-*}
       MCP_PORT: ${WALBOT_MCP_CONTAINER_PORT:-8001}
-    command: ["${WALBOT_MODE:---bot}"]
+    # No mode flag: the scheduler and the MCP server both run, and each binding decides
+    # whether it is driven by a clock or by an agent. The image's own CMD covers the rest.
     ports:
       # Loopback by default: the dashboard is unauthenticated, so it must not be reachable
       # around the reverse proxy on the host's public IP. Set WALBOT_BIND=0.0.0.0 only for

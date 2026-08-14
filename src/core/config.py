@@ -715,7 +715,9 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
     news_sources = _section(data_sources, "news_sentiment")
     sentiment_sources = _section(data_sources, "sentiment_data")
 
-    kill_switch = _str_to_bool(str(_config_value(runtime, "kill_switch", "KILL_SWITCH", KILL_SWITCH)), KILL_SWITCH)
+    # Env only, deliberately. It is a deployment-level brake for an emergency, not a control
+    # the dashboard offers: whether an algorithm trades is its binding's own switch.
+    kill_switch = _str_to_bool(os.getenv("KILL_SWITCH"), KILL_SWITCH)
     api_key = _direct_or_env(account_config, "api_key", "api_key_env", "ALPACA_API_KEY")
     api_secret = _direct_or_env(account_config, "api_secret", "api_secret_env", "ALPACA_API_SECRET")
     alpaca_data_api_key = _provider_credential(

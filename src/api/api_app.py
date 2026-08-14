@@ -46,8 +46,6 @@ from ..common.logging_utils import configure_logging, demote_uvicorn_access_logs
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 WEB_ROOT = PROJECT_ROOT / "web"
-RUNTIME_MODE_ENV = "TRADING_RUNTIME_MODE"
-
 demote_uvicorn_access_logs_to_debug()
 
 
@@ -55,15 +53,6 @@ def _cors_origins() -> list[str]:
     raw = os.getenv("CORS_ALLOW_ORIGINS", "*")
     origins = [origin.strip() for origin in raw.split(",") if origin.strip()]
     return origins or ["*"]
-
-
-def runtime_mode() -> str:
-    mode = str(os.getenv(RUNTIME_MODE_ENV, "bot")).strip().lower()
-    return mode if mode in {"bot", "mcp"} else "bot"
-
-
-def should_start_bot_runtime() -> bool:
-    return runtime_mode() == "bot"
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -77,13 +66,13 @@ class NoCacheStaticFiles(StaticFiles):
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
     demote_uvicorn_access_logs_to_debug()
-    if should_start_bot_runtime():
-        bot_runtime.start()
+    # Always started. A binding parked on "mcp" is simply never scheduled, so the loop costs
+    # nothing when nothing is switched on.
+    bot_runtime.start()
     try:
         yield
     finally:
-        if should_start_bot_runtime():
-            bot_runtime.stop()
+        bot_runtime.stop()
 
 
 app = FastAPI(title="Walbot API", lifespan=lifespan)
@@ -107,10 +96,7 @@ def dashboard() -> FileResponse:
 
 @app.get("/api/status")
 def status() -> dict[str, Any]:
-    payload = status_payload()
-    payload["runtime_mode"] = runtime_mode()
-    payload["bot_runtime_enabled"] = should_start_bot_runtime()
-    return payload
+    return status_payload()
 
 
 @app.get("/api/universe")

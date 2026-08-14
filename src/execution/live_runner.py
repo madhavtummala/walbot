@@ -33,12 +33,11 @@ def run_once(account_id: str | None = None, strategy: str | None = None) -> None
         config.alpaca_base_url,
     )
 
+    # No global enable check. Whether this algorithm trades is the binding's own switch, and
+    # the scheduler already refused to call run_once if it were off -- a second, dashboard-wide
+    # flag could only disagree with the thing the user actually toggled.
     if config.kill_switch:
-        logger.warning("Kill switch is enabled. Exiting without sending orders.")
-        return
-
-    if not controls["algorithm_enabled"]:
-        logger.warning("Algorithm trading is disabled in dashboard controls. Exiting without sending orders.")
+        logger.warning("KILL_SWITCH is set in the environment. Exiting without sending orders.")
         return
     logger.info("Active strategy: %s", STRATEGY_LABELS.get(strategy, strategy))
 

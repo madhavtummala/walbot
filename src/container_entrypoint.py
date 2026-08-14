@@ -65,9 +65,14 @@ def _start_mcp_server(host: str, port: int, transport: str) -> subprocess.Popen:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Start the Walbot container runtime.")
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--bot", action="store_true", help="Start the dashboard and built-in bot scheduler.")
-    mode.add_argument("--mcp", action="store_true", help="Start the dashboard in tool mode plus the MCP tool server.")
+    # No --bot/--mcp modes. Whether an algorithm is driven by the scheduler or by an agent is
+    # a property of its deployment -- the binding's frequency, "15m" through "1d" or "mcp" --
+    # so a process-wide mode could only contradict it. Both the scheduler and the MCP server
+    # always run; the bindings decide what either of them actually does.
+    parser.add_argument("--bot", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--mcp", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-mcp-server", action="store_true",
+                        help="Do not start the MCP tool server alongside the dashboard.")
     parser.add_argument("--host", default=os.getenv("HOST", "0.0.0.0"))
     parser.add_argument("--port", default=int(os.getenv("PORT", "8000")), type=int)
     parser.add_argument("--mcp-host", default=os.getenv("MCP_HOST", "0.0.0.0"))
@@ -75,17 +80,17 @@ def main() -> None:
     parser.add_argument("--mcp-transport", default=os.getenv("MCP_TRANSPORT", "sse"))
     args = parser.parse_args()
 
-    runtime_mode = "mcp" if args.mcp else "bot"
-    os.environ["TRADING_RUNTIME_MODE"] = runtime_mode
-
     note = prepare_config()
     if note:
         print(note, flush=True)
 
     mcp_process: subprocess.Popen | None = None
     try:
-        if runtime_mode == "mcp":
-            mcp_process = _start_mcp_server(args.mcp_host, args.mcp_port, args.mcp_transport)
+        if not args.no_mcp_server:
+            try:
+                mcp_process = _start_mcp_server(args.mcp_host, args.mcp_port, args.mcp_transport)
+            except Exception as error:  # noqa: BLE001 - the dashboard must still come up
+                print(f"MCP tool server did not start: {error}", flush=True)
         uvicorn.run(
             "src.api.api_app:app",
             host=args.host,
