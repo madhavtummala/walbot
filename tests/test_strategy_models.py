@@ -115,3 +115,26 @@ def test_dual_momentum_can_apply_sentiment_tilt() -> None:
     assert round(spy["social_score"], 6) == 0.325
     assert round(spy["score"] - spy["price_score"], 6) == 0.0325
     assert "sentiment tilt" in spy["reason"]
+
+
+def test_intraday_requirement_must_declare_its_bar_grid() -> None:
+    """A lookback counted in bars is meaningless until the algorithm names the grid."""
+    import pytest
+
+    from src.core.interfaces import AlgorithmRequirements
+
+    with pytest.raises(ValueError, match="must declare intraday_bar_minutes"):
+        AlgorithmRequirements(price_symbols=["SPY"], intraday_lookback_bars=100)
+
+    # Declining intraday data entirely stays valid, and states no grid.
+    assert AlgorithmRequirements(price_symbols=["SPY"]).intraday_bar_minutes == 0
+
+
+def test_intraday_algorithms_declare_their_own_grid() -> None:
+    """The 15-minute assumption lives on each algorithm now, not in the base interface."""
+    from src.algorithms.dual_momentum import DualMomentumConfig
+    from src.algorithms.fast_momentum import DefensiveMomentumConfig
+    from src.algorithms.invest_spy import InvestSpyConfig
+
+    for config_cls in (DualMomentumConfig, DefensiveMomentumConfig, InvestSpyConfig):
+        assert config_cls().intraday_bar_minutes == 15, config_cls.__name__

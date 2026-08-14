@@ -68,9 +68,20 @@ class AlgorithmRequirements:
     daily_extra_buffer_days: int = 0
     include_latest_daily: bool = True
     intraday_lookback_bars: int = 0
-    intraday_bar_minutes: int = 15
+    #: Bar size for ``intraday_lookback_bars``, which the algorithm must state. There is no
+    #: default on purpose: a lookback counted in bars only means a span of time once the grid
+    #: is known, so a base-class default would silently define every algorithm's horizons.
+    #: Left at 0 when no intraday data is wanted.
+    intraday_bar_minutes: int = 0
     needs_sentiment: bool = False
     paper_only: bool = False
+
+    def __post_init__(self) -> None:
+        if self.intraday_lookback_bars > 0 and self.intraday_bar_minutes <= 0:
+            raise ValueError(
+                "An algorithm asking for intraday bars must declare intraday_bar_minutes; "
+                f"got {self.intraday_lookback_bars} bars on an unstated grid"
+            )
 
 #: An algorithm's intent list is the complete portfolio: a held symbol absent from it is exited.
 MODE_TARGET = "target"

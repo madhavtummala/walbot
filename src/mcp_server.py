@@ -93,15 +93,27 @@ def _validate_target_weights(target_weights: Any) -> tuple[dict[str, float], str
 
 
 def _server(name: str, host: str, port: int):
-    try:
-        from mcp.server.fastmcp import FastMCP
-    except ImportError as exc:  # pragma: no cover - exercised in container builds with mcp installed.
-        raise RuntimeError("The MCP runtime is not installed. Install the 'mcp' package to use --mcp mode.") from exc
+    """Build the server object, across the 1.x/2.x rename.
 
+    mcp 2.0 dropped ``mcp.server.fastmcp`` and renamed ``FastMCP`` to ``MCPServer`` under
+    ``mcp.server.mcpserver``. The tool-registration and ``run`` surfaces this module uses are
+    unchanged, so both are supported rather than pinning the project to the old package.
+    """
     try:
-        return FastMCP(name, host=host, port=port)
+        from mcp.server.mcpserver import MCPServer  # mcp >= 2.0
+    except ImportError:
+        try:
+            from mcp.server.fastmcp import FastMCP as MCPServer  # mcp < 2.0
+        except ImportError as exc:  # pragma: no cover - exercised in container builds with mcp installed.
+            raise RuntimeError(
+                "The MCP runtime is not installed. Install the 'mcp' package to use --mcp mode."
+            ) from exc
+
+    # 2.x moved host/port off the constructor and onto run(); 1.x accepted them in both places.
+    try:
+        return MCPServer(name, host=host, port=port)
     except TypeError:
-        return FastMCP(name)
+        return MCPServer(name)
 
 
 def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
@@ -194,6 +206,10 @@ def main() -> None:
     args = parser.parse_args()
 
     mcp = create_mcp_server(host=args.host, port=args.port)
+    # stdio has nowhere to bind, and mcp 2.x rejects the kwargs on that transport.
+    if args.transport == "stdio":
+        mcp.run(transport=args.transport)
+        return
     try:
         mcp.run(transport=args.transport, host=args.host, port=args.port)
     except TypeError:
