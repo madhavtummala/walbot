@@ -33,6 +33,8 @@ EOD_MARKET_CATEGORY = "eod_market_data"
 NEWS_CATEGORY = "news_sentiment"
 SENTIMENT_CATEGORY = "sentiment_data"
 INTRADAY_CACHE_TTL_SECONDS = 900
+#: Minute frequencies Schwab's pricehistory endpoint accepts. Anything else is a 400.
+SCHWAB_MINUTE_FREQUENCIES = frozenset({1, 5, 10, 15, 30})
 EOD_CACHE_TTL_SECONDS = 1800
 EOD_BAR_FRESH_FOR_DAYS = 3
 
@@ -185,11 +187,22 @@ def _schwab_token(config: Config, category: str) -> str:
 
     Schwab access tokens last ~30 minutes, so a statically configured token goes stale almost
     immediately; it is kept only as a fallback for manual testing.
-    """
-    if getattr(config, "schwab_app_key", "") and getattr(config, "schwab_refresh_token", ""):
-        from src.brokerages.schwab_client import SchwabSession
 
-        return SchwabSession(config).access_token()
+    Gated on the app credentials alone, not on a configured refresh token: consent completed
+    through the dashboard stores its refresh token in the state store, which is where
+    ``SchwabSession`` looks when the config has none. Requiring SCHWAB_REFRESH_TOKEN here made
+    the connector unusable for exactly the flow the dashboard exists to drive.
+    """
+    if getattr(config, "schwab_app_key", "") and getattr(config, "schwab_app_secret", ""):
+        from src.brokerages.schwab_client import SchwabAuthError, SchwabSession
+
+        try:
+            return SchwabSession(config).access_token()
+        except SchwabAuthError as error:
+            # No consent yet, or the refresh token expired: fall through to the ladder rather
+            # than taking down the whole fetch.
+            logger.info("Schwab OAuth session unavailable, falling back: %s", error)
+            return ""
     return _access_token(config, category, "schwab")
 
 
@@ -532,7 +545,17 @@ def _run_provider_fallback(
     category: str,
     label: str,
 ) -> dict[str, pd.DataFrame]:
-    """Try each provider in order, returning the first non-empty result (empty frames if all fail)."""
+    """Walk the provider order, keeping the best result *per symbol*.
+
+    Per symbol rather than per batch: a provider that answered for twelve of fourteen symbols
+    used to win the whole request, and the two it had nothing for were simply returned empty
+    -- no fallback, no error, and downstream they read as a symbol with no history rather
+    than one nobody asked properly. Later providers now fill only what is still missing, and
+    the walk stops as soon as every symbol is covered.
+    """
+    resolved: dict[str, pd.DataFrame] = {}
+    wanted = [symbol.upper() for symbol in symbols]
+
     for index, provider_name in enumerate(providers):
         if provider_name not in fetchers:
             logger.warning("%s market data provider %s is not supported; skipping", label, provider_name)
@@ -547,11 +570,31 @@ def _run_provider_fallback(
             log = logger.info if next_provider else logger.warning
             log("%s market data provider %s failed%s: %s", label, provider_name, _fallback_suffix(next_provider), exc)
             continue
-        if any(not frame.empty for frame in bars.values()):
-            return bars
-        logger.info("%s market data provider %s returned no bars%s", label, provider_name, _fallback_suffix(next_provider))
-    return {symbol.upper(): _empty_bars() for symbol in symbols}
 
+        supplied = 0
+        for symbol, frame in (bars or {}).items():
+            key = str(symbol).upper()
+            if key in resolved or frame is None or frame.empty:
+                continue
+            resolved[key] = frame
+            supplied += 1
+
+        missing = [symbol for symbol in wanted if symbol not in resolved]
+        if not missing:
+            return {symbol: resolved[symbol] for symbol in wanted}
+        if supplied:
+            logger.info(
+                "%s market data provider %s covered %s of %s symbols; %s for %s",
+                label, provider_name, len(resolved), len(wanted),
+                f"falling back to {next_provider}" if next_provider else "no provider left",
+                ", ".join(missing[:8]) + ("..." if len(missing) > 8 else ""),
+            )
+        else:
+            logger.info("%s market data provider %s returned no bars%s", label, provider_name, _fallback_suffix(next_provider))
+
+    if not resolved:
+        return {symbol: _empty_bars() for symbol in wanted}
+    return {symbol: resolved.get(symbol, _empty_bars()) for symbol in wanted}
 
 def fetch_intraday_market_bars(
     symbols: list[str],
@@ -685,6 +728,13 @@ def fetch_schwab_intraday_bars(
         raise ValueError("lookback_bars must be positive")
     if bar_minutes <= 0:
         raise ValueError("bar_minutes must be positive")
+    # Schwab's pricehistory takes a fixed set of minute frequencies and 400s on anything else.
+    # Caught here so a mistyped grid names itself rather than surfacing as a provider error
+    # that the fallback chain would quietly swallow.
+    if int(bar_minutes) not in SCHWAB_MINUTE_FREQUENCIES:
+        raise ValueError(
+            f"Schwab supports {sorted(SCHWAB_MINUTE_FREQUENCIES)}-minute bars, not {int(bar_minutes)}"
+        )
     ttl_seconds = int(getattr(config, "intraday_market_data_cache_ttl_seconds", INTRADAY_CACHE_TTL_SECONDS))
     end = end_date or datetime.now(timezone.utc)
     trading_minutes_per_day = 390

@@ -1756,10 +1756,10 @@ function renderNavFooter() {
   const footer = $("#navFooter");
   if (!footer) return;
   const auth = state.schwabAuth;
-  // Only present when Schwab is actually configured: a connector nobody set up is not a
-  // status worth a permanent row. The dot carries the state, so the row says only what it
-  // is; the tooltip holds the detail for when the colour is not enough.
-  const authRow = auth?.configured
+  // Present whenever Schwab is wired up as a connector, credentials or not: this row is the
+  // control that *starts* consent, so gating it on being connected would hide the only way
+  // to connect. The dot carries the state; the tooltip explains what is missing.
+  const authRow = auth?.connector_enabled || auth?.configured
     ? `<button class="navHealth is-${escapeHtml(auth.state)}" type="button" id="schwabAuthPill"
          title="${escapeHtml(auth.detail || "")}">
          <span class="statusDot is-${auth.state === "ok" ? "live" : auth.state === "warning" ? "idle" : "off"}" aria-hidden="true"></span>
@@ -1770,8 +1770,7 @@ function renderNavFooter() {
   footer.innerHTML = `${authRow}
     <span class="navHealth is-muted" title="${escapeHtml(runtime.detail)}">
       <span class="statusDot is-${runtime.status}" aria-hidden="true"></span>
-      <span class="navHealthLabel">${escapeHtml(runtime.label)}</span>
-      <span class="navHealthNote">${escapeHtml(runtime.note)}</span>
+      <span class="navHealthLabel">Bot</span>
     </span>`;
 }
 
@@ -1783,10 +1782,11 @@ function runtimeSummary() {
   const loops = Object.values(bot.bindings || {});
   if (!loops.length && bot.algorithm) loops.push(bot.algorithm);
 
-  if (state.status?.runtime_mode === "mcp") {
-    return { status: "off", label: "MCP mode", note: "agent-driven", detail: "Scheduler disabled; the MCP agent drives runs." };
-  }
-
+  // Deliberately not keyed on the container's runtime mode. That only says an MCP server was
+  // started alongside the dashboard; it says nothing about whether any algorithm is on, and
+  // reporting "MCP mode" with everything switched off described the process rather than the
+  // bot. What runs is decided per binding: switched on with a frequency, or switched on and
+  // parked on "mcp" to wait for an external request.
   const running = loops.filter((loop) => loop.running);
   const armed = bindings().filter((binding) => binding.enabled);
   // The bot pill takes the same colour as the algorithms: green while anything is on a
@@ -1808,7 +1808,6 @@ function runtimeSummary() {
       : status === "idle"
         ? "Bot agent-driven"
         : "Bot off";
-  const note = lastRun ? formatActivityTime(lastRun) : "";
   const detail = error
     ? error
     : [
@@ -1821,7 +1820,9 @@ function runtimeSummary() {
         armed.length ? "" : "No algorithm is switched on",
         lastRun ? `Last run ${formatActivityTime(lastRun)}` : "No run yet",
       ].filter(Boolean).join(" · ");
-  return { status, label, note, detail };
+  // label and note are no longer rendered -- the dot says scheduled, agent-driven or off, and
+  // the words only repeated it. Both survive in the tooltip, where the detail belongs.
+  return { status, detail: `${label} -- ${detail}` };
 }
 
 // -- page frame --------------------------------------------------------------------------
@@ -2434,6 +2435,12 @@ async function refreshRuntimeStatus() {
 }
 
 async function connectSchwab() {
+  // The row is shown for a configured *connector*, which may still be missing its
+  // credentials. Say which ones rather than opening a popup that can only fail.
+  if (state.schwabAuth && !state.schwabAuth.configured) {
+    showToast(state.schwabAuth.detail || "Schwab is not configured.");
+    return;
+  }
   const popup = window.open("", "schwabAuth", "width=560,height=760");
   try {
     const payload = await api("/api/schwab/auth/start", { method: "POST", timeoutMs: 8000 });

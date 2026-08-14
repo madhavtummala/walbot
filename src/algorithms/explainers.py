@@ -199,8 +199,15 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "max_intraday_volatility": {"what": "Realised intraday volatility above which it de-risks.", "effect": "Lower makes it flinch earlier in choppy sessions."},
             "high_volatility_weight_scale": {"what": "How much weights are scaled when that volatility limit trips.", "effect": "0.5 halves every position; 1.0 disables the response."},
             "intraday_drawdown_limit": {"what": "Session drawdown that flips it defensive for the rest of the day.", "effect": "Closer to zero stops it out sooner and more often."},
+            "intraday_bar_minutes": {
+                "what": "Bar size every lookback below is counted on. 15 minutes, so a session is 26 bars.",
+                "effect": (
+                    "Changing this rescales every *_lookback_bars knob in wall-clock terms at once "
+                    "-- halving it halves each window. Backtest before moving it."
+                ),
+            },
             "nano_momentum_lookback_bars": {"what": "Bars in the shortest momentum window.", "effect": "Fewer bars means a noisier, faster signal."},
-            "micro_momentum_lookback_bars": {"what": "Bars in the intraday momentum window (78 bars is about one session).", "effect": "Longer smooths the primary signal."},
+            "micro_momentum_lookback_bars": {"what": "Bars in the intraday momentum window (78 bars is three sessions on the 15-minute grid).", "effect": "Longer smooths the primary signal."},
             "meso_trend_lookback_days": {"what": "Days in the medium trend window.", "effect": "Longer defines trend over a broader stretch and reacts later."},
             "macro_trend_lookback_days": {"what": "Days in the long trend window used for the regime check.", "effect": "Longer keeps the macro gate open through deeper corrections."},
             "sentiment_lookback_minutes": {"what": "How recent a news item must be to count.", "effect": "Longer keeps stale headlines in the score."},
@@ -246,6 +253,13 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "benchmark": {"what": "The index proxy whose trend defines the market regime.", "effect": "QQQM gates a growth basket tightly; SPY is broader and flips less often."},
             "signal_refresh_minutes": {"what": "How often membership may change.", "effect": "Longer cuts turnover and lets winners run; shorter reacts to leadership changes sooner."},
             "risk_refresh_minutes": {"what": "How often timing and risk are re-evaluated.", "effect": "Also the unit for cooldown_after_exit. Shorter reacts faster but re-checks cost more."},
+            "intraday_bar_minutes": {
+                "what": "Bar size every selection horizon is counted on. 15 minutes, so a session is 26 bars.",
+                "effect": (
+                    "Changing this rescales all four horizons in wall-clock terms at once -- macro 320 "
+                    "is 12.3 sessions at 15 minutes and 4.1 at 5. Backtest before moving it."
+                ),
+            },
             "selection_horizon_nano": {"what": "Fastest return horizon, in intraday bars.", "effect": "Small values make the ranking twitchy; this horizon carries the least score weight by design."},
             "selection_horizon_micro": {"what": "Short return horizon, in bars.", "effect": "Bridges the fast and trend horizons."},
             "selection_horizon_meso": {"what": "Medium return horizon, in bars.", "effect": "Half the selection weight sits here and in macro; this is what 'leadership' means."},
@@ -284,6 +298,7 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "sentiment_size_scale": {"what": "Coefficient on sentiment as a position-size modifier.", "effect": "0.05 with a clip of 2 gives at most a 10% size change. It can never create a position price logic rejected."},
             "sentiment_clip": {"what": "Cap on the normalised sentiment input.", "effect": "Bounds how much a single loud news cycle can move either sentiment term."},
             "sentiment_lookback_minutes": {"what": "How recent a story must be to count.", "effect": "Longer keeps stale headlines alive in the score; shorter makes sentiment sparse."},
+            "volatility_tilt": {"what": "Exponent on volatility in sizing: weight follows score x sigma ** tilt.", "effect": "-1 is risk parity, so calm names get the big positions. 0 ignores volatility. +1 leans into it, concentrating in the wildest movers -- more return while a trend runs, more damage when it turns."},
             "name_weight_max": {"what": "Cap on any one ETF before portfolio scaling.", "effect": "Binds before max_positions when few names qualify."},
             "risk_on_gross_max": {"what": "Cap on total invested fraction of equity.", "effect": "Below 1.0 it always holds cash. The simplest single lever on overall risk."},
             "target_portfolio_vol": {"what": "Annualised ex-ante volatility target.", "effect": "Lower means smaller positions in volatile markets. A risk budget, not a return booster."},
@@ -328,6 +343,10 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "growth_macro_return": {"what": "Macro return above which SPY counts as growing.", "effect": "Higher demands a stronger market before taking the growth stance, so it sits in income or cash more."},
             "max_gross_exposure": {"what": "Cap on total invested fraction of equity.", "effect": "Below 1.0 it always holds cash regardless of state."},
             "max_single_position_weight": {"what": "Cap on any one position.", "effect": "At 1.0 a single-name sleeve is allowed to be the whole portfolio."},
+            "intraday_bar_minutes": {
+                "what": "Bar size the lookbacks below are counted on. 15 minutes, so a session is 26 bars.",
+                "effect": "Changing this rescales those windows in wall-clock terms. Backtest before moving it.",
+            },
             "micro_momentum_lookback_bars": {"what": "Bars in the short window used for state detection.", "effect": "Fewer makes state changes twitchier."},
             "meso_momentum_lookback_bars": {"what": "Bars in the medium window.", "effect": "Longer makes state changes rarer and more deliberate."},
             "macro_trend_lookback_days": {"what": "Days in the long window that gates the growth state.", "effect": "Longer keeps it constructive through short corrections."},

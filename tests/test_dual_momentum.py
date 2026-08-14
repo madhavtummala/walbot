@@ -310,8 +310,14 @@ def test_re_entering_clears_the_exit_record() -> None:
 # =========================================================================================
 
 
-def test_weights_scale_with_score_and_inversely_with_volatility() -> None:
-    config = DualMomentumConfig(min_base_score=0.0, name_weight_max=1.0, risk_on_gross_max=1.0)
+def test_a_zero_tilt_sizes_on_score_alone() -> None:
+    """Volatility leaves sizing entirely, rather than being neutralised twice.
+
+    The score is already a cross-sectional comparison; dividing by volatility on top of it
+    underweighted the leaders, which cost return *and* drawdown on full-coverage replay.
+    """
+    config = DualMomentumConfig(min_base_score=0.0, name_weight_max=1.0, risk_on_gross_max=1.0,
+                                volatility_tilt=0.0)
     rows = [
         {"symbol": "CALM", "base_score": 1.0, "annual_volatility": 0.10},
         {"symbol": "WILD", "base_score": 1.0, "annual_volatility": 0.40},
@@ -319,7 +325,34 @@ def test_weights_scale_with_score_and_inversely_with_volatility() -> None:
 
     weights = score_to_weights(rows, config)
 
-    assert weights["CALM"] > weights["WILD"]
+    assert weights["CALM"] == pytest.approx(weights["WILD"])
+    assert sum(weights.values()) == pytest.approx(1.0, rel=1e-6)
+
+
+def test_a_positive_tilt_leans_into_the_volatile_name() -> None:
+    """The shipped default: same score, bigger position in the wilder name."""
+    config = DualMomentumConfig(min_base_score=0.0, name_weight_max=1.0, risk_on_gross_max=1.0,
+                                volatility_tilt=1.0)
+    rows = [
+        {"symbol": "CALM", "base_score": 1.0, "annual_volatility": 0.10},
+        {"symbol": "WILD", "base_score": 1.0, "annual_volatility": 0.40},
+    ]
+
+    weights = score_to_weights(rows, config)
+
+    assert weights["WILD"] == pytest.approx(4 * weights["CALM"], rel=1e-6)
+
+
+def test_a_negative_tilt_restores_risk_parity() -> None:
+    config = DualMomentumConfig(min_base_score=0.0, name_weight_max=1.0, risk_on_gross_max=1.0,
+                                volatility_tilt=-1.0)
+    rows = [
+        {"symbol": "CALM", "base_score": 1.0, "annual_volatility": 0.10},
+        {"symbol": "WILD", "base_score": 1.0, "annual_volatility": 0.40},
+    ]
+
+    weights = score_to_weights(rows, config)
+
     assert weights["CALM"] == pytest.approx(4 * weights["WILD"], rel=1e-6)
     assert sum(weights.values()) == pytest.approx(1.0, rel=1e-6)
 

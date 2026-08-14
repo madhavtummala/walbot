@@ -92,6 +92,10 @@ def _read_intraday(
     bars_by_symbol: dict[str, pd.DataFrame] = {}
     for symbol in symbols:
         coverage.intraday_requested += 1
+        # Deepest wins, not first. Taking the first provider with *any* rows let a two-day
+        # sliver from the preferred provider shadow months of history from another, and the
+        # symbol then scored as flat with nothing in the output saying why.
+        best = pd.DataFrame()
         for provider in providers:
             try:
                 bars = read_market_bars(
@@ -101,12 +105,15 @@ def _read_intraday(
             except Exception as exc:
                 logger.warning("Intraday cache read failed provider=%s symbol=%s: %s", provider, symbol, exc)
                 continue
-            if not bars.empty:
-                bars_by_symbol[symbol] = bars
-                coverage.intraday_supplied += 1
+            if len(bars) > len(best):
+                best = bars
+            if len(best) >= lookback_bars:
                 break
-        else:
+        if best.empty:
             coverage.missing_symbols.add(symbol)
+            continue
+        bars_by_symbol[symbol] = best
+        coverage.intraday_supplied += 1
     return bars_by_symbol
 
 

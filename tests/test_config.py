@@ -94,7 +94,9 @@ data_sources:
     assert config.symbols == ["AAA", "BBB"]
     assert config.momentum_lookback_days == 42
     assert config.max_longs == 3
-    assert config.kill_switch is True
+    # The kill switch is env-only now: a deployment brake, not a dashboard control, so a
+    # runtime: block in the config document no longer turns it on.
+    assert config.kill_switch is False
     assert config.backtest_period == "4m"
     assert config.social_trends_csv == "data/custom_social.csv"
     assert config.market_data_provider_order == ["finnhub", "alpaca"]
@@ -354,3 +356,47 @@ tradable_universe:
     assert config.trade_approval_timeout_seconds == 120
     assert config.trade_approval_poll_seconds == 2
     assert config.options_swing_dte_min == 35
+
+
+def test_the_kill_switch_is_an_environment_brake_not_a_config_key(tmp_path, monkeypatch) -> None:
+    """Per-binding switches decide what trades; this stays for an emergency stop on the host."""
+    from src.core.config import get_config
+
+    config_path = tmp_path / "walbot.yaml"
+    config_path.write_text("runtime:\n  kill_switch: true\naccounts:\n  items:\n    paper: {}\n", encoding="utf-8")
+    monkeypatch.setenv("TRADING_CONFIG_FILE", str(config_path))
+    monkeypatch.delenv("KILL_SWITCH", raising=False)
+
+    assert get_config().kill_switch is False
+
+    monkeypatch.setenv("KILL_SWITCH", "true")
+    assert get_config().kill_switch is True
+
+
+def test_the_tradable_universe_covers_every_symbol_an_algorithm_can_hold() -> None:
+    """It drifted: it still listed names dropped for illiquidity and missed ten being traded.
+
+    This list decides what the Universe view shows and what gets priced when an algorithm
+    does not declare its own symbols, so a gap there is a symbol nobody fetches.
+    """
+    import yaml
+
+    from src.core.config import config_file_path
+
+    document = yaml.safe_load(config_file_path().read_text(encoding="utf-8"))
+    algorithms = document["algorithms"]
+
+    held: set[str] = set()
+    for key in ("dual_momentum", "fast_momentum"):
+        section = algorithms[key]
+        held |= set(section["risk_on_universe"]) | set(section["defensive_universe"])
+        held.add(section.get("benchmark"))
+    rotation = algorithms.get("invest_spy", {})
+    for key in ("equity_income_universe", "defensive_universe", "crisis_hedge_universe"):
+        held |= set(rotation.get(key) or [])
+    held.add(rotation.get("spy_symbol"))
+    held.discard(None)
+
+    universe = set(document["tradable_universe"]["symbols"])
+
+    assert held <= universe, f"tradable_universe is missing {sorted(held - universe)}"

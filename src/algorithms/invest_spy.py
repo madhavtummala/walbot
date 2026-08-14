@@ -19,6 +19,10 @@ class InvestSpyConfig:
     equity_income_universe: list[str] = field(default_factory=lambda: ["XYLD"])
     defensive_universe: list[str] = field(default_factory=lambda: ["BIL"])
     crisis_hedge_universe: list[str] = field(default_factory=lambda: ["SH", "VXX"])
+    #: The grid the ``*_lookback_bars`` knobs below are counted on. 15 minutes is what they
+    #: were fitted against -- meso 26 is exactly one session of 15m bars -- so changing it
+    #: rescales those horizons in wall-clock terms. Backtest before moving it.
+    intraday_bar_minutes: int = 15
     micro_momentum_lookback_bars: int = 3
     meso_momentum_lookback_bars: int = 26
     macro_trend_lookback_days: int = 60
@@ -109,6 +113,7 @@ class InvestSpyConfig:
             equity_income_universe=symbols("equity_income_universe", defaults.equity_income_universe),
             defensive_universe=symbols("defensive_universe", defaults.defensive_universe),
             crisis_hedge_universe=symbols("crisis_hedge_universe", defaults.crisis_hedge_universe),
+            intraday_bar_minutes=integer("intraday_bar_minutes", defaults.intraday_bar_minutes),
             micro_momentum_lookback_bars=integer("micro_momentum_lookback_bars", defaults.micro_momentum_lookback_bars),
             meso_momentum_lookback_bars=integer("meso_momentum_lookback_bars", defaults.meso_momentum_lookback_bars),
             macro_trend_lookback_days=integer("macro_trend_lookback_days", defaults.macro_trend_lookback_days),
@@ -368,6 +373,7 @@ class InvestSpyAlgorithm(BaseAlgorithm):
             price_symbols=sorted(set(strategy_config.symbols) | set(current_positions)),
             daily_lookback_days=strategy_config.macro_trend_lookback_days,
             intraday_lookback_bars=strategy_config.required_intraday_bars,
+            intraday_bar_minutes=strategy_config.intraday_bar_minutes,
             needs_sentiment=True,
             paper_only=True,
         )

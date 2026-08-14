@@ -26,6 +26,10 @@ class DefensiveMomentumConfig:
 
     risk_on_universe: list[str] = field(default_factory=lambda: ["QQQ", "VTI", "IWM", "IEMG", "ACWI"])
     defensive_universe: list[str] = field(default_factory=lambda: ["BIL", "IEF", "AGG", "TLT", "GLD"])
+    #: The grid the ``*_lookback_bars`` knobs below are counted on. 15 minutes is what they
+    #: were fitted against -- micro 78 is exactly three sessions of 15m bars -- so changing it
+    #: rescales those horizons in wall-clock terms. Backtest before moving it.
+    intraday_bar_minutes: int = 15
     nano_momentum_lookback_bars: int = 10
     micro_momentum_lookback_bars: int = 78
     meso_trend_lookback_days: int = 60
@@ -89,6 +93,7 @@ class DefensiveMomentumConfig:
         return cls(
             risk_on_universe=symbols("risk_on_universe", defaults.risk_on_universe),
             defensive_universe=symbols("defensive_universe", defaults.defensive_universe),
+            intraday_bar_minutes=integer("intraday_bar_minutes", defaults.intraday_bar_minutes),
             nano_momentum_lookback_bars=integer("nano_momentum_lookback_bars", defaults.nano_momentum_lookback_bars),
             micro_momentum_lookback_bars=integer("micro_momentum_lookback_bars", defaults.micro_momentum_lookback_bars),
             meso_trend_lookback_days=integer("meso_trend_lookback_days", defaults.meso_trend_lookback_days),
@@ -225,13 +230,19 @@ def compute_composite_scores(
     return scored
 
 
-def get_intraday_bars(symbols: list[str], lookback_bars: int, config: Any, data_client: Any = None) -> dict[str, pd.DataFrame]:
-    """Use Finnhub to fetch the last N 15-minute bars per symbol."""
+def get_intraday_bars(
+    symbols: list[str],
+    lookback_bars: int,
+    config: Any,
+    data_client: Any = None,
+    bar_minutes: int | None = None,
+) -> dict[str, pd.DataFrame]:
+    """Fetch the last N intraday bars per symbol, on this strategy's own grid."""
     return fetch_intraday_market_bars(
         symbols,
         config,
         lookback_bars=lookback_bars,
-        bar_minutes=15,
+        bar_minutes=bar_minutes or DefensiveMomentumConfig.from_runtime_config(config).intraday_bar_minutes,
     )
 
 
@@ -664,6 +675,7 @@ class FastMomentumAlgorithm(BaseAlgorithm):
             price_symbols=sorted(set(strategy_config.symbols) | set(current_positions)),
             daily_lookback_days=strategy_config.required_daily_bars,
             intraday_lookback_bars=strategy_config.required_intraday_bars,
+            intraday_bar_minutes=strategy_config.intraday_bar_minutes,
             needs_sentiment=True,
             paper_only=True,
         )

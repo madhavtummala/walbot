@@ -528,3 +528,41 @@ def test_stocktwits_basic_auth_sentiment_endpoint(monkeypatch) -> None:
     assert records[0]["mentions"] == 42
     assert "Authorization" in captured["headers"]
     assert captured["url"].endswith("/SPY/detail")
+
+
+def test_the_ladder_fills_missing_symbols_from_the_next_provider() -> None:
+    """Per symbol, not per batch.
+
+    A provider that answered for most of the request used to win it outright, and the symbols
+    it had nothing for came back empty with no fallback attempted -- indistinguishable
+    downstream from a symbol with no history.
+    """
+    import pandas as pd
+
+    from src.connectors.service import _run_provider_fallback
+
+    def frame(value: float) -> pd.DataFrame:
+        return pd.DataFrame({"timestamp": [pd.Timestamp("2026-01-02", tz="UTC")], "close": [value]})
+
+    fetchers = {
+        "first": lambda: {"AAA": frame(1.0), "BBB": pd.DataFrame()},
+        "second": lambda: {"BBB": frame(2.0), "AAA": frame(99.0)},
+    }
+
+    bars = _run_provider_fallback(["AAA", "BBB"], ["first", "second"], fetchers, Config(), category="x", label="test")
+
+    assert float(bars["AAA"]["close"].iloc[0]) == 1.0, "the preferred provider keeps what it answered"
+    assert float(bars["BBB"]["close"].iloc[0]) == 2.0, "the gap is filled from the next one"
+
+
+def test_a_symbol_no_provider_can_answer_comes_back_empty() -> None:
+    import pandas as pd
+
+    from src.connectors.service import _run_provider_fallback
+
+    fetchers = {"only": lambda: {"AAA": pd.DataFrame({"timestamp": [pd.Timestamp("2026-01-02", tz="UTC")], "close": [1.0]})}}
+
+    bars = _run_provider_fallback(["AAA", "MISSING"], ["only"], fetchers, Config(), category="x", label="test")
+
+    assert not bars["AAA"].empty
+    assert bars["MISSING"].empty

@@ -1,24 +1,45 @@
 from __future__ import annotations
 
-from src.api import api_app
+import argparse
+
+from src.core.bot_runtime import _binding_enabled
 
 
-def test_runtime_mode_defaults_to_bot(monkeypatch) -> None:
-    monkeypatch.delenv(api_app.RUNTIME_MODE_ENV, raising=False)
+def test_there_is_no_process_wide_runtime_mode() -> None:
+    """Scheduled or agent-driven is a property of a deployment, not of the process.
 
-    assert api_app.runtime_mode() == "bot"
-    assert api_app.should_start_bot_runtime()
+    A --mcp process mode could only contradict the binding's own frequency, and it did: the
+    dashboard reported "MCP mode" with every algorithm switched off.
+    """
+    from src.api import api_app
+    from src import container_entrypoint
+
+    assert not hasattr(api_app, "runtime_mode")
+    assert not hasattr(api_app, "should_start_bot_runtime")
+    source = (container_entrypoint.__file__,)
+    text = open(source[0], encoding="utf-8").read()
+    assert "TRADING_RUNTIME_MODE" not in text
 
 
-def test_runtime_mode_can_disable_internal_bot_for_mcp(monkeypatch) -> None:
-    monkeypatch.setenv(api_app.RUNTIME_MODE_ENV, "mcp")
+def test_a_binding_parked_on_mcp_is_never_scheduled() -> None:
+    """It is switched on, but it waits for an external request rather than a clock."""
+    controls = {"bindings": [{"id": "b1", "strategy": "dca", "account_id": "paper",
+                              "enabled": True, "frequency": "mcp"}]}
 
-    assert api_app.runtime_mode() == "mcp"
-    assert not api_app.should_start_bot_runtime()
+    assert _binding_enabled("b1")(controls) is False
 
 
-def test_runtime_mode_falls_back_to_bot_for_unknown_values(monkeypatch) -> None:
-    monkeypatch.setenv(api_app.RUNTIME_MODE_ENV, "surprise")
+def test_a_binding_with_a_frequency_is_scheduled() -> None:
+    controls = {"bindings": [{"id": "b1", "strategy": "dca", "account_id": "paper",
+                              "enabled": True, "frequency": "15m"}]}
 
-    assert api_app.runtime_mode() == "bot"
-    assert api_app.should_start_bot_runtime()
+    assert _binding_enabled("b1")(controls) is True
+
+
+def test_the_mcp_server_is_started_unless_explicitly_disabled() -> None:
+    """It always runs, because an agent-driven binding needs something to call into."""
+    from src import container_entrypoint
+
+    text = open(container_entrypoint.__file__, encoding="utf-8").read()
+    assert "--no-mcp-server" in text
+    assert "if not args.no_mcp_server:" in text

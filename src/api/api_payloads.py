@@ -352,9 +352,14 @@ def positions_payload(account_id: str = "") -> dict[str, Any]:
         "rows": [],
         "error": "",
     }
-    # The local paper account keeps its own book and has no broker to ask.
-    if get_account_broker_type(config.account_id) == "paper":
+    # Routed by broker. Only the Alpaca path below is Alpaca-specific; anything else asking
+    # create_trading_client would silently report the *Alpaca* account's money under another
+    # account's name, which is what a Schwab account used to show.
+    broker = get_account_broker_type(config.account_id)
+    if broker == "paper":
         return {**payload, **_paper_positions(config)}
+    if broker != "alpaca":
+        return {**payload, **_brokerage_positions(config, broker)}
     try:
         client = create_trading_client(config)
         account = client.get_account()
@@ -506,6 +511,43 @@ def _paper_positions(config: Any) -> dict[str, Any]:
     }
 
 
+def _brokerage_positions(config: Any, broker: str) -> dict[str, Any]:
+    """Holdings and cash for any brokerage that is not Alpaca, through the shared interface.
+
+    The interface reports shares and account balances but no cost basis, so unrealised P/L is
+    left as None rather than filled with a zero that would read as break-even.
+    """
+    from ..core.pipeline import resolve_brokerage
+
+    try:
+        brokerage = resolve_brokerage(config)
+        state = brokerage.get_account_state()
+        holdings = brokerage.get_positions()
+    except Exception as error:  # noqa: BLE001 - an unreachable broker must not blank the page
+        logger.warning("Could not read %s positions for %s: %s", broker, config.account_id, error)
+        return {"error": str(error)}
+
+    prices = load_latest_prices(sorted(holdings), config, None) if holdings else {}
+    rows = [
+        {
+            "symbol": symbol,
+            "qty": float(shares),
+            "avg_entry_price": 0.0,
+            "market_value": float(shares) * float(prices.get(symbol, 0.0)),
+            "unrealized_pl": 0.0,
+            "unrealized_plpc": 0.0,
+        }
+        for symbol, shares in holdings.items()
+    ]
+    rows.sort(key=lambda row: abs(row["market_value"]), reverse=True)
+    return {
+        "equity": float(state.get("equity") or 0.0),
+        "cash": float(state.get("cash") or 0.0),
+        "total_pl": None,
+        "rows": rows,
+    }
+
+
 def _paper_activity(config: Any, limit: int) -> dict[str, Any]:
     """Order history for the local paper book, from the bot's own journal.
 
@@ -538,7 +580,12 @@ def account_activity_payload(account_id: str = "", limit: int = 40) -> dict[str,
     """
     config = get_config(account_id=account_id) if account_id else get_config()
     payload: dict[str, Any] = {"account_id": config.account_id, "rows": [], "error": ""}
-    if get_account_broker_type(config.account_id) == "paper":
+    broker = get_account_broker_type(config.account_id)
+    if broker == "paper":
+        return {**payload, **_paper_activity(config, limit)}
+    if broker != "alpaca":
+        # Only the bot's own journal is available for a non-Alpaca broker here; its order feed
+        # would need its own client, and reporting Alpaca's would name the wrong account.
         return {**payload, **_paper_activity(config, limit)}
     try:
         client = create_trading_client(config)
@@ -659,7 +706,17 @@ def controls_payload() -> dict[str, Any]:
 
 
 def schwab_auth_payload() -> dict[str, Any]:
-    return auth_status(get_config())
+    """Consent status, plus whether Schwab is wired up as a connector at all.
+
+    The dashboard shows the Schwab row when the *connector* is configured, not when consent
+    has been completed -- otherwise the one control that starts consent is hidden until after
+    consent, which is the wrong way round.
+    """
+    config = get_config()
+    connectors = set(getattr(config, "intraday_market_data_provider_order", []) or []) | set(
+        getattr(config, "eod_market_data_provider_order", []) or []
+    )
+    return {**auth_status(config), "connector_enabled": "schwab" in connectors}
 
 
 def start_schwab_auth_payload() -> dict[str, Any]:

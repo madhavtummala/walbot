@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,10 @@ ALPHA_VANTAGE_NEWS_LOOKBACK_DAYS = 30
 ALPHA_VANTAGE_NEWS_LIMIT = 50
 ALPHA_VANTAGE_MAX_SYMBOLS = 20
 ALPHA_VANTAGE_REQUEST_DELAY_SECONDS = 0.0
+#: One file holds every section. The per-section constants below are the pre-unification
+#: paths, kept because their env overrides still work and because an existing deployment is
+#: migrated from them on first start.
+CONFIG_FILE = "config/walbot.yaml"
 ACCOUNTS_FILE = "config/accounts.yaml"
 CONNECTORS_FILE = "config/connectors.yaml"
 ALGORITHMS_FILE = "config/algorithms.yaml"
@@ -116,18 +121,33 @@ def _load_yaml_file(config_path: Path) -> dict[str, Any]:
     return loaded
 
 
+def config_file_path(path: str | None = None) -> Path:
+    return _resolve_path(path or os.getenv("TRADING_CONFIG_FILE", CONFIG_FILE), CONFIG_FILE)
+
+
+def _section_path(path: str | None, env_name: str, legacy_default: str) -> Path:
+    """Where one section lives: the unified file, unless it is pointed somewhere explicitly.
+
+    Sections share a document because their top-level keys never collided, so every loader
+    still receives the shape it always did. An explicit path or the section's own env var
+    still wins -- tests bind individual sections to temp files, and the migration reads the
+    old ones.
+    """
+    if path or os.getenv(env_name):
+        return _resolve_path(path or os.getenv(env_name), legacy_default)
+    return config_file_path()
+
+
 def accounts_file_path(path: str | None = None) -> Path:
-    return _resolve_path(path or os.getenv("TRADING_ACCOUNTS_FILE", ACCOUNTS_FILE), ACCOUNTS_FILE)
+    return _section_path(path, "TRADING_ACCOUNTS_FILE", ACCOUNTS_FILE)
 
 
 def connectors_file_path(path: str | None = None) -> Path:
-    return _resolve_path(path or os.getenv("TRADING_CONNECTORS_FILE", CONNECTORS_FILE), CONNECTORS_FILE)
+    return _section_path(path, "TRADING_CONNECTORS_FILE", CONNECTORS_FILE)
 
 
 def _sibling_config_path(path: str | None, env_name: str, default: str) -> Path:
-    if path or os.getenv(env_name):
-        return _resolve_path(path or os.getenv(env_name), default)
-    return _resolve_path(default)
+    return _section_path(path, env_name, default)
 
 
 def algorithms_file_path(path: str | None = None) -> Path:
@@ -148,6 +168,39 @@ def dca_config_file_path(path: str | None = None) -> Path:
 
 def universe_file_path(path: str | None = None) -> Path:
     return _sibling_config_path(path, "TRADING_UNIVERSE_FILE", UNIVERSE_FILE)
+
+
+#: The seven files this configuration used to live in, in merge order.
+LEGACY_CONFIG_FILES = (
+    ACCOUNTS_FILE,
+    CONNECTORS_FILE,
+    UNIVERSE_FILE,
+    ALGORITHM_BOT_FILE,
+    ALGORITHMS_FILE,
+    DCA_BOT_FILE,
+    OPTIONS_BOT_FILE,
+)
+
+
+def migrate_legacy_config(directory: Path | None = None) -> Path | None:
+    """Fold pre-unification config files into the single document, once.
+
+    Returns the written path, or None when there is nothing to do. An existing deployment
+    keeps its tuning this way -- its DCA plan and per-account plans are in those files, and
+    seeding fresh defaults over them would quietly reset months of accrual.
+    """
+    target = config_file_path()
+    if target.exists():
+        return None
+    base = directory or target.parent
+    merged: dict[str, Any] = {}
+    for legacy in LEGACY_CONFIG_FILES:
+        source = base / Path(legacy).name
+        if source.is_file():
+            merged.update(_load_yaml_file(source))
+    if not merged:
+        return None
+    return _save_yaml_config(merged, target)
 
 
 def load_accounts_config(path: str | None = None) -> dict[str, Any]:
@@ -178,13 +231,26 @@ def load_universe_config(path: str | None = None) -> dict[str, Any]:
     return _load_yaml_file(universe_file_path(path))
 
 
+#: Serialises writes to the config document. Every saver is a read-modify-write of the whole
+#: file now that the sections share one, so two requests saving different sections would
+#: otherwise race and the loser's section would silently revert. FastAPI runs sync endpoints
+#: in a threadpool, so that is reachable, not theoretical.
+_CONFIG_WRITE_LOCK = threading.Lock()
+
+
 def _save_yaml_config(config: dict[str, Any], config_path: Path) -> Path:
     config_path.parent.mkdir(parents=True, exist_ok=True)
     if yaml is not None:
         content = yaml.safe_dump(config, sort_keys=False)
     else:
         content = _dump_simple_yaml(config)
-    config_path.write_text(content, encoding="utf-8")
+    with _CONFIG_WRITE_LOCK:
+        # Written through a temporary file in the same directory: a crash or a full disk
+        # leaves the previous config intact rather than a half-written one that fails to load
+        # and takes the account and binding definitions with it.
+        temporary = config_path.with_name(f".{config_path.name}.tmp")
+        temporary.write_text(content, encoding="utf-8")
+        os.replace(temporary, config_path)
     return config_path
 
 
@@ -649,7 +715,9 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
     news_sources = _section(data_sources, "news_sentiment")
     sentiment_sources = _section(data_sources, "sentiment_data")
 
-    kill_switch = _str_to_bool(str(_config_value(runtime, "kill_switch", "KILL_SWITCH", KILL_SWITCH)), KILL_SWITCH)
+    # Env only, deliberately. It is a deployment-level brake for an emergency, not a control
+    # the dashboard offers: whether an algorithm trades is its binding's own switch.
+    kill_switch = _str_to_bool(os.getenv("KILL_SWITCH"), KILL_SWITCH)
     api_key = _direct_or_env(account_config, "api_key", "api_key_env", "ALPACA_API_KEY")
     api_secret = _direct_or_env(account_config, "api_secret", "api_secret_env", "ALPACA_API_SECRET")
     alpaca_data_api_key = _provider_credential(

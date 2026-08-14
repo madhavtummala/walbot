@@ -547,7 +547,16 @@ def test_dca_backtest_never_spends_more_cash_than_it_has(monkeypatch) -> None:
 
 
 def test_defensive_momentum_signals_include_inactive_universe_rows(monkeypatch) -> None:
-    monkeypatch.setattr(market_context, "create_data_client", lambda config: object())
+    """Every configured symbol gets a row, including those holding no weight.
+
+    The context is constructed here rather than fetched: this used to patch the algorithm's
+    own fetch helpers, which the signal view no longer calls, so the assertions silently ran
+    against whatever the live cache held and flipped whenever the market moved.
+    """
+    from src.algorithms.fast_momentum import DefensiveMomentumConfig
+    from src.core import market_context
+    from src.core.config import get_config
+    from src.core.interfaces import AlgorithmContext
 
     def intraday(symbol: str) -> pd.DataFrame:
         step = 0.8 if symbol == "XSD" else -0.2 if symbol == "VXX" else 0.05
@@ -557,24 +566,30 @@ def test_defensive_momentum_signals_include_inactive_universe_rows(monkeypatch) 
         step = 0.5 if symbol in {"SPY", "XSD"} else -0.2 if symbol == "VXX" else 0.05
         return _strategy_bars([100 + index * step for index in range(220)])
 
-    monkeypatch.setattr(fast_momentum, "get_intraday_bars", lambda symbols, *_args, **_kwargs: {symbol: intraday(symbol) for symbol in symbols})
-    monkeypatch.setattr(fast_momentum, "get_daily_bars", lambda symbols, *_args, **_kwargs: {symbol: daily(symbol) for symbol in symbols})
-    monkeypatch.setattr(
-        fast_momentum,
-        "fetch_latest_news_sentiment",
-            lambda symbols, config: [
-                {"symbol": "SPY", "timestamp": pd.Timestamp.now(tz="UTC").isoformat(), "sentiment": 0.5, "provider": "stocktwits"},
-                {"symbol": "XSD", "timestamp": pd.Timestamp.now(tz="UTC").isoformat(), "sentiment": 0.3, "provider": "stocktwits"},
-            ],
-    )
+    def fake_context(config, requirements, **_kwargs) -> AlgorithmContext:
+        symbols = list(requirements.price_symbols)
+        return AlgorithmContext(
+            config=config,
+            bars_by_symbol={symbol: daily(symbol) for symbol in symbols},
+            intraday_bars_by_symbol={symbol: intraday(symbol) for symbol in symbols},
+            sentiment_scores={"SPY": 0.5, "XSD": 0.3},
+            latest_prices={symbol: float(daily(symbol)["close"].iloc[-1]) for symbol in symbols},
+        )
+
+    monkeypatch.setattr(market_context, "build_algorithm_context", fake_context)
 
     payload = strategy_signals_payload("fast_momentum")
 
+    # Derived from the configured universes rather than hard-coded, so editing them in
+    # walbot.yaml does not silently break this.
+    strategy_config = DefensiveMomentumConfig.from_runtime_config(get_config(strategy_id="fast_momentum"))
+    defensive = strategy_config.defensive_universe[0]
+
     by_symbol = {row["symbol"]: row for row in payload["leaders"]}
-    assert {"XSD", "BIL"} <= set(by_symbol)
-    assert by_symbol["XSD"]["signal"] == "LONG"
+    assert {"XSD", defensive} <= set(by_symbol)
+    assert by_symbol["XSD"]["signal"] == "LONG", "the steepest riser should be held"
     assert "score_components" in by_symbol["XSD"]
     assert payload["summary"][0]["value"] == "Dynamic rank"
-    assert by_symbol["BIL"]["reason"]
+    assert by_symbol[defensive]["reason"], "an unheld symbol still explains itself"
 
 
