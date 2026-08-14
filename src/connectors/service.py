@@ -33,6 +33,8 @@ EOD_MARKET_CATEGORY = "eod_market_data"
 NEWS_CATEGORY = "news_sentiment"
 SENTIMENT_CATEGORY = "sentiment_data"
 INTRADAY_CACHE_TTL_SECONDS = 900
+#: Minute frequencies Schwab's pricehistory endpoint accepts. Anything else is a 400.
+SCHWAB_MINUTE_FREQUENCIES = frozenset({1, 5, 10, 15, 30})
 EOD_CACHE_TTL_SECONDS = 1800
 EOD_BAR_FRESH_FOR_DAYS = 3
 
@@ -726,6 +728,13 @@ def fetch_schwab_intraday_bars(
         raise ValueError("lookback_bars must be positive")
     if bar_minutes <= 0:
         raise ValueError("bar_minutes must be positive")
+    # Schwab's pricehistory takes a fixed set of minute frequencies and 400s on anything else.
+    # Caught here so a mistyped grid names itself rather than surfacing as a provider error
+    # that the fallback chain would quietly swallow.
+    if int(bar_minutes) not in SCHWAB_MINUTE_FREQUENCIES:
+        raise ValueError(
+            f"Schwab supports {sorted(SCHWAB_MINUTE_FREQUENCIES)}-minute bars, not {int(bar_minutes)}"
+        )
     ttl_seconds = int(getattr(config, "intraday_market_data_cache_ttl_seconds", INTRADAY_CACHE_TTL_SECONDS))
     end = end_date or datetime.now(timezone.utc)
     trading_minutes_per_day = 390

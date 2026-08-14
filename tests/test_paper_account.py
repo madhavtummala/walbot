@@ -102,3 +102,38 @@ def test_activity_for_a_local_book_comes_from_the_bot_journal() -> None:
 
         assert [row["symbol"] for row in rows] == ["SPY"]
         assert rows[0]["filled_avg_price"] == 500.0
+
+
+def test_a_non_alpaca_account_is_not_reported_from_alpaca(monkeypatch) -> None:
+    """Only the Alpaca branch may use the Alpaca client.
+
+    A Schwab account fell through to it and displayed the *Alpaca* account's equity and P/L
+    under the Schwab account's name -- two accounts showing one balance, with nothing saying
+    which was real.
+    """
+    from src.api import api_payloads
+
+    class FakeBrokerage:
+        def get_account_state(self):
+            return {"equity": 4321.0, "cash": 321.0}
+
+        def get_positions(self):
+            return {"SPY": 3.0}
+
+    monkeypatch.setattr(api_payloads, "get_account_broker_type", lambda _account: "schwab")
+    monkeypatch.setattr("src.core.pipeline.resolve_brokerage", lambda _config: FakeBrokerage())
+    monkeypatch.setattr(api_payloads, "load_latest_prices", lambda symbols, config, client: {"SPY": 100.0})
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("the Alpaca client must not be used for a Schwab account")
+
+    monkeypatch.setattr(api_payloads, "create_trading_client", fail)
+
+    payload = api_payloads.positions_payload("schwab_individual")
+
+    assert payload["equity"] == 4321.0
+    assert payload["cash"] == 321.0
+    assert [row["symbol"] for row in payload["rows"]] == ["SPY"]
+    assert payload["rows"][0]["market_value"] == 300.0
+    # The interface carries no cost basis, so P/L stays absent rather than a misleading zero.
+    assert payload["total_pl"] is None

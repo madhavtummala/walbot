@@ -75,6 +75,10 @@ class DualMomentumConfig:
     risk_refresh_minutes: int = 15
 
     # -- selection score ------------------------------------------------------------------
+    #: The grid every ``selection_horizon_*`` below is counted on. 15 minutes is what those
+    #: horizons were fitted against, so changing it rescales all of them in wall-clock terms
+    #: (macro 320 is 12.3 sessions at 15m and 4.1 at 5m) -- backtest before moving it.
+    intraday_bar_minutes: int = 15
     selection_horizon_nano: int = 4
     selection_horizon_micro: int = 16
     selection_horizon_meso: int = 80
@@ -215,6 +219,7 @@ class DualMomentumConfig:
             benchmark=text("benchmark", defaults.benchmark),
             signal_refresh_minutes=integer("signal_refresh_minutes", defaults.signal_refresh_minutes),
             risk_refresh_minutes=integer("risk_refresh_minutes", defaults.risk_refresh_minutes),
+            intraday_bar_minutes=integer("intraday_bar_minutes", defaults.intraday_bar_minutes),
             selection_horizon_nano=integer("selection_horizon_nano", defaults.selection_horizon_nano),
             selection_horizon_micro=integer("selection_horizon_micro", defaults.selection_horizon_micro),
             selection_horizon_meso=integer("selection_horizon_meso", defaults.selection_horizon_meso),
@@ -1116,6 +1121,7 @@ class DualMomentumAlgorithm(BaseAlgorithm):
             daily_lookback_days=strategy_config.required_daily_bars,
             daily_ma_days=strategy_config.etf_ma_days,
             intraday_lookback_bars=strategy_config.required_intraday_bars,
+            intraday_bar_minutes=strategy_config.intraday_bar_minutes,
             needs_sentiment=strategy_config.uses_sentiment,
             # Unproven: keep it on paper until walk-forward results say otherwise.
             paper_only=True,
