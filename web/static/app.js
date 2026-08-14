@@ -1770,8 +1770,7 @@ function renderNavFooter() {
   footer.innerHTML = `${authRow}
     <span class="navHealth is-muted" title="${escapeHtml(runtime.detail)}">
       <span class="statusDot is-${runtime.status}" aria-hidden="true"></span>
-      <span class="navHealthLabel">${escapeHtml(runtime.label)}</span>
-      <span class="navHealthNote">${escapeHtml(runtime.note)}</span>
+      <span class="navHealthLabel">Bot</span>
     </span>`;
 }
 
@@ -1809,7 +1808,6 @@ function runtimeSummary() {
       : status === "idle"
         ? "Bot agent-driven"
         : "Bot off";
-  const note = lastRun ? formatActivityTime(lastRun) : "";
   const detail = error
     ? error
     : [
@@ -1822,7 +1820,9 @@ function runtimeSummary() {
         armed.length ? "" : "No algorithm is switched on",
         lastRun ? `Last run ${formatActivityTime(lastRun)}` : "No run yet",
       ].filter(Boolean).join(" · ");
-  return { status, label, note, detail };
+  // label and note are no longer rendered -- the dot says scheduled, agent-driven or off, and
+  // the words only repeated it. Both survive in the tooltip, where the detail belongs.
+  return { status, detail: `${label} -- ${detail}` };
 }
 
 // -- page frame --------------------------------------------------------------------------
