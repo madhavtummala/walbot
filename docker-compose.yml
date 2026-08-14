@@ -1,26 +1,53 @@
+# Walbot deployment: one image, one config file, one env file.
+#
+#   docker compose up -d
+#
+# There is no mode flag. The scheduler and the MCP tool server both start, and each
+# algorithm's own binding decides whether it is driven by a clock or by an agent.
 services:
   walbot:
     image: ${WALBOT_IMAGE:-ghcr.io/madhavtummala/walbot:latest}
     container_name: walbot
+    restart: unless-stopped
     pull_policy: ${WALBOT_PULL_POLICY:-always}
-    # Compose reads .env for ${...} substitution only -- without this the container gets none
-    # of the credentials, so Alpaca, Alpha Vantage and Schwab are all silently unconfigured
-    # inside it however complete the host's .env is.
+
+    # Compose reads .env for ${...} substitution only, so credentials have to be handed to the
+    # container explicitly. Alpaca, Alpha Vantage and Schwab all come from here.
     env_file:
       - .env
+
     environment:
-      KILL_SWITCH: ${KILL_SWITCH:-true}
-      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-*}
-      MCP_PORT: ${WALBOT_MCP_CONTAINER_PORT:-8001}
-    # No mode flag: the scheduler and the MCP server both run, and each binding decides
-    # whether it is driven by a clock or by an agent. The image's own CMD covers the rest.
+      # The one global brake, deliberately environment-only: it stops every order without
+      # needing the dashboard. Switching an individual algorithm on or off is the normal
+      # control, and lives per binding in walbot.yaml.
+      KILL_SWITCH: ${KILL_SWITCH:-false}
+      # The dashboard is same-origin with its own API, so it needs no cross-origin access.
+      # Leaving this as "*" lets any site you visit script this API through your browser.
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-http://localhost:${WALBOT_PORT:-9090}}
+
     ports:
-      # Loopback by default: the dashboard is unauthenticated, so it must not be reachable
-      # around the reverse proxy on the host's public IP. Set WALBOT_BIND=0.0.0.0 only for
-      # a trusted network with nothing in front. See Caddyfile.sample.
-      - "${WALBOT_BIND:-127.0.0.1}:${WALBOT_PORT:-8000}:8000"
-      - "${WALBOT_BIND:-127.0.0.1}:${WALBOT_MCP_PORT:-8001}:8001"
+      # Loopback by default: nothing here authenticates, so it must not be reachable around
+      # the reverse proxy on the host's LAN address. See Caddyfile.sample.
+      - "${WALBOT_BIND:-127.0.0.1}:${WALBOT_PORT:-9090}:8000"
+      - "${WALBOT_BIND:-127.0.0.1}:${WALBOT_MCP_PORT:-9091}:8001"
+
     volumes:
-      - ${WALBOT_RUNTIME:-./runtime}/config:/config
-      - ${WALBOT_RUNTIME:-./runtime}/data:/data
-    restart: unless-stopped
+      # config/ holds walbot.yaml -- seeded from the image on first start, and migrated from
+      # the older per-section files if the volume still has them. data/ holds the DuckDB
+      # store: price cache, Schwab token, DCA accrual, order journal.
+      - ${WALBOT_RUNTIME:-./walbot}/config:/config
+      - ${WALBOT_RUNTIME:-./walbot}/data:/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/status', timeout=3)\""]
+      interval: 60s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+# When Caddy runs as a container on the same host, put both on one network and let it reach
+# walbot by name: drop the ports block above and point the site block at walbot:8000.
+#
+# networks:
+#   caddy_network:
+#     external: true
