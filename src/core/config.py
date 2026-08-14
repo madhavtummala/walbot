@@ -55,6 +55,10 @@ ALPHA_VANTAGE_NEWS_LOOKBACK_DAYS = 30
 ALPHA_VANTAGE_NEWS_LIMIT = 50
 ALPHA_VANTAGE_MAX_SYMBOLS = 20
 ALPHA_VANTAGE_REQUEST_DELAY_SECONDS = 0.0
+#: One file holds every section. The per-section constants below are the pre-unification
+#: paths, kept because their env overrides still work and because an existing deployment is
+#: migrated from them on first start.
+CONFIG_FILE = "config/walbot.yaml"
 ACCOUNTS_FILE = "config/accounts.yaml"
 CONNECTORS_FILE = "config/connectors.yaml"
 ALGORITHMS_FILE = "config/algorithms.yaml"
@@ -116,18 +120,33 @@ def _load_yaml_file(config_path: Path) -> dict[str, Any]:
     return loaded
 
 
+def config_file_path(path: str | None = None) -> Path:
+    return _resolve_path(path or os.getenv("TRADING_CONFIG_FILE", CONFIG_FILE), CONFIG_FILE)
+
+
+def _section_path(path: str | None, env_name: str, legacy_default: str) -> Path:
+    """Where one section lives: the unified file, unless it is pointed somewhere explicitly.
+
+    Sections share a document because their top-level keys never collided, so every loader
+    still receives the shape it always did. An explicit path or the section's own env var
+    still wins -- tests bind individual sections to temp files, and the migration reads the
+    old ones.
+    """
+    if path or os.getenv(env_name):
+        return _resolve_path(path or os.getenv(env_name), legacy_default)
+    return config_file_path()
+
+
 def accounts_file_path(path: str | None = None) -> Path:
-    return _resolve_path(path or os.getenv("TRADING_ACCOUNTS_FILE", ACCOUNTS_FILE), ACCOUNTS_FILE)
+    return _section_path(path, "TRADING_ACCOUNTS_FILE", ACCOUNTS_FILE)
 
 
 def connectors_file_path(path: str | None = None) -> Path:
-    return _resolve_path(path or os.getenv("TRADING_CONNECTORS_FILE", CONNECTORS_FILE), CONNECTORS_FILE)
+    return _section_path(path, "TRADING_CONNECTORS_FILE", CONNECTORS_FILE)
 
 
 def _sibling_config_path(path: str | None, env_name: str, default: str) -> Path:
-    if path or os.getenv(env_name):
-        return _resolve_path(path or os.getenv(env_name), default)
-    return _resolve_path(default)
+    return _section_path(path, env_name, default)
 
 
 def algorithms_file_path(path: str | None = None) -> Path:
@@ -148,6 +167,39 @@ def dca_config_file_path(path: str | None = None) -> Path:
 
 def universe_file_path(path: str | None = None) -> Path:
     return _sibling_config_path(path, "TRADING_UNIVERSE_FILE", UNIVERSE_FILE)
+
+
+#: The seven files this configuration used to live in, in merge order.
+LEGACY_CONFIG_FILES = (
+    ACCOUNTS_FILE,
+    CONNECTORS_FILE,
+    UNIVERSE_FILE,
+    ALGORITHM_BOT_FILE,
+    ALGORITHMS_FILE,
+    DCA_BOT_FILE,
+    OPTIONS_BOT_FILE,
+)
+
+
+def migrate_legacy_config(directory: Path | None = None) -> Path | None:
+    """Fold pre-unification config files into the single document, once.
+
+    Returns the written path, or None when there is nothing to do. An existing deployment
+    keeps its tuning this way -- its DCA plan and per-account plans are in those files, and
+    seeding fresh defaults over them would quietly reset months of accrual.
+    """
+    target = config_file_path()
+    if target.exists():
+        return None
+    base = directory or target.parent
+    merged: dict[str, Any] = {}
+    for legacy in LEGACY_CONFIG_FILES:
+        source = base / Path(legacy).name
+        if source.is_file():
+            merged.update(_load_yaml_file(source))
+    if not merged:
+        return None
+    return _save_yaml_config(merged, target)
 
 
 def load_accounts_config(path: str | None = None) -> dict[str, Any]:
