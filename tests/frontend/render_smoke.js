@@ -38,7 +38,7 @@ const PAYLOADS = {
   "/api/positions": { account_id: "paper", equity: 100, cash: 10, day_pl: 1, day_pl_percent: 0.01, total_pl: 2, rows: [], error: "" },
   "/api/activity": { account_id: "paper", rows: [], error: "" },
   "/api/algorithm-activity": { strategy: "dca", rows: [{ submitted_at: "2026-08-13T14:00:00+00:00", strategy: "dca", account_id: "paper", symbol: "SPY", side: "buy", quantity: 2, status: "submitted", reason: "" }] },
-  "/api/schwab/auth": { configured: false, state: "unconfigured", detail: "" },
+  "/api/schwab/auth": { configured: false, connector_enabled: true, state: "unconfigured", detail: "Schwab is not configured: missing SCHWAB_APP_KEY." },
   "/api/algorithm-config": { strategy: "fast_momentum", config_key: "fast_momentum", config: { max_positions: 4 } },
 };
 global.fetch = async (url) => {
