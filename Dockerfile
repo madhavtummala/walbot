@@ -3,13 +3,7 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PORT=8000 \
-    TRADING_ACCOUNTS_FILE=/config/accounts.yaml \
-    TRADING_CONNECTORS_FILE=/config/connectors.yaml \
-    TRADING_ALGORITHM_BOT_FILE=/config/algorithm_bot.yaml \
-    TRADING_ALGORITHMS_FILE=/config/algorithms.yaml \
-    TRADING_OPTIONS_BOT_FILE=/config/options_bot.yaml \
-    TRADING_DCA_BOT_FILE=/config/dca_bot.yaml \
-    TRADING_UNIVERSE_FILE=/config/universe.yaml \
+    TRADING_CONFIG_FILE=/config/walbot.yaml \
     STATE_DUCKDB_PATH=/data/walbot.duckdb \
     TRADABLES_CSV=/app/data/tradable_etfs.csv \
     ALPHA_VANTAGE_NEWS_CSV=/data/social_trends.csv

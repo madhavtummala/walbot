@@ -15,35 +15,32 @@ import uvicorn
 #: are invisible at runtime and a fresh volume starts completely empty.
 CONFIG_DEFAULTS_DIR = Path(os.getenv("CONFIG_DEFAULTS_DIR", "/app/config-defaults"))
 
-#: Env var naming each config file, with the filename to seed it from.
-CONFIG_FILES = {
-    "TRADING_ACCOUNTS_FILE": "accounts.yaml",
-    "TRADING_CONNECTORS_FILE": "connectors.yaml",
-    "TRADING_ALGORITHM_BOT_FILE": "algorithm_bot.yaml",
-    "TRADING_ALGORITHMS_FILE": "algorithms.yaml",
-    "TRADING_OPTIONS_BOT_FILE": "options_bot.yaml",
-    "TRADING_DCA_BOT_FILE": "dca_bot.yaml",
-    "TRADING_UNIVERSE_FILE": "universe.yaml",
-}
+CONFIG_FILENAME = "walbot.yaml"
 
 
-def seed_config_defaults() -> list[Path]:
-    """Copy any config file the mounted volume is missing, and return what was seeded.
+def prepare_config() -> str:
+    """Make sure the mounted volume has a config file, and say what was done.
 
-    Only fills gaps: a file already on the volume is left alone, because the dashboard writes
-    tuning back to these same paths and a redeploy must not discard it. The corollary is that
-    an existing volume does not pick up new defaults -- delete a file to have it reseeded.
+    Three cases, in order: an existing unified file is left alone; a volume still holding the
+    seven pre-unification files is migrated into one, preserving tuning and DCA accrual; an
+    empty volume is seeded from the image defaults.
     """
-    seeded: list[Path] = []
-    for env_name, filename in CONFIG_FILES.items():
-        source = CONFIG_DEFAULTS_DIR / filename
-        target = Path(os.getenv(env_name) or f"/config/{filename}")
-        if not source.is_file() or target.exists():
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, target)
-        seeded.append(target)
-    return seeded
+    from src.core.config import config_file_path, migrate_legacy_config
+
+    target = config_file_path()
+    if target.exists():
+        return ""
+
+    migrated = migrate_legacy_config()
+    if migrated is not None:
+        return f"Merged the previous per-section config files into {migrated}"
+
+    source = CONFIG_DEFAULTS_DIR / CONFIG_FILENAME
+    if not source.is_file():
+        return ""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, target)
+    return f"Seeded {target} from the image defaults"
 
 
 def _start_mcp_server(host: str, port: int, transport: str) -> subprocess.Popen:
@@ -81,8 +78,9 @@ def main() -> None:
     runtime_mode = "mcp" if args.mcp else "bot"
     os.environ["TRADING_RUNTIME_MODE"] = runtime_mode
 
-    for path in seed_config_defaults():
-        print(f"Seeded {path} from the image defaults", flush=True)
+    note = prepare_config()
+    if note:
+        print(note, flush=True)
 
     mcp_process: subprocess.Popen | None = None
     try:

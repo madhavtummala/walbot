@@ -2,50 +2,58 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.container_entrypoint import CONFIG_FILES, seed_config_defaults
+import yaml
+
+from src.container_entrypoint import CONFIG_FILENAME, prepare_config
 
 
-def _defaults(tmp_path: Path) -> Path:
-    source = tmp_path / "defaults"
-    source.mkdir()
-    for filename in CONFIG_FILES.values():
-        (source / filename).write_text(f"# shipped {filename}\n", encoding="utf-8")
-    return source
-
-
-def _point_env(monkeypatch, defaults: Path, target_dir: Path) -> None:
+def _bind(monkeypatch, defaults: Path, target: Path) -> None:
     monkeypatch.setattr("src.container_entrypoint.CONFIG_DEFAULTS_DIR", defaults)
-    for env_name, filename in CONFIG_FILES.items():
-        monkeypatch.setenv(env_name, str(target_dir / filename))
+    monkeypatch.setenv("TRADING_CONFIG_FILE", str(target))
 
 
 def test_an_empty_volume_is_seeded_from_the_image(tmp_path, monkeypatch) -> None:
     """A bind mount shadows whatever the image baked into /config, so it starts empty."""
-    target = tmp_path / "config"
-    _point_env(monkeypatch, _defaults(tmp_path), target)
+    defaults = tmp_path / "defaults"
+    defaults.mkdir()
+    (defaults / CONFIG_FILENAME).write_text("algorithms: {dca: {}}\n", encoding="utf-8")
+    target = tmp_path / "config" / CONFIG_FILENAME
+    _bind(monkeypatch, defaults, target)
 
-    seeded = seed_config_defaults()
+    note = prepare_config()
 
-    assert {path.name for path in seeded} == set(CONFIG_FILES.values())
-    assert (target / "algorithms.yaml").read_text(encoding="utf-8") == "# shipped algorithms.yaml\n"
-
-
-def test_seeding_never_overwrites_what_the_volume_already_has(tmp_path, monkeypatch) -> None:
-    """The dashboard writes tuning to these paths; a redeploy must not discard it."""
-    target = tmp_path / "config"
-    target.mkdir()
-    (target / "algorithms.yaml").write_text("# tuned by hand\n", encoding="utf-8")
-    _point_env(monkeypatch, _defaults(tmp_path), target)
-
-    seeded = seed_config_defaults()
-
-    assert (target / "algorithms.yaml").read_text(encoding="utf-8") == "# tuned by hand\n"
-    assert Path(target / "algorithms.yaml") not in seeded
-    # Everything else it was missing still arrives.
-    assert (target / "accounts.yaml").exists()
+    assert "Seeded" in note
+    assert yaml.safe_load(target.read_text()) == {"algorithms": {"dca": {}}}
 
 
-def test_seeding_is_a_no_op_without_shipped_defaults(tmp_path, monkeypatch) -> None:
-    _point_env(monkeypatch, tmp_path / "absent", tmp_path / "config")
+def test_a_volume_from_before_the_merge_is_migrated_not_overwritten(tmp_path, monkeypatch) -> None:
+    """Those files hold the DCA plan and accrual; seeding over them would reset months."""
+    defaults = tmp_path / "defaults"
+    defaults.mkdir()
+    (defaults / CONFIG_FILENAME).write_text("algorithms: {shipped: true}\n", encoding="utf-8")
+    volume = tmp_path / "config"
+    volume.mkdir()
+    (volume / "accounts.yaml").write_text("default: live\naccounts: {items: {live: {}}}\n", encoding="utf-8")
+    (volume / "dca_bot.yaml").write_text("dca_bot: {dca_plan: {buy: {amount: 900}}}\n", encoding="utf-8")
+    _bind(monkeypatch, defaults, volume / CONFIG_FILENAME)
 
-    assert seed_config_defaults() == []
+    note = prepare_config()
+
+    merged = yaml.safe_load((volume / CONFIG_FILENAME).read_text())
+    assert "Merged" in note
+    assert merged["default"] == "live"
+    assert merged["dca_bot"]["dca_plan"]["buy"]["amount"] == 900
+    assert "shipped" not in merged.get("algorithms", {}), "the image must not overwrite tuning"
+
+
+def test_an_existing_unified_file_is_left_alone(tmp_path, monkeypatch) -> None:
+    defaults = tmp_path / "defaults"
+    defaults.mkdir()
+    (defaults / CONFIG_FILENAME).write_text("algorithms: {shipped: true}\n", encoding="utf-8")
+    target = tmp_path / "config" / CONFIG_FILENAME
+    target.parent.mkdir()
+    target.write_text("algorithms: {mine: true}\n", encoding="utf-8")
+    _bind(monkeypatch, defaults, target)
+
+    assert prepare_config() == ""
+    assert yaml.safe_load(target.read_text()) == {"algorithms": {"mine": True}}
