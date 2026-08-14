@@ -29,13 +29,9 @@ RUN pip install --no-cache-dir --no-compile -r requirements.txt
 COPY src ./src
 COPY web ./web
 COPY data/tradable_etfs.csv ./data/tradable_etfs.csv
-COPY --chown=app:app config/accounts.yaml /config/accounts.yaml
-COPY --chown=app:app config/connectors.yaml /config/connectors.yaml
-COPY --chown=app:app config/algorithm_bot.yaml /config/algorithm_bot.yaml
-COPY --chown=app:app config/algorithms.yaml /config/algorithms.yaml
-COPY --chown=app:app config/options_bot.yaml /config/options_bot.yaml
-COPY --chown=app:app config/dca_bot.yaml /config/dca_bot.yaml
-COPY --chown=app:app config/universe.yaml /config/universe.yaml
+# Shipped defaults live outside /config: that path is bind-mounted at runtime, which
+# shadows anything baked into it. The entrypoint seeds missing files from here.
+COPY --chown=app:app config/ ./config-defaults/
 
 USER app
 EXPOSE 8000
