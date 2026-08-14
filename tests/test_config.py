@@ -371,3 +371,32 @@ def test_the_kill_switch_is_an_environment_brake_not_a_config_key(tmp_path, monk
 
     monkeypatch.setenv("KILL_SWITCH", "true")
     assert get_config().kill_switch is True
+
+
+def test_the_tradable_universe_covers_every_symbol_an_algorithm_can_hold() -> None:
+    """It drifted: it still listed names dropped for illiquidity and missed ten being traded.
+
+    This list decides what the Universe view shows and what gets priced when an algorithm
+    does not declare its own symbols, so a gap there is a symbol nobody fetches.
+    """
+    import yaml
+
+    from src.core.config import config_file_path
+
+    document = yaml.safe_load(config_file_path().read_text(encoding="utf-8"))
+    algorithms = document["algorithms"]
+
+    held: set[str] = set()
+    for key in ("dual_momentum", "fast_momentum"):
+        section = algorithms[key]
+        held |= set(section["risk_on_universe"]) | set(section["defensive_universe"])
+        held.add(section.get("benchmark"))
+    rotation = algorithms.get("invest_spy", {})
+    for key in ("equity_income_universe", "defensive_universe", "crisis_hedge_universe"):
+        held |= set(rotation.get(key) or [])
+    held.add(rotation.get("spy_symbol"))
+    held.discard(None)
+
+    universe = set(document["tradable_universe"]["symbols"])
+
+    assert held <= universe, f"tradable_universe is missing {sorted(held - universe)}"
