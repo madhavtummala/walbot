@@ -137,6 +137,14 @@ class DualMomentumConfig:
     # -- sizing and risk ------------------------------------------------------------------
     name_weight_max: float = 0.35
     risk_on_gross_max: float = 1.0
+    #: Divide each weight by the symbol's own volatility. It equalises risk contribution, but
+    #: in a trending market it systematically underweights exactly the names doing the work:
+    #: the highest-volatility themes are usually the ones leading.
+    #:
+    #: Off by default because turning it off was a strict improvement on full-coverage replay
+    #: -- more return, *less* drawdown and a better Sharpe across 6M, 4M and 3M. Combined with
+    #: risk_adjusted_score, this algorithm was neutralising volatility twice.
+    inverse_vol_sizing: bool = False
     #: A crash brake, not a governor. The spec's 12% target was written for a diversified
     #: book; against a 23-58% volatility ETF universe it would scale the portfolio to 28-55%
     #: invested *permanently*, which is a large structural drag on a strategy whose whole
@@ -239,6 +247,7 @@ class DualMomentumConfig:
             sentiment_clip=number("sentiment_clip", defaults.sentiment_clip),
             sentiment_lookback_minutes=integer("sentiment_lookback_minutes", defaults.sentiment_lookback_minutes),
             name_weight_max=number("name_weight_max", defaults.name_weight_max),
+            inverse_vol_sizing=flag("inverse_vol_sizing", defaults.inverse_vol_sizing),
             risk_on_gross_max=number("risk_on_gross_max", defaults.risk_on_gross_max),
             target_portfolio_vol=number("target_portfolio_vol", defaults.target_portfolio_vol),
             vol_estimation_days=integer("vol_estimation_days", defaults.vol_estimation_days),
@@ -717,7 +726,7 @@ def score_to_weights(rows: list[dict[str, Any]], config: DualMomentumConfig) -> 
     for row in rows:
         excess = max(float(row.get("base_score", 0.0)) - config.min_base_score, 0.0)
         volatility = float(row.get("annual_volatility", 0.0))
-        raw[str(row["symbol"])] = excess / (volatility + EPSILON)
+        raw[str(row["symbol"])] = excess / (volatility + EPSILON) if config.inverse_vol_sizing else excess
 
     total = sum(raw.values())
     if total <= EPSILON:

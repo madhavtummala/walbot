@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -230,13 +231,26 @@ def load_universe_config(path: str | None = None) -> dict[str, Any]:
     return _load_yaml_file(universe_file_path(path))
 
 
+#: Serialises writes to the config document. Every saver is a read-modify-write of the whole
+#: file now that the sections share one, so two requests saving different sections would
+#: otherwise race and the loser's section would silently revert. FastAPI runs sync endpoints
+#: in a threadpool, so that is reachable, not theoretical.
+_CONFIG_WRITE_LOCK = threading.Lock()
+
+
 def _save_yaml_config(config: dict[str, Any], config_path: Path) -> Path:
     config_path.parent.mkdir(parents=True, exist_ok=True)
     if yaml is not None:
         content = yaml.safe_dump(config, sort_keys=False)
     else:
         content = _dump_simple_yaml(config)
-    config_path.write_text(content, encoding="utf-8")
+    with _CONFIG_WRITE_LOCK:
+        # Written through a temporary file in the same directory: a crash or a full disk
+        # leaves the previous config intact rather than a half-written one that fails to load
+        # and takes the account and binding definitions with it.
+        temporary = config_path.with_name(f".{config_path.name}.tmp")
+        temporary.write_text(content, encoding="utf-8")
+        os.replace(temporary, config_path)
     return config_path
 
 

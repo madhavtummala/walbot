@@ -284,6 +284,7 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "sentiment_size_scale": {"what": "Coefficient on sentiment as a position-size modifier.", "effect": "0.05 with a clip of 2 gives at most a 10% size change. It can never create a position price logic rejected."},
             "sentiment_clip": {"what": "Cap on the normalised sentiment input.", "effect": "Bounds how much a single loud news cycle can move either sentiment term."},
             "sentiment_lookback_minutes": {"what": "How recent a story must be to count.", "effect": "Longer keeps stale headlines alive in the score; shorter makes sentiment sparse."},
+            "inverse_vol_sizing": {"what": "Divide each weight by that symbol's own volatility.", "effect": "On, risk is spread evenly and the calm names get the big positions. Off, weight follows score alone, which concentrates into the volatile leaders -- more return in a trend, more damage in a reversal."},
             "name_weight_max": {"what": "Cap on any one ETF before portfolio scaling.", "effect": "Binds before max_positions when few names qualify."},
             "risk_on_gross_max": {"what": "Cap on total invested fraction of equity.", "effect": "Below 1.0 it always holds cash. The simplest single lever on overall risk."},
             "target_portfolio_vol": {"what": "Annualised ex-ante volatility target.", "effect": "Lower means smaller positions in volatile markets. A risk budget, not a return booster."},
