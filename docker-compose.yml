@@ -3,6 +3,11 @@ services:
     image: ${WALBOT_IMAGE:-ghcr.io/madhavtummala/walbot:latest}
     container_name: walbot
     pull_policy: ${WALBOT_PULL_POLICY:-always}
+    # Compose reads .env for ${...} substitution only -- without this the container gets none
+    # of the credentials, so Alpaca, Alpha Vantage and Schwab are all silently unconfigured
+    # inside it however complete the host's .env is.
+    env_file:
+      - .env
     environment:
       KILL_SWITCH: ${KILL_SWITCH:-true}
       CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-*}

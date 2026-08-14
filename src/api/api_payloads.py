@@ -659,7 +659,17 @@ def controls_payload() -> dict[str, Any]:
 
 
 def schwab_auth_payload() -> dict[str, Any]:
-    return auth_status(get_config())
+    """Consent status, plus whether Schwab is wired up as a connector at all.
+
+    The dashboard shows the Schwab row when the *connector* is configured, not when consent
+    has been completed -- otherwise the one control that starts consent is hidden until after
+    consent, which is the wrong way round.
+    """
+    config = get_config()
+    connectors = set(getattr(config, "intraday_market_data_provider_order", []) or []) | set(
+        getattr(config, "eod_market_data_provider_order", []) or []
+    )
+    return {**auth_status(config), "connector_enabled": "schwab" in connectors}
 
 
 def start_schwab_auth_payload() -> dict[str, Any]:

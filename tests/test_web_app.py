@@ -360,3 +360,24 @@ def test_account_page_shows_broker_order_activity_beside_positions() -> None:
     assert "Positions" in page
     assert "ensureActivity(account.id)" in page
     assert "/api/activity?account_id=" in app_js
+
+
+def test_the_schwab_row_appears_for_a_configured_connector_not_a_completed_consent() -> None:
+    """The row is the control that starts consent, so hiding it until connected is backwards."""
+    app_js, _, _ = _assets()
+
+    assert "auth?.connector_enabled || auth?.configured" in app_js
+    # Clicking it without credentials explains what is missing instead of failing silently.
+    connect = app_js[app_js.index("async function connectSchwab"):]
+    assert "!state.schwabAuth.configured" in connect
+    assert "showToast(state.schwabAuth.detail" in connect
+
+
+def test_schwab_auth_payload_reports_whether_the_connector_is_wired_up() -> None:
+    from src.api.api_payloads import schwab_auth_payload
+
+    payload = schwab_auth_payload()
+
+    assert "connector_enabled" in payload
+    # connectors.yaml lists schwab in both ladders.
+    assert payload["connector_enabled"] is True
