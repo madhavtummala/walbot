@@ -1,22 +1,32 @@
 data_sources:
+  # Provider order is the key order below, and it is a fallback ladder: each is tried in turn
+  # and the first non-empty result wins, so an unauthorized or failing provider costs only a
+  # log line. Schwab needs no key here -- it uses the OAuth session whenever SCHWAB_APP_KEY
+  # and a refresh token are present, and raises ProviderUnavailable until then.
   intraday_market_data:
     providers:
+      # First: no rate limits, and yfinance caps 15-minute history at ~60 days, which is what
+      # limits backtest windows today. Dividends are irrelevant at this bar size, so there is
+      # nothing to verify before preferring it.
+      schwab: {}
       yfinance: {}
       # alpaca: {}
       # finnhub:
       #   api_key_env: FINNHUB_API_KEY
-      # schwab:
-      #   access_token_env: SCHWAB_ACCESS_TOKEN
   eod_market_data:
     providers:
+      # Alpaca stays first deliberately: it is fetched with Adjustment.ALL, so its daily bars
+      # are total return. SGOV shows its ~3.8% yield rather than a flat sawtooth, and every
+      # backtest depends on that. Schwab sits last until `python -m
+      # src.brokerages.schwab_datacheck` confirms its closes are dividend-adjusted; promote it
+      # above alpaca only after that passes.
       alpaca:
         api_key_env: ALPACA_API_KEY
         api_secret_env: ALPACA_API_SECRET
       yfinance: {}
+      schwab: {}
       # finnhub:
       #   api_key_env: FINNHUB_API_KEY
-      # schwab:
-      #   access_token_env: SCHWAB_ACCESS_TOKEN
   sentiment_data:
     providers:
       # newsapi:
