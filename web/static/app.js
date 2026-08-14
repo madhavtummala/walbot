@@ -1783,10 +1783,11 @@ function runtimeSummary() {
   const loops = Object.values(bot.bindings || {});
   if (!loops.length && bot.algorithm) loops.push(bot.algorithm);
 
-  if (state.status?.runtime_mode === "mcp") {
-    return { status: "off", label: "MCP mode", note: "agent-driven", detail: "Scheduler disabled; the MCP agent drives runs." };
-  }
-
+  // Deliberately not keyed on the container's runtime mode. That only says an MCP server was
+  // started alongside the dashboard; it says nothing about whether any algorithm is on, and
+  // reporting "MCP mode" with everything switched off described the process rather than the
+  // bot. What runs is decided per binding: switched on with a frequency, or switched on and
+  // parked on "mcp" to wait for an external request.
   const running = loops.filter((loop) => loop.running);
   const armed = bindings().filter((binding) => binding.enabled);
   // The bot pill takes the same colour as the algorithms: green while anything is on a
