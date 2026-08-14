@@ -12,6 +12,10 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.api.api_payloads import (
+    account_activity_payload,
+    accounts_payload,
+    algorithm_activity_payload,
+    algorithm_config_payload,
     apply_universe_payload,
     backtest_payload,
     complete_schwab_auth_payload,
@@ -20,13 +24,19 @@ from src.api.api_payloads import (
     recommend_universe_payload,
     refresh_social_payload,
     save_controls_payload,
+    delete_account_payload,
+    save_account_payload,
+    save_algorithm_config_payload,
+    save_watchlist_payload,
     save_dca_payload,
     schwab_auth_payload,
+    positions_payload,
     social_payload,
     start_schwab_auth_payload,
     status_payload,
     strategy_signals_payload,
     universe_payload,
+    watchlist_payload,
 )
 from ..brokerages.schwab_client import SchwabAuthError
 from ..core.bot_runtime import bot_runtime
@@ -119,8 +129,8 @@ def apply_universe(body: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.get("/api/dca")
-def dca() -> dict[str, Any]:
-    return dca_payload()
+def dca(account_id: str = Query(default="", max_length=80)) -> dict[str, Any]:
+    return dca_payload(account_id=account_id)
 
 
 @app.post("/api/dca")
@@ -156,6 +166,79 @@ def refresh_social(body: dict[str, Any]) -> dict[str, Any]:
 @app.post("/api/backtest")
 def backtest(body: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
     return backtest_payload(body)
+
+
+@app.get("/api/watchlist")
+def watchlist() -> dict[str, Any]:
+    return watchlist_payload()
+
+
+@app.post("/api/watchlist")
+def save_watchlist(body: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return save_watchlist_payload(body.get("symbols"))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.get("/api/accounts")
+def accounts() -> dict[str, Any]:
+    return accounts_payload()
+
+
+@app.post("/api/accounts")
+def save_account(body: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return save_account_payload(body)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.delete("/api/accounts/{account_id}")
+def delete_account(account_id: str) -> dict[str, Any]:
+    try:
+        return delete_account_payload(account_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.get("/api/algorithm-config")
+def algorithm_config(strategy: str = Query(default=DEFAULT_STRATEGY_ID, max_length=80)) -> dict[str, Any]:
+    return algorithm_config_payload(strategy)
+
+
+@app.post("/api/algorithm-config")
+def save_algorithm_config(body: dict[str, Any]) -> dict[str, Any]:
+    try:
+        # Passing a non-object through as {} would silently wipe the saved tuning, so the
+        # bad shape has to reach save_algorithm_config_payload and be rejected there.
+        return save_algorithm_config_payload(
+            str(body.get("strategy") or DEFAULT_STRATEGY_ID),
+            body.get("config"),
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.get("/api/activity")
+def activity(
+    account_id: str = Query(default="", max_length=80),
+    limit: int = Query(default=40, ge=1, le=200),
+) -> dict[str, Any]:
+    return account_activity_payload(account_id=account_id, limit=limit)
+
+
+@app.get("/api/algorithm-activity")
+def algorithm_activity(
+    strategy: str = Query(default=DEFAULT_STRATEGY_ID, max_length=80),
+    limit: int = Query(default=40, ge=1, le=200),
+) -> dict[str, Any]:
+    return algorithm_activity_payload(strategy=strategy, limit=limit)
+
+
+@app.get("/api/positions")
+def positions(account_id: str = Query(default="", max_length=80)) -> dict[str, Any]:
+    return positions_payload(account_id)
 
 
 @app.get("/api/schwab/auth")

@@ -95,7 +95,8 @@ class DCAAlgorithm(BaseAlgorithm):
     def plan(self, config: Any) -> dict[str, Any]:
         from ...api.api_payloads import universe_payload
 
-        return load_dca_plan(universe_payload()["rows"])
+        # The plan is this account's config, so it must be read for the account being traded.
+        return load_dca_plan(universe_payload()["rows"], account_id=str(getattr(config, "account_id", "") or ""))
 
     def requirements(self, config: Any, current_positions: dict[str, int]) -> AlgorithmRequirements:
         return AlgorithmRequirements(price_symbols=sorted(plan_budgets(self.plan(config))))

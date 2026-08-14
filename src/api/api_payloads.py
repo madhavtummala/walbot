@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import logging
 import re
-from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from dataclasses import asdict
 from pathlib import Path
@@ -12,36 +12,36 @@ from typing import Any
 import pandas as pd
 
 from ..connectors.sentiment.alpha_vantage import collect_alpha_vantage_news, write_social_trends_csv
-from ..brokerages.alpaca_client import create_data_client, create_trading_client, get_account_equity, get_positions
+from alpaca.trading.enums import QueryOrderStatus
+from alpaca.trading.requests import GetOrdersRequest
+
+from ..brokerages.alpaca_client import create_data_client, create_trading_client
+from ..brokerages.providers.paper import PaperBrokerage
 from ..brokerages.schwab_auth import auth_status, begin_authorization, complete_authorization
 from ..data import fetch_daily_bars
 from ..execution.backtest import calculate_performance_metrics
 from ..execution.replay import replay
 from ..core.bot_runtime import bot_runtime
-from ..core.config import DEFAULT_STRATEGY_ID, get_config, save_universe_symbols
-from ..core.interfaces import Schedule
-from ..algorithms.registry import canonical_algorithm_id, get_algorithm_class
-from ..connectors import fetch_latest_news_sentiment
+from ..core.config import (
+    DEFAULT_STRATEGY_ID,
+    get_account_broker_type,
+    get_config,
+    load_accounts_config,
+    save_accounts_config,
+    load_algorithms_config,
+    save_algorithms_config,
+    save_universe_symbols,
+)
+from ..algorithms.explainers import explainer_for
+from ..algorithms.registry import LEGACY_ALGORITHM_IDS, canonical_algorithm_id, get_algorithm_class
 from src.api.controls import load_controls, save_controls
 from ..algorithms.dca import DCA_ALGORITHMS, allocation_preview, load_dca_plan, save_dca_plan
-from ..algorithms.dca.accrual import HOURS_IN_MONTH, min_executable
+from ..data.order_journal import load_order_journal
 from ..data.social import load_social_trends_csv
+from ..core.market_context import load_latest_prices
 from ..data.duckdb_store import read_market_bars
 from ..data.state_store import load_state, save_state
 from ..core.strategy_models import STRATEGY_LABELS, prepared_strategy_frame
-from ..algorithms.fast_momentum import (
-    DefensiveMomentumConfig,
-    compute_composite_scores,
-    compute_price_features,
-    decide_target_weights,
-)
-from ..algorithms.invest_spy import (
-    InvestSpyConfig,
-    classify_spy_state,
-    compute_invest_spy_price_features,
-    decide_invest_spy_weights,
-)
-from ..core.orders import plan_position_orders
 from ..data.universe import load_tradable_names, resolve_project_path
 from ..data.universe_selector import candidate_specs_by_symbol, preferred_symbols, recommend_universe_rows
 
@@ -268,11 +268,12 @@ def apply_universe_payload(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def dca_payload() -> dict[str, Any]:
+def dca_payload(account_id: str = "") -> dict[str, Any]:
     universe = universe_payload()["rows"]
-    plan = load_dca_plan(universe)
+    plan = load_dca_plan(universe, account_id=account_id)
     available = [row for row in universe if row["enabled"]]
     return {
+        "account_id": account_id,
         "plan": plan,
         "available": available,
         "preview": allocation_preview(plan),
@@ -281,13 +282,368 @@ def dca_payload() -> dict[str, Any]:
 
 def save_dca_payload(body: dict[str, Any]) -> dict[str, Any]:
     universe = universe_payload()["rows"]
-    plan = save_dca_plan(body.get("plan", body), universe)
+    account_id = str(body.get("account_id") or "")
+    plan = save_dca_plan(body.get("plan", body), universe, account_id=account_id)
     available = [row for row in universe if row["enabled"]]
     return {
+        "account_id": account_id,
         "plan": plan,
         "available": available,
         "preview": allocation_preview(plan),
     }
+
+
+def algorithm_config_payload(strategy: str) -> dict[str, Any]:
+    """The saved tuning for one algorithm, read from the key it actually lives under."""
+    strategy = canonical_algorithm_id(strategy)[:80]
+    sections = load_algorithms_config().get("algorithms") or {}
+    if not isinstance(sections, dict):
+        sections = {}
+    key = strategy if strategy in sections else next(
+        (legacy for legacy in LEGACY_ALGORITHM_IDS.get(strategy, []) if legacy in sections), strategy
+    )
+    values = sections.get(key) if isinstance(sections.get(key), dict) else {}
+    return {
+        "strategy": strategy,
+        # Surfaced so the dashboard can say which key on disk a value came from: several
+        # algorithms are still filed under a retired id.
+        "config_key": key,
+        "config": values,
+        "explainer": explainer_for(strategy),
+    }
+
+
+def save_algorithm_config_payload(strategy: str, values: Any) -> dict[str, Any]:
+    strategy = canonical_algorithm_id(strategy)[:80]
+    # A list or scalar here means the caller sent the wrong shape. Coercing it to {} would
+    # quietly erase every tuned value for this algorithm, so refuse instead.
+    if not isinstance(values, dict):
+        raise ValueError("Algorithm config must be a JSON object.")
+    raw = load_algorithms_config()
+    sections = raw.setdefault("algorithms", {})
+    if not isinstance(sections, dict):
+        sections = {}
+        raw["algorithms"] = sections
+    # Write back to the key it was read from, so retired ids keep their tuning rather than
+    # gaining a second, silently-ignored copy under the canonical name.
+    key = strategy if strategy in sections else next(
+        (legacy for legacy in LEGACY_ALGORITHM_IDS.get(strategy, []) if legacy in sections), strategy
+    )
+    sections[key] = values
+    save_algorithms_config(raw)
+    return algorithm_config_payload(strategy)
+
+
+def positions_payload(account_id: str = "") -> dict[str, Any]:
+    """Live holdings and P/L for one account.
+
+    Per account rather than per algorithm: the broker reports a single blended position per
+    symbol, so two bindings trading the same account cannot be told apart here.
+    """
+    config = get_config(account_id=account_id) if account_id else get_config()
+    payload: dict[str, Any] = {
+        "account_id": config.account_id,
+        "account_label": config.account_label,
+        "equity": None,
+        "cash": None,
+        "day_pl": None,
+        "day_pl_percent": None,
+        "total_pl": None,
+        "rows": [],
+        "error": "",
+    }
+    # The local paper account keeps its own book and has no broker to ask.
+    if get_account_broker_type(config.account_id) == "paper":
+        return {**payload, **_paper_positions(config)}
+    try:
+        client = create_trading_client(config)
+        account = client.get_account()
+        equity = float(getattr(account, "equity", 0.0) or 0.0)
+        last_equity = float(getattr(account, "last_equity", 0.0) or 0.0)
+        payload["equity"] = equity
+        payload["cash"] = float(getattr(account, "cash", 0.0) or 0.0)
+        if last_equity:
+            payload["day_pl"] = equity - last_equity
+            payload["day_pl_percent"] = (equity - last_equity) / last_equity
+        rows = []
+        total_pl = 0.0
+        for position in client.get_all_positions():
+            unrealized = float(getattr(position, "unrealized_pl", 0.0) or 0.0)
+            total_pl += unrealized
+            rows.append(
+                {
+                    "symbol": str(getattr(position, "symbol", "")),
+                    "qty": float(getattr(position, "qty", 0.0) or 0.0),
+                    "avg_entry_price": float(getattr(position, "avg_entry_price", 0.0) or 0.0),
+                    "market_value": float(getattr(position, "market_value", 0.0) or 0.0),
+                    "unrealized_pl": unrealized,
+                    "unrealized_plpc": float(getattr(position, "unrealized_plpc", 0.0) or 0.0),
+                }
+            )
+        rows.sort(key=lambda row: abs(row["market_value"]), reverse=True)
+        payload["rows"] = rows
+        payload["total_pl"] = total_pl
+    except Exception as error:  # noqa: BLE001 - a broker outage must not blank the dashboard
+        logger.warning("Could not load positions for %s: %s", config.account_id, error)
+        payload["error"] = str(error)
+    return payload
+
+
+#: Fields a deployment target carries. Secrets are deliberately absent: accounts reference the
+#: *names* of environment variables, so the dashboard can wire up a target without ever handling
+#: an API key. Setting the secret stays a deploy-time action on the host.
+ACCOUNT_FIELDS = ("label", "broker", "base_url", "data_feed", "api_key_env", "api_secret_env")
+
+
+def _account_items(raw: dict[str, Any]) -> dict[str, Any]:
+    accounts = raw.get("accounts") if isinstance(raw.get("accounts"), dict) else {}
+    items = accounts.get("items") if isinstance(accounts.get("items"), dict) else {}
+    return items
+
+
+def accounts_payload() -> dict[str, Any]:
+    """Every deployment target, with whether its credentials are actually present."""
+    raw = load_accounts_config()
+    items = _account_items(raw)
+    controls = load_controls()
+    deployed: dict[str, list[str]] = {}
+    for binding in controls.get("bindings") or []:
+        deployed.setdefault(str(binding.get("account_id") or ""), []).append(str(binding.get("strategy") or ""))
+
+    rows = []
+    for account_id, section in items.items():
+        section = section if isinstance(section, dict) else {}
+        key_env = str(section.get("api_key_env") or "")
+        secret_env = str(section.get("api_secret_env") or "")
+        missing = [name for name in (key_env, secret_env) if name and not os.getenv(name)]
+        rows.append(
+            {
+                "id": str(account_id),
+                "label": str(section.get("label") or account_id),
+                "broker": str(section.get("broker") or "alpaca"),
+                "base_url": str(section.get("base_url") or ""),
+                "data_feed": str(section.get("data_feed") or ""),
+                "api_key_env": key_env,
+                "api_secret_env": secret_env,
+                "credentials_ready": not missing,
+                "missing_env": missing,
+                "deployments": sorted(set(deployed.get(str(account_id), []))),
+            }
+        )
+    rows.sort(key=lambda row: row["id"])
+    return {"default": str(raw.get("default") or ""), "rows": rows}
+
+
+def save_account_payload(body: dict[str, Any]) -> dict[str, Any]:
+    account_id = str(body.get("id") or "").strip()[:80]
+    if not account_id:
+        raise ValueError("A deployment target needs an id.")
+    if not account_id.replace("_", "").replace("-", "").isalnum():
+        raise ValueError("Target id may only contain letters, numbers, dashes, and underscores.")
+
+    raw = load_accounts_config()
+    accounts = raw.setdefault("accounts", {})
+    if not isinstance(accounts, dict):
+        accounts = {}
+        raw["accounts"] = accounts
+    items = accounts.setdefault("items", {})
+    if not isinstance(items, dict):
+        items = {}
+        accounts["items"] = items
+
+    section = items.get(account_id) if isinstance(items.get(account_id), dict) else {}
+    for field_name in ACCOUNT_FIELDS:
+        if field_name in body:
+            section[field_name] = str(body.get(field_name) or "")
+    section.setdefault("broker", "alpaca")
+    items[account_id] = section
+    if not raw.get("default"):
+        raw["default"] = account_id
+    save_accounts_config(raw)
+    return accounts_payload()
+
+
+def delete_account_payload(account_id: str) -> dict[str, Any]:
+    account_id = str(account_id or "").strip()
+    raw = load_accounts_config()
+    items = _account_items(raw)
+    if account_id not in items:
+        raise ValueError(f"No deployment target named {account_id}.")
+    if len(items) <= 1:
+        raise ValueError("Keep at least one deployment target.")
+
+    controls = load_controls()
+    in_use = [b for b in (controls.get("bindings") or []) if str(b.get("account_id")) == account_id]
+    if in_use:
+        # Deleting a target out from under a running deployment would leave it pointed at an
+        # account that no longer resolves, which fails at order time rather than here.
+        raise ValueError(f"{account_id} still has {len(in_use)} deployment(s). Remove them first.")
+
+    items.pop(account_id)
+    if str(raw.get("default") or "") == account_id:
+        raw["default"] = next(iter(items), "")
+    save_accounts_config(raw)
+    return accounts_payload()
+
+
+def _paper_positions(config: Any) -> dict[str, Any]:
+    """Holdings and P/L from the local paper book.
+
+    ``day_pl`` stays None: the book has no notion of yesterday's close, and inventing one
+    would put a number on the dashboard that nothing backs.
+    """
+    try:
+        book = PaperBrokerage(config).book()
+    except Exception as error:  # noqa: BLE001 - a corrupt book must not blank the page
+        logger.warning("Could not read the paper book for %s: %s", config.account_id, error)
+        return {"error": str(error)}
+    rows = book.get("rows") or []
+    return {
+        "equity": float(book.get("equity") or 0.0),
+        "cash": float(book.get("cash") or 0.0),
+        "total_pl": sum(float(row["unrealized_pl"]) for row in rows),
+        "rows": rows,
+    }
+
+
+def _paper_activity(config: Any, limit: int) -> dict[str, Any]:
+    """Order history for the local paper book, from the bot's own journal.
+
+    The paper brokerage fills immediately and keeps no order log, so the journal written at
+    submission is the whole record -- which is complete here, since nothing but this bot can
+    trade a local book.
+    """
+    rows = []
+    for entry in load_order_journal(account_id=config.account_id, limit=limit):
+        rows.append(
+            {
+                "symbol": entry.get("symbol", ""),
+                "side": entry.get("side", ""),
+                "status": entry.get("status", ""),
+                "qty": entry.get("quantity"),
+                "filled_qty": entry.get("quantity") if entry.get("status") == "submitted" else 0.0,
+                "filled_avg_price": entry.get("price") or None,
+                "submitted_at": entry.get("submitted_at", ""),
+            }
+        )
+    return {"rows": rows}
+
+
+def account_activity_payload(account_id: str = "", limit: int = 40) -> dict[str, Any]:
+    """Recent broker orders for one account.
+
+    Read straight from the brokerage rather than a local mirror: the broker is the only source
+    that knows about fills, partial fills, and cancels after submission. The local paper book
+    is the exception -- there is no broker, so the bot's own journal is the record.
+    """
+    config = get_config(account_id=account_id) if account_id else get_config()
+    payload: dict[str, Any] = {"account_id": config.account_id, "rows": [], "error": ""}
+    if get_account_broker_type(config.account_id) == "paper":
+        return {**payload, **_paper_activity(config, limit)}
+    try:
+        client = create_trading_client(config)
+        try:
+            orders = client.get_orders(filter=GetOrdersRequest(status=QueryOrderStatus.ALL, limit=limit))
+        except Exception:  # noqa: BLE001 - older SDKs reject the filter; fall back to open orders
+            orders = client.get_orders()
+        rows = []
+        for order in orders:
+            submitted = getattr(order, "submitted_at", None) or getattr(order, "created_at", None)
+            rows.append(
+                {
+                    "symbol": str(getattr(order, "symbol", "")),
+                    "side": _enum_value(getattr(order, "side", "")),
+                    "status": _enum_value(getattr(order, "status", "")),
+                    "qty": _as_float(getattr(order, "qty", None)),
+                    "filled_qty": _as_float(getattr(order, "filled_qty", None)),
+                    "filled_avg_price": _as_float(getattr(order, "filled_avg_price", None)),
+                    "submitted_at": submitted.isoformat() if hasattr(submitted, "isoformat") else str(submitted or ""),
+                }
+            )
+        rows.sort(key=lambda row: row["submitted_at"], reverse=True)
+        payload["rows"] = rows[:limit]
+    except Exception as error:  # noqa: BLE001 - a broker outage must not blank the page
+        logger.warning("Could not load activity for %s: %s", config.account_id, error)
+        payload["error"] = str(error)
+    return payload
+
+
+def algorithm_activity_payload(strategy: str = "", limit: int = 40) -> dict[str, Any]:
+    """Orders this bot placed for one algorithm, from its own journal.
+
+    The counterpart to account_activity_payload: the broker knows the fill, only the bot knows
+    which algorithm asked for it. Neither view replaces the other.
+    """
+    strategy_id = canonical_algorithm_id(strategy) if strategy else ""
+    return {
+        "strategy": strategy_id,
+        "rows": load_order_journal(strategy=strategy_id, limit=limit),
+    }
+
+
+def _enum_value(value: Any) -> str:
+    return str(getattr(value, "value", value) or "")
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+#: Watchlist symbols live in the state store, not a config file: it is a per-user view
+#: preference rather than something that changes how an algorithm trades.
+WATCHLIST_STATE_KEY = "watchlist"
+DEFAULT_WATCHLIST = ["SPY", "QQQ", "GLD", "TLT"]
+
+
+def _watchlist_symbols() -> list[str]:
+    stored = load_state(WATCHLIST_STATE_KEY, None)
+    if not isinstance(stored, list):
+        return list(DEFAULT_WATCHLIST)
+    return [str(symbol).strip().upper()[:10] for symbol in stored if str(symbol).strip()]
+
+
+def watchlist_payload() -> dict[str, Any]:
+    """Watchlist tickers with their latest price and move since the previous close."""
+    symbols = _watchlist_symbols()
+    rows: list[dict[str, Any]] = [{"symbol": symbol, "price": None, "change": None} for symbol in symbols]
+    if not symbols:
+        return {"symbols": symbols, "rows": rows}
+
+    config = get_config()
+    prices: dict[str, float] = {}
+    try:
+        prices = load_latest_prices(symbols, config, create_data_client(config))
+    except Exception as error:  # noqa: BLE001 - a quote outage must not blank the sidebar
+        logger.warning("Could not price watchlist: %s", error)
+
+    for row in rows:
+        price = float(prices.get(row["symbol"], 0.0) or 0.0)
+        row["price"] = price or None
+        # Previous close comes from the cached daily bars, so the sidebar costs no extra call.
+        try:
+            bars = read_market_bars("eod_market_data", None, row["symbol"], "1d", lookback_bars=2)
+            if price and not bars.empty and len(bars) >= 1:
+                previous = float(bars["close"].iloc[-2] if len(bars) >= 2 else bars["close"].iloc[-1])
+                if previous:
+                    row["change"] = (price - previous) / previous
+        except Exception:  # noqa: BLE001 - a missing bar just means no percentage
+            continue
+    return {"symbols": symbols, "rows": rows}
+
+
+def save_watchlist_payload(symbols: Any) -> dict[str, Any]:
+    if not isinstance(symbols, list):
+        raise ValueError("Watchlist must be a list of symbols.")
+    cleaned: list[str] = []
+    for symbol in symbols:
+        ticker = str(symbol or "").strip().upper()[:10]
+        if ticker and ticker not in cleaned:
+            cleaned.append(ticker)
+    save_state(WATCHLIST_STATE_KEY, cleaned[:30])
+    return watchlist_payload()
 
 
 def controls_payload() -> dict[str, Any]:
@@ -766,7 +1122,8 @@ def backtest_payload(body: dict[str, Any] | None = None) -> dict[str, Any]:
     strategy = canonical_algorithm_id(str(body.get("strategy") or DEFAULT_STRATEGY_ID))[:80]
     refresh = bool(body.get("refresh"))
     cache_only = bool(body.get("cache_only") or body.get("cacheOnly"))
-    dca_plan = load_dca_plan(universe_payload()["rows"])
+    account_id = str(body.get("account_id") or "")
+    dca_plan = load_dca_plan(universe_payload()["rows"], account_id=account_id)
     key = _cache_key(strategy, period, dca_plan)
     cache = _load_backtest_cache()
 

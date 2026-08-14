@@ -9,8 +9,11 @@ services:
       MCP_PORT: ${WALBOT_MCP_CONTAINER_PORT:-8001}
     command: ["${WALBOT_MODE:---bot}"]
     ports:
-      - "${WALBOT_PORT:-8000}:8000"
-      - "${WALBOT_MCP_PORT:-8001}:8001"
+      # Loopback by default: the dashboard is unauthenticated, so it must not be reachable
+      # around the reverse proxy on the host's public IP. Set WALBOT_BIND=0.0.0.0 only for
+      # a trusted network with nothing in front. See Caddyfile.sample.
+      - "${WALBOT_BIND:-127.0.0.1}:${WALBOT_PORT:-8000}:8000"
+      - "${WALBOT_BIND:-127.0.0.1}:${WALBOT_MCP_PORT:-8001}:8001"
     volumes:
       - ${WALBOT_RUNTIME:-./runtime}/config:/config
       - ${WALBOT_RUNTIME:-./runtime}/data:/data

@@ -5,14 +5,21 @@ from ..core import pipeline
 from ..core.config import DEFAULT_STRATEGY_ID, get_config
 from ..common.logging_utils import configure_logging, log_signals, log_portfolio, log_orders, log_position_changes
 from ..core.strategy_models import STRATEGY_LABELS
+from ..data.order_journal import record_orders
 from ..algorithms.registry import canonical_algorithm_id
 
 logger = logging.getLogger(__name__)
 
 
-def run_once(account_id: str | None = None) -> None:
+def run_once(account_id: str | None = None, strategy: str | None = None) -> None:
+    """Run one algorithm against one account.
+
+    ``strategy`` is passed explicitly by the runtime, which drives several bindings at once and
+    cannot rely on a single selected strategy in controls. It falls back to that selection so a
+    bare ``run_once()`` from a shell still does the obvious thing.
+    """
     controls = load_controls()
-    strategy = canonical_algorithm_id(controls.get("active_strategy") or DEFAULT_STRATEGY_ID)
+    strategy = canonical_algorithm_id(strategy or controls.get("active_strategy") or DEFAULT_STRATEGY_ID)
     config = (
         get_config(account_id=account_id, strategy_id=strategy)
         if account_id
@@ -72,6 +79,9 @@ def run_once(account_id: str | None = None) -> None:
     log_portfolio(outcome["final_weights"], outcome["equity"])
     log_orders(outcome["order_results"])
     log_position_changes(outcome["order_results"])
+    # The brokerage feed cannot say which algorithm placed what, so the attribution is
+    # recorded here, at the one point where both facts are in hand.
+    record_orders(strategy, config.account_id, outcome["order_results"])
 
 
 def main() -> None:

@@ -16,6 +16,7 @@ from src.core.pipeline import (
     resolve_brokerage,
     run_algorithm,
 )
+from src.data.order_journal import record_orders
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +175,11 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
             return {"strategy": result.strategy, "status": "error", "reason": str(exc)}
 
         try:
-            return pipeline_place_orders(result, config, brokerage, target_weights=cleaned)
+            outcome = pipeline_place_orders(result, config, brokerage, target_weights=cleaned)
+            # Journalled here as well as in the live runner: an agent-driven order is still
+            # this algorithm's order, and the dashboard should not have a blind spot for it.
+            record_orders(result.strategy, config.account_id, outcome.get("order_results") or [])
+            return outcome
         except (StaleResultError, ValueError) as exc:
             return {"strategy": result.strategy, "status": "error", "reason": str(exc)}
 

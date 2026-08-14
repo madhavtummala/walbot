@@ -11,3 +11,16 @@ dca_bot:
     sell:
       amount: 0
       items: []
+  dca_plans:
+    paper:
+      max_item_amount: 2000.0
+      buy:
+        amount: 2675.0
+        items:
+        - symbol: GLD
+          amount: 1075.0
+        - symbol: XSD
+          amount: 1600.0
+      sell:
+        amount: 0
+        items: []

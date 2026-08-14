@@ -1,236 +1,483 @@
-Ticker,Name
-0KOLLN,PROSHARES TRUST-PROSHARES SHORT S&P500 ETF
-ACWI,ISHARES TRUST - ISHARES MSCI ACWI ETF
-ACWX,ISHARES TRUST - ISHARES MSCI ACWI EX U.S. ETF
-AGG,ISHARES TRUST-ISHARES CORE U.S. AGGREGATE BOND ETF
-AIQ,GLOBAL X FUNDS - GLOBAL X ARTIFICIAL INTELLIGENCE & TECH ETF
-AOA,ISHARES TRUST - ISHARES CORE AGGRESSIVE ALLOCATION ETF
-ARKB,ARK 21SHARES BITCOIN ETF
-ASHR,DBX ETF TRUST - XTRACKERS HARVEST CSI 300 CHINA A-SHARES ETF
-ASHS,DBX ETF TRUST
-BBC,ETFIS SERIES TRUST I - VTS LFSCI BIOTECH CLNCL TRLS ETF
-BBCA,JP MORGAN EXCHANGE-TRADED FUND TRUST - JPMORGAN BDC & CANADA ETF
-BBEU,JP MORGAN EXCHANGE-TRADED FD TR-JPM BETABUILDERS EUR ETF
-BBJP,JP MORGAN EXCHANGE-TRADED FD TR-JPMORGAN BETABUILDERS ETF
-BIL,STATE STREET SPDR BLOOMBERG 1-3 MONTH T-BILL ETF
-BITB,WISDOMTREE BITCOIN ETF
-BITC,WISDOMTREE BITCOIN FUND
-BITO,THE 2023 ETF SERIES TRUST - BRANDES INTERNATIONAL ETF
-BLV,VANGUARD BOND INDEX FUNDS-VANGUARD LONG-TERM BOND INDEX FUND
-BND,VANGUARD BOND INDEX FUNDS-VANGUARD TOTAL MARKET INDEX
-BNDX,VANGUARD CHARLOTTE FUNDS - VANGUARD TOTAL INTERNATIONAL BOND
-BNO,"UNITED STATES BRENT OIL FUND, LP"
-BOND,PIMCO ETF TRUST - PIMCO ACTIVE BOND EXCHANGE-TRADED FUND
-BRRR,VALKYRIE BITCOIN FUND
-BSMC,THE 2023 ETF SERIES TRUST - BRAN U.S. SMALL-MI CA VALUE ETF
-BSV,VANGUARD SHORT TERM BOND INDEX
-BTC,GRAYSCALE BITCOIN MINI TRUST (BTC)
-BTCO,INVESCO GALAXY BITCOIN ETF
-BTCW,WISDOMTREE BITCOIN FUND
-BUSA,THE 2023 ETF SERIES TRUST - BRANDES U.S. VALUE ETF
-CANE,TEUCRIUM COMMODITY TRUST - TEUCRIUM SUGAR FUND
-CORN,TEUCRIUM COMMODITY TRUST - TEUCRIUM CORN FUND
-CPER,UNITED STATES COMMODITY INDEX FUNDS TRUST-US COPPER ETF
-DBA,INVESCO DB MULTI-SECTOR COMMODITY TRUST - INVESCO DB AGRI FD
-DBEF,DBX ETF TRUST - XTRACKERS MSCI EAFE HEDGED EQUITY ETF
-FLIN,FRANKLIN TEMPLETON ETF TRUST - FRANKLIN FTSE INDIA ETF
-FNDE,SCHWAB STRATEGIC TRUST-SCHWB FDMNTL EMNG MRKTS EQT ETF
-FNDF,SCHWAB STRATEGIC TRUST-SCHWB FDMNTL INTL EQUITY ETF
-FTSL,FIRST TRUST SENIOR LOAN ETF
-GAA,CAMBRIA ETF TRUST-CAMBRIA GLOBAL ASSET ALLOCATION
-GBIL,GS ETF TRUST - GOLDMAN SACHS ACCESS TREASURY 0-1 YEAR ETF
-GBND,GOLDMAN SACHS ETF TRUST - GOLDMAN SACHS CORE BOND ETF
-GBTC,GRAYSCALE BITCOIN TRUST (BTC)
-GCAL,GOLDMAN SACHS ETF TRUST - GS DYNAMIC CALIF MUNI INCOME ETF
-GCOR,GS ETF TRUST - GOLDMAN SACHS ACCESS U.S. AGGREGATE BOND ETF
-GEMD,GS ETF TRUST - GS ACCESS EMERGING MARKETS USD BOND ETF
-GHYB,GS ETF TRUST - GOLDMAN SACHS ACCESS HIGH YIELD CORP BD EFT
-GIGB,GS ETF TRUST - GOLDMAN SACHS ACCESS INV GRADE CORP BD EFT
-GIGL,GOLDMAN SACHS ETF TRUST - GOLDMAN SACHS CORPORATE BOND ETF
-GIND,GOLDMAN SACHS ETF TRUST - GOLDMAN SACHS INDIA EQUITY ETF
-GINN,GOLDMAN SACHS ETF TRUST - GOLDMAN SACHS INNOVATE EQUITY ETF
-GLD,SPDR GOLD TRUST
-GLIN,VANECK VECTORS ETF TRUST-VANECK VECTORS INDIA GROWTH LEA ETF
-GLOV,GS ETF TRUST - GS ACTIVEBETA WORLD LOW VOL PLUS EQUITY ETF
-GMNY,GOLDMAN SACHS ETF TRUST - GS DYNAMIC NY MUNI INCOME ETF
-GMUB,GOLDMAN SACHS ETF TRUST - GOLDMAN SACHS MUNICIPAL INCOME ETF
-GMUN,GOLDMAN SACHS ETF TRUST - GOLDMAN SACHS ACCESS MUN BOND ETF
-GOVT,ISHARES TRUST - ISHARES U.S. TREASURY BOND ETF
-GPIX,GOLDMAN SACHS ETF TR - GOLDMAN SACHS S&P 500 PREMIUM INCOM ETF
-GPRF,GS ACCESS U.S. PREFERRED STOCK AND HYBRID SECURITIES ETF
-GSC,GOLDMAN SACHS ETF TRUST - GOLDMAN SACHS SMALL CAP EQUITY ETF
-GSEU,GS ETF TRUST - GOLDMAN SACHS ACTIVEBETA EUROPE EQUITY ETF
-GSEW,GS ETF TRUST - GOLDMAN SACHS EQUAL WT U.S. LARGE CAP EQ ETF
-GSG,ISHARES GSCI COMMODITY-INDEXED TRUST
-GSID,GS ETF TRUST - GS MARKETBETA INTERNATIONAL EQ ETF
-GSIE,GS ETF TRUST - GS ACTIVEBETA INTERNATIONAL EQUITY ETF
-GSIG,GS ETF TRUST - GS ACCESS INV GRADE CORP 1-5 YEAR BOND ETF
-GSJY,GS ETF TRUST - GOLDMAN SACHS ACTIVEBETA JAPAN EQUITY ETF
-GSLC,GS ETF TRUST - GS ACTIVEBETA U.S. LARGE CAP EQUITY ETF
-GSSC,GS ETF TRUST - GS ACTIVEBETA U.S. SMALL CAP EQUITY ETF
-GSST,GOLDMAN SACHS ETF TRUST - GOLDMAN SACHS ULTRA SHORT BOND ETF
-GSUS,GOLDMAN SACHS ETF TRUST - GS MRKTBTA U.S. EQUITY ETF
-GTEK,GOLDMAN SACHS ETF TRUST - GOLDMAN SACHS FUTURE TECH LEADERS ETF
-GTIP,GS ETF TRUST - GS ACCESS INFLATION PROTECTED USD BOND ETF
-GUMI,GOLDMAN SACHS ETF TRUST - GS ULTRA SHORT MUNI INCOME ETF
-GUSA,GS ETF TRUST II-GS MARKETBETA U.S. 1000 EQUITY ETF
-GUSE,GOLDMAN SACHS ETF TRUST-GOLDMAN SACHS ENHANCED U.S. EQUITY ETF
-GVIP,GS ETF TRUST - GOLDMAN SACHS HEDGE INDUSTRY VIP ETF
-GVLE,GOLDMAN SACHS ETF TRUST-GOLDMAN SACHS VALUE OPPORTUNITIES ET
-GVUS,GOLDMAN SACHS ETF TR-GOLDMN SCHS MRKTBT RSSLL 1000 VL EQ ETF
-GXUS,GOLDMAN SACHS ETF TRUST II - GOLDMAN SACHS MARKETBETA TOTAL
-HEDJ,WISDOMTREE TRUST - WISDOMTREE EUROPE HEDGED EQUITY FUND
-HEFA,ISHARES CURRENCY HEDGED MSCI EAFE ETF
-HEWJ,ISHARES TRUST - ISHARES CURRENCY HEDGED MSCI JAPAN ETF
-HEZU,ISHARES TRUST-ISHARES CURRENCY HEDGED MSCI EMU ETF
-HODL,VANECK BITCOIN TRUST
-HYD,VANECK HIGH YIELD MUNI ETF
-HYG,ISHARES TRUST - ISHARES IBOXX $ HIGH YIELD CORPORATE BOND ET
-HYMB,STATE STREET SPDR NUVEEN BLOOMBERG MUNICIPAL BOND ETF
-HYS,PIMCO ETF TRUST - PIMCO 0-5 YEAR HG YD CORP BD IDX EX-TRD FD
-IAU,ISHARES GOLD TRUST
-IAUM,ISHARES GOLD TRUST MICRO
-IBIT,ISHARES BITCOIN TRUST
-IDEV,ISHARES TRUST - ISHARES CORE MSCI INTERNATIONAL DEV MKT ETF
-IDV,ISHARES TRUST - ISHARES INTERNATIONAL SELECT DIVIDEND ETF
-IEF,ISHARES TRUST - ISHARES 7-10 YEAR TREASURY BOND ETF
-IEFA,ISHARES TRUST - ISHARES CORE MSCI EAFE ETF
-IEI,ISHARES TRUST - ISHARES CORE MSCI EAFE ETF
-IEMG,"ISHARES, INC. - ISHARES CORE MSCI EMERGING MARKETS ETF"
-IEUR,ISHARES TRUST - ISHARES CORE MSCI EUROPE
-IEV,ISHARES TRUST-ISHARES EUROPE ETF
-IHDG,WISDOMTREE TRUST-WISDOMTREE INT HEDGED QUALITY DIV GROWTH FD
-IJH,ISHARES TRUST - ISHARES CORE S&P MID-CAP ETF
-IJJ,ISHARES TRUST - ISHARES S&P 400 VALUE ETF
-IJK,ISHARES S&P MIDCAP 400 GROWTH ETF
-IJR,ISHARES TRUST - ISHARES CORE S&P SMALL-CAP ETF
-IJS,ISHARES S&P SMALLCAP 600 VALUE INDEX
-IJT,ISHARES TRUST - ISHARES S&P SMALL-CAP 600 GROWTH ETF
-ILTB,ISHARES TRUST - ISHARES CORE 10+ YEAR USD BOND ETF
-IMCG,ISHARES TRUST - ISHARES MORNINGSTAR MID-CAP GROWTH ETF
-INDA,ISHARES MSCI INDIA ETF
-IQLT,ISHARES TRUST - ISHARES MSCI INTL QUALITY FACTOR ETF
-ISTB,ISHARES TRUST - ISHARES CORE 1-5 YEAR USD BOND ETF
-ITOT,ISHARES TRUST - ISHARES CORE S&P TOTAL U.S. STOCK MARKET ETF
-IUSB,ISHARES TRUST - ISHARES CORE TOTAL USD BOND MARKET ETF
-IUSV,ISHARES TRUST - ISHARES CORE S&P U.S. VALUE ETF
-IVE,ISHARES TRUST - ISHARES S&P 500 VALUE ETF
-IVOL,KRANE SHARES TRUST-QUADRATIC INTRT RATE VOLTY N IFTN HDG ETF
-IVOO,VANGUARD ADMIRAL FUNDS - VANGUARD S&P MID-CAP 400 INDEX FUND
-IVV,ISHARES CORE S&P 500
-IVW,ISHARES TRUST - ISHARES RUSSELL 1000 ETF
-IWC,ISHARES MICRO-CAP ETF
-IWD,ISHARES TRUST-ISHARES RUSSELL 1000 VALUE ETF
-IWM,ISHARES TRUST-ISHARES RUSSELL 2000 ETF
-IWN,ISHARES TRUST - ISHARES RUSSELL 2000 VALUE ETF
-IWO,ISHARES RUSSELL 2000 GROWTH INDEX
-IWP,ISHARES TRUST - ISHARES RUSSELL MID-CAP GROWTH ETF
-IWR,ISHARES TRUST - ISHARES RUSSELL MID-CAP ETF
-IWS,ISHARES TRUST - ISHARES RUSSELL MID-CAP VALUE ETF
-IWV,ISHARES TRUST-ISHARES RUSSELL 3000 ETF
-IXUS,ISHARES TRUST-ISHARES CORE MSCI TOTAL INTL STOCK ETF/MKUS
-IYY,ISHARES TRUST - ISHARES DOW JONES U.S. ETF
-JAAA,JANUS DETROIT STREET TRUST - JANUS HENDERSON AAA CLO ETF
-JBBB,JANUS DETROIT STREET TRUST - JANUS HENDERSON B-BBB CLO ETF
-JUST,GS ETF TRUST - GS JUST U.S. LARGE CAP EQUITY ETF
-MUB,ISHARES TRUST - ISHARES NATIONAL MUNI BOND ETF
-MUNY,VANGUARD NEW YORK TAX-FREE FUNDS-VANG NEW YORK TAX-EX BD ETF
-NFTY,FIRST TR EXCH-TR ALPHA DX LI-FR IND NFTY 50 EQ WGH ETF
-NOBL,PROSHARES TRUST - PROSHARES S&P 500 DIVIDEND ARISTOCRATS ETF
-NYF,ISHARES TRUST - ISHARES NEW YORK MUNI BOND ETF
-OPPE,WISDOMTREE TRUST - WISDOMTREE EUROPE HEDGED SMALLCAP EQUITY
-PALL,ABERDEEN STANDARD PHYSICAL PALLADIUM SHARES ETF
-PBD,INVESCO EXCH-TRADED FD TR II-INVESCO GLOBAL CLEAN ENERGY ETF
-PBW,INVESCO EXCHANGE-TRADED FUND TRUST- INV WH CLEAN ENG ETF
-PCY,INVESCO EXC-TRED FD TR II-INVESCO EMERGING MKTS SOV DEBT ETF
-PEY,INV EX-TR FD TR-INVESCO HGH YLD EQUITY DIV ACHIEVERS ETF
-PFF,ISHARES TRUST - ISHARES PREFERRED AND INCOME SECURITIES ETF
-PGX,INVESCO EXCHANGE-TRADED FUND TRUST II -INVESCO PREFERRED ETF
-PID,INV EX-TR FD TR-INV INTL DIVD ACHIEVER ETF
-PPLT,ABERDEEN STANDARD PHYSICAL PLATINUM SHARES ETF
-PRF,INVESCO EX-TR FD TR-INVESCO FTSE RAFI US 1000 ETF
-QETH,INVESCO GALAXY ETHEREUM ETF
-QQQ,"INVESCO QQQ TRUST ETF, SERIES 1"
-QQQM,INV NASDAQ 100 IDX
-QUAL,ISHARES TRUST - ISHARES MSCI USA QUALITY FACTOR ETF
-RSP,INVESCO EXCHANGE-TRADED FUND TRUST-INVESCO S&P 500 EQ WGT ETF
-RSPR,INVESCO ETF TR -INVESCO S&P 500 EQUAL WEIGHT REAL ESTATE ETF
-RSPS,INVESCO ETF TRUST - INVESCO S&P 500 EQUAL WEIGHT CNS STP ETF
-RUT,RUSSELL 2000 INDEX
-RWJ,INVESCO EXCHANGE-TRADED FD TR II-INVES S&P 600 REV ETF
-RWK,INVESCO EXCHANGE-TRADED FD TR II-INVES S&P MDCAP 400 REV ETF
-RWL,INVESCO EXCHANGE-TRADED FD TR II-INVESCO S&P 500 REVENUE ETF
-SCHD,SCHWAB US SMALL-CAP ETF
-SHV,ISHARES BARCLAYS SHORT TREASURY BOND
-SHY,ISHARES TRUST-ISHARES 1-3 YEAR TREASURY BOND ETF
-SJNK,SPDR SERIES TRUST - SPDR BLOOMBERG ST HI YLD BD ETF
-SLV,ISHARES SILVER TRUST
-SOYB,TEUCRIUM COMMODITY TRUST - TEUCRIUM SOYBEAN FUND
-SPEM,SPDR INDEX ISHARES FUNDS -SPDR PORTFOLIO EMERGING MARKETS ETF
-SPHD,INVESCO S&P 500 HH DV LW VLT ETF
-SPHY,SPDR SERIES TRUST-SPDR PORTFOLIO HIGH YIELD BOND ETF
-SPIB,STATE STREET SPDR PORTFOLIO INTERMEIDITE TRM CRPRATE BND ETF
-SPTL,SPDR SERIES TRUST - SPDR PORTFOLIO LONG TERM TREASURY ETF
-SPTS,SPDR PORTFOLIO SHORT TERM TREASURY ETF
-SPY,SPDR SP 500 ETF TRUST
-SPYD,SPDR SERIES TRUST - SPDR PORTFOLIO S&P 500 HIGH DIVIDEND ETF
-SPYM,STATE STREET SPDR PORTFOLIO S&P 500 ETF
-SPYV,STATE STREET SPDR PORTFOLIO S&P 500 VALUE ETF
-SRLN,SPDR BLACKSTONE SENIOR LOAN ETF
-STIP,ISHARES TRUST - ISHARES 0-5 YEAR TIPS BOND ETF
-SUB,ISHARES TRUST-ISHARES S&P SHORT TERM NATIONAL MUNICIPL BD FD
-SUSA,ISHARES MSCI USA ESG SELECT ETF
-TETH,TEUCRIUM COMMODITY TRUST - TEUCRIUM SOYBEAN FUND
-TFI,SPDR SER TRUST-SPDR(R) NUVEEN BLOOMBERG MUNI BD ETF
-TIP,ISHARES TRUST - ISHARES TIPS BOND ETF
-TLT,ISHARES BARCLAYS 20+ YEAR TREASURY BOND
-TMDV,PROSHARES RUSSELL US DIVIDEND GROWERS ETF
-TRTY,CAMBRIA ETF TRUST - CAMBRIA TRINITY ETF
-UGA,UNITED STATES GASOLINE FUND LP
-UNG,UNITED STATES GASOLINE FUND LP
-USHY,ISHARES TRUST -ISHARES BROAD USD HIGH YIELD CORP BD ETF
-USL,"UNITED STATES 12 MONTH OIL FUND, LP"
-USMV,ISHARES TRUST - ISHARES MSCI USA MIN VOL FACTOR ETF
-USO,"UNITED STATES OIL FUND, LP"
-VB,VANGUARD INDEX FUNDS - VANGUARD SMALL-CAP INDEX FUND
-VCEB,VANGUARD SHT TERM CORP BND INDEX
-VCIT,VANGUARD SCOTTSDALE FUNDS- VAN INT-TERM TREASURY INDX FD
-VGK,VANGUARD FTSE EUROPE ETF
-VGSH,VANGUARD SCOTTSDALE FUNDS -VANGUARD SHORT-TERM TREAS IDX FD
-VIG,VANGUARD SPECIALIZED FUNDS-VANGUARD DIVIDEND APPRECIATION INDEX FX FD
-VIOG,VANGUARD S&P SMALL-CAP 600 GROWTH ETF
-VIOO,VANGUARD S&P SMALL-CAP 600 INDEX
-VLUE,ISHARES TRUST - ISHARES MSCI USA VALUE FACTOR ETF
-VNQI,VANGUARD INTRL EQ IDX FD-VGRD GLB EX-US REAL EST IDX FD
-VO,VANGUARD INDEX FUNDS - VANGUARD MID-CAP INDEX FUND
-VOE,VANGUARD INDEX FUNDS - VANGUARD MID-CAP VALUE INDEX FUND
-VONE,VANGUARD SCOTTSDALE FUNDS - VANGUARD RUSSELL 1000 INDEX FUND
-VONV,VANGUARD SCOTTSDALE FUNDS- VANGUARD RUSSELL 1000 VALUE INDEX
-VOO,VANGUARD INDEX FUNDS - VANGUARD 500 INDEX FUND
-VOOV,VANGUARD S&P 500 VALUE ETF
-VOT,VANGUARD INDEX FUNDS-VANGUARD MID-CAP GROWTH INDEX FUND
-VPL,VANGUARD INTERNATIONAL EQUITY INDEX FUNDS-PACIFIC STK IND FD
-VSS,VANGUARD INTL EQ IDX FD-VGRD FTSE ALL-WLD EX-US SM CP IDX FD
-VT,VANGUARD TOTAL WORLD STK
-VTEB,VANGUARD MUNI BD FDS-VANGUARD TAX-EXEMPT BOND INDEX FUND
-VTHR,VANGUARD SCOTTSDALE FUNDS - VANGUARD RUSSELL 3000 INDEX FUND
-VTI,VANGUARD TOTAL STOCK MARKET INDEX
-VTIP,VANGUARD MALVERN FUNDS- VAN SHRT TERM INFL PRT SEC IND FUNDS
-VTV,VANGUARD INDEX FUNDS - VANGUARD VALUE INDEX FUND
-VTWO,VANGUARD RUSSELL 2000 INDEX
-VV,VANGUARD LARGE-CAP INDEX
-VWO,VANGUARD INTERNATIONAL EQ ID FD-VANGUARD EMG MKT STK IN FD
-VWOB,VANGUARD INDEX FUNDS-VANGUARD EMERGING MKTS GVT BDX FUND
-VXF,VANGUARD EXTENDED MARKET INDEX
-VXUS,VANGUARD STAR FUNDS-VANGUARD TOTAL INTERNNTNL STOCK INDEX FD
-VXX,BARCLAYS BANK PLC - IPATH SERIES B S&P 500 VIX S-T FUT ETN
-VYM,VANGUARD HIGH DIVIDEND YIELD ETF
-VYMI,VANGUARD WHITEHALL FUNDS - VANGUARD INTERNATIONAL HIGH DIVID
-WEAT,TEUCRIUM COMMODITY TRUST - TEUCRIUM WHEAT FUND
-XBI,SPDR S&P BIOTECH ETF
-XOP,SPDR SERIES TRUST-SPDR S&P OIL & GAS EXPLORATION & PROD ETF
-XRT,STATE STREET SPDR S&P RETAIL ETF
-XSD,SPDR SERIES TRUST-SPDR S&P SEMICONDUCTOR ETF
-XSP,CBOE MINI SPX INDEX
-XYLD,GLOBAL X FUNDS-GLOBAL X S&P 500 COVERED CALL ETF
-ZROZ,PIMCO ETF TR-PIMCO 25+ YEAR ZERO COUPON U.S TREASURY IND ETF
+Ticker,Category,Exchange,Asset_Class
+AAAU,Precious Metals,US Listing,Commodity
+GBIL,Fixed Income / Treasury,US Listing,Fixed Income
+GBND,Other,US Listing,Equity
+GCAL,Other,US Listing,Equity
+GCOR,Other,US Listing,Equity
+GEMD,Other,US Listing,Equity
+GHYB,Other,US Listing,Equity
+GIGB,Other,US Listing,Equity
+GIGL,Other,US Listing,Equity
+GIND,Other,US Listing,Equity
+GINN,Other,US Listing,Equity
+GMNY,Other,US Listing,Equity
+GMUB,Other,US Listing,Equity
+GMUN,Other,US Listing,Equity
+GPIQ,Other,US Listing,Equity
+GPIX,Other,US Listing,Equity
+GPRF,Other,US Listing,Equity
+GSC,Other,US Listing,Equity
+GSEU,Other,US Listing,Equity
+GSEW,Other,US Listing,Equity
+GSID,Other,US Listing,Equity
+GSIE,Other,US Listing,Equity
+GSIG,Other,US Listing,Equity
+GSJY,Other,US Listing,Equity
+GSLC,Other,US Listing,Equity
+GSSC,Other,US Listing,Equity
+GSST,Other,US Listing,Equity
+GSUS,Other,US Listing,Equity
+GSWO,Other,US Listing,Equity
+GTEK,Other,US Listing,Equity
+GTIP,Other,US Listing,Equity
+GTPE,Other,US Listing,Equity
+GUMI,Other,US Listing,Equity
+GUSA,Other,US Listing,Equity
+GUSE,Other,US Listing,Equity
+GVIP,Other,US Listing,Equity
+GVLE,Other,US Listing,Equity
+GVUS,Other,US Listing,Equity
+GXUS,Other,US Listing,Equity
+JUST,Other,US Listing,Equity
+BJAN,Defined Outcome / Buffer ETF,US Listing,Equity
+BFEB,Defined Outcome / Buffer ETF,US Listing,Equity
+BMAR,Defined Outcome / Buffer ETF,US Listing,Equity
+BAPR,Defined Outcome / Buffer ETF,US Listing,Equity
+BMAY,Defined Outcome / Buffer ETF,US Listing,Equity
+BJUN,Defined Outcome / Buffer ETF,US Listing,Equity
+BJUL,Defined Outcome / Buffer ETF,US Listing,Equity
+BAUG,Defined Outcome / Buffer ETF,US Listing,Equity
+BSEP,Defined Outcome / Buffer ETF,US Listing,Equity
+BOCT,Defined Outcome / Buffer ETF,US Listing,Equity
+BNOV,Defined Outcome / Buffer ETF,US Listing,Equity
+BDEC,Defined Outcome / Buffer ETF,US Listing,Equity
+PJAN,Defined Outcome / Buffer ETF,US Listing,Equity
+PFEB,Defined Outcome / Buffer ETF,US Listing,Equity
+PMAR,Defined Outcome / Buffer ETF,US Listing,Equity
+PAPR,Defined Outcome / Buffer ETF,US Listing,Equity
+PSEP,Defined Outcome / Buffer ETF,US Listing,Equity
+POCT,Defined Outcome / Buffer ETF,US Listing,Equity
+PNOV,Defined Outcome / Buffer ETF,US Listing,Equity
+PDEC,Defined Outcome / Buffer ETF,US Listing,Equity
+UJAN,Defined Outcome / Buffer ETF,US Listing,Equity
+UFEB,Defined Outcome / Buffer ETF,US Listing,Equity
+UMAR,Defined Outcome / Buffer ETF,US Listing,Equity
+UAPR,Defined Outcome / Buffer ETF,US Listing,Equity
+UMAY,Defined Outcome / Buffer ETF,US Listing,Equity
+UJUN,Defined Outcome / Buffer ETF,US Listing,Equity
+UJUL,Defined Outcome / Buffer ETF,US Listing,Equity
+UAUG,Defined Outcome / Buffer ETF,US Listing,Equity
+USEP,Defined Outcome / Buffer ETF,US Listing,Equity
+UOCT,Defined Outcome / Buffer ETF,US Listing,Equity
+UNOV,Defined Outcome / Buffer ETF,US Listing,Equity
+UDEC,Defined Outcome / Buffer ETF,US Listing,Equity
+NJAN,Defined Outcome / Buffer ETF,US Listing,Equity
+NFEB,Defined Outcome / Buffer ETF,US Listing,Equity
+NMAR,Defined Outcome / Buffer ETF,US Listing,Equity
+NAPR,Defined Outcome / Buffer ETF,US Listing,Equity
+NMAY,Defined Outcome / Buffer ETF,US Listing,Equity
+NJUN,Defined Outcome / Buffer ETF,US Listing,Equity
+NJUL,Defined Outcome / Buffer ETF,US Listing,Equity
+NAUG,Defined Outcome / Buffer ETF,US Listing,Equity
+NSEP,Defined Outcome / Buffer ETF,US Listing,Equity
+NOCT,Defined Outcome / Buffer ETF,US Listing,Equity
+NNOV,Defined Outcome / Buffer ETF,US Listing,Equity
+NDEC,Defined Outcome / Buffer ETF,US Listing,Equity
+KJAN,Defined Outcome / Buffer ETF,US Listing,Equity
+KFEB,Defined Outcome / Buffer ETF,US Listing,Equity
+KMAR,Defined Outcome / Buffer ETF,US Listing,Equity
+KAPR,Defined Outcome / Buffer ETF,US Listing,Equity
+KMAY,Defined Outcome / Buffer ETF,US Listing,Equity
+KJUN,Defined Outcome / Buffer ETF,US Listing,Equity
+KJUL,Defined Outcome / Buffer ETF,US Listing,Equity
+KAUG,Defined Outcome / Buffer ETF,US Listing,Equity
+KSEP,Defined Outcome / Buffer ETF,US Listing,Equity
+KOCT,Defined Outcome / Buffer ETF,US Listing,Equity
+KNOV,Defined Outcome / Buffer ETF,US Listing,Equity
+KDEC,Defined Outcome / Buffer ETF,US Listing,Equity
+IJAN,Defined Outcome / Buffer ETF,US Listing,Equity
+IFEB,Defined Outcome / Buffer ETF,US Listing,Equity
+IMAR,Defined Outcome / Buffer ETF,US Listing,Equity
+IAPR,Defined Outcome / Buffer ETF,US Listing,Equity
+IMAY,Defined Outcome / Buffer ETF,US Listing,Equity
+IJUN,Defined Outcome / Buffer ETF,US Listing,Equity
+IJUL,Defined Outcome / Buffer ETF,US Listing,Equity
+IAUG,Defined Outcome / Buffer ETF,US Listing,Equity
+ISEP,Defined Outcome / Buffer ETF,US Listing,Equity
+IOCT,Defined Outcome / Buffer ETF,US Listing,Equity
+INOV,Defined Outcome / Buffer ETF,US Listing,Equity
+IDEC,Defined Outcome / Buffer ETF,US Listing,Equity
+EJAN,Defined Outcome / Buffer ETF,US Listing,Equity
+EAPR,Defined Outcome / Buffer ETF,US Listing,Equity
+EJUL,Defined Outcome / Buffer ETF,US Listing,Equity
+EOCT,Defined Outcome / Buffer ETF,US Listing,Equity
+BALT,Other,US Listing,Equity
+EALT,Other,US Listing,Equity
+ZALT,Other,US Listing,Equity
+QBUF,Other,US Listing,Equity
+RBUF,Other,US Listing,Equity
+IBUF,Other,US Listing,Equity
+EBUF,Other,US Listing,Equity
+JAJL,Other,US Listing,Equity
+APOC,Other,US Listing,Equity
+ZJAN,Defined Outcome / Buffer ETF,US Listing,Equity
+ZFEB,Defined Outcome / Buffer ETF,US Listing,Equity
+ZMAR,Defined Outcome / Buffer ETF,US Listing,Equity
+ZAPR,Defined Outcome / Buffer ETF,US Listing,Equity
+ZMAY,Defined Outcome / Buffer ETF,US Listing,Equity
+ZJUN,Defined Outcome / Buffer ETF,US Listing,Equity
+ZJUL,Defined Outcome / Buffer ETF,US Listing,Equity
+ZAUG,Defined Outcome / Buffer ETF,US Listing,Equity
+ZSEP,Defined Outcome / Buffer ETF,US Listing,Equity
+ZOCT,Defined Outcome / Buffer ETF,US Listing,Equity
+ZNOV,Defined Outcome / Buffer ETF,US Listing,Equity
+ZDEK,Other,US Listing,Equity
+AJAN,Defined Outcome / Buffer ETF,US Listing,Equity
+AAPR,Other,US Listing,Equity
+AJUL,Other,US Listing,Equity
+AOCT,Other,US Listing,Equity
+TJAN,Defined Outcome / Buffer ETF,US Listing,Equity
+TAPR,Other,US Listing,Equity
+TJUL,Other,US Listing,Equity
+TOCT,Other,US Listing,Equity
+DDSQ,Other,US Listing,Equity
+DDNQ,Other,US Listing,Equity
+DDTL,Other,US Listing,Equity
+DDTS,Other,US Listing,Equity
+DDTO,Other,US Listing,Equity
+DDTN,Other,US Listing,Equity
+DDTD,Other,US Listing,Equity
+DDTJ,Other,US Listing,Equity
+DDTF,Other,US Listing,Equity
+DDFL,Other,US Listing,Equity
+DDFS,Other,US Listing,Equity
+DDFO,Other,US Listing,Equity
+DDFN,Other,US Listing,Equity
+DDFD,Other,US Listing,Equity
+DDFJ,Other,US Listing,Equity
+DDFF,Other,US Listing,Equity
+LJAN,Defined Outcome / Buffer ETF,US Listing,Equity
+LAPR,Other,US Listing,Equity
+LJUL,Other,US Listing,Equity
+LOCT,Other,US Listing,Equity
+JANH,Other,US Listing,Equity
+JANJ,Other,US Listing,Equity
+APRH,Other,US Listing,Equity
+APRJ,Other,US Listing,Equity
+JULH,Other,US Listing,Equity
+JULJ,Other,US Listing,Equity
+OCTH,Other,US Listing,Equity
+OCTJ,Other,US Listing,Equity
+QTJA,Other,US Listing,Equity
+QTAP,Other,US Listing,Equity
+QTJL,Other,US Listing,Equity
+QTOC,Other,US Listing,Equity
+XBJA,Other,US Listing,Equity
+XBAP,Other,US Listing,Equity
+XBJL,Other,US Listing,Equity
+XBOC,Other,US Listing,Equity
+XTJA,Other,US Listing,Equity
+XTAP,Other,US Listing,Equity
+XTJL,Other,US Listing,Equity
+XTOC,Other,US Listing,Equity
+XDSQ,Other,US Listing,Equity
+XDQQ,Other,US Listing,Equity
+SFLR,Other,US Listing,Equity
+QFLR,Other,US Listing,Equity
+RFLR,Other,US Listing,Equity
+IFLR,Other,US Listing,Equity
+BFRZ,Other,US Listing,Equity
+BUFB,Other,US Listing,Equity
+BUFF,Other,US Listing,Equity
+BSTP,Other,US Listing,Equity
+PSTP,Other,US Listing,Equity
+QHDG,Other,US Listing,Equity
+ACEI,Other,US Listing,Equity
+ACII,Other,US Listing,Equity
+SPUT,Other,US Listing,Equity
+EPRF,Other,US Listing,Equity
+TFJL,Other,US Listing,Equity
+TBJL,Other,US Listing,Equity
+XUSP,Other,US Listing,Equity
+QBF,Other,US Listing,Equity
+LOUP,Other,US Listing,Equity
+IGTR,Other,US Listing,Equity
+XBFR,Other,US Listing,Equity
+ACWI,International Equity,US Listing,Equity
+ACWX,International Equity,US Listing,Equity
+AGG,Fixed Income / Treasury,US Listing,Fixed Income
+AIQ,Other,US Listing,Equity
+AOA,Other,US Listing,Equity
+ARKB,Bitcoin Spot,US Listing,Equity
+ASHR,Other,US Listing,Equity
+ASHS,Other,US Listing,Equity
+BBC,Other,US Listing,Equity
+BBCA,Other,US Listing,Equity
+BBEU,Other,US Listing,Equity
+BBJP,Other,US Listing,Equity
+BIL,Fixed Income / Treasury,US Listing,Fixed Income
+BINV,Other,US Listing,Equity
+BITB,Bitcoin Spot,US Listing,Equity
+BLDG,Other,US Listing,Equity
+BLV,Other,US Listing,Equity
+BND,Fixed Income / Treasury,US Listing,Fixed Income
+BNDX,Other,US Listing,Equity
+BNO,Other,US Listing,Equity
+BOND,Other,US Listing,Equity
+BRRR,Bitcoin Spot,US Listing,Equity
+BSMC,Other,US Listing,Equity
+BSV,Other,US Listing,Equity
+BTC,Bitcoin Spot,US Listing,Equity
+BTCO,Other,US Listing,Equity
+BTCW,Bitcoin Spot,US Listing,Equity
+BUSA,Other,US Listing,Equity
+CANE,Other,US Listing,Equity
+CORN,Other,US Listing,Equity
+CPER,Other,US Listing,Equity
+DAPR,Other,US Listing,Equity
+DBA,Other,US Listing,Equity
+DBEF,Other,US Listing,Equity
+DBEU,Other,US Listing,Equity
+DBJP,Other,US Listing,Equity
+DBO,Other,US Listing,Equity
+DEFI,Other,US Listing,Equity
+DEM,Other,US Listing,Equity
+DFAT,Other,US Listing,Equity
+DFAX,Other,US Listing,Equity
+DFIV,Other,US Listing,Equity
+DFSI,Other,US Listing,Equity
+DFUS,Other,US Listing,Equity
+DFUV,Other,US Listing,Equity
+DGRO,Other,US Listing,Equity
+DVY,Other,US Listing,Equity
+DWM,Other,US Listing,Equity
+DWX,Other,US Listing,Equity
+DXJ,Other,US Listing,Equity
+EASG,Other,US Listing,Equity
+EEM,International Equity,US Listing,Equity
+EEMV,Other,US Listing,Equity
+EFA,Other,US Listing,Equity
+EFAV,Other,US Listing,Equity
+EFV,Other,US Listing,Equity
+EMB,Other,US Listing,Equity
+EMLC,Other,US Listing,Equity
+ESGD,Other,US Listing,Equity
+ESGU,Other,US Listing,Equity
+ESML,Other,US Listing,Equity
+ETH,Ethereum Spot,US Listing,Equity
+ETHA,Ethereum Spot,US Listing,Equity
+ETHE,Ethereum Spot,US Listing,Equity
+ETHV,Ethereum Spot,US Listing,Equity
+ETHW,Ethereum Spot,US Listing,Equity
+EWC,Other,US Listing,Equity
+EWJ,Other,US Listing,Equity
+EZBC,Bitcoin Spot,US Listing,Equity
+EZET,Ethereum Spot,US Listing,Equity
+EZU,Other,US Listing,Equity
+FBTC,Bitcoin Spot,US Listing,Equity
+FENI,Other,US Listing,Equity
+FETH,Ethereum Spot,US Listing,Equity
+FEZ,Other,US Listing,Equity
+FIW,Other,US Listing,Equity
+FLIN,Other,US Listing,Equity
+FNDE,Other,US Listing,Equity
+FNDF,Other,US Listing,Equity
+FTSL,Other,US Listing,Equity
+GAA,Other,US Listing,Equity
+GBTC,Bitcoin Spot,US Listing,Equity
+GLD,Precious Metals,US Listing,Commodity
+GLIN,Other,US Listing,Equity
+GOVT,Other,US Listing,Equity
+GSG,Other,US Listing,Equity
+HEDJ,Other,US Listing,Equity
+HEFA,Other,US Listing,Equity
+HEWJ,Other,US Listing,Equity
+HEZU,Other,US Listing,Equity
+HODL,Bitcoin Spot,US Listing,Equity
+HYD,Other,US Listing,Equity
+HYG,Other,US Listing,Equity
+HYMB,Other,US Listing,Equity
+HYS,Other,US Listing,Equity
+IAU,Precious Metals,US Listing,Commodity
+IAUM,Other,US Listing,Equity
+IBIT,Bitcoin Spot,US Listing,Equity
+IDEV,Other,US Listing,Equity
+IDV,Other,US Listing,Equity
+IEF,Fixed Income / Treasury,US Listing,Fixed Income
+IEFA,Other,US Listing,Equity
+IEI,Other,US Listing,Equity
+IEMG,International Equity,US Listing,Equity
+IEUR,Other,US Listing,Equity
+IEV,Other,US Listing,Equity
+IGIB,Other,US Listing,Equity
+IHDG,Other,US Listing,Equity
+IJH,Other,US Listing,Equity
+IJJ,Other,US Listing,Equity
+IJK,Other,US Listing,Equity
+IJR,US Mid/Small / Factor,US Listing,Equity
+IJS,Other,US Listing,Equity
+IJT,Other,US Listing,Equity
+ILTB,Other,US Listing,Equity
+IMCG,Other,US Listing,Equity
+INDA,Other,US Listing,Equity
+IQLT,Other,US Listing,Equity
+ISTB,Other,US Listing,Equity
+ITOT,Broad Market / Large Cap,US Listing,Equity
+IUSB,Other,US Listing,Equity
+IUSV,Other,US Listing,Equity
+IVE,Other,US Listing,Equity
+IVOL,Other,US Listing,Equity
+IVOO,Other,US Listing,Equity
+IVV,Broad Market / Large Cap,US Listing,Equity
+IWB,Other,US Listing,Equity
+IWC,Other,US Listing,Equity
+IWD,Other,US Listing,Equity
+IWM,US Mid/Small / Factor,US Listing,Equity
+IWN,Other,US Listing,Equity
+IWO,Other,US Listing,Equity
+IWP,Other,US Listing,Equity
+IWR,Other,US Listing,Equity
+IWS,Other,US Listing,Equity
+IWV,Other,US Listing,Equity
+IXUS,International Equity,US Listing,Equity
+IYY,Other,US Listing,Equity
+JAAA,Other,US Listing,Equity
+JBBB,Other,US Listing,Equity
+JEPI,Other,US Listing,Equity
+JEPQ,Other,US Listing,Equity
+JNK,Other,US Listing,Equity
+JPST,Other,US Listing,Equity
+JPXN,Other,US Listing,Equity
+KBE,Other,US Listing,Equity
+KRE,Other,US Listing,Equity
+LEMB,Other,US Listing,Equity
+LQD,Other,US Listing,Equity
+MBB,Other,US Listing,Equity
+MBWO,Other,US Listing,Equity
+MDY,Other,US Listing,Equity
+MUB,Other,US Listing,Equity
+MUNY,Other,US Listing,Equity
+NFTY,Other,US Listing,Equity
+NOBL,Other,US Listing,Equity
+NYF,Other,US Listing,Equity
+OPPE,Other,US Listing,Equity
+PALL,Precious Metals,US Listing,Commodity
+PBD,Other,US Listing,Equity
+PBW,Other,US Listing,Equity
+PCY,Other,US Listing,Equity
+PEY,Other,US Listing,Equity
+PFF,Other,US Listing,Equity
+PGX,Other,US Listing,Equity
+PID,Other,US Listing,Equity
+PPLT,Precious Metals,US Listing,Commodity
+PRF,Other,US Listing,Equity
+QETH,Ethereum Spot,US Listing,Equity
+QQQ,Broad Market / Large Cap,US Listing,Equity
+QQQM,Broad Market / Large Cap,US Listing,Equity
+QUAL,Other,US Listing,Equity
+RSP,Other,US Listing,Equity
+RSPR,Other,US Listing,Equity
+RSPS,Other,US Listing,Equity
+RUT,Other,US Listing,Equity
+RWJ,Other,US Listing,Equity
+RWK,Other,US Listing,Equity
+RWL,Other,US Listing,Equity
+SCHA,Other,US Listing,Equity
+SCHB,Other,US Listing,Equity
+SCHD,Other,US Listing,Equity
+SCHE,Other,US Listing,Equity
+SCHF,Other,US Listing,Equity
+SCHM,Other,US Listing,Equity
+SCHO,Other,US Listing,Equity
+SCHP,Other,US Listing,Equity
+SCHR,Other,US Listing,Equity
+SCHV,Other,US Listing,Equity
+SCHX,Other,US Listing,Equity
+SCHZ,Other,US Listing,Equity
+SCZ,Other,US Listing,Equity
+SDIV,Other,US Listing,Equity
+SDY,Other,US Listing,Equity
+SGOV,Fixed Income / Treasury,US Listing,Fixed Income
+SH,Other,US Listing,Equity
+SHM,Other,US Listing,Equity
+SHV,Other,US Listing,Equity
+SHY,Fixed Income / Treasury,US Listing,Fixed Income
+SJNK,Other,US Listing,Equity
+SLV,Precious Metals,US Listing,Commodity
+SOYB,Other,US Listing,Equity
+SPEM,Other,US Listing,Equity
+SPHD,Other,US Listing,Equity
+SPHY,Other,US Listing,Equity
+SPIB,Other,US Listing,Equity
+SPTL,Other,US Listing,Equity
+SPTS,Other,US Listing,Equity
+SPY,Broad Market / Large Cap,US Listing,Equity
+SPYD,Other,US Listing,Equity
+SPYM,Other,US Listing,Equity
+SPYV,Other,US Listing,Equity
+SRLN,Other,US Listing,Equity
+STIP,Other,US Listing,Equity
+SUB,Other,US Listing,Equity
+SUSA,Other,US Listing,Equity
+TAGS,Other,US Listing,Equity
+TETH,Ethereum Spot,US Listing,Equity
+TFI,Other,US Listing,Equity
+TIP,Other,US Listing,Equity
+TLT,Fixed Income / Treasury,US Listing,Fixed Income
+TMDV,Other,US Listing,Equity
+TRTY,Other,US Listing,Equity
+UGA,Other,US Listing,Equity
+UNG,Other,US Listing,Equity
+USFR,Other,US Listing,Equity
+USHY,Other,US Listing,Equity
+USL,Other,US Listing,Equity
+USMV,Other,US Listing,Equity
+USO,Other,US Listing,Equity
+VB,US Mid/Small / Factor,US Listing,Equity
+VBK,US Mid/Small / Factor,US Listing,Equity
+VBR,US Mid/Small / Factor,US Listing,Equity
+VCIT,Other,US Listing,Equity
+VCLT,Other,US Listing,Equity
+VCSH,Other,US Listing,Equity
+VEA,International Equity,US Listing,Equity
+VEU,International Equity,US Listing,Equity
+VGIT,Fixed Income / Treasury,US Listing,Fixed Income
+VGK,Other,US Listing,Equity
+VGSH,Fixed Income / Treasury,US Listing,Fixed Income
+VIG,Other,US Listing,Equity
+VIOG,Other,US Listing,Equity
+VIXY,Other,US Listing,Equity
+VLUE,Other,US Listing,Equity
+VNQI,Other,US Listing,Equity
+VO,US Mid/Small / Factor,US Listing,Equity
+VOE,Other,US Listing,Equity
+VONE,Other,US Listing,Equity
+VONV,Other,US Listing,Equity
+VOO,Broad Market / Large Cap,US Listing,Equity
+VOOV,Other,US Listing,Equity
+VOT,Other,US Listing,Equity
+VPL,Other,US Listing,Equity
+VSS,Other,US Listing,Equity
+VT,Other,US Listing,Equity
+VTEB,Other,US Listing,Equity
+VTHR,Other,US Listing,Equity
+VTI,Broad Market / Large Cap,US Listing,Equity
+VTIP,Other,US Listing,Equity
+VTV,US Mid/Small / Factor,US Listing,Equity
+VTWO,Other,US Listing,Equity
+VVV,Other,US Listing,Equity
+VWO,International Equity,US Listing,Equity
+VWOB,Other,US Listing,Equity
+VXF,Other,US Listing,Equity
+VXUS,International Equity,US Listing,Equity
+VXX,Other,US Listing,Equity
+VYM,Other,US Listing,Equity
+VYMI,Other,US Listing,Equity
+WEAT,Other,US Listing,Equity
+XBI,Other,US Listing,Equity
+XOP,Other,US Listing,Equity
+XRT,Other,US Listing,Equity
+XSD,Other,US Listing,Equity
+XSP,Other,US Listing,Equity
+XYLD,Other,US Listing,Equity
+ZROZ,Other,US Listing,Equity

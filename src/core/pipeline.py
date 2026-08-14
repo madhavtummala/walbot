@@ -9,7 +9,6 @@ from src.brokerages import BROKERAGE_REGISTRY
 from src.core.config import get_account_broker_type
 from src.core.interfaces import (
     MODE_TARGET,
-    AlgorithmContext,
     AlgorithmDecision,
     AlgorithmResult,
     Brokerage,
@@ -188,6 +187,11 @@ def place_orders(
     )
 
     algorithm.settle(config, order_results, final_intents)
+
+    # A brokerage that keeps its own book (the local paper one) has no price feed, so its
+    # equity would stay marked at the last fill until someone traded again.
+    if hasattr(brokerage, "mark_prices"):
+        brokerage.mark_prices(latest_prices)
 
     rejected = [order for order in order_results if order.get("status") == "rejected"]
     submitted = [order for order in order_results if order.get("status") == "submitted"]

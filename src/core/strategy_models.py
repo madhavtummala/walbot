@@ -11,6 +11,7 @@ STRATEGY_LABELS = {
     "dca": "DCA",
     "bursty_dca": "Bursty DCA",
     "fast_momentum": "Fast Momentum",
+    "dual_momentum": "Dual Momentum",
     # Named for what it does: classify SPY into GROWING / FLAT / FALLING / CRISIS and rotate
     # between growth, covered-call income, cash, and hedges.
     "spy_rotation": "SPY Rotation",

@@ -94,7 +94,10 @@ def build_algorithm_context(
     bars_by_symbol: dict[str, Any] = {}
     if requirements.daily_lookback_days:
         bars_by_symbol = fetch_daily_bars(
-            config.symbols,
+            # The symbols the algorithm asked for, not the global universe: an algorithm
+            # trading a name outside config.symbols used to receive no daily bars for it and
+            # silently score it as flat, which reads as a market fact rather than a data gap.
+            price_symbols,
             requirements.daily_lookback_days,
             ma_days=requirements.daily_ma_days,
             extra_buffer_days=requirements.daily_extra_buffer_days,

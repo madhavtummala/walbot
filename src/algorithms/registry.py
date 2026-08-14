@@ -8,6 +8,10 @@ from .base import BaseAlgorithm
 
 ALGORITHM_MODULES = {
     "fast_momentum": "src.algorithms.fast_momentum",
+    # Not to be confused with the "dual_momentum" *scoring model* in core/strategy_models.py,
+    # which is a daily-bar row builder used by the options swing algorithm. This id is the
+    # algorithm; that string is a signal-row style.
+    "dual_momentum": "src.algorithms.dual_momentum",
     "spy_rotation": "src.algorithms.invest_spy",
     "dca": "src.algorithms.dca",
     "bursty_dca": "src.algorithms.dca",
@@ -18,6 +22,7 @@ ALGORITHM_REGISTRY: dict[str, str | Type[BaseAlgorithm]] = {
     "dca": "src.algorithms.dca.bot:DCAAlgorithm",
     "bursty_dca": "src.algorithms.dca.bursty:BurstyDCAAlgorithm",
     "fast_momentum": "src.algorithms.fast_momentum:FastMomentumAlgorithm",
+    "dual_momentum": "src.algorithms.dual_momentum:DualMomentumAlgorithm",
     "spy_rotation": "src.algorithms.invest_spy:InvestSpyAlgorithm",
 }
 

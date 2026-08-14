@@ -14,6 +14,9 @@ def test_sanitize_controls_defaults_and_bools() -> None:
         "options_trading": {"enabled": False, "strategy": "none", "account_id": ""},
         "algorithm_enabled": False,
         "options_trading_enabled": False,
+        "bindings": [
+            {"id": "b1", "strategy": "fast_momentum", "account_id": "", "enabled": False, "frequency": "1hr"},
+        ],
         "active_strategy": "fast_momentum",
         "options_strategy": "none",
         "options_trading_account_id": "",

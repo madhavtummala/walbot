@@ -9,12 +9,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from src.core.config import DEFAULT_STRATEGY_ID, get_config
-from src.core import pipeline
-from ..api.controls import load_controls
+from ..api.controls import find_binding, load_controls
 from ..algorithms.registry import get_algorithm_class
 from ..core.interfaces import Schedule, schedule_minutes
 from ..execution.live_runner import run_once
-from ..common.logging_utils import log_position_changes
 
 logger = logging.getLogger(__name__)
 MARKET_TZ = ZoneInfo("America/Chicago")
@@ -111,7 +109,7 @@ class _RuntimeLoop:
         
         logger.info("Starting %s run (key=%s)", self.name, run_key or "manual")
         try:
-            self._run_fn(account_id or None)
+            self._run_fn(account_id or None, run_key)
             with self._lock:
                 self._state.last_run_date = date.today().isoformat()
             logger.info("Completed %s run successfully", self.name)
@@ -125,11 +123,93 @@ class _RuntimeLoop:
                 self._state.last_finished_at = datetime.now(timezone.utc).isoformat()
 
 
-def _algorithm_enabled(controls: dict[str, Any]) -> bool:
-    # No sentinel strategy to screen out any more: every id names a real algorithm, so the
-    # power toggle is the whole answer. Options still has a "none" because it can be off
-    # while equities trade.
-    return bool(controls.get("algorithm_enabled"))
+def _binding_frequency(binding_id: str) -> str:
+    controls = load_controls()
+    binding = find_binding(controls, binding_id)
+    candidate = str((binding or {}).get("frequency") or "1hr").strip().lower()
+    if candidate in {"15m", "30m", "1hr", "2hr", "1d", "mcp"}:
+        return candidate
+    return "1hr"
+
+
+def _binding_enabled(binding_id: str):
+    """Enabled check scoped to one binding, re-read from controls on every tick."""
+
+    def enabled(controls: dict[str, Any]) -> bool:
+        binding = find_binding(controls, binding_id)
+        if not binding or not binding.get("enabled"):
+            return False
+        return str((binding or {}).get("frequency") or "1hr").strip().lower() != "mcp"
+
+    return enabled
+
+
+def _binding_account_id(binding_id: str):
+    def account_id(controls: dict[str, Any]) -> str:
+        binding = find_binding(controls, binding_id)
+        return str((binding or {}).get("account_id") or controls.get("trading_account_id") or "")
+
+    return account_id
+
+
+def _binding_strategy(binding_id: str, controls: dict[str, Any] | None = None) -> str:
+    controls = controls if controls is not None else load_controls()
+    binding = find_binding(controls, binding_id)
+    return str((binding or {}).get("strategy") or DEFAULT_STRATEGY_ID)
+
+
+def _binding_schedule(binding_id: str) -> Schedule:
+    try:
+        return get_algorithm_class(_binding_strategy(binding_id)).schedule
+    except (KeyError, ValueError, TypeError):
+        return Schedule()
+
+
+def _frequency_minutes(frequency: str) -> int:
+    mapping = {"15m": 15, "30m": 30, "1hr": 60, "2hr": 120, "1d": 24 * 60}
+    return mapping.get(str(frequency or "1hr").strip().lower(), 60)
+
+
+def _binding_run_fn(binding_id: str):
+    def run(account_id: str | None, run_key: str = "") -> None:
+        # Resolved per run, so switching a binding's strategy takes effect on the next tick.
+        run_once(account_id=account_id, strategy=_binding_strategy(binding_id))
+
+    return run
+
+
+def _binding_run_key(binding_id: str):
+    def run_key() -> str | None:
+        frequency = _binding_frequency(binding_id)
+        if frequency == "mcp":
+            return None
+        local_now = datetime.now(MARKET_TZ)
+        # The binding owns the cadence, the algorithm still owns the session window. Without
+        # this a 1hr binding fires at 03:00 on a Sunday: run_once bails at the market-closed
+        # check, but only after a full data fetch, and it still stamps "last run" with a time
+        # the market was shut.
+        if not _is_regular_market_hours(local_now, _binding_schedule(binding_id)):
+            return None
+        minutes = _frequency_minutes(frequency)
+        if minutes >= 24 * 60:
+            bucket = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            bucket_minute = ((local_now.hour * 60) + local_now.minute) // minutes * minutes
+            bucket_hour, minute = divmod(bucket_minute, 60)
+            bucket = local_now.replace(hour=bucket_hour, minute=minute, second=0, microsecond=0)
+        return f"{binding_id}:{bucket.isoformat(timespec='minutes')}"
+
+    return run_key
+
+
+def _binding_check_seconds(binding_id: str):
+    def check_seconds() -> int:
+        frequency = _binding_frequency(binding_id)
+        if frequency == "mcp":
+            return 300
+        return max(_frequency_minutes(frequency) * 60, 60)
+
+    return check_seconds
 
 
 def _options_enabled(controls: dict[str, Any]) -> bool:
@@ -145,7 +225,8 @@ def _run_algorithm(account_id: str | None) -> None:
     run_once(account_id=account_id)
 
 
-def _run_options(account_id: str | None) -> None:
+def _run_options(account_id: str | None, run_key: str = "") -> None:
+    # run_key is accepted for a uniform runner signature; the options path has no binding.
     from .algorithms.options.swing import run_options_once
 
     run_options_once(account_id=account_id)
@@ -223,22 +304,17 @@ def _options_account_id(controls: dict[str, Any]) -> str:
 
 
 class BotRuntime:
-    """Two loops, not three.
+    """One scheduler loop per algorithm binding, plus the options loop.
 
-    DCA used to get its own loop with its own cron, because it was not an algorithm. Now that
-    it is one, it runs on the equities loop like everything else and its cadence comes from
-    ``DCAAlgorithm.schedule``. Keeping the third loop would have let two schedulers drive the
-    same accrual state at once.
+    Bindings are user-editable at runtime, so the loop set is reconciled against controls
+    rather than fixed at construction: adding a binding in the dashboard starts a loop for it,
+    removing one stops that loop and leaves the others alone.
     """
 
     def __init__(self) -> None:
-        self.algorithm = _RuntimeLoop(
-            "algorithm",
-            _algorithm_enabled,
-            _run_algorithm,
-            _algorithm_check_seconds,
-            _algorithm_run_key,
-        )
+        self._lock = threading.Lock()
+        self._algorithm_loops: dict[str, _RuntimeLoop] = {}
+        self._started = False
         self.options = _RuntimeLoop(
             "options",
             _options_enabled,
@@ -248,17 +324,68 @@ class BotRuntime:
             _options_account_id,
         )
 
+    def _make_loop(self, binding_id: str) -> _RuntimeLoop:
+        return _RuntimeLoop(
+            f"algorithm-{binding_id}",
+            _binding_enabled(binding_id),
+            _binding_run_fn(binding_id),
+            _binding_check_seconds(binding_id),
+            _binding_run_key(binding_id),
+            _binding_account_id(binding_id),
+        )
+
+    def reconcile(self) -> None:
+        try:
+            bindings = load_controls().get("bindings") or []
+        except Exception:  # noqa: BLE001 - a bad config must not kill the runtime
+            logger.exception("Could not read bindings; leaving runtime loops as they are")
+            return
+        wanted = {str(binding.get("id")) for binding in bindings}
+        with self._lock:
+            for binding_id in list(self._algorithm_loops):
+                if binding_id not in wanted:
+                    self._algorithm_loops.pop(binding_id).stop()
+            for binding_id in wanted:
+                if binding_id not in self._algorithm_loops:
+                    loop = self._make_loop(binding_id)
+                    self._algorithm_loops[binding_id] = loop
+                    if self._started:
+                        loop.start()
+
     def start(self) -> None:
-        self.algorithm.start()
+        self._started = True
+        self.reconcile()
+        with self._lock:
+            loops = list(self._algorithm_loops.values())
+        for loop in loops:
+            loop.start()
         self.options.start()
 
     def stop(self) -> None:
-        self.algorithm.stop()
+        self._started = False
+        with self._lock:
+            loops = list(self._algorithm_loops.values())
+        for loop in loops:
+            loop.stop()
         self.options.stop()
 
+    @property
+    def algorithm(self) -> _RuntimeLoop:
+        """The first binding's loop, for callers that predate multiple bindings."""
+        self.reconcile()
+        with self._lock:
+            loops = list(self._algorithm_loops.values())
+        return loops[0] if loops else self._make_loop("b1")
+
     def snapshot(self) -> dict[str, Any]:
+        self.reconcile()
+        with self._lock:
+            loops = dict(self._algorithm_loops)
+        bindings = {binding_id: loop.snapshot() for binding_id, loop in loops.items()}
+        first = next(iter(bindings.values()), None)
         return {
-            "algorithm": self.algorithm.snapshot(),
+            "bindings": bindings,
+            "algorithm": first if first is not None else RuntimeState().__dict__,
             "options": self.options.snapshot(),
         }
 

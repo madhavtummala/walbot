@@ -114,7 +114,8 @@ def test_dca_is_rarer_than_bursty_dca() -> None:
 def test_runtime_has_no_dca_loop_of_its_own() -> None:
     """Two schedulers driving one accrual state was the hazard this collapse removes."""
     assert not hasattr(bot_runtime.bot_runtime, "dca")
-    assert set(bot_runtime.bot_runtime.snapshot()) == {"algorithm", "options"}
+    # "algorithm" mirrors the first binding for callers that predate the binding list.
+    assert set(bot_runtime.bot_runtime.snapshot()) == {"bindings", "algorithm", "options"}
 
 
 def test_describe_schedule_renders_the_cadence_for_the_dashboard() -> None:
@@ -135,3 +136,67 @@ def test_options_enabled_requires_strategy_and_kill_switch_off(monkeypatch) -> N
     Config.kill_switch = True
 
     assert not bot_runtime._options_enabled({"options_trading_enabled": True, "options_strategy": "covered_call"})
+
+
+def _binding_controls(frequency: str = "1hr", strategy: str = "dual_momentum") -> dict:
+    return {
+        "bindings": [{"id": "b1", "strategy": strategy, "account_id": "paper",
+                      "enabled": True, "frequency": frequency}],
+        "trading_account_id": "paper",
+    }
+
+
+def test_a_binding_never_fires_outside_the_algorithms_session(monkeypatch) -> None:
+    """The binding chooses the cadence; the algorithm still owns the session window.
+
+    Without this an hourly binding wakes at 03:00 on a Sunday, fetches a full universe of
+    market data, and only then discovers the market is closed.
+    """
+    monkeypatch.setattr(bot_runtime, "load_controls", lambda: _binding_controls())
+    sunday_3am = datetime(2026, 8, 16, 3, 0, tzinfo=bot_runtime.MARKET_TZ)
+    monkeypatch.setattr(bot_runtime, "datetime", _FrozenClock(sunday_3am))
+
+    assert bot_runtime._binding_run_key("b1")() is None
+
+
+def test_a_binding_fires_inside_the_session(monkeypatch) -> None:
+    monkeypatch.setattr(bot_runtime, "load_controls", lambda: _binding_controls())
+    wednesday_noon = datetime(2026, 8, 12, 12, 0, tzinfo=bot_runtime.MARKET_TZ)
+    monkeypatch.setattr(bot_runtime, "datetime", _FrozenClock(wednesday_noon))
+
+    key = bot_runtime._binding_run_key("b1")()
+
+    assert key is not None and key.startswith("b1:")
+
+
+def test_the_frequency_sets_the_bucket_size(monkeypatch) -> None:
+    """Two runs inside one bucket dedupe; the next bucket is a new key."""
+    monkeypatch.setattr(bot_runtime, "load_controls", lambda: _binding_controls("15m"))
+    first = datetime(2026, 8, 12, 12, 0, tzinfo=bot_runtime.MARKET_TZ)
+    monkeypatch.setattr(bot_runtime, "datetime", _FrozenClock(first))
+    key_at_noon = bot_runtime._binding_run_key("b1")()
+    monkeypatch.setattr(bot_runtime, "datetime", _FrozenClock(first.replace(minute=7)))
+    key_at_seven_past = bot_runtime._binding_run_key("b1")()
+    monkeypatch.setattr(bot_runtime, "datetime", _FrozenClock(first.replace(minute=15)))
+    key_at_quarter_past = bot_runtime._binding_run_key("b1")()
+
+    assert key_at_noon == key_at_seven_past
+    assert key_at_quarter_past != key_at_noon
+
+
+def test_an_mcp_binding_is_never_scheduled(monkeypatch) -> None:
+    monkeypatch.setattr(bot_runtime, "load_controls", lambda: _binding_controls("mcp"))
+    monkeypatch.setattr(bot_runtime, "datetime", _FrozenClock(datetime(2026, 8, 12, 12, 0, tzinfo=bot_runtime.MARKET_TZ)))
+
+    assert bot_runtime._binding_run_key("b1")() is None
+    assert bot_runtime._binding_enabled("b1")(_binding_controls("mcp")) is False
+
+
+class _FrozenClock:
+    """Stands in for the datetime module so `datetime.now(tz)` is deterministic."""
+
+    def __init__(self, moment: datetime) -> None:
+        self._moment = moment
+
+    def now(self, tz=None):
+        return self._moment.astimezone(tz) if tz else self._moment

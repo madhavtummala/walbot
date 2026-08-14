@@ -241,7 +241,7 @@ def test_cache_only_backtest_does_not_compute_without_cached_rows(monkeypatch) -
     monkeypatch.setattr(
         api_payloads,
         "load_dca_plan",
-        lambda rows: {"buy": {"items": []}, "sell": {"items": []}},
+        lambda rows, **kwargs: {"buy": {"items": []}, "sell": {"items": []}},
     )
     monkeypatch.setattr(api_payloads, "_load_backtest_cache", lambda: {"version": 2, "items": {}})
     monkeypatch.setattr(api_payloads, "_compute_backtest", fail_compute)
@@ -262,7 +262,7 @@ def test_non_refresh_backtest_does_not_compute_without_cached_rows(monkeypatch) 
     monkeypatch.setattr(
         api_payloads,
         "load_dca_plan",
-        lambda rows: {"buy": {"items": []}, "sell": {"items": []}},
+        lambda rows, **kwargs: {"buy": {"items": []}, "sell": {"items": []}},
     )
     monkeypatch.setattr(api_payloads, "_load_backtest_cache", lambda: {"version": 4, "items": {}})
     monkeypatch.setattr(api_payloads, "_compute_backtest", fail_compute)
@@ -291,7 +291,7 @@ def test_refresh_backtest_computes_with_market_data_refresh(monkeypatch) -> None
     monkeypatch.setattr(
         api_payloads,
         "load_dca_plan",
-        lambda rows: {"buy": {"items": []}, "sell": {"items": []}},
+        lambda rows, **kwargs: {"buy": {"items": []}, "sell": {"items": []}},
     )
     monkeypatch.setattr(api_payloads, "_load_backtest_cache", lambda: {"version": 4, "items": {}})
     monkeypatch.setattr(api_payloads, "_save_backtest_cache", lambda cache: None)
@@ -469,7 +469,7 @@ def test_dca_view_states_its_cadence_and_planned_total(monkeypatch) -> None:
         "sell": {"items": []},
     }
     monkeypatch.setattr(api_payloads, "universe_payload", lambda: {"rows": [{"symbol": "SPY"}]})
-    monkeypatch.setattr(api_payloads, "load_dca_plan", lambda rows: plan)
+    monkeypatch.setattr(api_payloads, "load_dca_plan", lambda rows, **kwargs: plan)
     monkeypatch.setattr(dca_bot.DCAAlgorithm, "plan", lambda self, config: plan)
     monkeypatch.setattr(dca, "unknown_plan_symbols", lambda *a, **kw: [])
     monkeypatch.setattr(dca_bot, "unknown_plan_symbols", lambda *a, **kw: [])

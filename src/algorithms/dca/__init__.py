@@ -7,6 +7,12 @@ from ...core.config import load_dca_config, save_dca_config
 
 DCA_PLAN_SECTION = "dca_plan"
 
+#: Per-account plans. The monthly budgets *are* DCA's config, and config is per account the
+#: same way accrual state is (``dca_accrual:{strategy}:{account}``) -- two DCA bindings on
+#: different accounts must not share one budget. ``dca_plan`` above stays readable as the
+#: template for any account that has never been edited.
+DCA_PLANS_SECTION = "dca_plans"
+
 #: Hard ceiling on a per-symbol budget. Every plan amount means **dollars per month, per
 #: symbol** -- the same meaning in DCA and Bursty DCA, so switching between them never
 #: silently changes the spend rate.
@@ -99,28 +105,49 @@ def sanitize_dca_plan(plan: dict[str, Any] | None, universe_rows: list[dict[str,
     return sanitized
 
 
-def _raw_plan_from_config(raw_config: dict[str, Any]) -> dict[str, Any]:
+def _raw_plan_from_config(raw_config: dict[str, Any], account_id: str = "") -> dict[str, Any]:
     bot_section = raw_config.get("dca_bot")
-    if isinstance(bot_section, dict):
-        section = bot_section.get(DCA_PLAN_SECTION)
-        if isinstance(section, dict):
-            return section
+    if not isinstance(bot_section, dict):
+        return DEFAULT_DCA_PLAN
+    plans = bot_section.get(DCA_PLANS_SECTION)
+    if account_id and isinstance(plans, dict) and isinstance(plans.get(account_id), dict):
+        return plans[account_id]
+    # No plan of its own yet: fall back to the single pre-account plan, which keeps an existing
+    # config working and seeds a new account with something sensible rather than an empty board.
+    section = bot_section.get(DCA_PLAN_SECTION)
+    if isinstance(section, dict):
+        return section
     return DEFAULT_DCA_PLAN
 
 
-def load_dca_plan(universe_rows: list[dict[str, Any]], path: str | None = None) -> dict[str, Any]:
+def load_dca_plan(
+    universe_rows: list[dict[str, Any]], path: str | None = None, account_id: str = ""
+) -> dict[str, Any]:
     raw_config = load_dca_config(path)
-    return sanitize_dca_plan(_raw_plan_from_config(raw_config), universe_rows)
+    return sanitize_dca_plan(_raw_plan_from_config(raw_config, account_id), universe_rows)
 
 
-def save_dca_plan(plan: dict[str, Any], universe_rows: list[dict[str, Any]], path: str | None = None) -> dict[str, Any]:
+def save_dca_plan(
+    plan: dict[str, Any],
+    universe_rows: list[dict[str, Any]],
+    path: str | None = None,
+    account_id: str = "",
+) -> dict[str, Any]:
     sanitized = sanitize_dca_plan(plan, universe_rows)
     raw_config = load_dca_config(path)
     dca_bot = raw_config.setdefault("dca_bot", {})
     if not isinstance(dca_bot, dict):
         dca_bot = {}
         raw_config["dca_bot"] = dca_bot
-    dca_bot[DCA_PLAN_SECTION] = sanitized
+    if account_id:
+        plans = dca_bot.setdefault(DCA_PLANS_SECTION, {})
+        if not isinstance(plans, dict):
+            plans = {}
+            dca_bot[DCA_PLANS_SECTION] = plans
+        plans[account_id] = sanitized
+    else:
+        # No account in play (a bare CLI edit): keep writing the shared template.
+        dca_bot[DCA_PLAN_SECTION] = sanitized
     save_dca_config(raw_config, path)
     return sanitized
 

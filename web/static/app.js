@@ -7,6 +7,10 @@ const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 let BACKTEST_PERIOD = "4m";
 let BACKTEST_LABEL = "4M";
 
+//: Selectable backtest windows. The configured default from status still wins on first load;
+//: this only lets you look at a different window without editing config.
+const BACKTEST_PERIOD_CHOICES = ["1m", "2m", "3m", "4m", "6m", "12m", "24m"];
+
 const ENABLED_COLORS = {
   buy: "#024c4a",
   sell: "#7a3800",
@@ -20,6 +24,7 @@ const DISABLED_COLORS = {
 const STRATEGIES = [
   {
     key: "dca",
+    blurb: "Buys each symbol's monthly budget as soon as it clears the broker minimum.",
     name: "DCA",
     status: "Live",
     horizon: "Continuous",
@@ -29,6 +34,7 @@ const STRATEGIES = [
   },
   {
     key: "bursty_dca",
+    blurb: "Same monthly budget as DCA, but only deployed into a dip above the 200-day.",
     name: "Bursty DCA",
     status: "Live",
     horizon: "Continuous",
@@ -38,6 +44,7 @@ const STRATEGIES = [
   },
   {
     key: "fast_momentum",
+    blurb: "Ranks risk-on and defensive ETFs on multi-horizon momentum, then sizes with caps.",
     name: "Fast Momentum",
     status: "Live",
     horizon: "Intraday",
@@ -46,7 +53,18 @@ const STRATEGIES = [
     signals: ["Nano momentum", "Micro momentum", "Meso trend", "Macro trend", "Pullback bonus"],
   },
   {
+    key: "dual_momentum",
+    blurb: "Relative momentum picks the leaders; absolute momentum decides if it may hold any.",
+    name: "Dual Momentum",
+    status: "Paper",
+    horizon: "Intraday",
+    risk: "Medium",
+    logic: "Gates risk-on exposure on a benchmark trend and breadth regime, requires each ETF to clear its own absolute-trend test before it is ranked, times entries with a separate fast signal, and scales weights toward a portfolio volatility target.",
+    signals: ["Regime gate", "Breadth", "Absolute eligibility", "Slow rank", "Entry timing", "Vol target"],
+  },
+  {
     key: "spy_rotation",
+    blurb: "Classifies the SPY regime, then rotates between growth, income, cash, and hedges.",
     name: "SPY Rotation",
     status: "Live",
     horizon: "Intraday",
@@ -70,7 +88,7 @@ const state = {
     algorithm_enabled: false,
     active_strategy: "fast_momentum",
   },
-  accounts: [],
+  accounts: { rows: [] },
   bot: null,
   dca: null,
   layout: null,
@@ -92,8 +110,18 @@ const state = {
   universeRefreshing: false,
   universeApplying: false,
   deckWheelLocked: false,
-  renderedAlgorithmDeckKey: "",
   schwabAuth: null,
+  renderedBindingKey: "",
+  algorithmConfigs: {},
+  algorithmConfigLoading: {},
+  watchlist: null,
+  watchDrag: null,
+  positions: {},
+  positionsLoading: {},
+  activity: {},
+  activityLoading: {},
+  algorithmActivity: {},
+  algorithmActivityLoading: {},
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -154,14 +182,6 @@ function clamp(value, min, max) {
 }
 // DCA is live when it is the selected algorithm and the algorithm bot is on -- the same
 // condition as any other strategy, now that it runs on the shared loop.
-function isDcaEnabled() {
-  return isAlgorithmTradingEnabled() && DCA_ALGORITHM_KEYS.includes(activeAlgorithmKey());
-}
-
-function isAlgorithmTradingEnabled() {
-  return Boolean(state.controls?.algorithm_enabled);
-}
-
 function bucketColor(bucketName) {
   return isDcaEnabled() ? ENABLED_COLORS[bucketName] : DISABLED_COLORS[bucketName];
 }
@@ -209,11 +229,12 @@ function textEl(attrs, content) {
 
 function calculateLayout() {
   const svg = $("#bubbleBoard");
+  if (!svg) return;
   const width = svg.clientWidth || 1200;
   const height = svg.clientHeight || 720;
   const stacked = width < 760;
-  const baseR = stacked ? Math.min(width * 0.35, height * 0.19, 210) : Math.min(width * 0.2, height * 0.36, 292);
-  const maxR = stacked ? Math.min(width * 0.43, height * 0.24, 260) : Math.min(width * 0.27, height * 0.44, 365);
+  const baseR = stacked ? Math.min(width * 0.31, height * 0.17, 185) : Math.min(width * 0.18, height * 0.32, 257);
+  const maxR = stacked ? Math.min(width * 0.38, height * 0.21, 229) : Math.min(width * 0.24, height * 0.39, 321);
 
   state.layout = {
     width,
@@ -246,14 +267,6 @@ function pointFromPosition(position, bucket, radius) {
   return {
     x: bucket.cx + clamp(Number(position?.x || 0), -1, 1) * usable,
     y: bucket.cy + clamp(Number(position?.y || 0), -1, 1) * usable,
-  };
-}
-
-function pointToPosition(point, bucket, radius) {
-  const usable = Math.max(bucket.r - radius - 18, 1);
-  return {
-    x: clamp((point.x - bucket.cx) / usable, -1, 1),
-    y: clamp((point.y - bucket.cy) / usable, -1, 1),
   };
 }
 
@@ -388,7 +401,7 @@ function syncNodesToPlan() {
 }
 
 function renderBoard() {
-  if (!state.dca?.plan) return;
+  if (!state.dca?.plan || !$("#bubbleBoard")) return;
   window.cancelAnimationFrame(state.animationId);
   document.body.classList.toggle("dca-off", !isDcaEnabled());
   calculateLayout();
@@ -837,17 +850,9 @@ function moveAsset(node) {
   schedulePlanSave();
 }
 
-function renderControls() {
-  renderPlanSummary();
-  renderAlgorithmPower();
-  renderAlgorithmDeck();
-  updateFeatureToggles();
-}
-
 function renderDca() {
   if (!state.dca?.plan) return;
   syncNodesToPlan();
-  renderControls();
   renderBoard();
 }
 
@@ -869,27 +874,101 @@ function algorithmChoices() {
   return STRATEGIES;
 }
 
+//: Bindings are pairs of algorithm and account. Signals and backtests are keyed by strategy,
+//: so two bindings on the same strategy share those views; the account only changes execution.
+function bindings() {
+  return state.controls?.bindings || [];
+}
+
+function primaryDcaBindingId() {
+  return bindings().find((binding) => DCA_ALGORITHM_KEYS.includes(binding.strategy))?.id || "";
+}
+
+function bindingById(bindingId) {
+  return bindings().find((binding) => String(binding.id) === String(bindingId)) || null;
+}
+
+function isDcaEnabled() {
+  // The bubbles are one shared plan, so any live DCA binding lights them up.
+  return bindings().some((binding) => binding.enabled && DCA_ALGORITHM_KEYS.includes(binding.strategy));
+}
+
+function configFieldKind(value) {
+  if (typeof value === "boolean") return "bool";
+  if (typeof value === "number") return "number";
+  if (typeof value === "string") return "string";
+  if (Array.isArray(value) && value.every((item) => typeof item !== "object" || item === null)) return "list";
+  return "json";
+}
+
+function renderConfigField(key, value, doc) {
+  const kind = configFieldKind(value);
+  const help = doc
+    ? `<em class="fieldWhat">${escapeHtml(doc.what)}</em><em class="fieldEffect">${escapeHtml(doc.effect)}</em>`
+    : "";
+  const label = `<span title="${escapeHtml(key)}">${escapeHtml(key)}</span>${help}`;
+  const attrs = `data-config-key="${escapeHtml(key)}" data-config-kind="${kind}"`;
+  if (kind === "bool") {
+    return `<label class="configField">${label}
+      <input type="checkbox" ${attrs}${value ? " checked" : ""} />
+    </label>`;
+  }
+  if (kind === "number") {
+    // `any` keeps fractional knobs like 0.95 editable; integers still type naturally.
+    return `<label class="configField">${label}
+      <input type="number" step="any" ${attrs} value="${escapeHtml(String(value))}" />
+    </label>`;
+  }
+  if (kind === "string") {
+    return `<label class="configField">${label}
+      <input type="text" ${attrs} value="${escapeHtml(value)}" />
+    </label>`;
+  }
+  if (kind === "list") {
+    return `<label class="configField configField--wide">${label}
+      <textarea rows="2" ${attrs}>${escapeHtml(value.join(", "))}</textarea>
+    </label>`;
+  }
+  // Nested structures have no sensible widget, so they keep a JSON box of their own.
+  return `<label class="configField configField--wide">${label}
+    <textarea rows="3" ${attrs}>${escapeHtml(JSON.stringify(value, null, 1))}</textarea>
+  </label>`;
+}
+
+function collectConfigValues(host) {
+  const values = {};
+  host.querySelectorAll("[data-config-key]").forEach((field) => {
+    const key = field.dataset.configKey;
+    const kind = field.dataset.configKind;
+    if (kind === "bool") {
+      values[key] = field.checked;
+      return;
+    }
+    if (kind === "number") {
+      const parsed = Number(field.value);
+      if (Number.isNaN(parsed)) throw new Error(`${key} must be a number`);
+      values[key] = parsed;
+      return;
+    }
+    if (kind === "list") {
+      values[key] = field.value.split(/[\s,]+/).map((item) => item.trim()).filter(Boolean);
+      return;
+    }
+    if (kind === "json") {
+      try {
+        values[key] = JSON.parse(field.value);
+      } catch (error) {
+        throw new Error(`${key} is not valid JSON`);
+      }
+      return;
+    }
+    values[key] = field.value;
+  });
+  return values;
+}
+
 function strategyByKey(strategyKey) {
   return algorithmChoices().find((choice) => choice.key === strategyKey) || STRATEGIES[0];
-}
-
-function activeAlgorithmKey() {
-  const key = state.controls?.active_strategy || DEFAULT_ALGORITHM_KEY;
-  // A saved "none" predates DCA being selectable; it always meant "just run DCA".
-  return algorithmChoices().some((choice) => choice.key === key) ? key : DEFAULT_ALGORITHM_KEY;
-}
-
-function deckClass(offset) {
-  if (offset === 0) return "active";
-  if (offset === -1) return "before";
-  if (offset === 1) return "after";
-  if (offset === 2) return "farAfter";
-  if (offset === -2) return "farBefore";
-  return "hidden";
-}
-
-function toneClass(index) {
-  return `tone-${index % 5}`;
 }
 
 function isBacktestPayload(payload) {
@@ -916,59 +995,12 @@ function configureBacktestPeriod(period) {
   BACKTEST_LABEL = label;
 }
 
-function renderAlgorithmDeck() {
-  const deck = $("#algorithmDeck");
-  if (!deck) return;
-  const choices = algorithmChoices();
-  const activeKey = activeAlgorithmKey();
-  const activeIndex = Math.max(0, choices.findIndex((choice) => choice.key === activeKey));
-  const renderKey = `${activeKey}:${choices.length}`;
-  deck.classList.toggle("locked", isAlgorithmTradingEnabled());
-  deck.setAttribute("aria-disabled", String(isAlgorithmTradingEnabled()));
-  if (state.renderedAlgorithmDeckKey === renderKey && deck.children.length) {
-    renderAlgorithmSignals();
-    return;
-  }
-  state.renderedAlgorithmDeckKey = renderKey;
-  deck.innerHTML = choices.map((strategy, index) => {
-    const offset = index - activeIndex;
-    const signalPreview = (strategy.signals || []).slice(0, 5);
-    const extraSignalCount = Math.max(0, (strategy.signals || []).length - signalPreview.length);
-    return `
-      <article class="deckCard ${deckClass(offset)} ${toneClass(index)}" data-strategy="${escapeHtml(strategy.key)}" aria-current="${offset === 0 ? "true" : "false"}">
-        <header class="deckHeader">
-          <div>
-            <span class="deckKicker">${offset === 0 ? "Selected" : "Available"}</span>
-            <h2>${escapeHtml(strategy.name)}</h2>
-          </div>
-        </header>
-        <section class="strategyLogic" aria-label="${escapeHtml(strategy.name)} logic">
-          <span>Logic</span>
-          <p>${escapeHtml(strategy.logic)}</p>
-        </section>
-        <section class="strategySignals" aria-label="${escapeHtml(strategy.name)} signals">
-          <span>Signals</span>
-          <ul>
-            ${signalPreview.map((signal) => `<li>${escapeHtml(signal)}</li>`).join("")}
-            ${extraSignalCount ? `<li>+${extraSignalCount} more</li>` : ""}
-          </ul>
-        </section>
-        <div class="strategyMeta">
-          <span>${escapeHtml(strategy.status)}</span>
-          <span>${escapeHtml(strategy.horizon)}</span>
-          <span>${escapeHtml(strategy.risk)}</span>
-        </div>
-      </article>
-    `;
-  }).join("");
-  renderAlgorithmSignals();
-}
-
 async function loadBacktest(strategyKey, refresh, options = {}) {
   const cacheOnly = Boolean(options.cacheOnly);
+  let changed = false;
   if (!cacheOnly) state.backtestLoading[strategyKey] = true;
   if (!cacheOnly && state.backtests[strategyKey]?.error) delete state.backtests[strategyKey];
-  if (!cacheOnly) renderAlgorithmDeck();
+  if (!cacheOnly) render();
   try {
     const payload = await api("/api/backtest", {
       method: "POST",
@@ -977,25 +1009,30 @@ async function loadBacktest(strategyKey, refresh, options = {}) {
     });
     if (isBacktestPayload(payload)) {
       state.backtests[strategyKey] = payload;
+      changed = true;
     } else if (payload?.error) {
       if (!cacheOnly) {
         state.backtests[strategyKey] = { error: payload.error };
+        changed = true;
       }
     }
   } catch (error) {
     if (!cacheOnly) {
       state.backtests[strategyKey] = { error: error.message };
+      changed = true;
     }
   } finally {
     if (!cacheOnly) state.backtestLoading[strategyKey] = false;
-    if (!cacheOnly) renderAlgorithmDeck();
-    renderAlgorithmSignals();
+    // Every render of the Backtest tab probes the cache, and this used to re-render whatever
+    // the probe found -- including "nothing". Repainting the page for a result that changed
+    // no state is what closed the period dropdown the instant it was opened.
+    if (changed || !cacheOnly) render();
   }
 }
 
 async function recommendUniverse() {
   state.universeRefreshing = true;
-  renderAlgorithmSignals();
+  render();
   try {
     const payload = await api("/api/universe/recommend", {
       method: "POST",
@@ -1008,7 +1045,7 @@ async function recommendUniverse() {
     showToast(error.message);
   } finally {
     state.universeRefreshing = false;
-    renderAlgorithmSignals();
+    render();
   }
 }
 
@@ -1016,7 +1053,7 @@ async function applyUniverseProposal() {
   const rows = state.universeProposal?.rows || [];
   if (!rows.length || state.universeApplying) return;
   state.universeApplying = true;
-  renderAlgorithmSignals();
+  render();
   try {
     const payload = await api("/api/universe/apply", {
       method: "POST",
@@ -1027,28 +1064,22 @@ async function applyUniverseProposal() {
     state.universeProposal = null;
     state.signals = {};
     state.backtests = {};
-    const dcaPayload = await api("/api/dca", { timeoutMs: 5000 });
+    const dcaPayload = await api(
+      `/api/dca?account_id=${encodeURIComponent(state.dca?.account_id || bindings()[0]?.account_id || "")}`,
+      { timeoutMs: 5000 },
+    );
     state.dca = dcaPayload;
     state.dca.plan.max_item_amount = MAX_AMOUNT;
     renderDca();
-    renderAlgorithmDeck();
-    loadSignals(activeAlgorithmKey());
-    loadCachedBacktestsForDeck();
+    render();
+    // The universe change invalidates every algorithm's view, so reload the one on screen.
+    loadSignals(currentRoute().id);
     showToast("Universe applied");
   } catch (error) {
     showToast(error.message);
   } finally {
     state.universeApplying = false;
-    renderAlgorithmSignals();
-  }
-}
-
-async function loadCachedBacktestsForDeck() {
-  const keys = algorithmChoices().map((strategy) => strategy.key);
-  for (const strategyKey of keys) {
-    if (!state.backtests[strategyKey] && !state.backtestLoading[strategyKey]) {
-      await loadBacktest(strategyKey, false, { cacheOnly: true });
-    }
+    render();
   }
 }
 
@@ -1059,7 +1090,7 @@ async function ensureSignals(strategyKey) {
 
 async function loadSignals(strategyKey) {
   state.signalLoading[strategyKey] = true;
-  renderAlgorithmSignals();
+  render();
   try {
     state.signals[strategyKey] = await api(`/api/strategy-signals?strategy=${encodeURIComponent(strategyKey)}`, {
       timeoutMs: 60000,
@@ -1068,7 +1099,7 @@ async function loadSignals(strategyKey) {
     state.signals[strategyKey] = { error: error.message };
   } finally {
     state.signalLoading[strategyKey] = false;
-    renderAlgorithmSignals();
+    render();
   }
 }
 
@@ -1084,6 +1115,20 @@ function formatSignalDetail(strategyKey, row) {
       `Pullback ${signedNum(components.pullback_uptrend, 2)}`,
       `Sentiment ${signedNum(components.sentiment ?? row.sentiment_component ?? row.sentiment_score ?? row.social_score, 2)}`,
     ];
+    return details.join(" / ");
+  }
+  // Each layer that could have stopped this symbol, in the order it is applied -- the point
+  // of the algorithm is that you can see which gate rejected a name, not just its score.
+  if (strategyKey === "dual_momentum") {
+    const details = [
+      row.reason || "Signal pending",
+      `Regime ${row.regime_risk_on ? "risk-on" : "risk-off"} (breadth ${percent(row.regime_breadth)})`,
+      `Eligible ${row.eligible ? "yes" : "no"}`,
+      row.rank ? `Rank ${row.rank}` : "Unranked",
+      `Timing ${row.timing ? "go" : "wait"} (${signedNum(row.momentum_change, 2)})`,
+      `Vol ${percent(row.annual_volatility)} / scale ${num(row.vol_scale, 2)}`,
+    ];
+    if (row.close) details.push(`Close ${money(row.close, 2)}`);
     return details.join(" / ");
   }
   if (strategyKey === "spy_rotation") {
@@ -1128,7 +1173,7 @@ function formatSignalHeadline(strategyKey, row) {
     if (row.warning) parts.push(row.warning);
     return parts.filter(Boolean).join(" / ");
   }
-  if (strategyKey === "fast_momentum" || strategyKey === "spy_rotation") {
+  if (strategyKey === "fast_momentum" || strategyKey === "spy_rotation" || strategyKey === "dual_momentum") {
     const parts = [
       row.side || row.signal || "Signal",
       `Score ${num(row.score, 2)}`,
@@ -1206,84 +1251,6 @@ function renderUniverseProposalRows() {
   `;
 }
 
-function renderSignalBacktestCard({
-  card,
-  strategyKey,
-  selected,
-  kicker = "Position Signals",
-  backtestChartId = "activeBacktestChart",
-  universeLabel = "Algorithm universe",
-}) {
-  if (!card) return;
-  const payload = state.signals[strategyKey];
-  const backtest = state.backtests[strategyKey];
-  const loading = Boolean(state.signalLoading[strategyKey]);
-  const backtestLoading = Boolean(state.backtestLoading[strategyKey]);
-  const signalInputs = (selected.signals || []).slice(0, 5);
-  const backtestCaption = backtestCaptionText(backtest, backtestLoading);
-  const equityCaption = backtestEquityText(backtest);
-  const orderCaption = backtestOrderText(backtest);
-  const refreshAttrs = backtestLoading ? 'disabled aria-busy="true"' : "";
-  const universeAttrs = state.universeRefreshing ? 'disabled aria-busy="true"' : "";
-  const allLeaders = payload?.leaders || [];
-  const activeLeaders = allLeaders.filter((row) => (row.side === "LONG" || row.side === "SHORT" || row.signal === "LONG" || row.signal === "SHORT"));
-  const inactiveLeaders = allLeaders.filter((row) => !activeLeaders.includes(row));
-  const visibleLeaders = [...activeLeaders, ...inactiveLeaders];
-  const signalRowsHtml = state.universeProposal || state.universeRefreshing
-    ? renderUniverseProposalRows()
-    : loading
-      ? "<p>Fetching live signal snapshot.</p>"
-      : payload?.error
-        ? `<p>${escapeHtml(payload.error)}</p>`
-        : visibleLeaders.length
-          ? visibleLeaders.map((row) => `
-            <article>
-              <strong>${escapeHtml(row.symbol)}</strong>
-              <span>${escapeHtml(formatSignalHeadline(strategyKey, row))}</span>
-              <span>${escapeHtml(formatSignalDetail(strategyKey, row))}</span>
-            </article>
-          `).join("")
-          : renderSignalFallbackRows(selected, payload, signalInputs);
-  card.innerHTML = `
-    <header class="signalHeader">
-      <div>
-        <span class="deckKicker">${escapeHtml(kicker)}</span>
-      </div>
-      <div class="signalActions">
-        <button class="refreshUniverse" type="button" data-refresh-universe ${universeAttrs}>Refresh Universe</button>
-        <button class="refreshBacktest" type="button" data-refresh-backtest="${escapeHtml(strategyKey)}" ${refreshAttrs}>Backtest</button>
-      </div>
-    </header>
-    <div class="signalBody">
-      <div class="signalRows">
-        ${signalRowsHtml}
-      </div>
-      <section class="cachedBacktest" aria-label="Cached ${BACKTEST_LABEL} backtest">
-        <div class="cachedBacktestHeader">
-          <span>${BACKTEST_LABEL} Backtest</span>
-          <strong>${escapeHtml(backtestStatusLabel(backtest, backtestLoading))}</strong>
-        </div>
-        <svg class="deckChart" id="${escapeHtml(backtestChartId)}" role="img" aria-label="${BACKTEST_LABEL} backtest chart"></svg>
-        ${backtestCaption ? `<p>${escapeHtml(backtestCaption)}</p>` : ""}
-        ${equityCaption ? `<p>${escapeHtml(equityCaption)}</p>` : ""}
-        ${orderCaption ? `<p>${escapeHtml(orderCaption)}</p>` : ""}
-      </section>
-    </div>
-  `;
-  renderBacktestChart(backtest, $(`#${backtestChartId}`));
-}
-
-function renderAlgorithmSignals() {
-  renderSignalBacktestCard({
-    card: $("#algorithmSignalCard"),
-    strategyKey: activeAlgorithmKey(),
-    selected: strategyByKey(activeAlgorithmKey()),
-    kicker: "Position Signals",
-    backtestChartId: "activeBacktestChart",
-    universeLabel: "Algorithm universe",
-  });
-}
-
 function renderSignalFallbackRows(selected, payload, signalInputs) {
   const isTemplate = payload?.wired === false;
   const heading = isTemplate ? "Template signal model" : "No active live rows";
@@ -1305,94 +1272,6 @@ function renderSignalFallbackRows(selected, payload, signalInputs) {
       </article>
     `).join("")}
   `;
-}
-
-async function selectAlgorithmStrategy(strategyKey) {
-  if (isAlgorithmTradingEnabled()) {
-    showToast("Turn algorithm off before changing strategies");
-    return;
-  }
-  if (strategyKey === activeAlgorithmKey()) return;
-  state.controls.active_strategy = strategyKey;
-  renderAlgorithmDeck();
-  renderAlgorithmPower();
-  const savePromise = saveControlsOnly({ renderDecks: false });
-  await Promise.all([savePromise, ensureSignals(strategyKey)]);
-}
-
-function canShiftDeck() {
-  if (state.deckWheelLocked) return false;
-  state.deckWheelLocked = true;
-  window.setTimeout(() => {
-    state.deckWheelLocked = false;
-  }, 760);
-  return true;
-}
-
-function shiftAlgorithmDeck(direction) {
-  if (isAlgorithmTradingEnabled()) {
-    showToast("Turn algorithm off before changing strategies");
-    return;
-  }
-  const choices = algorithmChoices();
-  const index = Math.max(0, choices.findIndex((choice) => choice.key === activeAlgorithmKey()));
-  const nextIndex = clamp(index + direction, 0, choices.length - 1);
-  if (nextIndex === index) return; // at ends, no movement or animation
-  if (!canShiftDeck()) return;
-  const deck = $("#algorithmDeck");
-  if (deck) deck.setAttribute("data-shift", direction > 0 ? "down" : "up");
-  selectRelativeAlgorithm(direction);
-  if (deck) window.setTimeout(() => deck.removeAttribute("data-shift"), 760);
-}
-
-function selectRelativeAlgorithm(direction) {
-  if (isAlgorithmTradingEnabled()) return;
-  const choices = algorithmChoices();
-  const index = Math.max(0, choices.findIndex((choice) => choice.key === activeAlgorithmKey()));
-  const nextIndex = clamp(index + direction, 0, choices.length - 1);
-  const next = choices[nextIndex];
-  if (next && next.key !== activeAlgorithmKey()) selectAlgorithmStrategy(next.key);
-}
-
-function updateFeatureToggles() {
-  // DCA has no switch of its own any more: it runs when it is the selected algorithm and the
-  // algorithm bot is on, like every other strategy.
-  const panel = $("#schedulePanel");
-  if (panel) panel.classList.toggle("is-on", isDcaEnabled());
-}
-
-function renderAlgorithmPower() {
-  const enabled = isAlgorithmTradingEnabled();
-  const button = $("#algorithmPowerToggle");
-  const panel = $("#algorithmRunPanel");
-  const select = $("#tradingAccount");
-  const deck = $("#algorithmDeck");
-  if (button) {
-    button.setAttribute("aria-pressed", String(enabled));
-    button.classList.toggle("on", enabled);
-    button.disabled = false;
-    button.innerHTML = '<span aria-hidden="true">&#9211;</span>';
-  }
-  if (panel) panel.classList.toggle("is-on", enabled);
-  if (deck) {
-    deck.classList.toggle("locked", enabled);
-    deck.setAttribute("aria-disabled", String(enabled));
-  }
-  document.querySelectorAll('[data-deck="algorithm"]').forEach((button) => {
-    button.disabled = enabled;
-  });
-  if (select) {
-    const accounts = state.accounts.length
-      ? state.accounts
-      : [{ id: state.controls?.trading_account_id || "default", label: "Default" }];
-    const activeAccount = state.controls?.trading_account_id || accounts[0]?.id || "";
-    select.innerHTML = accounts.map((account) => `
-      <option value="${escapeHtml(account.id)}"${account.id === activeAccount ? " selected" : ""}>
-        ${escapeHtml(account.label || account.id)}
-      </option>
-    `).join("");
-    select.disabled = enabled;
-  }
 }
 
 function renderBacktestChart(payload, svg) {
@@ -1589,19 +1468,6 @@ function percent(value) {
   return `${(Number(value) * 100).toFixed(1)}%`;
 }
 
-function renderPlanSummary() {
-  const element = $("#planSummary");
-  if (!element) return;
-  const total = BUCKET_NAMES.reduce(
-    (sum, bucketName) => sum + bucketItems(bucketName).reduce((inner, item) => inner + Number(item.amount || 0), 0),
-    0,
-  );
-  // Cadence is declared on the algorithm class, so the only thing to state here is the rate.
-  element.textContent = total > 0
-    ? `$${total.toLocaleString()}/month across ${bucketItems("buy").length + bucketItems("sell").length} symbols`
-    : "Dollars per month, per symbol.";
-}
-
 //: Wheel and pinch fire continuously, so plan edits coalesce into one POST once the gesture
 //: settles rather than one per tick.
 const PLAN_SAVE_DEBOUNCE_MS = 500;
@@ -1624,7 +1490,11 @@ async function savePlan(quiet = true) {
   syncNodesToPlan();
   try {
     const [dcaPayload, controlsPayload] = await Promise.all([
-      api("/api/dca", { method: "POST", body: JSON.stringify({ plan: state.dca.plan }), timeoutMs: 5000 }),
+      api("/api/dca", {
+        method: "POST",
+        body: JSON.stringify({ plan: state.dca.plan, account_id: state.dca?.account_id || "" }),
+        timeoutMs: 5000,
+      }),
       api("/api/controls", { method: "POST", body: JSON.stringify({ controls: state.controls }), timeoutMs: 5000 }),
     ]);
     state.dca = dcaPayload;
@@ -1642,30 +1512,904 @@ async function savePlan(quiet = true) {
   }
 }
 
-async function saveControlsOnly(options = {}) {
-  const renderDecks = options.renderDecks !== false;
+function shadeColor(color, percent) {
+  const parsed = color.replace("#", "");
+  const number = parseInt(parsed, 16);
+  const amount = Math.round(2.55 * percent);
+  const red = clamp((number >> 16) + amount, 0, 255);
+  const green = clamp(((number >> 8) & 0xff) + amount, 0, 255);
+  const blue = clamp((number & 0xff) + amount, 0, 255);
+  return `#${(0x1000000 + red * 0x10000 + green * 0x100 + blue).toString(16).slice(1)}`;
+}
+
+
+// =========================================================================================
+// Shell: sidebar + hash router. Each algorithm gets a full page whose tabs follow the
+// lifecycle -- see what it does, tune it, test it, debug it, deploy it. Deployment targets
+// (accounts) get their own pages, so "where does this run" is a first-class question.
+// =========================================================================================
+
+//: Overview answers "what is this and what has it done": the explainer panels plus the
+//: bot's own order journal, which is the only per-algorithm record of activity there is.
+//: Broker holdings live on the account page instead -- see renderAccountPage.
+const TABS = [
+  { id: "overview", label: "Overview" },
+  { id: "signals", label: "Signals" },
+  { id: "tune", label: "Tune" },
+  { id: "backtest", label: "Backtest" },
+];
+
+const DEFAULT_TAB = TABS[0].id;
+
+function currentRoute() {
+  const raw = (window.location.hash || "").replace(/^#\/?/, "");
+  const parts = raw.split("/").filter(Boolean);
+  if (parts[0] === "algo" && parts[1]) {
+    const tab = TABS.some((tab) => tab.id === parts[2]) ? parts[2] : DEFAULT_TAB;
+    return { page: "algo", id: decodeURIComponent(parts[1]), tab };
+  }
+  if ((parts[0] === "account" || parts[0] === "target") && parts[1]) {
+    return { page: "account", id: decodeURIComponent(parts[1]), tab: "" };
+  }
+  return { page: "algo", id: DEFAULT_ALGORITHM_KEY, tab: DEFAULT_TAB };
+}
+
+function deploymentsFor(strategyKey) {
+  return bindings().filter((binding) => binding.strategy === strategyKey);
+}
+
+//: One algorithm runs against at most one account, so a deployment is singular. That keeps
+//: P/L attributable: the broker blends positions per account, and with one algorithm per
+//: account the account's numbers *are* this algorithm's numbers.
+function deploymentFor(strategyKey) {
+  return deploymentsFor(strategyKey)[0] || null;
+}
+
+function accountRows() {
+  return state.accounts?.rows || [];
+}
+
+function accountLabel(accountId) {
+  return accountRows().find((row) => row.id === accountId)?.label || accountId || "unassigned";
+}
+
+// -- sidebar -----------------------------------------------------------------------------
+
+//: One colour rule for the whole dashboard: an algorithm is green when it is switched on and
+//: on a clock, orange when it is switched on but waiting for the MCP agent to drive it, and
+//: dark when it is off. Accounts and the bot pill both derive from this rather than each
+//: inventing their own reading -- "deployed but paused" used to show amber, which looked
+//: identical to "the agent is driving it".
+function deploymentStatus(deployments) {
+  const armed = (deployments || []).filter((deployment) => deployment.enabled);
+  if (armed.some((deployment) => normalizeBindingFrequency(deployment.frequency) !== "mcp")) return "live";
+  if (armed.length) return "idle";
+  return "off";
+}
+
+function renderSidebar() {
+  const route = currentRoute();
+  const algorithmNav = $("#algorithmNav");
+  if (algorithmNav) {
+    algorithmNav.innerHTML = algorithmChoices().map((strategy) => {
+      const deployments = deploymentsFor(strategy.key);
+      const active = route.page === "algo" && route.id === strategy.key;
+      const status = deploymentStatus(deployments);
+      return `
+        <li>
+          <a class="navItem${active ? " is-active" : ""}" href="#/algo/${escapeHtml(strategy.key)}/${escapeHtml(route.page === "algo" ? route.tab : DEFAULT_TAB)}">
+            <span class="statusDot is-${status}" aria-hidden="true"></span>
+            <span class="navItemLabel">${escapeHtml(strategy.name)}</span>
+            ${deployments.length ? `<span class="navBadge">${deployments.length}</span>` : ""}
+          </a>
+        </li>`;
+    }).join("");
+  }
+
+  renderAccountNav();
+  renderWatchlist();
+  renderNavFooter();
+}
+
+//: Accounts sit under the algorithms because that is the reading order of the question the
+//: sidebar answers: what runs, and what is it doing to the money. The number shown is day
+//: P/L, which is the only figure the broker reports without a cost-basis round trip.
+function renderAccountNav() {
+  const host = $("#accountNav");
+  if (!host) return;
+  const rows = accountRows();
+  if (!rows.length) {
+    host.innerHTML = `<li><span class="navEmpty">No accounts yet</span></li>`;
+    return;
+  }
+  const route = currentRoute();
+  host.innerHTML = rows.map((account) => {
+    const deployed = bindings().filter((binding) => binding.account_id === account.id);
+    // An account is only as live as the algorithms pointed at it, and it cannot be live at
+    // all without credentials.
+    const status = account.credentials_ready ? deploymentStatus(deployed) : "off";
+    const active = route.page === "account" && route.id === account.id;
+    const positions = state.positions[account.id];
+    const pl = positions && !positions.error ? positions.day_pl : null;
+    const stat = pl === null || pl === undefined
+      ? `<span class="navStat is-muted">--</span>`
+      : `<span class="navStat ${pl >= 0 ? "gain" : "loss"}">${escapeHtml(money(pl, 2))}</span>`;
+    const title = account.credentials_ready
+      ? `${account.label} · ${deployed.length ? `runs ${deployed.map((binding) => strategyByKey(binding.strategy).name).join(", ")}` : "no algorithm deployed"}`
+      : `${account.label} · credentials missing`;
+    const inner = `
+      <span class="statusDot is-${status}" aria-hidden="true"></span>
+      <span class="navItemLabel">${escapeHtml(account.label)}</span>
+      ${stat}`;
+    return `
+      <li>
+        <a class="navItem navItem--stat${active ? " is-active" : ""}" href="#/account/${escapeHtml(account.id)}" title="${escapeHtml(title)}">${inner}</a>
+      </li>`;
+  }).join("");
+  // The sidebar is the only place an idle account's P/L shows, so it pulls its own numbers.
+  rows.filter((account) => account.credentials_ready).forEach((account) => ensurePositions(account.id));
+}
+
+function renderWatchlist() {
+  const host = $("#watchlist");
+  if (!host) return;
+  const rows = state.watchlist?.rows || [];
+  if (!rows.length) {
+    host.innerHTML = `<li><span class="navEmpty">No tickers yet</span></li>`;
+    return;
+  }
+  host.innerHTML = rows.map((row) => `
+    <li>
+      <div class="watchRow" draggable="true" data-watch="${escapeHtml(row.symbol)}">
+        <span class="watchGrip" aria-hidden="true">⠿</span>
+        <span class="watchSymbol">${escapeHtml(row.symbol)}</span>
+        <span class="watchPrice">${row.price === null || row.price === undefined ? "--" : escapeHtml(money(row.price, 2))}</span>
+        <span class="watchChange ${(row.change || 0) >= 0 ? "gain" : "loss"}">${row.change === null || row.change === undefined ? "" : escapeHtml(percent(row.change))}</span>
+        <button class="watchRemove" type="button" data-remove-watch aria-label="Remove ${escapeHtml(row.symbol)}">&times;</button>
+      </div>
+    </li>`).join("");
+}
+
+function reorderWatchlist(fromSymbol, toSymbol) {
+  const current = [...(state.watchlist?.symbols || [])];
+  const from = current.indexOf(fromSymbol);
+  const to = current.indexOf(toSymbol);
+  if (from < 0 || to < 0 || from === to) return;
+  current.splice(to, 0, current.splice(from, 1)[0]);
+  // Paint the new order immediately; the save reconciles it.
+  state.watchlist = { ...state.watchlist, symbols: current, rows: current.map((symbol) =>
+    (state.watchlist.rows || []).find((row) => row.symbol === symbol) || { symbol, price: null, change: null }) };
+  renderWatchlist();
+  saveWatchlist(current);
+}
+
+function wireWatchlistDrag() {
+  const host = $("#watchlist");
+  if (!host) return;
+  host.addEventListener("dragstart", (event) => {
+    const row = event.target.closest("[data-watch]");
+    if (!row) return;
+    state.watchDrag = row.dataset.watch;
+    row.classList.add("is-dragging");
+    event.dataTransfer.effectAllowed = "move";
+    // Firefox refuses to start a drag without data on the transfer.
+    event.dataTransfer.setData("text/plain", row.dataset.watch);
+  });
+  host.addEventListener("dragover", (event) => {
+    if (!state.watchDrag) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  });
+  host.addEventListener("drop", (event) => {
+    const row = event.target.closest("[data-watch]");
+    if (!row || !state.watchDrag) return;
+    event.preventDefault();
+    reorderWatchlist(state.watchDrag, row.dataset.watch);
+    state.watchDrag = null;
+  });
+  host.addEventListener("dragend", () => {
+    state.watchDrag = null;
+    host.querySelectorAll(".is-dragging").forEach((node) => node.classList.remove("is-dragging"));
+  });
+}
+
+async function loadWatchlist() {
   try {
-    const payload = await api("/api/controls", {
+    state.watchlist = await api("/api/watchlist", { timeoutMs: 12000 });
+  } catch (error) {
+    state.watchlist = { rows: [] };
+  }
+  renderWatchlist();
+}
+
+function normalizeWatchlistSymbol(symbol) {
+  return String(symbol ?? "").trim().toUpperCase().slice(0, 10);
+}
+
+async function saveWatchlist(symbols) {
+  const normalized = [...new Set((Array.isArray(symbols) ? symbols : []).map(normalizeWatchlistSymbol).filter(Boolean))];
+  try {
+    state.watchlist = await api("/api/watchlist", {
       method: "POST",
-      body: JSON.stringify({ controls: state.controls }),
-      timeoutMs: 5000,
+      body: JSON.stringify({ symbols: normalized }),
+      timeoutMs: 12000,
     });
-    state.controls = payload.controls;
-    state.accounts = payload.accounts || state.accounts;
-    state.bot = payload.bot || state.bot;
-    updateFeatureToggles();
-    renderAlgorithmPower();
-    if (renderDecks) {
-      renderAlgorithmDeck();
-    } else {
-      renderAlgorithmSignals();
-    }
+  } catch (error) {
+    showToast(error.message);
+  }
+  renderWatchlist();
+}
+
+function addWatchTicker() {
+  const symbol = window.prompt("Ticker to watch");
+  if (!symbol) return;
+  const current = state.watchlist?.symbols || [];
+  saveWatchlist([...current, symbol]);
+}
+
+function removeWatchTicker(symbol) {
+  const current = state.watchlist?.symbols || [];
+  saveWatchlist(current.filter((entry) => entry !== symbol));
+}
+
+function renderNavFooter() {
+  const footer = $("#navFooter");
+  if (!footer) return;
+  const auth = state.schwabAuth;
+  // Only present when Schwab is actually configured: a connector nobody set up is not a
+  // status worth a permanent row. The dot carries the state, so the row says only what it
+  // is; the tooltip holds the detail for when the colour is not enough.
+  const authRow = auth?.configured
+    ? `<button class="navHealth is-${escapeHtml(auth.state)}" type="button" id="schwabAuthPill"
+         title="${escapeHtml(auth.detail || "")}">
+         <span class="statusDot is-${auth.state === "ok" ? "live" : auth.state === "warning" ? "idle" : "off"}" aria-hidden="true"></span>
+         <span class="navHealthLabel">Schwab API</span>
+       </button>`
+    : "";
+  const runtime = runtimeSummary();
+  footer.innerHTML = `${authRow}
+    <span class="navHealth is-muted" title="${escapeHtml(runtime.detail)}">
+      <span class="statusDot is-${runtime.status}" aria-hidden="true"></span>
+      <span class="navHealthLabel">${escapeHtml(runtime.label)}</span>
+      <span class="navHealthNote">${escapeHtml(runtime.note)}</span>
+    </span>`;
+}
+
+//: Every deployment gets its own scheduler loop, so the runtime has one state *per binding*.
+//: Reading the first of them -- which is what this did -- reported "paused" whenever the one
+//: armed algorithm happened not to be first in the dict.
+function runtimeSummary() {
+  const bot = state.bot || {};
+  const loops = Object.values(bot.bindings || {});
+  if (!loops.length && bot.algorithm) loops.push(bot.algorithm);
+
+  if (state.status?.runtime_mode === "mcp") {
+    return { status: "off", label: "MCP mode", note: "agent-driven", detail: "Scheduler disabled; the MCP agent drives runs." };
+  }
+
+  const running = loops.filter((loop) => loop.running);
+  const armed = bindings().filter((binding) => binding.enabled);
+  // The bot pill takes the same colour as the algorithms: green while anything is on a
+  // clock, orange when everything that is on is waiting for the agent instead.
+  const status = deploymentStatus(armed);
+  const scheduled = armed.filter((binding) => normalizeBindingFrequency(binding.frequency) !== "mcp");
+  const agentDriven = armed.filter((binding) => normalizeBindingFrequency(binding.frequency) === "mcp");
+  const lastRun = loops
+    .map((loop) => loop.last_finished_at)
+    .filter(Boolean)
+    .sort()
+    .pop() || "";
+  const error = loops.map((loop) => loop.last_error).filter(Boolean)[0] || "";
+
+  const label = running.length
+    ? `Bot running${running.length > 1 ? ` (${running.length})` : ""}`
+    : status === "live"
+      ? `Bot scheduled${scheduled.length > 1 ? ` (${scheduled.length})` : ""}`
+      : status === "idle"
+        ? "Bot agent-driven"
+        : "Bot off";
+  const note = lastRun ? formatActivityTime(lastRun) : "";
+  const detail = error
+    ? error
+    : [
+        scheduled.length
+          ? `Scheduled: ${scheduled.map((binding) => `${strategyByKey(binding.strategy).name} every ${normalizeBindingFrequency(binding.frequency)}`).join(", ")}`
+          : "",
+        agentDriven.length
+          ? `Agent-driven: ${agentDriven.map((binding) => strategyByKey(binding.strategy).name).join(", ")}`
+          : "",
+        armed.length ? "" : "No algorithm is switched on",
+        lastRun ? `Last run ${formatActivityTime(lastRun)}` : "No run yet",
+      ].filter(Boolean).join(" · ");
+  return { status, label, note, detail };
+}
+
+// -- page frame --------------------------------------------------------------------------
+
+function pageHeader({ title, subtitle, meta = "", actions = "" }) {
+  return `
+    <header class="pageHead">
+      <div class="pageHeadMain">
+        <h1>${escapeHtml(title)}</h1>
+        ${subtitle ? `<p>${escapeHtml(subtitle)}</p>` : ""}
+      </div>
+      <div class="pageHeadSide">${meta}${actions}</div>
+    </header>`;
+}
+
+function tabBar(strategyKey, activeTab) {
+  return `<nav class="tabBar" aria-label="Sections">
+    ${TABS.map((tab) => `
+      <a class="tabLink${tab.id === activeTab ? " is-active" : ""}" href="#/algo/${escapeHtml(strategyKey)}/${tab.id}">${escapeHtml(tab.label)}</a>
+    `).join("")}
+  </nav>`;
+}
+
+function render() {
+  const route = currentRoute();
+  renderSidebar();
+  const content = $("#content");
+  if (!content) return;
+  // Rebuilding the body under an open <select> closes it mid-click, and under a focused
+  // input it discards what is being typed. While the user is holding a control, leave the
+  // body alone -- the next state change repaints it.
+  const active = document.activeElement;
+  if (active && active.matches?.("select, input, textarea") && content.contains?.(active)) return;
+  if (route.page === "account") renderAccountPage(content, route.id);
+  else renderAlgorithmPage(content, route.id, route.tab);
+  closeNavOnMobile();
+}
+
+// -- algorithm page ----------------------------------------------------------------------
+
+function normalizeBindingFrequency(value) {
+  const candidate = String(value ?? "1hr").trim().toLowerCase();
+  return ["15m", "30m", "1hr", "2hr", "1d", "mcp"].includes(candidate) ? candidate : "1hr";
+}
+
+function renderAlgorithmPage(content, strategyKey, tab) {
+  const strategy = strategyByKey(strategyKey);
+  const deployments = deploymentsFor(strategy.key);
+  const deployment = deploymentFor(strategy.key);
+  // Every account is offered to every algorithm. Sharing one account between algorithms is
+  // allowed; it only costs attribution, which the overview says plainly when it happens.
+  const options = accountRows();
+  const frequencyOptions = ["15m", "30m", "1hr", "2hr", "1d", "mcp"];
+  const savedFrequency = normalizeBindingFrequency(deployment?.frequency || "1hr");
+  const actions = options.length
+    ? `<div class="deployControl"${deployment ? ` data-binding="${escapeHtml(deployment.id)}"` : ""}>
+         <button class="ctl powerButton${deployment?.enabled ? " on" : ""}" type="button" data-role="power"
+           aria-pressed="${Boolean(deployment?.enabled)}" aria-label="Toggle trading"
+           title="${deployment?.enabled ? "Pause" : "Start"} trading"><span aria-hidden="true">&#9211;</span></button>
+         <select class="ctl" id="deployTargetSelect" aria-label="Account"${deployment?.enabled ? " disabled" : ""}>
+           ${options.map((account) => `<option value="${escapeHtml(account.id)}"${account.id === deployment?.account_id ? " selected" : ""}>${escapeHtml(account.label)}</option>`).join("")}
+         </select>
+         <select class="ctl" id="deployFrequencySelect" aria-label="Frequency" data-binding="${escapeHtml(deployment?.id || "")}" ${!deployment ? "disabled" : ""}>
+           ${frequencyOptions.map((value) => `<option value="${escapeHtml(value)}"${savedFrequency === value ? " selected" : ""}>${escapeHtml(value)}</option>`).join("")}
+         </select>
+       </div>`
+    : `<span class="pill is-idle">No account available</span>`;
+
+  content.innerHTML = `
+    ${pageHeader({ title: strategy.name, subtitle: strategy.blurb, actions })}
+    ${tabBar(strategy.key, tab)}
+    <div class="tabBody" id="tabBody"></div>`;
+
+  const body = $("#tabBody");
+  if (tab === "overview") renderOverviewTab(body, strategy, deployment);
+  if (tab === "signals") renderSignalsTab(body, strategy);
+  if (tab === "tune") renderTuneTab(body, strategy);
+  if (tab === "backtest") renderBacktestTab(body, strategy);
+}
+
+// -- account page ------------------------------------------------------------------------
+
+//: Holdings and orders live here rather than on the algorithm because the broker reports
+//: them per account and knows nothing about which algorithm -- or which hand-placed order --
+//: produced them. Attributing an account's blended P/L to one algorithm would be a lie.
+function renderAccountPage(content, accountId) {
+  const account = accountRows().find((row) => row.id === accountId);
+  if (!account) {
+    content.innerHTML = `
+      ${pageHeader({ title: accountId, subtitle: "Unknown account" })}
+      <section class="card"><p class="emptyState">No account with this id is configured.</p></section>`;
+    return;
+  }
+
+  const positions = state.positions[account.id];
+  const activity = state.activity[account.id];
+  const deployed = bindings().filter((binding) => binding.account_id === account.id);
+  const status = deploymentStatus(deployed);
+  const busy = Boolean(state.positionsLoading[account.id] || state.activityLoading[account.id]);
+  const meta = `<span class="pill is-${status}">${
+    status === "live" ? "Trading" : status === "idle" ? "Agent-driven" : deployed.length ? "Deployed, paused" : "No algorithm"}</span>`;
+  const actions = `<button class="ctl" type="button" id="refreshAccountButton" data-account="${escapeHtml(account.id)}"
+    ${busy ? "disabled" : ""}>${busy ? "Refreshing." : "Refresh"}</button>`;
+
+  content.innerHTML = `
+    ${pageHeader({
+      title: account.label,
+      subtitle: `${account.broker}${account.data_feed ? ` · ${account.data_feed}` : ""} · ${account.id}`,
+      meta,
+      actions,
+    })}
+    <div class="pageBody">
+    <section class="card">
+      <div class="metricRow">
+        <div class="metric"><span>Equity</span><strong>${positions ? escapeHtml(money(positions.equity, 2)) : "--"}</strong></div>
+        <div class="metric"><span>Cash</span><strong>${positions ? escapeHtml(money(positions.cash, 2)) : "--"}</strong></div>
+        <div class="metric"><span>Day P/L</span><strong class="${(positions?.day_pl || 0) >= 0 ? "gain" : "loss"}">${
+          // A local book has no yesterday to compare against, so it reports no day figure.
+          positions?.day_pl === null || positions?.day_pl === undefined
+            ? "--"
+            : `${escapeHtml(money(positions.day_pl, 2))} (${escapeHtml(percent(positions.day_pl_percent))})`}</strong></div>
+        <div class="metric"><span>Open P/L</span><strong class="${(positions?.total_pl || 0) >= 0 ? "gain" : "loss"}">${
+          positions ? escapeHtml(money(positions.total_pl, 2)) : "--"}</strong></div>
+      </div>
+      ${!account.credentials_ready
+        ? `<p class="cardHint">Credentials missing: set <code>${escapeHtml(account.missing_env.join("</code> and <code>"))}</code> in <code>.env</code> and restart. It cannot trade until then.</p>`
+        : `<p class="cardHint">${account.broker === "paper"
+            // No broker holds this money, so the usual "including your own orders" caveat
+            // would be nonsense here: nothing but this bot can touch a local book.
+            ? "A local book, not a broker. Orders fill instantly at the last price the algorithm saw, and no real money moves."
+            : "Everything the broker reports for this account, including orders you placed yourself."}${
+            deployed.length ? ` Algorithms running here: ${deployed.map((binding) => strategyByKey(binding.strategy).name).join(", ")}.` : ""}</p>`}
+      ${deployed.length ? `<div class="chipRow">${deployed.map((binding) => `
+        <a class="chip is-link" href="#/algo/${escapeHtml(binding.strategy)}/${DEFAULT_TAB}">${escapeHtml(strategyByKey(binding.strategy).name)}</a>`).join("")}</div>` : ""}
+    </section>
+    <div class="cardGrid">
+      <section class="card">
+        <div class="cardHead">
+          <h2>Positions</h2>
+          <span class="cardHint">${positions?.rows?.length ? `${positions.rows.length} open` : ""}</span>
+        </div>
+        ${accountPositionsTable(positions)}
+      </section>
+      <section class="card">
+        <div class="cardHead">
+          <h2>Recent orders</h2>
+          <span class="cardHint">${activity?.rows?.length ? `${activity.rows.length} shown` : ""}</span>
+        </div>
+        ${accountOrdersTable(activity)}
+      </section>
+    </div>
+    </div>`;
+
+  if (account.credentials_ready) {
+    ensurePositions(account.id);
+    ensureActivity(account.id);
+  }
+}
+
+function accountPositionsTable(positions) {
+  if (positions?.error) return `<p class="emptyState">${escapeHtml(positions.error)}</p>`;
+  if (!positions) return `<p class="emptyState">Loading positions.</p>`;
+  if (!positions.rows?.length) return `<p class="emptyState">No open positions.</p>`;
+  return `
+    <div class="tableWrap is-scroll">
+      <table class="dataTable">
+        <thead>
+          <tr><th>Symbol</th><th class="num">Qty</th><th class="num">Avg</th><th class="num">Value</th><th class="num">P/L</th></tr>
+        </thead>
+        <tbody>
+          ${positions.rows.map((row) => `
+            <tr>
+              <td><strong>${escapeHtml(row.symbol)}</strong></td>
+              <td class="num">${escapeHtml(num(row.qty, row.qty % 1 ? 3 : 0))}</td>
+              <td class="num">${escapeHtml(money(row.avg_entry_price, 2))}</td>
+              <td class="num">${escapeHtml(money(row.market_value, 2))}</td>
+              <td class="num ${row.unrealized_pl >= 0 ? "gain" : "loss"}">${escapeHtml(money(row.unrealized_pl, 2))}
+                <span class="tableNote">${escapeHtml(percent(row.unrealized_plpc))}</span></td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function accountOrdersTable(activity) {
+  if (activity?.error) return `<p class="emptyState">${escapeHtml(activity.error)}</p>`;
+  if (!activity) return `<p class="emptyState">Loading activity.</p>`;
+  if (!activity.rows?.length) return `<p class="emptyState">No orders yet.</p>`;
+  return `
+    <div class="tableWrap is-scroll">
+      <table class="dataTable">
+        <thead>
+          <tr><th>Time</th><th>Symbol</th><th>Side</th><th>Detail</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          ${activity.rows.map((row) => `
+            <tr>
+              <td class="nowrap">${escapeHtml(formatActivityTime(row.submitted_at))}</td>
+              <td><strong>${escapeHtml(row.symbol)}</strong></td>
+              <td><span class="side is-${escapeHtml(row.side)}">${escapeHtml(row.side)}</span></td>
+              <td>${escapeHtml(formatActivityDetail(row))}</td>
+              <td class="tableNote">${escapeHtml(row.status)}</td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+//: The cached copies are what make the sidebar cheap, so a manual refresh has to drop them
+//: before asking again -- ensurePositions treats "already present" as "nothing to do".
+function refreshAccount(accountId) {
+  delete state.positions[accountId];
+  delete state.activity[accountId];
+  ensurePositions(accountId);
+  ensureActivity(accountId);
+  render();
+}
+
+
+function explainerCard(strategy) {
+  const explainer = state.algorithmConfigs[strategy.key]?.explainer;
+  if (!explainer?.summary) return "";
+  return `
+    <section class="card">
+      <h2>How it decides</h2>
+      <p class="cardBody">${escapeHtml(explainer.summary)}</p>
+      ${explainer.formula?.length
+        ? `<pre class="formula">${explainer.formula.map((line) => escapeHtml(line)).join("\n")}</pre>`
+        : ""}
+      ${explainer.behavior ? `<p class="cardBody">${escapeHtml(explainer.behavior)}</p>` : ""}
+    </section>`;
+}
+
+function renderTuneTab(body, strategy) {
+  const isDca = DCA_ALGORITHM_KEYS.includes(strategy.key);
+  ensureAlgorithmConfig(strategy.key);
+  body.innerHTML = `
+    ${explainerCard(strategy)}
+    <section class="card tuneCard">
+      <div class="cardHead">
+        <h2>Configuration</h2>
+        <span class="cardHint" id="tuneHint"></span>
+      </div>
+      <div class="tuneBody" id="tuneBody"></div>
+      ${isDca ? "" : `<div class="cardActions"><button class="ctl" type="button" id="saveConfigButton">Save changes</button></div>`}
+    </section>`;
+  const host = $("#tuneBody");
+  if (isDca) renderDcaTuner(host, strategy);
+  else renderConfigForm(host, strategy);
+}
+
+function renderDcaTuner(host, strategy) {
+  const hint = $("#tuneHint");
+  const plan = state.algorithmConfigs[strategy.key]?.explainer?.parameters?.__plan__;
+  if (hint) hint.textContent = `Dollars per month, per symbol · ${accountLabel(state.dca?.account_id)}`;
+  host.innerHTML = `<svg class="bubbleBoard" id="bubbleBoard" role="img"
+    aria-label="Interactive buy and sell budget bubbles"></svg>
+    <p class="cardHint">${escapeHtml(plan?.effect || "")} Scroll a bubble to change its budget, drag between buckets, double-click to add. Saves automatically.</p>`;
+  renderDca();
+}
+
+function renderConfigForm(host, strategy) {
+  const entry = state.algorithmConfigs[strategy.key];
+  const hint = $("#tuneHint");
+  if (!entry) {
+    host.innerHTML = `<p class="emptyState">Loading configuration.</p>`;
+    ensureAlgorithmConfig(strategy.key);
+    return;
+  }
+  if (hint) hint.textContent = `config/algorithms.yaml · ${entry.config_key || strategy.key}`;
+  const fields = Object.entries(entry.config || {});
+  const docs = entry.explainer?.parameters || {};
+  host.innerHTML = fields.length
+    ? `<div class="configForm">${fields.map(([key, value]) => renderConfigField(key, value, docs[key])).join("")}</div>`
+    : `<p class="emptyState">This algorithm has no tunable parameters.</p>`;
+}
+
+function renderBacktestTab(body, strategy) {
+  const backtest = state.backtests[strategy.key];
+  const loading = Boolean(state.backtestLoading[strategy.key]);
+  body.innerHTML = `
+    <section class="card">
+      <div class="cardHead">
+        <h2>Backtest</h2>
+        <div class="cardHeadActions">
+          <select class="ctl" id="backtestPeriodSelect" aria-label="Backtest period">
+            ${BACKTEST_PERIOD_CHOICES.map((period) => `
+              <option value="${escapeHtml(period)}"${period === BACKTEST_PERIOD ? " selected" : ""}>${escapeHtml(backtestPeriodLabel(period))}</option>
+            `).join("")}
+          </select>
+          <button class="ctl is-primary" type="button" id="runBacktestButton" ${loading ? "disabled" : ""}>
+            ${loading ? "Running." : "Run backtest"}
+          </button>
+        </div>
+      </div>
+      <div class="metricRow">
+        <div class="metric"><span>Return</span><strong class="${(backtest?.total_return || 0) >= 0 ? "gain" : "loss"}">${backtest ? escapeHtml(percent(backtest.total_return)) : "--"}</strong></div>
+        <div class="metric"><span>Ending equity</span><strong>${backtest ? escapeHtml(money(backtest.ending_equity)) : "--"}</strong></div>
+        <div class="metric"><span>Orders</span><strong>${backtest?.orders?.total_orders ?? "--"}</strong></div>
+        <div class="metric"><span>Status</span><strong>${escapeHtml(backtestStatusLabel(backtest, loading))}</strong></div>
+      </div>
+      <svg class="chartLarge" id="backtestChart" role="img" aria-label="Backtest equity curve"></svg>
+      ${[backtestCaptionText(backtest, loading), backtestEquityText(backtest), backtestOrderText(backtest)]
+        .filter(Boolean)
+        .map((line) => `<p class="cardHint">${escapeHtml(line)}</p>`)
+        .join("")}
+    </section>`;
+  renderBacktestChart(backtest, $("#backtestChart"));
+  if (!backtest && !loading) loadBacktest(strategy.key, false, { cacheOnly: true });
+}
+
+function renderOverviewTab(body, strategy, deployment) {
+  const backtest = state.backtests[strategy.key];
+  body.innerHTML = `
+    <div class="cardGrid">
+      <section class="card">
+        <h2>How it works</h2>
+        <p class="cardBody">${escapeHtml(strategy.logic)}</p>
+        <div class="chipRow">
+          ${(strategy.signals || []).map((signal) => `<span class="chip">${escapeHtml(signal)}</span>`).join("")}
+        </div>
+      </section>
+      <section class="card">
+        <h2>At a glance</h2>
+        <dl class="factList">
+          <div><dt>Horizon</dt><dd>${escapeHtml(strategy.horizon)}</dd></div>
+          <div><dt>Risk</dt><dd>${escapeHtml(strategy.risk)}</dd></div>
+          <div><dt>Account</dt><dd>${deployment
+            ? `<a class="factLink" href="#/account/${escapeHtml(deployment.account_id)}">${escapeHtml(accountLabel(deployment.account_id))}</a>`
+            : "none"}</dd></div>
+          <div><dt>${escapeHtml(BACKTEST_LABEL)} backtest</dt><dd>${backtest ? escapeHtml(percent(backtest.total_return)) : "--"}</dd></div>
+        </dl>
+      </section>
+    </div>
+    <section class="card">
+      <div class="cardHead">
+        <h2>Orders this algorithm placed</h2>
+        <div class="cardHeadActions">
+          ${deployment ? `<span class="cardHint">on <a class="factLink" href="#/account/${escapeHtml(deployment.account_id)}">${escapeHtml(accountLabel(deployment.account_id))}</a></span>` : ""}
+          <button class="ctl" type="button" id="refreshAlgoOrdersButton">Refresh</button>
+        </div>
+      </div>
+      ${algorithmOrdersTable(state.algorithmActivity[strategy.key])}
+    </section>`;
+  ensureAlgorithmActivity(strategy.key);
+}
+
+function renderSignalsTab(body, strategy) {
+  const payload = state.signals[strategy.key];
+  const loading = Boolean(state.signalLoading[strategy.key]);
+  const leaders = payload?.leaders || [];
+  body.innerHTML = `
+    <section class="card">
+      <div class="cardHead">
+        <h2>Live signals</h2>
+        <div class="cardHeadActions">
+          <button class="ctl" type="button" id="refreshUniverseButton" ${state.universeRefreshing ? "disabled" : ""}>Refresh universe</button>
+          <button class="ctl" type="button" id="refreshSignalsButton" ${loading ? "disabled" : ""}>${loading ? "Loading." : "Refresh"}</button>
+        </div>
+      </div>
+      ${(payload?.summary || []).length ? `<div class="metricRow">
+        ${payload.summary.map((item) => `<div class="metric"><span>${escapeHtml(item.label)}</span><strong>${escapeHtml(item.value)}</strong></div>`).join("")}
+      </div>` : ""}
+      <div class="signalRows" id="signalRows">
+        ${state.universeProposal || state.universeRefreshing
+          ? renderUniverseProposalRows()
+          : loading
+            ? `<p class="emptyState">Fetching live signal snapshot.</p>`
+            : payload?.error
+              ? `<p class="emptyState">${escapeHtml(payload.error)}</p>`
+              : leaders.length
+                ? leaders.map((row) => `
+                  <article>
+                    <strong>${escapeHtml(row.symbol)}</strong>
+                    <span>${escapeHtml(formatSignalHeadline(strategy.key, row))}</span>
+                    <span>${escapeHtml(formatSignalDetail(strategy.key, row))}</span>
+                  </article>`).join("")
+                : renderSignalFallbackRows(strategy, payload, (strategy.signals || []).slice(0, 5))}
+      </div>
+    </section>`;
+  if (!payload && !loading) ensureSignals(strategy.key);
+}
+
+//: The bot's own journal, not the broker's feed: it is the only record that knows which
+//: algorithm asked for an order, so it is the one view that is honestly per-algorithm.
+function algorithmOrdersTable(journal) {
+  if (journal?.error) return `<p class="emptyState">${escapeHtml(journal.error)}</p>`;
+  if (!journal) return `<p class="emptyState">Loading orders.</p>`;
+  if (!journal.rows?.length) {
+    return `<p class="emptyState">No orders placed yet. This lists what the bot submitted for this algorithm, so orders you place yourself appear only on the account page.</p>`;
+  }
+  return `
+    <div class="tableWrap is-scroll">
+      <table class="dataTable">
+        <thead>
+          <tr><th>Time</th><th>Symbol</th><th>Side</th><th class="num">Qty</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          ${journal.rows.map((row) => `
+            <tr>
+              <td class="nowrap">${escapeHtml(formatActivityTime(row.submitted_at))}</td>
+              <td><strong>${escapeHtml(row.symbol)}</strong></td>
+              <td><span class="side is-${escapeHtml(orderSideClass(row.side))}">${escapeHtml(row.side)}</span></td>
+              <td class="num">${escapeHtml(row.quantity ? num(row.quantity, row.quantity % 1 ? 3 : 0) : "--")}</td>
+              <td class="tableNote" title="${escapeHtml(row.reason || "")}">${escapeHtml(row.status)}</td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+// The journal records the algorithm's verb ("add"/"trim"), which has to map onto the two
+// colours the side chip knows about.
+function orderSideClass(side) {
+  const value = String(side || "").toLowerCase();
+  if (value === "buy" || value === "add") return "buy";
+  if (value === "sell" || value === "trim") return "sell";
+  return "none";
+}
+
+// -- target page -------------------------------------------------------------------------
+
+// -- data ---------------------------------------------------------------------------------
+
+async function ensureAlgorithmConfig(strategyKey) {
+  if (state.algorithmConfigs[strategyKey] || state.algorithmConfigLoading[strategyKey]) return;
+  state.algorithmConfigLoading[strategyKey] = true;
+  try {
+    state.algorithmConfigs[strategyKey] = await api(
+      `/api/algorithm-config?strategy=${encodeURIComponent(strategyKey)}`, { timeoutMs: 8000 });
+  } catch (error) {
+    state.algorithmConfigs[strategyKey] = { error: error.message, config: {} };
+  } finally {
+    state.algorithmConfigLoading[strategyKey] = false;
+    render();
+  }
+}
+
+function formatActivityDetail(row) {
+  const filled = Number(row.filled_qty || 0);
+  if (filled > 0 && row.filled_avg_price) {
+    return `${num(filled, filled % 1 ? 3 : 0)} @ ${money(row.filled_avg_price, 2)}`;
+  }
+  const qty = Number(row.qty || 0);
+  return qty ? `${num(qty, qty % 1 ? 3 : 0)} requested` : "--";
+}
+
+function formatActivityTime(value) {
+  if (!value) return "--";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value).slice(0, 16);
+  return date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+async function ensureActivity(accountId) {
+  const key = accountId || "";
+  if (state.activity[key] || state.activityLoading[key]) return;
+  state.activityLoading[key] = true;
+  try {
+    state.activity[key] = await api(`/api/activity?account_id=${encodeURIComponent(key)}`, { timeoutMs: 15000 });
+  } catch (error) {
+    state.activity[key] = { error: error.message, rows: [] };
+  } finally {
+    state.activityLoading[key] = false;
+    render();
+  }
+}
+
+async function ensureAlgorithmActivity(strategyKey) {
+  if (state.algorithmActivity[strategyKey] || state.algorithmActivityLoading[strategyKey]) return;
+  state.algorithmActivityLoading[strategyKey] = true;
+  try {
+    state.algorithmActivity[strategyKey] = await api(
+      `/api/algorithm-activity?strategy=${encodeURIComponent(strategyKey)}`, { timeoutMs: 8000 });
+  } catch (error) {
+    state.algorithmActivity[strategyKey] = { error: error.message, rows: [] };
+  } finally {
+    state.algorithmActivityLoading[strategyKey] = false;
+    render();
+  }
+}
+
+async function ensurePositions(accountId) {
+  const key = accountId || "";
+  if (state.positions[key] || state.positionsLoading[key]) return;
+  state.positionsLoading[key] = true;
+  try {
+    state.positions[key] = await api(`/api/positions?account_id=${encodeURIComponent(key)}`, { timeoutMs: 15000 });
+  } catch (error) {
+    state.positions[key] = { error: error.message, rows: [] };
+  } finally {
+    state.positionsLoading[key] = false;
+    render();
+  }
+}
+
+async function loadAccounts() {
+  try {
+    state.accounts = await api("/api/accounts", { timeoutMs: 6000 });
+  } catch (error) {
+    state.accounts = { rows: [] };
+  }
+}
+
+async function saveCurrentConfig(strategyKey) {
+  const host = $("#tuneBody");
+  if (!host) return;
+  let values;
+  try {
+    values = collectConfigValues(host);
+  } catch (error) {
+    showToast(error.message);
+    return;
+  }
+  try {
+    state.algorithmConfigs[strategyKey] = await api("/api/algorithm-config", {
+      method: "POST",
+      body: JSON.stringify({ strategy: strategyKey, config: values }),
+      timeoutMs: 8000,
+    });
+    // Tuning feeds the backtest cache key, so the cached curve no longer describes this config.
+    delete state.backtests[strategyKey];
+    delete state.signals[strategyKey];
+    showToast("Configuration saved");
+    render();
   } catch (error) {
     showToast(error.message);
   }
 }
 
-const SCHWAB_AUTH_POLL_MS = 5 * 60 * 1000;
+async function saveBindings() {
+  try {
+    const payload = await api("/api/controls", {
+      method: "POST",
+      body: JSON.stringify({ controls: state.controls }),
+      timeoutMs: 6000,
+    });
+    state.controls = payload.controls;
+    state.bot = payload.bot || state.bot;
+    await loadAccounts();
+  } catch (error) {
+    showToast(error.message);
+  }
+  render();
+}
+
+async function setDeploymentAccount(strategyKey, accountId) {
+  const deployment = deploymentFor(strategyKey);
+  if (deployment) {
+    if (deployment.account_id === accountId) return;
+    deployment.account_id = accountId;
+    await saveBindings();
+    return;
+  }
+  await deployTo(strategyKey, accountId);
+}
+
+async function setDeploymentFrequency(bindingId, frequency) {
+  const binding = bindingById(bindingId);
+  if (!binding) return;
+  binding.frequency = normalizeBindingFrequency(frequency);
+  await saveBindings();
+}
+
+async function deployTo(strategyKey, accountId) {
+  const used = new Set(bindings().map((binding) => String(binding.id)));
+  let index = 1;
+  while (used.has(`b${index}`)) index += 1;
+  bindings().push({ id: `b${index}`, strategy: strategyKey, account_id: accountId, enabled: false, frequency: "1hr" });
+  await saveBindings();
+  showToast(`Deployed to ${accountLabel(accountId)}`);
+}
+
+async function toggleDeployment(bindingId) {
+  const binding = bindingById(bindingId);
+  if (!binding) return;
+  binding.enabled = !binding.enabled;
+  await saveBindings();
+}
+
+async function removeDeployment(bindingId) {
+  if (bindings().length <= 1) {
+    showToast("Keep at least one deployment");
+    return;
+  }
+  state.controls.bindings = bindings().filter((binding) => String(binding.id) !== String(bindingId));
+  await saveBindings();
+}
 
 async function loadSchwabAuth() {
   try {
@@ -1673,34 +2417,23 @@ async function loadSchwabAuth() {
   } catch (error) {
     state.schwabAuth = null;
   }
-  renderSchwabAuth();
+  renderNavFooter();
 }
 
-function renderSchwabAuth() {
-  const pill = $("#schwabAuthPill");
-  if (!pill) return;
-  const auth = state.schwabAuth;
-  // Nothing to act on until Schwab is wired up, so stay out of the way entirely.
-  if (!auth || !auth.configured) {
-    pill.hidden = true;
+//: The footer claims to show what the runtime is doing right now, so it cannot rely on the
+//: snapshot taken at page load -- a run that started an hour ago would still read "armed".
+async function refreshRuntimeStatus() {
+  try {
+    const payload = await api("/api/status", { timeoutMs: 5000 });
+    state.status = payload;
+    state.bot = payload.bot || state.bot;
+  } catch (error) {
     return;
   }
-  const labels = {
-    ok: "Schwab connected",
-    warning: "Schwab expiring soon",
-    expired: "Schwab expired - reconnect",
-    missing: "Connect Schwab",
-  };
-  pill.hidden = false;
-  pill.classList.remove("is-ok", "is-warning", "is-expired", "is-missing");
-  pill.classList.add(`is-${auth.state}`);
-  pill.querySelector(".authLabel").textContent = labels[auth.state] || "Schwab";
-  pill.title = auth.detail || "";
+  renderNavFooter();
 }
 
 async function connectSchwab() {
-  // Open synchronously inside the click so the popup blocker treats it as user-initiated,
-  // then point it at Schwab once the authorize URL comes back.
   const popup = window.open("", "schwabAuth", "width=560,height=760");
   try {
     const payload = await api("/api/schwab/auth/start", { method: "POST", timeoutMs: 8000 });
@@ -1712,45 +2445,80 @@ async function connectSchwab() {
   }
 }
 
-function wireSchwabAuth() {
-  $("#schwabAuthPill")?.addEventListener("click", connectSchwab);
-  window.addEventListener("message", (event) => {
-    if (event.data?.type !== "schwab-auth") return;
-    showToast(event.data.ok ? "Schwab connected." : "Schwab authorization failed.");
-    loadSchwabAuth();
-  });
-  // The popup may be closed by hand without ever reporting back, so re-check on return.
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) loadSchwabAuth();
-  });
-  window.setInterval(loadSchwabAuth, SCHWAB_AUTH_POLL_MS);
+// -- events -------------------------------------------------------------------------------
+
+function closeNavOnMobile() {
+  if (window.innerWidth > 900) return;
+  $("#sidebar")?.classList.remove("is-open");
+  $("#navToggle")?.setAttribute("aria-expanded", "false");
 }
 
 function wireEvents() {
-  wireSchwabAuth();
-  $("#algorithmDeck")?.addEventListener("click", (event) => {
-    const card = event.target.closest("[data-strategy]");
-    if (card) selectAlgorithmStrategy(card.dataset.strategy);
+  window.addEventListener("hashchange", render);
+  window.addEventListener("resize", () => {
+    if ($("#bubbleBoard")) renderDca();
   });
-  $("#algorithmSignalCard")?.addEventListener("click", handleSignalCardClick);
-  $("#algorithmDeck")?.addEventListener("wheel", (event) => {
-    event.preventDefault();
-    shiftAlgorithmDeck(event.deltaY > 0 ? 1 : -1);
-  }, { passive: false });
-  $("#algorithmDeck")?.addEventListener("keydown", (event) => {
-    if (event.key === "ArrowDown") selectRelativeAlgorithm(1);
-    if (event.key === "ArrowUp") selectRelativeAlgorithm(-1);
+
+  $("#navToggle")?.addEventListener("click", () => {
+    const sidebar = $("#sidebar");
+    const open = sidebar?.classList.toggle("is-open");
+    $("#navToggle")?.setAttribute("aria-expanded", String(Boolean(open)));
   });
-  $("#algorithmPowerToggle")?.addEventListener("click", () => {
-    state.controls.algorithm_enabled = !state.controls.algorithm_enabled;
-    renderAlgorithmPower();
-    saveControlsOnly({ renderDecks: false });
+  $("#addWatchButton")?.addEventListener("click", addWatchTicker);
+  wireWatchlistDrag();
+  $("#watchlist")?.addEventListener("click", (event) => {
+    const row = event.target.closest("[data-watch]");
+    if (row && event.target.closest("[data-remove-watch]")) removeWatchTicker(row.dataset.watch);
   });
-  $("#tradingAccount")?.addEventListener("change", (event) => {
-    state.controls.trading_account_id = event.target.value;
-    renderAlgorithmPower();
-    saveControlsOnly({ renderDecks: false });
+
+  // Delegated: page bodies are replaced wholesale on every render.
+  $("#content")?.addEventListener("click", (event) => {
+    const route = currentRoute();
+    const refreshAccountButton = event.target.closest("#refreshAccountButton");
+    if (refreshAccountButton) return refreshAccount(refreshAccountButton.dataset.account);
+    if (event.target.closest("#saveConfigButton")) return saveCurrentConfig(route.id);
+    if (event.target.closest("#runBacktestButton")) return loadBacktest(route.id, true);
+    if (event.target.closest("#refreshSignalsButton")) {
+      delete state.signals[route.id];
+      return loadSignals(route.id);
+    }
+    if (event.target.closest("#refreshAlgoOrdersButton")) {
+      delete state.algorithmActivity[route.id];
+      return ensureAlgorithmActivity(route.id);
+    }
+    if (event.target.closest("#refreshUniverseButton")) return recommendUniverse();
+    if (event.target.closest("[data-apply-universe]")) return applyUniverseProposal();
+    if (event.target.closest('[data-role="power"]')) {
+      const deployment = deploymentFor(route.id);
+      // Arming with no deployment yet means deploying to whatever the picker shows.
+      if (deployment) return toggleDeployment(deployment.id);
+      const target = $("#deployTargetSelect")?.value;
+      if (target) return deployTo(route.id, target).then(() => toggleDeployment(deploymentFor(route.id)?.id));
+      return;
+    }
   });
+
+  $("#content")?.addEventListener("change", (event) => {
+    if (event.target.id === "deployTargetSelect") {
+      setDeploymentAccount(currentRoute().id, event.target.value);
+      return;
+    }
+    if (event.target.id === "deployFrequencySelect") {
+      const bindingId = event.target.dataset.binding;
+      if (bindingId) setDeploymentFrequency(bindingId, event.target.value);
+      return;
+    }
+    if (event.target.id === "backtestPeriodSelect") {
+      configureBacktestPeriod(event.target.value);
+      render();
+      loadBacktest(currentRoute().id, false, { cacheOnly: true });
+    }
+  });
+
+  $("#navFooter")?.addEventListener("click", (event) => {
+    if (event.target.closest("#schwabAuthPill")) connectSchwab();
+  });
+
   $("#symbolEntry")?.addEventListener("keydown", (event) => {
     if (event.key === "Enter") commitSymbolEntry();
     if (event.key === "Escape") hideSymbolEntry();
@@ -1761,129 +2529,60 @@ function wireEvents() {
     renderBoard();
   });
   $("#symbolEntry")?.addEventListener("blur", () => window.setTimeout(commitSymbolEntry, 80));
-  document.querySelectorAll(".deckArrow").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      const target = event.currentTarget;
-      const direction = Number(target.dataset.direction || 0);
-      if (target.dataset.deck === "algorithm") shiftAlgorithmDeck(direction);
-    });
-  });
-  window.addEventListener("resize", () => {
-    renderDca();
-  });
-  // Allow keyboard delete/backspace to remove the currently selected bubble
+
   window.addEventListener("keydown", (event) => {
-    const target = event.target;
-    const tag = target && target.tagName && target.tagName.toLowerCase();
-    if (tag === "input" || tag === "textarea" || target.isContentEditable) return;
+    const tag = event.target?.tagName?.toLowerCase();
+    if (tag === "input" || tag === "textarea" || event.target?.isContentEditable) return;
     if ((event.key === "Delete" || event.key === "Backspace") && state.selected) {
-      // find the bucket that contains the selected symbol
-      const fromItems = BUCKET_NAMES.flatMap((bucketName) =>
+      const found = BUCKET_NAMES.flatMap((bucketName) =>
         bucketItems(bucketName).map((item) => ({ bucketName, item })),
-      );
-      const found = fromItems.find(({ item }) => item.symbol === state.selected);
+      ).find(({ item }) => item.symbol === state.selected);
       if (found) {
         removeSymbol(found.bucketName, state.selected);
         state.selected = null;
-        return;
-      }
-      // fallback: if plan not yet loaded or item not found in plan, remove from rendered nodes
-      const nodeIndex = state.nodes.findIndex((n) => n.symbol === state.selected);
-      if (nodeIndex !== -1) {
-        state.nodes.splice(nodeIndex, 1);
-        state.selected = null;
-        renderBoard();
       }
     }
   });
-}
 
-function handleSignalCardClick(event) {
-  const universeButton = event.target.closest("[data-refresh-universe]");
-  if (universeButton) {
-    recommendUniverse();
-    return;
-  }
-  const applyUniverseButton = event.target.closest("[data-apply-universe]");
-  if (applyUniverseButton) {
-    applyUniverseProposal();
-    return;
-  }
-  const refreshButton = event.target.closest("[data-refresh-backtest]");
-  if (!refreshButton) return;
-  const strategyKey = refreshButton.dataset.refreshBacktest;
-  delete state.signals[strategyKey];
-  loadSignals(strategyKey);
-  loadBacktest(strategyKey, true);
+  window.addEventListener("message", (event) => {
+    if (event.data?.type !== "schwab-auth") return;
+    showToast(event.data.ok ? "Schwab connected." : "Schwab authorization failed.");
+    loadSchwabAuth();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    loadSchwabAuth();
+    refreshRuntimeStatus();
+  });
+  window.setInterval(loadSchwabAuth, 5 * 60 * 1000);
+  window.setInterval(refreshRuntimeStatus, 60 * 1000);
 }
 
 async function init() {
   wireEvents();
-  // Deliberately not awaited or bundled with the loads below: a Schwab hiccup must not stop
-  // the rest of the dashboard from rendering.
   loadSchwabAuth();
-  renderAlgorithmDeck();
-  renderStaticBubbles();
+  loadWatchlist();
+  render();
   try {
-    const [statusPayload, universePayload, dcaPayload, controlsPayload] = await Promise.all([
+    const [statusPayload, universePayload, controlsPayload] = await Promise.all([
       api("/api/status", { timeoutMs: 5000 }),
       api("/api/universe", { timeoutMs: 5000 }),
-      api("/api/dca", { timeoutMs: 5000 }),
       api("/api/controls", { timeoutMs: 5000 }),
     ]);
     state.status = statusPayload;
     configureBacktestPeriod(statusPayload.config?.backtest_period);
     state.universe = universePayload.rows || [];
-    state.dca = dcaPayload;
     state.controls = controlsPayload.controls || state.controls;
-    state.accounts = controlsPayload.accounts || [];
     state.bot = controlsPayload.bot || statusPayload.bot || null;
+    await loadAccounts();
+    // Plans are per account, so the plan to load is only knowable once controls are in.
+    const dcaAccount = bindingById(primaryDcaBindingId())?.account_id || "";
+    state.dca = await api(`/api/dca?account_id=${encodeURIComponent(dcaAccount)}`, { timeoutMs: 5000 });
     state.dca.plan.max_item_amount = MAX_AMOUNT;
-    renderDca();
-    renderAlgorithmDeck();
-    // One page now, so the algorithm view is always visible and its signals always needed.
-    ensureSignals(activeAlgorithmKey());
-    loadCachedBacktestsForDeck();
   } catch (error) {
-    showToast(`Could not load DCA data: ${error.message}`);
-    return;
+    showToast(`Could not load dashboard: ${error.message}`);
   }
-}
-
-function renderStaticBubbles() {
-  calculateLayout();
-  const svg = $("#bubbleBoard");
-  svg.setAttribute("viewBox", `0 0 ${state.layout.width} ${state.layout.height}`);
-  svg.replaceChildren();
-  BUCKET_NAMES.forEach((bucketName) => {
-    const bucket = state.layout.buckets[bucketName];
-    const color = DISABLED_COLORS[bucketName];
-    svg.appendChild(svgEl("circle", {
-      class: `bucket-blob ${bucketName}`,
-      cx: bucket.cx,
-      cy: bucket.cy,
-      r: bucket.r,
-      fill: color,
-      stroke: shadeColor(color, -30),
-    }));
-    svg.appendChild(textEl({
-      class: "bucket-label",
-      x: bucket.cx,
-      y: bucket.cy,
-      "text-anchor": "middle",
-      fill: color,
-    }, bucket.label));
-  });
-}
-
-function shadeColor(color, percent) {
-  const parsed = color.replace("#", "");
-  const number = parseInt(parsed, 16);
-  const amount = Math.round(2.55 * percent);
-  const red = clamp((number >> 16) + amount, 0, 255);
-  const green = clamp(((number >> 8) & 0xff) + amount, 0, 255);
-  const blue = clamp((number & 0xff) + amount, 0, 255);
-  return `#${(0x1000000 + red * 0x10000 + green * 0x100 + blue).toString(16).slice(1)}`;
+  render();
 }
 
 init();

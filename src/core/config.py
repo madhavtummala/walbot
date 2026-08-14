@@ -86,6 +86,7 @@ ALGORITHM_IDS = {
     "dca",
     "bursty_dca",
     "fast_momentum",
+    "dual_momentum",
     "spy_rotation",
 }
 
@@ -193,6 +194,10 @@ def save_dca_config(config: dict[str, Any], path: str | None = None) -> Path:
 
 def save_algorithm_bot_config(config: dict[str, Any], path: str | None = None) -> Path:
     return _save_yaml_config(config, algorithm_bot_file_path(path))
+
+
+def save_accounts_config(config: dict[str, Any], path: str | None = None) -> Path:
+    return _save_yaml_config(config, accounts_file_path(path))
 
 
 def save_algorithms_config(config: dict[str, Any], path: str | None = None) -> Path:

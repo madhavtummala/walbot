@@ -1,10 +1,31 @@
 algorithm_bot:
   trading_account_id: paper
-  enabled: true
+  enabled: false
   strategy: dca
   backtest_period: 2m
   require_trade_approval: false
   trade_approval_timeout_seconds: 300
   trade_approval_poll_seconds: 5
+  bindings:
+  - id: b2
+    strategy: dca
+    account_id: paper
+    enabled: false
+    frequency: 1hr
+  - id: b1
+    strategy: fast_momentum
+    account_id: paper
+    enabled: false
+    frequency: 1hr
+  - id: b3
+    strategy: bursty_dca
+    account_id: paper
+    enabled: false
+    frequency: 1hr
+  - id: b4
+    strategy: dual_momentum
+    account_id: local_paper
+    enabled: false
+    frequency: 1hr
 runtime:
   kill_switch: false

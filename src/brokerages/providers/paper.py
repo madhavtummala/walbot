@@ -14,6 +14,10 @@ STATE_KEY = "paper_brokerage"
 DEFAULT_STARTING_CASH = 100_000.0
 
 
+def _state_key(account_id: str) -> str:
+    return f"{STATE_KEY}:{account_id}" if account_id else STATE_KEY
+
+
 class PaperBrokerage(BaseBrokerage):
     """A local, fill-immediately brokerage backed by the state store.
 
@@ -28,10 +32,16 @@ class PaperBrokerage(BaseBrokerage):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         starting_cash = float(getattr(config, "paper_starting_cash", DEFAULT_STARTING_CASH) or DEFAULT_STARTING_CASH)
-        self.state = load_state(STATE_KEY, {"cash": starting_cash, "positions": {}, "prices": {}})
+        self.state_key = _state_key(str(getattr(config, "account_id", "") or ""))
+        # Books are per account, so two local accounts are two separate portfolios rather
+        # than one shared pile that neither of them explains.
+        self.state = load_state(self.state_key, None)
+        if self.state is None:
+            # Fall back to the single unnamespaced book written before accounts were a thing.
+            self.state = load_state(STATE_KEY, {"cash": starting_cash, "positions": {}, "prices": {}})
 
     def _save(self) -> None:
-        save_state(STATE_KEY, self.state)
+        save_state(self.state_key, self.state)
 
     def _market_value(self) -> float:
         prices = self.state.get("prices", {})
@@ -57,10 +67,12 @@ class PaperBrokerage(BaseBrokerage):
 
         signed = request.quantity if request.action == "buy" else -request.quantity
         positions = dict(self.state.get("positions", {}))
-        positions[request.symbol] = positions.get(request.symbol, 0.0) + signed
+        held = positions.get(request.symbol, 0.0)
+        positions[request.symbol] = held + signed
         if abs(positions[request.symbol]) < 1e-9:
             positions.pop(request.symbol, None)
 
+        self._update_basis(request.symbol, held=held, signed=signed, price=price)
         self.state["positions"] = positions
         self.state["cash"] = float(self.state.get("cash", 0.0)) - signed * price
         self.state.setdefault("prices", {})[request.symbol] = price
@@ -74,6 +86,45 @@ class PaperBrokerage(BaseBrokerage):
             "symbol": request.symbol,
             "qty": request.quantity,
         }
+
+    def _update_basis(self, symbol: str, *, held: float, signed: float, price: float) -> None:
+        """Track average entry price, so the book can report P/L rather than just holdings.
+
+        Adding to a position averages the new fill in; reducing one leaves the basis alone,
+        because a partial sale does not change what the remaining shares cost. Closing out
+        (or crossing through zero) starts fresh from the crossing price.
+        """
+        basis = dict(self.state.get("basis", {}))
+        after = held + signed
+        if abs(after) < 1e-9:
+            basis.pop(symbol, None)
+        elif held == 0 or (held > 0) != (after > 0):
+            basis[symbol] = price
+        elif (signed > 0) == (held > 0):
+            previous = float(basis.get(symbol, price))
+            basis[symbol] = ((abs(held) * previous) + (abs(signed) * price)) / abs(after)
+        self.state["basis"] = basis
+
+    def book(self) -> Dict[str, Any]:
+        """Holdings with marks and cost basis, for callers that report rather than trade."""
+        prices = self.state.get("prices", {})
+        basis = self.state.get("basis", {})
+        rows = []
+        for symbol, shares in self.get_positions().items():
+            price = float(prices.get(symbol, 0.0))
+            entry = float(basis.get(symbol, 0.0))
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "qty": float(shares),
+                    "avg_entry_price": entry,
+                    "market_value": float(shares) * price,
+                    "unrealized_pl": (price - entry) * float(shares) if entry and price else 0.0,
+                    "unrealized_plpc": (price / entry - 1.0) if entry and price else 0.0,
+                }
+            )
+        rows.sort(key=lambda row: abs(row["market_value"]), reverse=True)
+        return {**self.get_account_state(), "rows": rows}
 
     def cancel_all_orders(self) -> None:
         """No-op: paper orders fill immediately, so nothing is ever open."""

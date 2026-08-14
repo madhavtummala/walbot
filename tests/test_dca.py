@@ -129,3 +129,66 @@ def test_save_and_load_dca_plan_uses_dca_bot_file(tmp_path, monkeypatch) -> None
     assert loaded == saved
     assert "dca_bot:" in saved_yaml
     assert "dca_plan:" in saved_yaml
+
+
+def test_plans_are_per_account_with_the_legacy_plan_as_template(tmp_path) -> None:
+    """The monthly budgets are DCA's config, and config cannot be shared across accounts."""
+    from src.algorithms.dca import load_dca_plan, save_dca_plan
+
+    path = tmp_path / "dca_bot.yaml"
+    path.write_text(
+        """
+dca_bot:
+  dca_plan:
+    max_item_amount: 500.0
+    buy:
+      amount: 100.0
+      items:
+        - symbol: SPY
+          amount: 60.0
+    sell:
+      amount: 0.0
+      items: []
+""",
+        encoding="utf-8",
+    )
+    universe = [{"symbol": "SPY", "enabled": True}, {"symbol": "QQQ", "enabled": True}]
+
+    # Every account starts from the pre-account plan, so an existing config keeps working.
+    for account in ("", "paper", "live"):
+        loaded = load_dca_plan(universe, path=str(path), account_id=account)
+        assert [(i["symbol"], i["amount"]) for i in loaded["buy"]["items"]] == [("SPY", 60.0)]
+
+    save_dca_plan(
+        {"max_item_amount": 500.0, "buy": {"amount": 25.0, "items": [{"symbol": "QQQ", "amount": 25.0}]},
+         "sell": {"amount": 0.0, "items": []}},
+        universe,
+        path=str(path),
+        account_id="paper",
+    )
+
+    paper = load_dca_plan(universe, path=str(path), account_id="paper")
+    live = load_dca_plan(universe, path=str(path), account_id="live")
+    assert [(i["symbol"], i["amount"]) for i in paper["buy"]["items"]] == [("QQQ", 25.0)]
+    # Untouched accounts still read the template rather than inheriting paper's edit.
+    assert [(i["symbol"], i["amount"]) for i in live["buy"]["items"]] == [("SPY", 60.0)]
+
+
+def test_dca_algorithm_reads_the_plan_for_the_account_it_trades(monkeypatch) -> None:
+    from src.algorithms.dca import bot as dca_bot
+
+    seen = {}
+
+    def fake_load(rows, path=None, account_id=""):
+        seen["account_id"] = account_id
+        return {"buy": {"items": []}, "sell": {"items": []}}
+
+    monkeypatch.setattr(dca_bot, "load_dca_plan", fake_load)
+    monkeypatch.setattr("src.api.api_payloads.universe_payload", lambda: {"rows": []})
+
+    class _Config:
+        account_id = "live"
+
+    config = _Config()
+    dca_bot.DCAAlgorithm(config).plan(config)
+    assert seen["account_id"] == "live"
