@@ -92,6 +92,14 @@ class DCAAlgorithm(BaseAlgorithm):
     # Plan and configuration
     # ----------------------------------------------------------------------------------
 
+    def config_fingerprint(self, config: Any) -> dict[str, Any]:
+        """The plan is this algorithm's real configuration, so it belongs in the fingerprint.
+
+        Editing a bucket weight changes every future decision, and a cached backtest computed
+        under the old plan describes a strategy that no longer exists.
+        """
+        return {**super().config_fingerprint(config), "plan": self.plan(config)}
+
     def plan(self, config: Any) -> dict[str, Any]:
         from ...api.api_payloads import universe_payload
 

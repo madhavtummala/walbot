@@ -265,9 +265,6 @@ def test_cache_only_backtest_does_not_compute_without_cached_rows(monkeypatch) -
         raise AssertionError("cache-only request should not compute a backtest")
 
     _patch_payloads(monkeypatch, "universe_payload", lambda: {"rows": []})
-    _patch_payloads(monkeypatch, "load_dca_plan",
-        lambda rows, **kwargs: {"buy": {"items": []}, "sell": {"items": []}},
-    )
     _patch_payloads(monkeypatch, "_load_backtest_cache", lambda: {"version": 2, "items": {}})
     _patch_payloads(monkeypatch, "_compute_backtest", fail_compute)
 
@@ -300,7 +297,7 @@ def test_non_refresh_backtest_does_not_compute_without_cached_rows(monkeypatch) 
 def test_refresh_backtest_computes_with_market_data_refresh(monkeypatch) -> None:
     calls = []
 
-    def fake_compute(strategy, period, dca_plan):
+    def fake_compute(strategy, period):
         calls.append((strategy, period))
         return {
             "strategy": strategy,
@@ -390,7 +387,7 @@ def test_fast_momentum_backtest_honors_configured_max_positions(monkeypatch) -> 
         return {symbol: bars[symbol] for symbol in requested_symbols}
 
     _patch_payloads(monkeypatch, "fetch_daily_bars", fake_fetch_daily_bars)
-    payload = api_payloads._compute_backtest("fast_momentum", "1m", {})
+    payload = api_payloads._compute_backtest("fast_momentum", "1m")
     history = pd.DataFrame(payload["rows"]).set_index("timestamp")
 
     position_counts = history["positions"].apply(len)
@@ -487,7 +484,7 @@ def test_spy_rotation_backtest_uses_spy_state_logic(monkeypatch) -> None:
 
     monkeypatch.setattr(replay_module, "read_history", fake_read_history)
 
-    payload = api_payloads._compute_backtest("spy_rotation", "6m", {})
+    payload = api_payloads._compute_backtest("spy_rotation", "6m")
     history = pd.DataFrame(payload["rows"]).set_index("timestamp")
 
     assert history["order_count"].sum() > 0
@@ -538,7 +535,7 @@ def _dca_backtest_history(monkeypatch, strategy, plan, *, price=100.0, equity=10
     monkeypatch.setattr(dca_bot.DCAAlgorithm, "plan", lambda self, config: plan)
     monkeypatch.setattr(dca_bot, "broker_supports_fractional_shares", lambda account_id: True)
 
-    payload = api_payloads._compute_backtest(strategy, "6m", plan)
+    payload = api_payloads._compute_backtest(strategy, "6m")
     return pd.DataFrame(payload["rows"]).set_index("timestamp")
 
 
@@ -644,3 +641,32 @@ def test_defensive_momentum_signals_include_inactive_universe_rows(monkeypatch) 
     assert by_symbol[defensive]["reason"], "an unheld symbol still explains itself"
 
 
+
+
+def test_an_algorithm_declares_what_invalidates_its_cached_backtest() -> None:
+    """Editing a DCA plan must invalidate that backtest, and nothing else must know why.
+
+    The plan used to be passed down through three backtest signatures purely to reach the
+    cache hash -- an argument the algorithm never received, existing only to change a string.
+    """
+    from src.algorithms.registry import get_algorithm_class
+    from src.api.payloads.backtest import _cache_key
+    from src.core.config import get_config
+
+    dca = get_algorithm_class("dca").from_config(get_config(strategy_id="dca"))
+    assert "plan" in dca.config_fingerprint(get_config(strategy_id="dca"))
+
+    momentum = get_algorithm_class("dual_momentum").from_config(get_config(strategy_id="dual_momentum"))
+    assert "plan" not in momentum.config_fingerprint(get_config(strategy_id="dual_momentum"))
+
+    # Stable for the same inputs, and distinct per strategy and per period.
+    assert _cache_key("dual_momentum", "6m") == _cache_key("dual_momentum", "6m")
+    assert _cache_key("dual_momentum", "6m") != _cache_key("dual_momentum", "4m")
+    assert _cache_key("dual_momentum", "6m") != _cache_key("dca", "6m")
+
+
+def test_an_unknown_strategy_still_hashes_rather_than_raising() -> None:
+    """Reporting a bad strategy id is the compute step's job, not the cache key's."""
+    from src.api.payloads.backtest import _cache_key
+
+    assert _cache_key("no_such_algorithm", "6m")
