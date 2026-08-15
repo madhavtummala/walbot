@@ -244,7 +244,7 @@ def _extend_with_cached_history(
     bars answer the far end of the window perfectly well for a return measured in minutes.
     """
     from ..data.bars import coverage_minutes
-    from ..data.duckdb_store import read_history
+    from ..data.bars import read_history
 
     end = datetime.now(timezone.utc)
     extended: dict[str, pd.DataFrame] = {}

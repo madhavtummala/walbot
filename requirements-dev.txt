@@ -1,3 +1,8 @@
 -r requirements.txt
 python-dotenv>=1.0.0
 pytest>=8.0.0
+# Static checks used by the architecture tests and the refactor tooling: pyflakes finds
+# undefined names that only surface at runtime, autoflake removes dead imports correctly
+# (hand-rolled removal broke grouped `from x import (` statements twice).
+pyflakes>=3.0.0
+autoflake>=2.0.0

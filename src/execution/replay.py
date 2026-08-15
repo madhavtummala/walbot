@@ -32,7 +32,7 @@ from ..core.interfaces import (
     PortfolioSnapshot,
 )
 from ..data.bars import coverage_minutes
-from ..data.duckdb_store import read_history
+from ..data.bars import read_history
 from ..data.state_store import ephemeral_state
 
 logger = logging.getLogger(__name__)

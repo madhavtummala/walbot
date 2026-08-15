@@ -245,6 +245,23 @@ def _migrate_bar_timestamps(connection) -> None:
     )
 
 
+def create_dividends_table(connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dividends (
+            symbol VARCHAR NOT NULL,
+            ex_date DATE NOT NULL,
+            record_date DATE,
+            payable_date DATE,
+            amount DOUBLE NOT NULL,
+            special BOOLEAN NOT NULL DEFAULT FALSE,
+            source VARCHAR NOT NULL,
+            fetched_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (symbol, ex_date)
+        )
+        """
+    )
+
 def initialize_schema(connection) -> None:
     _create_market_bars(connection)
     _migrate_market_bars(connection)
@@ -299,10 +316,6 @@ def initialize_schema(connection) -> None:
         )
         """
     )
-    # Imported here rather than at module scope: ``src.data.dividends`` reads ``_connect``
-    # from this module, so a top-level import would close the cycle.
-    from src.data.dividends import create_dividends_table
-
     create_dividends_table(connection)
     connection.execute("UPDATE market_bars SET adjusted_close = close WHERE adjusted_close IS NULL")
     # Last, because it records its own completion in app_state, which is created just above.
@@ -403,77 +416,7 @@ def read_bars(
         ORDER BY timestamp ASC
     """
     with _connect(db_path) as connection:
-        frame = _normalize_bars(connection.execute(query, params).fetchdf())
-    # Derived here rather than stored: ``market_bars`` holds only what the market printed.
-    from src.data.bars import attach_total_return
-
-    return attach_total_return(frame, symbol)
-
-
-def read_history(
-    symbol: str,
-    *,
-    lookback_minutes: int,
-    end: datetime | None = None,
-    max_interval_minutes: int | None = None,
-    provider: str | None = None,
-    db_path: str = DUCKDB_STATE_PATH,
-) -> pd.DataFrame:
-    """The best available view of ``symbol`` over the trailing window, blending resolutions.
-
-    ``lookback_minutes`` is market time -- minutes the exchange was open -- because that is
-    what a momentum horizon means; the calendar span to search is derived from it. Resolutions
-    are walked finest first, each taking what it covers, with the next coarser tier filling
-    the stretch still missing. So a window longer than the intraday cache reaches is served by
-    daily bars at its far end rather than coming back truncated.
-
-    That blend is the point of stating horizons in minutes: a lookup only needs *an*
-    observation near the moment it asks about, not one on a particular grid.
-    """
-    from src.data.bars import calendar_days_for, coverage_minutes
-
-    end_ts = pd.Timestamp(end or _now())
-    floor = end_ts - pd.Timedelta(days=calendar_days_for(lookback_minutes))
-    intervals = [
-        interval
-        for interval in available_intervals(symbol, provider=provider, db_path=db_path)
-        if max_interval_minutes is None or interval <= int(max_interval_minutes)
-    ]
-    if not intervals:
-        return pd.DataFrame(columns=MARKET_BAR_COLUMNS + ["interval_minutes"])
-
-    frames: list[pd.DataFrame] = []
-    # Filled from the newest end backwards; each coarser tier only supplies what is still
-    # uncovered, so a fine bar always wins over a coarse one for the same instant. The walk
-    # stops as soon as the window is covered in market minutes, which is what keeps a coarse
-    # tier out of a frame the fine bars already answer in full.
-    uncovered_end = end_ts
-    covered = 0
-    for interval in intervals:
-        if uncovered_end <= floor or covered >= lookback_minutes:
-            break
-        bars = read_bars(
-            symbol,
-            interval_minutes=interval,
-            provider=provider,
-            start=floor,
-            end=uncovered_end,
-            db_path=db_path,
-        )
-        if bars.empty:
-            continue
-        frames.append(bars)
-        covered += coverage_minutes(bars)
-        uncovered_end = pd.Timestamp(bars["timestamp"].min()) - pd.Timedelta(minutes=1)
-
-    if not frames:
-        return pd.DataFrame(columns=MARKET_BAR_COLUMNS + ["interval_minutes"])
-    merged = pd.concat(frames, ignore_index=True)
-    return (
-        merged.sort_values("timestamp")
-        .drop_duplicates(subset=["timestamp"], keep="first")
-        .reset_index(drop=True)
-    )
+        return _normalize_bars(connection.execute(query, params).fetchdf())
 
 
 def write_market_bars(
