@@ -7,11 +7,9 @@ unrelated domains. The public names are unchanged and still importable from ``ap
 
 from __future__ import annotations
 
-from ...algorithms.dca import DCA_ALGORITHMS
 from ...algorithms.registry import canonical_algorithm_id
 from ...brokerages.alpaca_client import create_data_client
 from ...algorithms.registry import get_algorithm_class
-from ...algorithms.dca import load_dca_plan
 from ...data.universe import resolve_project_path
 
 import json
@@ -36,7 +34,6 @@ from ...data.state_store import load_state, save_state
 from ...core.strategy_models import STRATEGY_LABELS, prepared_strategy_frame
 
 logger = logging.getLogger(__name__)
-from .universe import universe_payload
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -140,38 +137,33 @@ def _save_backtest_cache(cache: dict[str, Any], path: str = BACKTEST_CACHE_PATH)
     cache_path.write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def _cache_key(strategy: str, period: str, dca_plan: dict[str, Any]) -> str:
+def _cache_key(strategy: str, period: str) -> str:
+    """Hash of everything a cached backtest's validity depends on.
+
+    The algorithm declares its own half through ``config_fingerprint`` -- which is how DCA's
+    plan gets in without this function knowing DCA exists. It used to be passed a ``dca_plan``
+    argument threaded down from the request handler purely to reach this hash.
+    """
     config = get_config(strategy_id=strategy)
-    selected_algorithm_config = (
-        config.algorithm_configs.get(strategy, {}) if isinstance(config.algorithm_configs, dict) else {}
-    )
-    algorithm_config = {
-        "symbols": config.symbols,
-        "selected_algorithm_config": selected_algorithm_config,
-        "momentum_lookback_days": config.momentum_lookback_days,
-        "short_momentum_lookback_days": config.short_momentum_lookback_days,
-        "long_ma_days": config.long_ma_days,
-        "volume_lookback_days": config.volume_lookback_days,
-        "social_lookback_days": config.social_lookback_days,
-        "price_momentum_weight": config.price_momentum_weight,
-        "social_momentum_weight": config.social_momentum_weight,
-        "volume_momentum_weight": config.volume_momentum_weight,
-        "min_composite_score": config.min_composite_score,
-        "max_weight_per_symbol": config.max_weight_per_symbol,
-        "max_portfolio_exposure": config.max_portfolio_exposure,
-        "max_longs": config.max_longs,
-        "target_annual_vol": config.target_annual_vol,
-        "cash_buffer": config.cash_buffer,
-        "transaction_cost_bps": config.transaction_cost_bps,
-        "starting_equity": _backtest_starting_equity(),
-        "cash_account_only": True,
-    }
+    try:
+        algorithm_basis = get_algorithm_class(strategy).from_config(config).config_fingerprint(config)
+    except (KeyError, TypeError, ValueError):
+        # An unresolvable strategy still needs a stable key. Reporting it is the compute
+        # step's job -- failing here would turn a bad request id into an error from a hash.
+        algorithm_basis = {"unresolved": strategy}
     cache_basis = {
         "strategy": strategy,
         "period": period,
         "data_feed": config.alpaca_data_feed,
-        "algorithm_config": algorithm_config,
-        "dca_plan": dca_plan if strategy in DCA_ALGORITHMS else {},
+        "starting_equity": _backtest_starting_equity(),
+        # Shared knobs every algorithm is sized and costed by, whatever it decides.
+        "portfolio": {
+            "max_weight_per_symbol": config.max_weight_per_symbol,
+            "max_portfolio_exposure": config.max_portfolio_exposure,
+            "cash_buffer": config.cash_buffer,
+            "transaction_cost_bps": config.transaction_cost_bps,
+        },
+        "algorithm": algorithm_basis,
     }
     encoded = json.dumps(cache_basis, sort_keys=True, default=str).encode("utf-8")
     return sha256(encoded).hexdigest()
@@ -337,11 +329,7 @@ def _configured_history_providers(config) -> list[str]:
     return providers or ["yfinance"]
 
 
-def _compute_backtest(
-    strategy: str,
-    period: str,
-    dca_plan: dict[str, Any],
-) -> dict[str, Any]:
+def _compute_backtest(strategy: str, period: str) -> dict[str, Any]:
     """Backtest by replaying the algorithm itself.
 
     One path for every algorithm. There is no per-strategy branch here any more: whatever the
@@ -353,10 +341,10 @@ def _compute_backtest(
     # to this call so the long-running services keep their short-lived connections and can
     # still share the database file -- see ``pooled_connections``.
     with pooled_connections():
-        return _replay_backtest(strategy, period, dca_plan)
+        return _replay_backtest(strategy, period)
 
 
-def _replay_backtest(strategy: str, period: str, dca_plan: dict[str, Any]) -> dict[str, Any]:
+def _replay_backtest(strategy: str, period: str) -> dict[str, Any]:
     starting_equity = _backtest_starting_equity()
     config = get_config(strategy_id=strategy)
     algorithm = get_algorithm_class(strategy).from_config(config)
@@ -407,9 +395,7 @@ def backtest_payload(body: dict[str, Any] | None = None) -> dict[str, Any]:
     strategy = canonical_algorithm_id(str(body.get("strategy") or DEFAULT_STRATEGY_ID))[:80]
     refresh = bool(body.get("refresh"))
     cache_only = bool(body.get("cache_only") or body.get("cacheOnly"))
-    account_id = str(body.get("account_id") or "")
-    dca_plan = load_dca_plan(universe_payload()["rows"], account_id=account_id)
-    key = _cache_key(strategy, period, dca_plan)
+    key = _cache_key(strategy, period)
     cache = _load_backtest_cache()
 
     if key in cache["items"] and not refresh:
@@ -426,7 +412,7 @@ def backtest_payload(body: dict[str, Any] | None = None) -> dict[str, Any]:
             "error": f"No cached {_period_label(period)} backtest is available.",
         }
 
-    payload = _compute_backtest(strategy, period, dca_plan)
+    payload = _compute_backtest(strategy, period)
     payload["cached"] = False
     cache["items"][key] = payload
     _save_backtest_cache(cache)

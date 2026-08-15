@@ -136,6 +136,24 @@ class BaseAlgorithm(AlgorithmPlugin):
     def requirements(self, config: Any, current_positions: Dict[str, int]) -> AlgorithmRequirements:
         return AlgorithmRequirements()
 
+    def config_fingerprint(self, config: Any) -> Dict[str, Any]:
+        """Everything this algorithm's behaviour depends on, for cache invalidation.
+
+        A cached backtest is only valid while the inputs that produced it are unchanged, and
+        "the inputs" differ per algorithm. This used to be handled by threading DCA's plan
+        through three backtest signatures as a special case -- an argument that never reached
+        the algorithm and existed solely to change a hash. An algorithm that reads extra
+        configuration declares it here instead, and the backtest stays generic.
+
+        The value only has to be stable and JSON-encodable; it is hashed, never read.
+        """
+        selected = (
+            config.algorithm_configs.get(self.algorithm_id, {})
+            if isinstance(getattr(config, "algorithm_configs", None), dict)
+            else {}
+        )
+        return {"tuning": selected, "symbols": list(getattr(config, "symbols", []) or [])}
+
     def generate_signals(self, context: AlgorithmContext) -> List[Dict[str, Any]]:
         # Default implementation: no signals
         return []
