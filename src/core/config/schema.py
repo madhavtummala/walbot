@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from ...algorithms.ids import LEGACY_ALGORITHM_IDS, canonical_algorithm_id
+
 import os
 from dataclasses import dataclass, field
 from typing import Any
@@ -121,9 +123,6 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
     universe = _section(raw_universe_config, "tradable_universe")
     raw_algorithms_config = load_algorithms_config()
     algorithm_configs = _algorithm_sections(raw_algorithms_config)
-    # Imported here rather than at module scope: the algorithm registry reaches back into
-    # config through the algorithms it loads.
-    from ...algorithms.registry import LEGACY_ALGORITHM_IDS, canonical_algorithm_id
 
     selected_strategy_id = canonical_algorithm_id(str(strategy_id or DEFAULT_STRATEGY_ID))
     algorithm = _section(algorithm_configs, selected_strategy_id)

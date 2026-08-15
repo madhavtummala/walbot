@@ -19,7 +19,7 @@ from typing import Any, Iterable
 import pandas as pd
 
 from src.core.interfaces import CashDividend
-from src.data.duckdb_store import DUCKDB_STATE_PATH, _connect
+from src.data.duckdb_store import DUCKDB_STATE_PATH, _connect, create_dividends_table
 
 logger = logging.getLogger(__name__)
 
@@ -33,24 +33,6 @@ DIVIDEND_COLUMNS = [
     "source",
     "fetched_at",
 ]
-
-
-def create_dividends_table(connection) -> None:
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS dividends (
-            symbol VARCHAR NOT NULL,
-            ex_date DATE NOT NULL,
-            record_date DATE,
-            payable_date DATE,
-            amount DOUBLE NOT NULL,
-            special BOOLEAN NOT NULL DEFAULT FALSE,
-            source VARCHAR NOT NULL,
-            fetched_at TIMESTAMPTZ NOT NULL,
-            PRIMARY KEY (symbol, ex_date)
-        )
-        """
-    )
 
 
 def _collapse(dividends: Iterable[CashDividend]) -> list[CashDividend]:

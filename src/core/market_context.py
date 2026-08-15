@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.data.signals.sentiment import sentiment_scores_from_records
+
 import dataclasses
 import logging
 from datetime import datetime, timezone
@@ -44,8 +46,6 @@ def load_sentiment_scores(symbols: list[str], config) -> tuple[dict[str, float],
     A provider outage degrades to neutral rather than failing the run: sentiment is one
     weighted term in a composite score, and losing it should not stop the algorithm trading.
     """
-    from src.algorithms.fast_momentum import sentiment_scores_from_records
-
     records: list[dict[str, Any]] = []
     providers = [str(item).lower() for item in getattr(config, "sentiment_data_provider_order", [])]
     if not providers:

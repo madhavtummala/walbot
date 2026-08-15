@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from src import data
+from src.data import bars as bars_module
 from src.data import cache_warmup, duckdb_store, provider_cache
 
 
@@ -172,7 +173,7 @@ def test_read_history_blends_fine_bars_with_the_daily_tail(tmp_path) -> None:
     duckdb_store.write_market_bars("schwab", "SPY", 5, fine, db_path=db_path)
 
     # Ten sessions of market time, which the twelve 5-minute bars cannot begin to cover.
-    blended = duckdb_store.read_history(
+    blended = bars_module.read_history(
         "SPY",
         lookback_minutes=10 * 390,
         end=datetime(2026, 5, 14, 16, tzinfo=timezone.utc),
@@ -197,7 +198,7 @@ def test_read_history_prefers_the_finest_tier_that_covers_the_window(tmp_path) -
     duckdb_store.write_market_bars("schwab", "SPY", 1440, _bars(["2026-05-13T20:00:00Z"]), db_path=db_path)
     duckdb_store.write_market_bars("schwab", "SPY", 5, fine, db_path=db_path)
 
-    blended = duckdb_store.read_history(
+    blended = bars_module.read_history(
         "SPY",
         lookback_minutes=195,
         end=datetime(2026, 5, 14, 17, tzinfo=timezone.utc),

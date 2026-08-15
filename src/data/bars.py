@@ -17,17 +17,27 @@ never counting the gap across a close. That is the property a bar count had for 
 reason this module exists rather than a bare ``timestamp <= now - delta`` comparison.
 
 The other half is resolution independence: one frame may blend fine bars recently with daily
-bars further back (what ``duckdb_store.read_history`` returns), and a horizon has to mean the
+bars further back (what :func:`read_history` below returns), and a horizon has to mean the
 same thing across the seam. A daily bar advances one session; a 5-minute bar advances five
 minutes; the axis makes both comparable.
 """
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import math
 from typing import Any, Iterable, Sequence
 
 import pandas as pd
+
+from src.data.duckdb_store import (
+    DUCKDB_STATE_PATH,
+    MARKET_BAR_COLUMNS,
+    _now,
+    available_intervals,
+    read_bars,
+)
 
 #: The grid every tuned threshold in this project was fitted on. Volatility is reported
 #: against it so a change of feed resolution does not silently rescale the numbers.
@@ -350,3 +360,81 @@ def finest_interval(frames: Sequence[Any]) -> int:
     """
     intervals = [bar_interval_minutes(frame) for frame in frames if isinstance(frame, pd.DataFrame) and not frame.empty]
     return min(intervals) if intervals else REFERENCE_INTERVAL_MINUTES
+
+
+# =========================================================================================
+# Reads that blend resolutions
+# =========================================================================================
+# ``read_history`` lives here rather than in ``duckdb_store`` because it is a statement about
+# bars, not about storage: it walks the market-time axis defined in this module and returns a
+# total-return series. Keeping it in the store meant the store imported this module, which
+# imports the dividend ledger, which imports the store -- a cycle that only stayed harmless
+# because all three imports were deferred into function bodies.
+
+def read_history(
+    symbol: str,
+    *,
+    lookback_minutes: int,
+    end: datetime | None = None,
+    max_interval_minutes: int | None = None,
+    provider: str | None = None,
+    db_path: str = DUCKDB_STATE_PATH,
+) -> pd.DataFrame:
+    """The best available view of ``symbol`` over the trailing window, blending resolutions.
+
+    ``lookback_minutes`` is market time -- minutes the exchange was open -- because that is
+    what a momentum horizon means; the calendar span to search is derived from it. Resolutions
+    are walked finest first, each taking what it covers, with the next coarser tier filling
+    the stretch still missing. So a window longer than the intraday cache reaches is served by
+    daily bars at its far end rather than coming back truncated.
+
+    That blend is the point of stating horizons in minutes: a lookup only needs *an*
+    observation near the moment it asks about, not one on a particular grid.
+    """
+    end_ts = pd.Timestamp(end or _now())
+    floor = end_ts - pd.Timedelta(days=calendar_days_for(lookback_minutes))
+    intervals = [
+        interval
+        for interval in available_intervals(symbol, provider=provider, db_path=db_path)
+        if max_interval_minutes is None or interval <= int(max_interval_minutes)
+    ]
+    if not intervals:
+        return pd.DataFrame(columns=MARKET_BAR_COLUMNS + ["interval_minutes"])
+
+    frames: list[pd.DataFrame] = []
+    # Filled from the newest end backwards; each coarser tier only supplies what is still
+    # uncovered, so a fine bar always wins over a coarse one for the same instant. The walk
+    # stops as soon as the window is covered in market minutes, which is what keeps a coarse
+    # tier out of a frame the fine bars already answer in full.
+    uncovered_end = end_ts
+    covered = 0
+    for interval in intervals:
+        if uncovered_end <= floor or covered >= lookback_minutes:
+            break
+        # Attached here rather than inside ``read_bars``: the store returns what the market
+        # printed, and the total-return series is derived for the signal layer that wants it.
+        bars = attach_total_return(
+            read_bars(
+                symbol,
+                interval_minutes=interval,
+                provider=provider,
+                start=floor,
+                end=uncovered_end,
+                db_path=db_path,
+            ),
+            symbol,
+        )
+        if bars.empty:
+            continue
+        frames.append(bars)
+        covered += coverage_minutes(bars)
+        uncovered_end = pd.Timestamp(bars["timestamp"].min()) - pd.Timedelta(minutes=1)
+
+    if not frames:
+        return pd.DataFrame(columns=MARKET_BAR_COLUMNS + ["interval_minutes"])
+    merged = pd.concat(frames, ignore_index=True)
+    return (
+        merged.sort_values("timestamp")
+        .drop_duplicates(subset=["timestamp"], keep="first")
+        .reset_index(drop=True)
+    )
