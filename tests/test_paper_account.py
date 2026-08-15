@@ -192,3 +192,20 @@ def test_a_non_alpaca_account_is_not_reported_from_alpaca(monkeypatch) -> None:
     assert payload["rows"][0]["market_value"] == 300.0
     # The interface carries no cost basis, so P/L stays absent rather than a misleading zero.
     assert payload["total_pl"] is None
+
+
+def test_config_resolves_real_files_from_the_repo_root() -> None:
+    """Guards a failure mode that type checking cannot see.
+
+    ``_project_root`` counts parent directories from ``__file__``, so moving the config module
+    changes what it resolves to. When ``config.py`` became a package the count went stale, the
+    root resolved to ``src/``, every config file read as missing, and ``get_config()`` quietly
+    returned the unnamed-account sentinel with an empty universe -- no error anywhere.
+    """
+    from src.core.config import config_file_path, get_config
+
+    assert config_file_path().exists(), "walbot.yaml must resolve from the repo root"
+
+    config = get_config()
+    assert config.account_id != UNNAMED_ACCOUNT_ID, "a configured default account must be found"
+    assert config.symbols, "the tradable universe must load"
