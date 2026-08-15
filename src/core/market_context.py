@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
+
 from src.data.signals.sentiment import sentiment_scores_from_records
 
 import dataclasses
@@ -70,6 +72,88 @@ def load_sentiment_scores(symbols: list[str], config) -> tuple[dict[str, float],
     return by_symbol, market_sentiment
 
 
+class ContextSource(ABC):
+    """Where an :class:`AlgorithmContext`'s data comes from.
+
+    ``build_algorithm_context`` used to do two jobs at once -- decide *what* an algorithm's
+    ``requirements`` mean, and *fetch* it from live feeds. Only the second differs between a
+    live run and a replay, but because they were fused the backtester had to assemble its own
+    context by hand. That is the kind of duplication that goes stale silently: an algorithm
+    declaring a new data need got it live and not in the backtest, and nothing failed.
+
+    Sourcing is the seam, so it is the thing with implementations.
+    """
+
+    @abstractmethod
+    def timestamp(self) -> datetime:
+        """The moment this context describes. ``analyze`` may read no data after it."""
+
+    @abstractmethod
+    def latest_prices(self, symbols: list[str], config) -> dict[str, float]:
+        ...
+
+    @abstractmethod
+    def daily_bars(self, symbols: list[str], requirements, config) -> dict[str, Any]:
+        ...
+
+    @abstractmethod
+    def history_bars(self, symbols: list[str], requirements, config) -> dict[str, Any]:
+        ...
+
+    def sentiment(self, symbols: list[str], config) -> tuple[dict[str, float], float]:
+        """Neutral by default: only a live run has a sentiment feed to read."""
+        return {}, 0.0
+
+    def extra(self) -> dict[str, Any]:
+        return {}
+
+
+class LiveContextSource(ContextSource):
+    """Satisfies requirements from the live feeds, through the connector layer."""
+
+    def __init__(self, data_client: Any = None, config=None) -> None:
+        self._data_client = data_client or (create_data_client(config) if config is not None else None)
+
+    @property
+    def data_client(self) -> Any:
+        return self._data_client
+
+    def timestamp(self) -> datetime:
+        return datetime.now(timezone.utc)
+
+    def latest_prices(self, symbols: list[str], config) -> dict[str, float]:
+        return load_latest_prices(symbols, config, self._data_client)
+
+    def daily_bars(self, symbols: list[str], requirements, config) -> dict[str, Any]:
+        return fetch_daily_bars(
+            # The symbols the algorithm asked for, not the global universe: an algorithm
+            # trading a name outside config.symbols used to receive no daily bars for it and
+            # silently score it as flat, which reads as a market fact rather than a data gap.
+            symbols,
+            requirements.daily_lookback_days,
+            ma_days=requirements.daily_ma_days,
+            extra_buffer_days=requirements.daily_extra_buffer_days,
+            data_client=self._data_client,
+            include_latest=requirements.include_latest_daily,
+            config=config,
+        )
+
+    def history_bars(self, symbols: list[str], requirements, config) -> dict[str, Any]:
+        return fetch_market_history(
+            symbols,
+            config,
+            lookback_minutes=requirements.history_lookback_minutes,
+            bar_minutes=requirements.preferred_bar_minutes,
+            data_client=self._data_client,
+        )
+
+    def sentiment(self, symbols: list[str], config) -> tuple[dict[str, float], float]:
+        return load_sentiment_scores(symbols, config)
+
+    def extra(self) -> dict[str, Any]:
+        return {"data_client": self._data_client}
+
+
 def build_algorithm_context(
     config,
     requirements,
@@ -77,49 +161,33 @@ def build_algorithm_context(
     positions: dict[str, int] | None = None,
     equity: float = 0.0,
     data_client: Any = None,
+    source: ContextSource | None = None,
 ) -> AlgorithmContext:
-    """Satisfy ``requirements`` from live data and return the context ``analyze`` will read.
+    """Satisfy ``requirements`` and return the context ``analyze`` will read.
 
-    The single place a live context is assembled. The live runner, the dashboard signal view,
-    and the MCP agent all go through here, so an algorithm that declares a new data need gets
-    it everywhere at once. The backtester builds the same context from cached history instead
-    -- see ``src/execution/replay.py``.
+    The single place a context is assembled, live or replayed. The live runner, the dashboard
+    signal view, the MCP agent and the backtester all go through here, so an algorithm that
+    declares a new data need gets it everywhere at once -- which was the original intent, and
+    was true of everything except the backtester until ``source`` existed.
     """
     positions = positions or {}
-    data_client = data_client or create_data_client(config)
+    source = source or LiveContextSource(data_client=data_client, config=config)
 
     price_symbols = sorted(set(requirements.price_symbols or config.symbols) | set(positions))
-    latest_prices = load_latest_prices(price_symbols, config, data_client)
+    latest_prices = source.latest_prices(price_symbols, config)
 
     bars_by_symbol: dict[str, Any] = {}
     if requirements.daily_lookback_days:
-        bars_by_symbol = fetch_daily_bars(
-            # The symbols the algorithm asked for, not the global universe: an algorithm
-            # trading a name outside config.symbols used to receive no daily bars for it and
-            # silently score it as flat, which reads as a market fact rather than a data gap.
-            price_symbols,
-            requirements.daily_lookback_days,
-            ma_days=requirements.daily_ma_days,
-            extra_buffer_days=requirements.daily_extra_buffer_days,
-            data_client=data_client,
-            include_latest=requirements.include_latest_daily,
-            config=config,
-        )
+        bars_by_symbol = source.daily_bars(price_symbols, requirements, config)
 
     history_bars_by_symbol: dict[str, Any] = {}
     if requirements.history_lookback_minutes:
-        history_bars_by_symbol = fetch_market_history(
-            price_symbols,
-            config,
-            lookback_minutes=requirements.history_lookback_minutes,
-            bar_minutes=requirements.preferred_bar_minutes,
-            data_client=data_client,
-        )
+        history_bars_by_symbol = source.history_bars(price_symbols, requirements, config)
 
     sentiment_scores: dict[str, float] = {}
     market_sentiment = 0.0
     if requirements.needs_sentiment:
-        sentiment_scores, market_sentiment = load_sentiment_scores(price_symbols, config)
+        sentiment_scores, market_sentiment = source.sentiment(price_symbols, config)
 
     return AlgorithmContext(
         config=config,
@@ -131,6 +199,6 @@ def build_algorithm_context(
         latest_prices=latest_prices,
         equity=equity,
         account_id=getattr(config, "account_id", ""),
-        timestamp=datetime.now(timezone.utc),
-        extra={"data_client": data_client},
+        timestamp=source.timestamp(),
+        extra=source.extra(),
     )

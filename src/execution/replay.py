@@ -18,18 +18,15 @@ near zero and look merely unprofitable instead of unsupported.
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any
 
 import pandas as pd
 
 from ..brokerages.providers.paper import PaperBrokerage
-from ..core.interfaces import (
-    AlgorithmContext,
-    AlgorithmPlugin,
-    AlgorithmResult,
-    CashDividend,
-)
+from ..core.interfaces import AlgorithmPlugin, AlgorithmResult, CashDividend
+from ..core.market_context import ContextSource, build_algorithm_context
 from ..core.pipeline import place_orders
 from ..data.bars import coverage_minutes
 from ..data.bars import read_history
@@ -182,6 +179,57 @@ def _read_history(
         coverage.history_supplied += min(coverage_minutes(best), lookback_minutes)
     return bars_by_symbol
 
+class ReplayContextSource(ContextSource):
+    """Satisfies the same requirements from cached history, as of one past date.
+
+    The counterpart to ``LiveContextSource``. It exists so the backtester stops assembling its
+    own ``AlgorithmContext``: the shape of a context, and what each requirement means, is now
+    decided in one place for both paths.
+
+    Every method answers strictly as of ``as_of``. That is where the backtest's honesty lives
+    -- daily bars are sliced at the signal date, prices are that date's closes, and the cache
+    read ends there -- so a decision physically cannot see data it could not have had.
+    """
+
+    def __init__(
+        self,
+        as_of: pd.Timestamp,
+        daily_history: dict[str, pd.DataFrame],
+        *,
+        providers: list[str],
+        coverage: Coverage,
+    ) -> None:
+        self.as_of = as_of
+        self.daily_history = daily_history
+        self.providers = providers
+        self.coverage = coverage
+
+    def timestamp(self) -> datetime:
+        return self.as_of.to_pydatetime()
+
+    def latest_prices(self, symbols: list[str], config) -> dict[str, float]:
+        return {
+            symbol: float(frame.loc[self.as_of, "close"])
+            for symbol, frame in self.daily_history.items()
+            if self.as_of in frame.index
+        }
+
+    def daily_bars(self, symbols: list[str], requirements, config) -> dict[str, Any]:
+        # Already loaded once for the whole replay and sliced per date, rather than refetched:
+        # the depth an algorithm needs is the same on every date, only the right edge moves.
+        return _slice_daily(self.daily_history, self.as_of)
+
+    def history_bars(self, symbols: list[str], requirements, config) -> dict[str, Any]:
+        return _read_history(
+            sorted(self.daily_history),
+            self.as_of,
+            providers=self.providers,
+            lookback_minutes=requirements.history_lookback_minutes,
+            coverage=self.coverage,
+        )
+
+
+
 def replay(
     algorithm: AlgorithmPlugin,
     config: Any,
@@ -259,30 +307,14 @@ def replay(
             # index 0 has no prior bar to form a signal from, so it only seeds the clock.
             if index > 0 and should_run(trade_date):
                 signal_date = trade_dates[index - 1]
-                history = (
-                    _read_history(
-                        sorted(daily_history),
-                        signal_date,
-                        providers=providers,
-                        lookback_minutes=requirements.history_lookback_minutes,
-                        coverage=coverage,
-                    )
-                    if requirements.history_lookback_minutes
-                    else {}
-                )
-                context = AlgorithmContext(
-                    config=config,
-                    bars_by_symbol=_slice_daily(daily_history, signal_date),
-                    history_bars_by_symbol=history,
+                context = build_algorithm_context(
+                    config,
+                    requirements,
                     positions={s: int(v) for s, v in positions.items()},
-                    latest_prices={
-                        symbol: float(frame.loc[signal_date, "close"])
-                        for symbol, frame in daily_history.items()
-                        if signal_date in frame.index
-                    },
                     equity=equity,
-                    account_id=getattr(config, "account_id", ""),
-                    timestamp=signal_date.to_pydatetime(),
+                    source=ReplayContextSource(
+                        signal_date, daily_history, providers=providers, coverage=coverage
+                    ),
                 )
                 decision = algorithm.analyze(context)
 

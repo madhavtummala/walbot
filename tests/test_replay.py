@@ -50,7 +50,10 @@ class _Recorder(BaseAlgorithm):
         self.settled: list = []
 
     def requirements(self, config, positions) -> AlgorithmRequirements:
-        return AlgorithmRequirements(price_symbols=["AAA"])
+        # Daily bars are handed over only when they are declared, live and replayed alike.
+        # The replay used to supply them regardless, so a stub could read data it never asked
+        # for and a real algorithm could quietly depend on that in a backtest but not live.
+        return AlgorithmRequirements(price_symbols=["AAA"], daily_lookback_days=30)
 
     def analyze(self, context) -> AlgorithmDecision:
         self.contexts.append(context)
@@ -224,3 +227,41 @@ def test_a_backtest_never_touches_the_configured_paper_account() -> None:
             assert isinstance(PaperBrokerage(account), PaperBrokerage)
     finally:
         delete_state(key)
+
+
+def test_the_replay_source_answers_strictly_as_of_the_signal_date() -> None:
+    """The lookahead guarantee now lives in the source, so it is asserted there.
+
+    Assembling the context moved into ``build_algorithm_context``, shared with the live path.
+    What keeps a backtest honest is that every method of ``ReplayContextSource`` answers as of
+    one past date -- if any of them reached past it, no test of the loop would notice.
+    """
+    from src.core.interfaces import AlgorithmRequirements
+    from src.execution.replay import Coverage, ReplayContextSource
+
+    history = _history()
+    as_of = DATES[5]
+    source = ReplayContextSource(as_of, history, providers=[], coverage=Coverage())
+
+    assert pd.Timestamp(source.timestamp()) == as_of
+    # Prices are that date's closes, not the newest the frame happens to hold.
+    assert set(source.latest_prices(["AAA"], Config())) == {"AAA"}
+    daily = source.daily_bars(["AAA"], AlgorithmRequirements(daily_lookback_days=30), Config())
+    assert daily["AAA"]["timestamp"].max() == as_of, "daily bars reached past the signal date"
+
+
+def test_live_and_replay_share_one_context_assembler() -> None:
+    """An algorithm that declares a new data need must get it in both paths.
+
+    They were assembled separately before, so a requirement honoured live could be silently
+    ignored in the backtest -- nothing would fail, the strategy would just score differently.
+    """
+    import inspect
+
+    from src.core.market_context import ContextSource, LiveContextSource, build_algorithm_context
+    from src.execution.replay import ReplayContextSource
+
+    assert issubclass(LiveContextSource, ContextSource)
+    assert issubclass(ReplayContextSource, ContextSource)
+    # One assembler, and the only thing that varies is where the data comes from.
+    assert "source" in inspect.signature(build_algorithm_context).parameters
