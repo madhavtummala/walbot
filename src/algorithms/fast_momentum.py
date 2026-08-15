@@ -9,10 +9,11 @@ from typing import Any
 
 import pandas as pd
 
-from .base import BaseAlgorithm
-from ..connectors import fetch_intraday_market_bars, fetch_latest_news_sentiment
+from .base import BaseAlgorithm, minutes_knob
+from ..connectors import fetch_latest_news_sentiment, fetch_market_history
 from ..core.interfaces import AlgorithmContext, AlgorithmDecision, AlgorithmRequirements, Schedule
 from ..data import fetch_daily_bars
+from ..data.bars import realized_volatility, return_over_minutes, signal_price
 from ..data.state_store import load_state, save_state
 
 logger = logging.getLogger(__name__)
@@ -26,12 +27,13 @@ class DefensiveMomentumConfig:
 
     risk_on_universe: list[str] = field(default_factory=lambda: ["QQQ", "VTI", "IWM", "IEMG", "ACWI"])
     defensive_universe: list[str] = field(default_factory=lambda: ["BIL", "IEF", "AGG", "TLT", "GLD"])
-    #: The grid the ``*_lookback_bars`` knobs below are counted on. 15 minutes is what they
-    #: were fitted against -- micro 78 is exactly three sessions of 15m bars -- so changing it
-    #: rescales those horizons in wall-clock terms. Backtest before moving it.
-    intraday_bar_minutes: int = 15
-    nano_momentum_lookback_bars: int = 10
-    micro_momentum_lookback_bars: int = 78
+    #: Preferred bar resolution, in minutes. Fidelity only: the horizons below are market-time,
+    #: so a finer grid resolves them more precisely and a coarser one still answers them.
+    #: 0 takes whatever the feed is configured to prefer.
+    intraday_bar_minutes: int = 0
+    nano_momentum_lookback_minutes: int = 150
+    #: Three trading sessions.
+    micro_momentum_lookback_minutes: int = 1170
     meso_trend_lookback_days: int = 60
     macro_trend_lookback_days: int = 180
     sentiment_lookback_minutes: int = 60
@@ -54,7 +56,8 @@ class DefensiveMomentumConfig:
     pullback_nano_z_threshold: float = -0.5
     pullback_nano_z_cap: float = 3.0
     pullback_min_micro_return: float = -0.02
-    volatility_lookback_bars: int = 13
+    volatility_lookback_minutes: int = 195
+    #: Quoted per 15-minute bar whatever the feed's grid is -- see ``data/bars.py``.
     max_intraday_volatility: float = 0.06
     high_volatility_weight_scale: float = 0.5
     intraday_drawdown_limit: float = -0.02
@@ -94,8 +97,12 @@ class DefensiveMomentumConfig:
             risk_on_universe=symbols("risk_on_universe", defaults.risk_on_universe),
             defensive_universe=symbols("defensive_universe", defaults.defensive_universe),
             intraday_bar_minutes=integer("intraday_bar_minutes", defaults.intraday_bar_minutes),
-            nano_momentum_lookback_bars=integer("nano_momentum_lookback_bars", defaults.nano_momentum_lookback_bars),
-            micro_momentum_lookback_bars=integer("micro_momentum_lookback_bars", defaults.micro_momentum_lookback_bars),
+            nano_momentum_lookback_minutes=minutes_knob(
+                raw, "nano_momentum_lookback_minutes", defaults.nano_momentum_lookback_minutes
+            ),
+            micro_momentum_lookback_minutes=minutes_knob(
+                raw, "micro_momentum_lookback_minutes", defaults.micro_momentum_lookback_minutes
+            ),
             meso_trend_lookback_days=integer("meso_trend_lookback_days", defaults.meso_trend_lookback_days),
             macro_trend_lookback_days=integer("macro_trend_lookback_days", defaults.macro_trend_lookback_days),
             sentiment_lookback_minutes=integer("sentiment_lookback_minutes", defaults.sentiment_lookback_minutes),
@@ -118,7 +125,9 @@ class DefensiveMomentumConfig:
             pullback_nano_z_threshold=number("pullback_nano_z_threshold", defaults.pullback_nano_z_threshold),
             pullback_nano_z_cap=number("pullback_nano_z_cap", defaults.pullback_nano_z_cap),
             pullback_min_micro_return=number("pullback_min_micro_return", defaults.pullback_min_micro_return),
-            volatility_lookback_bars=integer("volatility_lookback_bars", defaults.volatility_lookback_bars),
+            volatility_lookback_minutes=minutes_knob(
+                raw, "volatility_lookback_minutes", defaults.volatility_lookback_minutes
+            ),
             max_intraday_volatility=number("max_intraday_volatility", defaults.max_intraday_volatility),
             high_volatility_weight_scale=number("high_volatility_weight_scale", defaults.high_volatility_weight_scale),
             intraday_drawdown_limit=number("intraday_drawdown_limit", defaults.intraday_drawdown_limit),
@@ -129,12 +138,12 @@ class DefensiveMomentumConfig:
         return sorted(set(self.risk_on_universe) | set(self.defensive_universe))
 
     @property
-    def required_intraday_bars(self) -> int:
+    def required_history_minutes(self) -> int:
         return max(
-            self.nano_momentum_lookback_bars,
-            self.micro_momentum_lookback_bars,
-            self.volatility_lookback_bars,
-        ) + 1
+            self.nano_momentum_lookback_minutes,
+            self.micro_momentum_lookback_minutes,
+            self.volatility_lookback_minutes,
+        )
 
     @property
     def required_daily_bars(self) -> int:
@@ -142,6 +151,7 @@ class DefensiveMomentumConfig:
 
 
 def _return_over(closes: pd.Series, bars: int) -> float:
+    """Positional return, still used for the daily series where a bar *is* a day."""
     if len(closes) <= bars or bars <= 0:
         return 0.0
     start = float(closes.iloc[-bars - 1])
@@ -151,23 +161,31 @@ def _return_over(closes: pd.Series, bars: int) -> float:
 
 def compute_price_features(
     symbol: str,
-    intraday_bars: pd.DataFrame,
+    history_bars: pd.DataFrame,
     daily_bars: pd.DataFrame,
     config: DefensiveMomentumConfig,
 ) -> dict[str, Any]:
-    """Calculate multi-horizon momentum, absolute trend, and intraday volatility."""
-    intraday = intraday_bars.copy() if isinstance(intraday_bars, pd.DataFrame) else pd.DataFrame()
-    daily = daily_bars.copy() if isinstance(daily_bars, pd.DataFrame) else pd.DataFrame()
-    closes = pd.to_numeric(intraday.get("close", pd.Series(dtype=float)), errors="coerce").dropna()
-    daily_closes = pd.to_numeric(daily.get("close", pd.Series(dtype=float)), errors="coerce").dropna()
+    """Calculate multi-horizon momentum, absolute trend, and intraday volatility.
 
-    intraday_returns = closes.pct_change().dropna().tail(config.volatility_lookback_bars)
-    realized_volatility = float(intraday_returns.std()) if not intraday_returns.empty else 0.0
-    nano_return = _return_over(closes, config.nano_momentum_lookback_bars)
-    micro_return = _return_over(closes, config.micro_momentum_lookback_bars)
+    The two fast horizons are measured in market minutes against ``history_bars``, so they
+    mean the same span whether the feed supplied 1-minute, 5-minute, or daily observations.
+    The two slow ones stay positional on daily closes: "the 60-day return" is a statement
+    about sessions, not about elapsed time.
+    """
+    daily = daily_bars.copy() if isinstance(daily_bars, pd.DataFrame) else pd.DataFrame()
+    daily_closes = signal_price(daily).dropna() if not daily.empty else pd.Series(dtype=float)
+
+    volatility = realized_volatility(history_bars, config.volatility_lookback_minutes)
+    nano_return = return_over_minutes(history_bars, config.nano_momentum_lookback_minutes)
+    micro_return = return_over_minutes(history_bars, config.micro_momentum_lookback_minutes)
     meso_return = _return_over(daily_closes, config.meso_trend_lookback_days)
     macro_return = _return_over(daily_closes, config.macro_trend_lookback_days)
 
+    closes = (
+        signal_price(history_bars).dropna()
+        if isinstance(history_bars, pd.DataFrame) and not history_bars.empty
+        else pd.Series(dtype=float)
+    )
     return {
         "symbol": symbol.upper(),
         "nano_return": nano_return,
@@ -175,7 +193,7 @@ def compute_price_features(
         "meso_return": meso_return,
         "macro_return": macro_return,
         "macro_trend_ok": macro_return > 0.0,
-        "realized_volatility": 0.0 if math.isnan(realized_volatility) else realized_volatility,
+        "realized_volatility": 0.0 if math.isnan(volatility) else volatility,
         "close": float(closes.iloc[-1]) if not closes.empty else 0.0,
     }
 
@@ -230,19 +248,20 @@ def compute_composite_scores(
     return scored
 
 
-def get_intraday_bars(
+def get_history_bars(
     symbols: list[str],
-    lookback_bars: int,
+    lookback_minutes: int,
     config: Any,
     data_client: Any = None,
     bar_minutes: int | None = None,
 ) -> dict[str, pd.DataFrame]:
-    """Fetch the last N intraday bars per symbol, on this strategy's own grid."""
-    return fetch_intraday_market_bars(
+    """Fetch the trailing ``lookback_minutes`` of bars per symbol, at the best grid available."""
+    return fetch_market_history(
         symbols,
         config,
-        lookback_bars=lookback_bars,
+        lookback_minutes=lookback_minutes,
         bar_minutes=bar_minutes or DefensiveMomentumConfig.from_runtime_config(config).intraday_bar_minutes,
+        data_client=data_client,
     )
 
 
@@ -253,8 +272,7 @@ def get_daily_bars(symbols: list[str], lookback_days: int, config: Any, data_cli
         lookback_days=lookback_days,
         ma_days=0,
         extra_buffer_days=5,
-        alpaca_data_client=data_client,
-        data_feed=getattr(config, "alpaca_data_feed", "iex"),
+        data_client=data_client,
         include_latest=True,
         config=config,
     )
@@ -565,7 +583,7 @@ def score_universe(
         {
             symbol: compute_price_features(
                 symbol,
-                context.intraday_bars_by_symbol.get(symbol, pd.DataFrame()),
+                context.history_bars_by_symbol.get(symbol, pd.DataFrame()),
                 context.bars_by_symbol.get(symbol, pd.DataFrame()),
                 strategy_config,
             )
@@ -674,8 +692,8 @@ class FastMomentumAlgorithm(BaseAlgorithm):
         return AlgorithmRequirements(
             price_symbols=sorted(set(strategy_config.symbols) | set(current_positions)),
             daily_lookback_days=strategy_config.required_daily_bars,
-            intraday_lookback_bars=strategy_config.required_intraday_bars,
-            intraday_bar_minutes=strategy_config.intraday_bar_minutes,
+            history_lookback_minutes=strategy_config.required_history_minutes,
+            preferred_bar_minutes=strategy_config.intraday_bar_minutes,
             needs_sentiment=True,
             paper_only=True,
         )

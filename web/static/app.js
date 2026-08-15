@@ -1946,6 +1946,12 @@ function renderAccountPage(content, accountId) {
             : `${escapeHtml(money(positions.day_pl, 2))} (${escapeHtml(percent(positions.day_pl_percent))})`}</strong></div>
         <div class="metric"><span>Open P/L</span><strong class="${(positions?.total_pl || 0) >= 0 ? "gain" : "loss"}">${
           positions ? escapeHtml(money(positions.total_pl, 2)) : "--"}</strong></div>
+        <div class="metric"><span>Dividends (1y)</span><strong class="${(positions?.dividend_pl || 0) >= 0 ? "gain" : "loss"}">${
+          // Reported beside Open P/L, never inside it. Price appreciation and income are
+          // different things, and a T-bill sleeve earns almost entirely through this one.
+          positions?.dividend_pl === null || positions?.dividend_pl === undefined
+            ? "--"
+            : escapeHtml(money(positions.dividend_pl, 2))}</strong></div>
       </div>
       ${!account.credentials_ready
         ? `<p class="cardHint">Credentials missing: set <code>${escapeHtml(account.missing_env.join("</code> and <code>"))}</code> in <code>.env</code> and restart. It cannot trade until then.</p>`
@@ -1972,6 +1978,13 @@ function renderAccountPage(content, accountId) {
           <span class="cardHint">${activity?.rows?.length ? `${activity.rows.length} shown` : ""}</span>
         </div>
         ${accountOrdersTable(activity)}
+      </section>
+      <section class="card">
+        <div class="cardHead">
+          <h2>Dividends received</h2>
+          <span class="cardHint">${positions?.dividend_rows?.length ? `${positions.dividend_rows.length} shown` : ""}</span>
+        </div>
+        ${accountDividendsTable(positions)}
       </section>
     </div>
     </div>`;
@@ -2001,6 +2014,33 @@ function accountPositionsTable(positions) {
               <td class="num">${escapeHtml(money(row.market_value, 2))}</td>
               <td class="num ${row.unrealized_pl >= 0 ? "gain" : "loss"}">${escapeHtml(money(row.unrealized_pl, 2))}
                 <span class="tableNote">${escapeHtml(percent(row.unrealized_plpc))}</span></td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function accountDividendsTable(positions) {
+  if (positions?.error) return `<p class="emptyState">${escapeHtml(positions.error)}</p>`;
+  if (!positions) return `<p class="emptyState">Loading dividends.</p>`;
+  if (!positions.dividend_rows?.length) {
+    // An account that has simply not been paid yet is not an error, and neither is a broker
+    // that cannot report income -- say so plainly rather than showing a blank card.
+    return `<p class="emptyState">No dividends received in the last year.</p>`;
+  }
+  return `
+    <div class="tableWrap is-scroll">
+      <table class="dataTable">
+        <thead>
+          <tr><th>Date</th><th>Symbol</th><th class="num">Amount</th></tr>
+        </thead>
+        <tbody>
+          ${positions.dividend_rows.map((row) => `
+            <tr>
+              <td>${escapeHtml(row.date || "")}</td>
+              <td><strong>${escapeHtml(row.symbol || "Cash")}</strong>${
+                row.description ? `<span class="tableNote">${escapeHtml(row.description)}</span>` : ""}</td>
+              <td class="num ${row.amount >= 0 ? "gain" : "loss"}">${escapeHtml(money(row.amount, 2))}</td>
             </tr>`).join("")}
         </tbody>
       </table>

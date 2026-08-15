@@ -39,12 +39,13 @@ import logging
 import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
-from typing import Any, Iterable
+from typing import Any
 
 import pandas as pd
 
-from .base import BaseAlgorithm
+from .base import BaseAlgorithm, minutes_knob
 from ..core.interfaces import AlgorithmContext, AlgorithmDecision, AlgorithmRequirements, Schedule
+from ..data.bars import bar_interval_minutes, ema, realized_volatility, return_path, signal_price
 from ..data.state_store import load_state, save_state
 
 logger = logging.getLogger(__name__)
@@ -75,14 +76,17 @@ class DualMomentumConfig:
     risk_refresh_minutes: int = 15
 
     # -- selection score ------------------------------------------------------------------
-    #: The grid every ``selection_horizon_*`` below is counted on. 15 minutes is what those
-    #: horizons were fitted against, so changing it rescales all of them in wall-clock terms
-    #: (macro 320 is 12.3 sessions at 15m and 4.1 at 5m) -- backtest before moving it.
-    intraday_bar_minutes: int = 15
-    selection_horizon_nano: int = 4
-    selection_horizon_micro: int = 16
-    selection_horizon_meso: int = 80
-    selection_horizon_macro: int = 320
+    #: Preferred bar resolution, in minutes. Fidelity only: the horizons below are stated in
+    #: minutes the market is open, so a finer grid resolves them more precisely and a coarser one
+    #: still answers them. 0 takes whatever the feed is configured to prefer.
+    intraday_bar_minutes: int = 0
+    #: Selection horizons, in minutes. Roughly: a quarter-session, a half-session, three
+    #: sessions, and twelve. Twelve sessions is longer than a fresh intraday cache reaches,
+    #: which is why the store blends daily bars into the far end of the window.
+    selection_horizon_nano_minutes: int = 60
+    selection_horizon_micro_minutes: int = 240
+    selection_horizon_meso_minutes: int = 1200
+    selection_horizon_macro_minutes: int = 4800
     w_nano: float = 0.10
     w_micro: float = 0.20
     w_meso: float = 0.35
@@ -96,7 +100,7 @@ class DualMomentumConfig:
     #: the choppy most-recent quarter and always ran lower volatility, so this is a genuine
     #: trade rather than a settled question -- which is why it is a dashboard knob.
     risk_adjusted_score: bool = False
-    score_ema_bars: int = 3
+    score_ema_minutes: int = 45
 
     # -- market regime gate ---------------------------------------------------------------
     benchmark_ma_days: int = 100
@@ -125,7 +129,7 @@ class DualMomentumConfig:
     cooldown_after_exit: int = 4
 
     # -- entry timing ---------------------------------------------------------------------
-    momentum_change_ema_bars: int = 3
+    momentum_change_ema_minutes: int = 45
     momentum_change_enter: float = 0.0
     pullback_macro_z_min: float = 0.0
     pullback_meso_z_min: float = 0.50
@@ -220,17 +224,29 @@ class DualMomentumConfig:
             signal_refresh_minutes=integer("signal_refresh_minutes", defaults.signal_refresh_minutes),
             risk_refresh_minutes=integer("risk_refresh_minutes", defaults.risk_refresh_minutes),
             intraday_bar_minutes=integer("intraday_bar_minutes", defaults.intraday_bar_minutes),
-            selection_horizon_nano=integer("selection_horizon_nano", defaults.selection_horizon_nano),
-            selection_horizon_micro=integer("selection_horizon_micro", defaults.selection_horizon_micro),
-            selection_horizon_meso=integer("selection_horizon_meso", defaults.selection_horizon_meso),
-            selection_horizon_macro=integer("selection_horizon_macro", defaults.selection_horizon_macro),
+            selection_horizon_nano_minutes=minutes_knob(
+                raw, "selection_horizon_nano_minutes", defaults.selection_horizon_nano_minutes,
+                legacy_key="selection_horizon_nano",
+            ),
+            selection_horizon_micro_minutes=minutes_knob(
+                raw, "selection_horizon_micro_minutes", defaults.selection_horizon_micro_minutes,
+                legacy_key="selection_horizon_micro",
+            ),
+            selection_horizon_meso_minutes=minutes_knob(
+                raw, "selection_horizon_meso_minutes", defaults.selection_horizon_meso_minutes,
+                legacy_key="selection_horizon_meso",
+            ),
+            selection_horizon_macro_minutes=minutes_knob(
+                raw, "selection_horizon_macro_minutes", defaults.selection_horizon_macro_minutes,
+                legacy_key="selection_horizon_macro",
+            ),
             w_nano=number("w_nano", defaults.w_nano),
             w_micro=number("w_micro", defaults.w_micro),
             w_meso=number("w_meso", defaults.w_meso),
             w_macro=number("w_macro", defaults.w_macro),
             robust_zscore=flag("robust_zscore", defaults.robust_zscore),
             risk_adjusted_score=flag("risk_adjusted_score", defaults.risk_adjusted_score),
-            score_ema_bars=integer("score_ema_bars", defaults.score_ema_bars),
+            score_ema_minutes=minutes_knob(raw, "score_ema_minutes", defaults.score_ema_minutes),
             benchmark_ma_days=integer("benchmark_ma_days", defaults.benchmark_ma_days),
             benchmark_return_days=integer("benchmark_return_days", defaults.benchmark_return_days),
             breadth_ma_days=integer("breadth_ma_days", defaults.breadth_ma_days),
@@ -248,7 +264,9 @@ class DualMomentumConfig:
             exit_rank_max=integer("exit_rank_max", defaults.exit_rank_max),
             min_score_delta_to_replace=number("min_score_delta_to_replace", defaults.min_score_delta_to_replace),
             cooldown_after_exit=integer("cooldown_after_exit", defaults.cooldown_after_exit),
-            momentum_change_ema_bars=integer("momentum_change_ema_bars", defaults.momentum_change_ema_bars),
+            momentum_change_ema_minutes=minutes_knob(
+                raw, "momentum_change_ema_minutes", defaults.momentum_change_ema_minutes
+            ),
             momentum_change_enter=number("momentum_change_enter", defaults.momentum_change_enter),
             pullback_macro_z_min=number("pullback_macro_z_min", defaults.pullback_macro_z_min),
             pullback_meso_z_min=number("pullback_meso_z_min", defaults.pullback_meso_z_min),
@@ -283,18 +301,14 @@ class DualMomentumConfig:
         return abs(self.sentiment_weight) > 0 or abs(self.sentiment_size_scale) > 0
 
     @property
-    def required_intraday_bars(self) -> int:
-        # The slowest horizon plus the smoothing tail, since the score is EMA'd across bars.
-        return (
-            max(
-                self.selection_horizon_nano,
-                self.selection_horizon_micro,
-                self.selection_horizon_meso,
-                self.selection_horizon_macro,
-            )
-            + max(self.score_ema_bars, self.momentum_change_ema_bars)
-            + 1
-        )
+    def required_history_minutes(self) -> int:
+        # The slowest horizon plus the smoothing tail, since the score is EMA'd over time.
+        return max(
+            self.selection_horizon_nano_minutes,
+            self.selection_horizon_micro_minutes,
+            self.selection_horizon_meso_minutes,
+            self.selection_horizon_macro_minutes,
+        ) + max(self.score_ema_minutes, self.momentum_change_ema_minutes)
 
     @property
     def required_daily_bars(self) -> int:
@@ -316,8 +330,11 @@ class DualMomentumConfig:
 
 
 def _closes(bars: Any) -> pd.Series:
+    """Total-return closes -- see ``data.bars.signal_price`` for why not the raw price."""
     frame = bars if isinstance(bars, pd.DataFrame) else pd.DataFrame()
-    return pd.to_numeric(frame.get("close", pd.Series(dtype=float)), errors="coerce").dropna()
+    if frame.empty:
+        return pd.Series(dtype=float)
+    return signal_price(frame).dropna()
 
 
 def _return_over(closes: pd.Series, periods: int) -> float:
@@ -327,37 +344,6 @@ def _return_over(closes: pd.Series, periods: int) -> float:
     start = float(closes.iloc[-periods - 1])
     end = float(closes.iloc[-1])
     return end / start - 1.0 if start > 0 else 0.0
-
-
-def _return_series(closes: pd.Series, periods: int, count: int) -> list[float]:
-    """The last ``count`` values of the rolling ``periods``-observation return.
-
-    Oldest first. Short history is padded with the oldest available value rather than zero,
-    so a thin cache biases the smoothing toward the data that exists instead of toward flat.
-    """
-    if periods <= 0 or closes.empty:
-        return [0.0] * max(count, 1)
-    series = closes.pct_change(periods=periods).dropna()
-    if series.empty:
-        return [0.0] * max(count, 1)
-    values = [float(value) for value in series.tail(max(count, 1))]
-    while len(values) < max(count, 1):
-        values.insert(0, values[0])
-    return values
-
-
-def _ema(values: Iterable[float], span: int) -> float:
-    """Last value of an EMA over ``values`` (oldest first)."""
-    data = [float(value) for value in values]
-    if not data:
-        return 0.0
-    if span <= 1 or len(data) == 1:
-        return data[-1]
-    alpha = 2.0 / (span + 1.0)
-    result = data[0]
-    for value in data[1:]:
-        result = (alpha * value) + ((1 - alpha) * result)
-    return result
 
 
 def _rolling_volatility(closes: pd.Series, window: int) -> float:
@@ -373,36 +359,41 @@ def _rolling_volatility(closes: pd.Series, window: int) -> float:
 
 def compute_features(
     symbol: str,
-    intraday_bars: Any,
+    history_bars: Any,
     daily_bars: Any,
     config: DualMomentumConfig,
 ) -> dict[str, Any]:
     """Everything about one symbol that the layers below need, computed once.
 
-    Selection horizons are measured in intraday bars; the eligibility and regime gates are
-    measured in daily bars, because "above its 100-day average" is a statement about the
-    trend, not about the last few hours.
+    Selection horizons are measured in market minutes against ``history_bars``, whatever
+    resolution those turn out to be; the eligibility and regime gates are measured in daily
+    bars, because "above its 100-day average" is a statement about the trend, not about the
+    last few hours.
     """
-    closes = _closes(intraday_bars)
+    closes = _closes(history_bars)
     daily_closes = _closes(daily_bars)
-    smoothing = max(config.score_ema_bars, 1)
+    step = bar_interval_minutes(history_bars)
+    smoothing = max(config.score_ema_minutes, step)
 
     horizons = {
-        "nano": config.selection_horizon_nano,
-        "micro": config.selection_horizon_micro,
-        "meso": config.selection_horizon_meso,
-        "macro": config.selection_horizon_macro,
+        "nano": config.selection_horizon_nano_minutes,
+        "micro": config.selection_horizon_micro_minutes,
+        "meso": config.selection_horizon_meso_minutes,
+        "macro": config.selection_horizon_macro_minutes,
     }
-    return_series = {name: _return_series(closes, bars, smoothing) for name, bars in horizons.items()}
+    return_series = {
+        name: return_path(history_bars, minutes, span_minutes=smoothing)
+        for name, minutes in horizons.items()
+    }
 
     # Volatility-normalised momentum change: fast momentum relative to its own noise, minus
     # the same for the medium horizon. Positive means the near term is accelerating away
     # from the trend, which is what "enter now" should mean.
-    nano_vol = _rolling_volatility(closes, max(config.selection_horizon_nano, 2))
-    meso_vol = _rolling_volatility(closes, max(config.selection_horizon_meso, 2))
-    change_span = max(config.momentum_change_ema_bars, 1)
-    nano_path = _return_series(closes, config.selection_horizon_nano, change_span)
-    meso_path = _return_series(closes, config.selection_horizon_meso, change_span)
+    nano_vol = realized_volatility(history_bars, config.selection_horizon_nano_minutes)
+    meso_vol = realized_volatility(history_bars, config.selection_horizon_meso_minutes)
+    change_span = max(config.momentum_change_ema_minutes, step)
+    nano_path = return_path(history_bars, config.selection_horizon_nano_minutes, span_minutes=change_span)
+    meso_path = return_path(history_bars, config.selection_horizon_meso_minutes, span_minutes=change_span)
     change_series = [
         (nano / (nano_vol + EPSILON)) - (meso / (meso_vol + EPSILON))
         for nano, meso in zip(nano_path, meso_path)
@@ -425,7 +416,8 @@ def compute_features(
         "meso_return": return_series["meso"][-1],
         "macro_return": return_series["macro"][-1],
         "return_series": return_series,
-        "momentum_change": _ema(change_series, change_span),
+        "step_minutes": step,
+        "momentum_change": ema(change_series, change_span, step),
         "moving_average": moving_average,
         "above_moving_average": bool(enough_history and last_daily > moving_average > 0),
         "daily_bars": int(len(daily_closes)),
@@ -435,7 +427,7 @@ def compute_features(
         # Annualised, because the volatility target is quoted annually.
         "annual_volatility": daily_vol * math.sqrt(TRADING_DAYS),
         "has_daily": not daily_closes.empty,
-        "has_intraday": not closes.empty,
+        "has_history": not closes.empty,
     }
 
 
@@ -485,7 +477,7 @@ def base_scores(
     features_by_symbol: dict[str, dict[str, Any]],
     config: DualMomentumConfig,
 ) -> dict[str, dict[str, Any]]:
-    """Slow-weighted composite score, smoothed across the last ``score_ema_bars`` bars.
+    """Slow-weighted composite score, smoothed over ``score_ema_minutes``.
 
     The smoothing is done here rather than across runs so that ``analyze`` stays pure: the
     score at bar t-1 is recomputed from the bars, not remembered from the previous run, which
@@ -501,7 +493,12 @@ def base_scores(
     """
     if not features_by_symbol:
         return {}
-    smoothing = max(config.score_ema_bars, 1)
+    # How many samples the smoothing window came out to, which follows the feed's resolution
+    # rather than a fixed count: 45 minutes is three points on a 15m grid and nine on a 5m
+    # one. Read off the paths themselves so every symbol's cross-section lines up.
+    first = next(iter(features_by_symbol.values()))
+    smoothing = max(len(first.get("return_series", {}).get("nano", [])), 1)
+    step = int(first.get("step_minutes") or 1)
     scale = _risk_scales(features_by_symbol) if config.risk_adjusted_score else {}
     weights = {
         "nano": config.w_nano,
@@ -535,7 +532,7 @@ def base_scores(
         }
         scored[symbol] = {
             **features,
-            "base_score": _ema(path, smoothing),
+            "base_score": ema(path, config.score_ema_minutes, step),
             "score_unsmoothed": path[-1],
             "z": latest_z[symbol],
             "score_components": components,
@@ -931,7 +928,7 @@ def analyze_universe(context: AlgorithmContext, config: DualMomentumConfig) -> d
     features = {
         symbol: compute_features(
             symbol,
-            context.intraday_bars_by_symbol.get(symbol, pd.DataFrame()),
+            context.history_bars_by_symbol.get(symbol, pd.DataFrame()),
             context.bars_by_symbol.get(symbol, pd.DataFrame()),
             config,
         )
@@ -1120,8 +1117,8 @@ class DualMomentumAlgorithm(BaseAlgorithm):
             price_symbols=sorted(set(strategy_config.symbols) | set(current_positions)),
             daily_lookback_days=strategy_config.required_daily_bars,
             daily_ma_days=strategy_config.etf_ma_days,
-            intraday_lookback_bars=strategy_config.required_intraday_bars,
-            intraday_bar_minutes=strategy_config.intraday_bar_minutes,
+            history_lookback_minutes=strategy_config.required_history_minutes,
+            preferred_bar_minutes=strategy_config.intraday_bar_minutes,
             needs_sentiment=strategy_config.uses_sentiment,
             # Unproven: keep it on paper until walk-forward results say otherwise.
             paper_only=True,
@@ -1331,9 +1328,10 @@ def _in_cooldown(
 ) -> bool:
     """Whether ``symbol`` exited too recently to be re-entered.
 
-    Measured in wall-clock minutes derived from the bar count, using the timestamp
-    ``analyze`` recorded -- which the backtester sets to the historical bar, so a replay
-    applies the same cooldown the live runner would have.
+    Elapsed wall-clock minutes, not market ones: ``cooldown_after_exit`` counts algorithm
+    *runs*, so the window is that many times ``risk_refresh_minutes``. Compared against the
+    timestamp ``analyze`` recorded -- which the backtester sets to the historical bar, so a
+    replay applies the same cooldown the live runner would have.
     """
     exits = state.get("exited_at") if isinstance(state.get("exited_at"), dict) else {}
     exited_at = _parse_time(str(exits.get(symbol, "")))

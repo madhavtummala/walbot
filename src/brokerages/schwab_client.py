@@ -137,6 +137,11 @@ class SchwabSession:
         return self.request("DELETE", url, **kwargs)
 
 
+def _digits(value: Any) -> str:
+    """An account number reduced to its digits, so formatting never decides identity."""
+    return "".join(character for character in str(value or "") if character.isdigit())
+
+
 def account_hash(session: SchwabSession, account_number: str = "") -> str:
     """Resolve the hash Schwab requires in account-scoped paths.
 
@@ -148,8 +153,16 @@ def account_hash(session: SchwabSession, account_number: str = "") -> str:
     if not accounts:
         raise SchwabAPIError(404, "Schwab returned no accounts for these credentials")
 
-    wanted = str(account_number or "").strip()
+    wanted = _digits(account_number)
     for entry in accounts:
-        if not wanted or str(entry.get("accountNumber", "")) == wanted:
+        # Compared on digits alone. Schwab's API reports the number bare -- "00000000" -- while
+        # every human-facing surface, statements and the website included, writes it "0000-0000".
+        # Matching the raw strings made a correctly configured account 404, and because the
+        # dashboard falls back to the default account on error, the Schwab tab then showed
+        # Alpaca's money under Schwab's name.
+        if not wanted or _digits(entry.get("accountNumber", "")) == wanted:
             return str(entry.get("hashValue", ""))
-    raise SchwabAPIError(404, f"Schwab account {wanted} not found in {len(accounts)} account(s)")
+    raise SchwabAPIError(
+        404,
+        f"Schwab account {account_number} not found in {len(accounts)} account(s)",
+    )

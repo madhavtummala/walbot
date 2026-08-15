@@ -170,10 +170,11 @@ def test_broker_holdings_and_orders_live_on_the_account_page() -> None:
 
 
 def test_every_unbounded_list_panel_scrolls_inside_its_card() -> None:
-    """Positions, broker orders and the bot's own journal all grow without bound."""
+    """Positions, broker orders, received dividends and the bot's own journal all grow
+    without bound."""
     app_js, app_css, _ = _assets()
 
-    assert app_js.count('class="tableWrap is-scroll"') == 3
+    assert app_js.count('class="tableWrap is-scroll"') == 4
     assert ".tableWrap.is-scroll {" in app_css
     # One shared cap, so signals and the tables cut off at the same height.
     assert "--panel-scroll: min(46vh, 420px);" in app_css

@@ -7,7 +7,7 @@ import pytest
 
 from src.brokerages.providers.schwab import SchwabBrokerage
 from src.brokerages.schwab_client import SchwabAuthError, SchwabSession
-from src.connectors.service import _fetch_schwab_quotes
+from src.connectors.market.schwab import _fetch_schwab_quotes
 from src.core.config import Config
 from src.core.interfaces import OrderRequest
 
@@ -160,11 +160,11 @@ def test_schwab_declares_no_fractional_support() -> None:
 
 
 def test_quotes_fall_back_from_last_to_mid_to_close(monkeypatch) -> None:
-    from src.connectors import service
+    from src.connectors.market import schwab as market_schwab
 
-    monkeypatch.setattr(service, "_schwab_token", lambda config, category: "token")
+    monkeypatch.setattr(market_schwab, "_schwab_token", lambda config, category: "token")
     monkeypatch.setattr(
-        service,
+        market_schwab,
         "_request_json",
         lambda *a, **kw: {
             "AAA": {"quote": {"lastPrice": 10.0}},

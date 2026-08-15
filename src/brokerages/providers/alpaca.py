@@ -4,7 +4,9 @@ from typing import Dict, Any, List, Optional
 from ..base import BaseBrokerage
 from ...core.interfaces import OrderRequest
 from src.brokerages.alpaca_client import (
+    DIVIDEND_ACTIVITY_TYPES,
     create_trading_client,
+    get_account_activities,
     get_positions,
     submit_market_order,
     submit_option_limit_order,
@@ -21,6 +23,27 @@ class AlpacaBrokerage(BaseBrokerage):
         # or it might be a Config object. alpaca_client functions expect Config object or similar.
         # For now, let's pass config as is.
         self.client = create_trading_client(config)
+        self._config = config
+
+    def get_dividend_activity(self, start=None, end=None) -> List[Dict[str, Any]]:
+        from datetime import datetime, time, timezone
+
+        after = datetime.combine(start, time.min, tzinfo=timezone.utc) if start else None
+        rows: List[Dict[str, Any]] = []
+        for item in get_account_activities(self._config, DIVIDEND_ACTIVITY_TYPES, after=after):
+            stamp = str(item.get("date") or item.get("transaction_time") or "")[:10]
+            if end and stamp and stamp > end.isoformat():
+                continue
+            rows.append(
+                {
+                    "symbol": str(item.get("symbol") or ""),
+                    "date": stamp,
+                    "amount": float(item.get("net_amount") or 0.0),
+                    "description": str(item.get("description") or item.get("activity_type") or ""),
+                }
+            )
+        rows.sort(key=lambda row: row["date"], reverse=True)
+        return rows
 
     def get_account_state(self) -> Dict[str, Any]:
         account = self.client.get_account()

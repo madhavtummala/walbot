@@ -43,8 +43,8 @@ def daily_bars(start: float, end: float, days: int = 140) -> pd.DataFrame:
                          "high": closes, "low": closes, "volume": [1_000_000] * days})
 
 
-def intraday_bars(start: float, end: float, bars: int = 400) -> pd.DataFrame:
-    dates = pd.date_range("2026-06-01", periods=bars, freq="15min", tz="UTC")
+def intraday_bars(start: float, end: float, bars: int = 400, freq: str = "15min") -> pd.DataFrame:
+    dates = pd.date_range("2026-06-01", periods=bars, freq=freq, tz="UTC")
     closes = [start + (end - start) * (index / max(bars - 1, 1)) for index in range(bars)]
     return pd.DataFrame({"timestamp": dates, "close": closes, "open": closes,
                          "high": closes, "low": closes, "volume": [10_000] * bars})
@@ -66,7 +66,7 @@ def context_for(config: Runtime, daily: dict, intraday: dict, timestamp: datetim
     return AlgorithmContext(
         config=config,
         bars_by_symbol=daily,
-        intraday_bars_by_symbol=intraday,
+        history_bars_by_symbol=intraday,
         latest_prices={symbol: float(frame["close"].iloc[-1]) for symbol, frame in daily.items()},
         timestamp=timestamp or datetime(2026, 6, 5, 15, 0, tzinfo=timezone.utc),
     )
@@ -602,7 +602,8 @@ def test_the_algorithm_is_registered_and_declares_what_it_needs() -> None:
     # The benchmark has to be fetched even though it is never traded.
     assert "QQQM" in requirements.price_symbols
     assert "ZZZ" in requirements.price_symbols, "held positions are priced too"
-    assert requirements.intraday_lookback_bars > 320
+    # Twelve sessions of wall-clock time, not a bar count that means nothing without a grid.
+    assert requirements.history_lookback_minutes > 320 * 15
     assert requirements.daily_lookback_days >= 100
     assert requirements.paper_only is True
     assert requirements.needs_sentiment is False, "sentiment is off until it is phased in"

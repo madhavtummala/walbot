@@ -7,9 +7,9 @@ from typing import Any
 
 from src.brokerages.alpaca_client import create_data_client, get_latest_price
 from src.connectors import (
-    fetch_intraday_market_bars,
     fetch_latest_market_quotes,
     fetch_latest_news_sentiment,
+    fetch_market_history,
 )
 from src.core.interfaces import AlgorithmContext
 from src.data import fetch_daily_bars
@@ -101,19 +101,18 @@ def build_algorithm_context(
             requirements.daily_lookback_days,
             ma_days=requirements.daily_ma_days,
             extra_buffer_days=requirements.daily_extra_buffer_days,
-            alpaca_data_client=data_client,
-            data_feed=config.alpaca_data_feed,
+            data_client=data_client,
             include_latest=requirements.include_latest_daily,
             config=config,
         )
 
-    intraday_bars_by_symbol: dict[str, Any] = {}
-    if requirements.intraday_lookback_bars:
-        intraday_bars_by_symbol = fetch_intraday_market_bars(
+    history_bars_by_symbol: dict[str, Any] = {}
+    if requirements.history_lookback_minutes:
+        history_bars_by_symbol = fetch_market_history(
             price_symbols,
             config,
-            lookback_bars=requirements.intraday_lookback_bars,
-            bar_minutes=requirements.intraday_bar_minutes,
+            lookback_minutes=requirements.history_lookback_minutes,
+            bar_minutes=requirements.preferred_bar_minutes,
             data_client=data_client,
         )
 
@@ -125,7 +124,7 @@ def build_algorithm_context(
     return AlgorithmContext(
         config=config,
         bars_by_symbol=bars_by_symbol,
-        intraday_bars_by_symbol=intraday_bars_by_symbol,
+        history_bars_by_symbol=history_bars_by_symbol,
         sentiment_scores=sentiment_scores,
         market_sentiment=market_sentiment,
         positions=positions,

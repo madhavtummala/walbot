@@ -6,7 +6,7 @@ from typing import Any, Iterable
 
 import pandas as pd
 
-from src.execution.backtest import calculate_performance_metrics
+from src.execution.metrics import calculate_performance_metrics
 from src.core.strategy_models import DEFENSIVE_MOMENTUM_DEFENSIVE_ORDER, DEFENSIVE_MOMENTUM_DEFENSIVE_SYMBOLS, prepared_strategy_frame
 
 
