@@ -23,14 +23,14 @@ from typing import Any
 
 import pandas as pd
 
+from ..brokerages.providers.paper import PaperBrokerage
 from ..core.interfaces import (
-    MODE_TARGET,
     AlgorithmContext,
     AlgorithmPlugin,
+    AlgorithmResult,
     CashDividend,
-    Intent,
-    PortfolioSnapshot,
 )
+from ..core.pipeline import place_orders
 from ..data.bars import coverage_minutes
 from ..data.bars import read_history
 from ..data.state_store import ephemeral_state
@@ -182,34 +182,6 @@ def _read_history(
         coverage.history_supplied += min(coverage_minutes(best), lookback_minutes)
     return bars_by_symbol
 
-
-def _target_shares(
-    intents: list[Intent],
-    mode: str,
-    positions: dict[str, float],
-    prices: dict[str, float],
-    equity: float,
-) -> dict[str, float]:
-    """Convert intents of any kind into desired share counts.
-
-    Mirrors what step 2 does live, minus the brokerage: ``weight`` is a share of equity,
-    ``notional`` a dollar increment, ``shares`` an absolute count. In target mode a held
-    symbol with no intent is exited; in incremental mode it is left alone.
-    """
-    desired = dict(positions) if mode != MODE_TARGET else {symbol: 0.0 for symbol in positions}
-    for intent in intents:
-        price = float(prices.get(intent.symbol, 0.0) or 0.0)
-        if price <= 0:
-            continue
-        if intent.kind == "weight":
-            desired[intent.symbol] = (intent.value * equity) / price
-        elif intent.kind == "notional":
-            desired[intent.symbol] = positions.get(intent.symbol, 0.0) + (intent.value / price)
-        else:
-            desired[intent.symbol] = float(intent.value)
-    return desired
-
-
 def replay(
     algorithm: AlgorithmPlugin,
     config: Any,
@@ -234,38 +206,35 @@ def replay(
     requirements = algorithm.requirements(config, {})
     providers = history_providers or ["yfinance"]
     coverage = Coverage()
-
-    cash = starting_equity
-    positions: dict[str, float] = {}
-    contributed = 0.0
-    dividend_income = 0.0
     records: list[dict[str, Any]] = []
 
-    # Distributions are booked as the cash events they are rather than being folded into the
-    # price series. Marking at a back-adjusted close used to make a payment look like price
-    # appreciation, which meant a replay holding SGOV for four years booked +0.5% against an
-    # actual +18% -- the income simply never existed. Prices here stay raw and the cash shows
-    # up in the ledger, which is also what the brokerage statement says.
     schedule = dividend_schedule(sorted(daily_history), trade_dates, dividends)
     pending: list[tuple[pd.Timestamp, str, float]] = []
+    dividend_income = 0.0
+    contributed = 0.0
 
-    # One throwaway state store for the whole replay: algorithms that carry state between runs
-    # keep it across dates, but nothing touches the live account's state.
+    # The book is a real ``PaperBrokerage`` on a throwaway state store, not the configured
+    # local paper account: that account is for live scheduled testing and must never be moved
+    # by a backtest. ``ephemeral_state`` redirects every read and write to an in-memory dict,
+    # so the class, the fills and the accounting are shared while the balances are not.
     with ephemeral_state():
+        book = PaperBrokerage(config)
+        book.state.update({"cash": float(starting_equity), "positions": {}, "prices": {}})
+
         for index, trade_date in enumerate(trade_dates):
             closes = {
                 symbol: float(frame.loc[trade_date, "close"])
                 for symbol, frame in daily_history.items()
                 if trade_date in frame.index
             }
+            positions = book.get_positions()
 
             # Entitlement is settled before this date trades: owning the shares through the
             # previous close is what earns the payment, so a position opened today does not.
             for symbol, amount in schedule.get(trade_date, ()):
                 held = positions.get(symbol, 0.0)
                 if abs(held) > 1e-9:
-                    payable = _payable_on(trade_date, amount, trade_dates)
-                    pending.append((payable, symbol, held * amount.amount))
+                    pending.append((_payable_on(trade_date, amount, trade_dates), symbol, held * amount.amount))
 
             # Cash lands on the payable date, not the ex-date. The gap is a real few days of
             # drag rather than a rounding detail, so the replay waits it out too.
@@ -273,22 +242,23 @@ def replay(
             paid_today = 0.0
             for payable, symbol, value in pending:
                 if payable <= trade_date:
-                    cash += value
-                    dividend_income += value
                     paid_today += value
                 else:
                     still_pending.append((payable, symbol, value))
             pending = still_pending
+            if paid_today:
+                book.state["cash"] = float(book.state.get("cash", 0.0)) + paid_today
+                dividend_income += paid_today
 
-            market_value = sum(positions.get(s, 0.0) * p for s, p in closes.items())
-            equity = cash + market_value
+            book.mark_prices(closes)
+            account = book.get_account_state()
+            equity = float(account["equity"])
             order_count = 0
             turnover = 0.0
 
             # index 0 has no prior bar to form a signal from, so it only seeds the clock.
             if index > 0 and should_run(trade_date):
                 signal_date = trade_dates[index - 1]
-                daily = _slice_daily(daily_history, signal_date)
                 history = (
                     _read_history(
                         sorted(daily_history),
@@ -300,66 +270,63 @@ def replay(
                     if requirements.history_lookback_minutes
                     else {}
                 )
-                signal_closes = {
-                    symbol: float(frame.loc[signal_date, "close"])
-                    for symbol, frame in daily_history.items()
-                    if signal_date in frame.index
-                }
-
                 context = AlgorithmContext(
                     config=config,
-                    bars_by_symbol=daily,
+                    bars_by_symbol=_slice_daily(daily_history, signal_date),
                     history_bars_by_symbol=history,
                     positions={s: int(v) for s, v in positions.items()},
-                    latest_prices=signal_closes,
+                    latest_prices={
+                        symbol: float(frame.loc[signal_date, "close"])
+                        for symbol, frame in daily_history.items()
+                        if signal_date in frame.index
+                    },
                     equity=equity,
                     account_id=getattr(config, "account_id", ""),
                     timestamp=signal_date.to_pydatetime(),
                 )
                 decision = algorithm.analyze(context)
-                snapshot = PortfolioSnapshot(positions=dict(positions), equity=equity)
-                intents = algorithm.refine(
-                    decision.resolved_intents(), decision.signals, snapshot, closes, config
+
+                # Step 2 exactly as the live runner performs it -- the same sizing, the same
+                # rebalance threshold and minimum trade size, the same brokerage call. The
+                # replay used to size intents itself with a simpler rule, so a backtest was
+                # quietly testing execution logic the runtime does not use.
+                #
+                # ``latest_prices`` is deliberately this date's closes rather than the signal
+                # date's: the decision is made on yesterday's data and filled at today's price.
+                result = AlgorithmResult(
+                    strategy=getattr(algorithm, "algorithm_id", ""),
+                    intents=[i for i in decision.resolved_intents() if i.kind != "weight" or i.value],
+                    signals=decision.signals,
+                    latest_prices=closes,
+                    metadata={**decision.metadata, "requirements": requirements},
+                    mode=decision.mode,
                 )
-
-                desired = _target_shares(intents, decision.mode, positions, closes, equity)
-                fills: list[dict[str, Any]] = []
-                for symbol, want in sorted(desired.items()):
-                    price = closes.get(symbol)
-                    if not price or price <= 0:
-                        continue
-                    delta = (want if fractional else float(int(want))) - positions.get(symbol, 0.0)
-                    value = delta * price
-                    if abs(value) < 0.01:
-                        continue
-                    if value > cash:  # never spend money the account does not have
-                        delta = cash / price
-                        value = delta * price
-                    if delta > 0 and value <= 0:
-                        continue
-                    positions[symbol] = positions.get(symbol, 0.0) + delta
-                    cash -= value
-                    turnover += abs(value)
-                    order_count += 1
-                    if value > 0:
+                outcome = place_orders(
+                    result,
+                    config,
+                    book,
+                    # A historical result is stale by construction; freshness is a live guard.
+                    max_result_age_seconds=0,
+                    algorithm=algorithm,
+                )
+                filled = [o for o in outcome["order_results"] if o.get("status") == "submitted"]
+                order_count = len(filled)
+                for order in filled:
+                    value = abs(float(order.get("quantity", 0.0)) * float(order.get("latest_price", 0.0)))
+                    turnover += value
+                    if str(order.get("action", "")).lower() == "buy":
                         contributed += value
-                    fills.append(
-                        {"symbol": symbol, "status": "submitted",
-                         "quantity": abs(delta), "latest_price": price,
-                         "side": "buy" if delta > 0 else "sell"}
-                    )
-                # Lets a stateful algorithm draw down what actually filled, exactly as live.
-                algorithm.settle(config, fills, intents)
 
-                market_value = sum(positions.get(s, 0.0) * p for s, p in closes.items())
+                book.mark_prices(closes)
+                account = book.get_account_state()
 
-            positions = {s: v for s, v in positions.items() if abs(v) > 1e-9}
+            positions = book.get_positions()
             records.append(
                 {
                     "timestamp": trade_date,
-                    "equity": cash + market_value,
-                    "cash": cash,
-                    "invested": market_value,
+                    "equity": float(account["equity"]),
+                    "cash": float(account["cash"]),
+                    "invested": float(account["equity"]) - float(account["cash"]),
                     "positions": {s: positions.get(s, 0.0) * p for s, p in closes.items()
                                   if abs(positions.get(s, 0.0) * p) > 0.005},
                     "dca_contributions": contributed,

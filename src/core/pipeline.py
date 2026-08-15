@@ -125,6 +125,7 @@ def place_orders(
     approval_timeout_seconds: int = 300,
     approval_poll_seconds: int = 5,
     max_result_age_seconds: int = DEFAULT_MAX_RESULT_AGE_SECONDS,
+    algorithm: Any = None,
 ) -> dict[str, Any]:
     """Turn a step-1 result into submitted orders, given what the account currently holds.
 
@@ -134,7 +135,10 @@ def place_orders(
     """
     _assert_fresh(result, max_result_age_seconds)
 
-    algorithm = get_algorithm_class(result.strategy).from_config(config)
+    # Re-resolving from the registry is only a convenience for callers holding a bare result.
+    # A caller that already has the instance -- the replay steps the same one through every
+    # date -- passes it, which also lets an unregistered algorithm be driven through step 2.
+    algorithm = algorithm or get_algorithm_class(result.strategy).from_config(config)
     snapshot = read_snapshot(config, brokerage)
     latest_prices = result.latest_prices
 
