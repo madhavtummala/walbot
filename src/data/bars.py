@@ -231,13 +231,33 @@ def _market_minutes_axis(work: pd.DataFrame) -> pd.Series:
     return gaps.cumsum()
 
 
+def _closes_at_offsets(work: pd.DataFrame, axis: pd.Series, offsets: Sequence[float]):
+    """Closes at each of several market-minute offsets before the newest bar.
+
+    Binary search, not a scan. The axis is a cumulative sum of non-negative gaps, so it is
+    monotonic and ``searchsorted`` answers exactly what ``axis <= target`` did -- but the mask
+    version rebuilt a boolean array over the whole frame and materialised a filtered copy for
+    every single lookup, 31,752 times in one backtest. Answering the whole batch at once also
+    lets a sampled path pay for one search instead of one per point.
+    """
+    import numpy as np
+
+    if work.empty:
+        return np.zeros(len(offsets))
+    values = axis.to_numpy()
+    closes = work["close"].to_numpy()
+    targets = values[-1] - np.asarray(offsets, dtype=float)
+    # ``side="right"`` then step back one: the last bar at or before the target, matching the
+    # inclusive ``axis <= target`` this replaced.
+    index = np.searchsorted(values, targets, side="right") - 1
+    return np.where(index < 0, closes[0], closes[np.clip(index, 0, None)])
+
+
 def _close_at_offset(work: pd.DataFrame, axis: pd.Series, minutes_back: float) -> float:
     """The close ``minutes_back`` market-minutes before the newest bar."""
-    target = float(axis.iloc[-1]) - float(minutes_back)
-    at_or_before = work.loc[axis <= target]
-    if at_or_before.empty:
-        return float(work["close"].iloc[0])
-    return float(at_or_before["close"].iloc[-1])
+    if work.empty:
+        return 0.0
+    return float(_closes_at_offsets(work, axis, [minutes_back])[0])
 
 
 def latest_timestamp(bars: Any) -> pd.Timestamp | None:
@@ -300,9 +320,17 @@ def return_path(bars: Any, horizon_minutes: int, *, span_minutes: int) -> list[f
     if work.empty or horizon_minutes <= 0:
         return [0.0] * points
 
+    # Every sample in one pass. Each point needs the close at its offset and the close a
+    # horizon earlier, so the whole path is two batched searches rather than 2N scans.
+    offsets = [float(step * index) for index in range(points - 1, -1, -1)]
+    span = float(axis.iloc[-1])
+    ends = _closes_at_offsets(work, axis, offsets)
+    starts = _closes_at_offsets(work, axis, [horizon_minutes + offset for offset in offsets])
     values = [
-        _return_over(work, axis, horizon_minutes, step * index)
-        for index in range(points - 1, -1, -1)
+        (float(end) / float(start)) - 1.0
+        if start > 0 and span >= horizon_minutes + offset
+        else 0.0
+        for start, end, offset in zip(starts, ends, offsets)
     ]
     first_real = next((index for index, value in enumerate(values) if value != 0.0), None)
     if first_real:
