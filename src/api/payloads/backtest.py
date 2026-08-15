@@ -26,6 +26,7 @@ import pandas as pd
 
 from ...data import fetch_daily_bars
 from ...execution.metrics import calculate_performance_metrics
+from ...data.duckdb_store import pooled_connections
 from ...execution.replay import replay
 from ...core.config import (
     DEFAULT_STRATEGY_ID,
@@ -347,6 +348,15 @@ def _compute_backtest(
     algorithm declares in ``requirements()`` is what the replay loads, and whatever ``analyze``
     decides is what gets traded -- so a backtest cannot test different logic than the runtime.
     """
+    # One connection for the whole replay. Thousands of cache reads happen below, and paying
+    # the open-plus-schema-init cost on each made the connection the dominant expense. Scoped
+    # to this call so the long-running services keep their short-lived connections and can
+    # still share the database file -- see ``pooled_connections``.
+    with pooled_connections():
+        return _replay_backtest(strategy, period, dca_plan)
+
+
+def _replay_backtest(strategy: str, period: str, dca_plan: dict[str, Any]) -> dict[str, Any]:
     starting_equity = _backtest_starting_equity()
     config = get_config(strategy_id=strategy)
     algorithm = get_algorithm_class(strategy).from_config(config)

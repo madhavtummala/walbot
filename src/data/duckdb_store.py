@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 
@@ -113,12 +115,111 @@ def _duckdb():
     return duckdb
 
 
+#: One live connection per database file, per thread, held only while a batch job asks for it.
+#: DuckDB connections are not thread-safe, so they are never shared across threads.
+_CONNECTIONS: dict[tuple[int, str], Any] = {}
+_CONNECTION_LOCK = threading.Lock()
+
+#: Whether this thread is inside :func:`pooled_connections`.
+_POOLING = threading.local()
+
+
+class _PooledConnection:
+    """A cached connection that survives its ``with`` block.
+
+    Every caller here writes ``with _connect(path) as connection:``, and DuckDB's own
+    ``__exit__`` closes the connection -- so a pool cannot simply hand back the cached object.
+    This wrapper delegates everything and makes the context manager a no-op, which keeps all
+    ~30 call sites unchanged while the connection outlives them.
+    """
+
+    __slots__ = ("_connection",)
+
+    def __init__(self, connection: Any) -> None:
+        self._connection = connection
+
+    def __enter__(self):
+        return self._connection
+
+    def __exit__(self, *_exc) -> bool:
+        return False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._connection, name)
+
+
+@contextmanager
+def pooled_connections(db_path: str = DUCKDB_STATE_PATH):
+    """Hold one connection open for the duration of a batch job.
+
+    Opening a connection costs ~3ms and ``initialize_schema`` another ~2ms -- six
+    ``CREATE TABLE IF NOT EXISTS`` statements, a migration check and an ``UPDATE``. That is
+    nothing once and ruinous per read, and a backtest issues thousands of reads, which made
+    the *connection* rather than the query the dominant cost of replaying an algorithm.
+
+    Deliberately opt-in rather than always on. DuckDB permits a single read-write process at a
+    time, so a permanently-held connection locks every other process out entirely -- the API
+    server would shut out the MCP server, the warmup job and every CLI tool. Measured, not
+    assumed: a second process attempting a read against a held connection fails outright with
+    "Conflicting lock is held". Short-lived connections are what lets those coexist, so the
+    default stays short-lived and only batch work opts in.
+    """
+    resolved = str(resolve_project_path(db_path))
+    key = (threading.get_ident(), resolved)
+    depth = getattr(_POOLING, "depth", 0)
+    _POOLING.depth = depth + 1
+    try:
+        yield
+    finally:
+        _POOLING.depth = depth
+        if depth == 0:  # outermost scope closes it, so nesting is safe
+            with _CONNECTION_LOCK:
+                connection = _CONNECTIONS.pop(key, None)
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception:  # pragma: no cover - closing a dead handle is not an error
+                    pass
+
+
 def _connect(db_path: str = DUCKDB_STATE_PATH):
+    """A connection to ``db_path``. Reused only inside :func:`pooled_connections`."""
     resolved = resolve_project_path(db_path)
+    if not getattr(_POOLING, "depth", 0):
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        connection = _duckdb().connect(str(resolved))
+        initialize_schema(connection)
+        return connection
+
+    key = (threading.get_ident(), str(resolved))
+    cached = _CONNECTIONS.get(key)
+    if cached is not None:
+        try:
+            # Cheapest possible liveness check. A tmp-dir database can be deleted out from
+            # under a cached handle between tests, and a stale one must be replaced rather
+            # than raised through a caller that only asked to read a row.
+            cached.execute("SELECT 1")
+            return _PooledConnection(cached)
+        except Exception:
+            _CONNECTIONS.pop(key, None)
+
     resolved.parent.mkdir(parents=True, exist_ok=True)
     connection = _duckdb().connect(str(resolved))
     initialize_schema(connection)
-    return connection
+    with _CONNECTION_LOCK:
+        _CONNECTIONS[key] = connection
+    return _PooledConnection(connection)
+
+
+def close_connections() -> None:
+    """Drop every pooled connection for this thread. For tests and shutdown."""
+    ident = threading.get_ident()
+    with _CONNECTION_LOCK:
+        for key in [k for k in _CONNECTIONS if k[0] == ident]:
+            try:
+                _CONNECTIONS.pop(key).close()
+            except Exception:  # pragma: no cover - closing a dead handle is not an error
+                pass
 
 
 def _market_bars_columns(connection) -> set[str]:

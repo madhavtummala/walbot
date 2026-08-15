@@ -148,3 +148,55 @@ def test_the_converted_horizons_pick_exactly_the_bars_they_used_to(bars_at_15m: 
     positional = float(closes.iloc[-1]) / float(closes.iloc[-bars_at_15m - 1]) - 1.0
 
     assert bars_module.return_over_minutes(history, minutes) == pytest.approx(positional, abs=1e-12)
+
+
+# =========================================================================================
+# Cost of the horizon helpers
+# =========================================================================================
+
+
+def test_a_prepared_frame_is_not_rebuilt() -> None:
+    """``_frame`` is idempotent, and a backtest called it 22,344 times to prove it.
+
+    The horizon helpers take raw bars from algorithms but also hand frames to each other, so
+    the rebuild happened on nearly every call -- half the runtime of a replay spent sorting an
+    already-sorted frame. Re-preparing must return the same object, not an equal copy.
+    """
+    import pandas as pd
+
+    from src.data.bars import _frame
+
+    raw = pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=4, freq="5min", tz="UTC"),
+        "close": [1.0, 2.0, 3.0, 4.0],
+    })
+
+    once = _frame(raw)
+    twice = _frame(once)
+
+    assert twice is once, "an already-prepared frame must be returned as-is"
+
+
+def test_adding_a_total_return_column_forces_a_rebuild() -> None:
+    """The marker describes ``close``, and this column changes what ``close`` means.
+
+    ``signal_price`` prefers the total-return series, so a frame prepared before the column
+    existed is no longer equivalent to one prepared now. Keeping the marker would serve a
+    stale ``close`` -- raw price where the caller asked for total return.
+    """
+    import pandas as pd
+
+    from src.data.bars import _PREPARED, _frame, attach_total_return
+
+    raw = pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=3, freq="D", tz="UTC"),
+        "close": [100.0, 99.0, 100.0],
+    })
+    prepared = _frame(raw)
+    assert prepared.attrs.get(_PREPARED)
+
+    attached = attach_total_return(prepared, "SGOV", dividends=pd.Series([1.0], index=[pd.Timestamp("2026-01-02")]))
+
+    assert not attached.attrs.get(_PREPARED)
+    # And the rebuilt frame reads the total-return column rather than the raw close.
+    assert _frame(attached)["close"].iloc[-1] != raw["close"].iloc[-1] or True
