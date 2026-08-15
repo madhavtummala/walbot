@@ -2,31 +2,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 import pandas as pd
-
-@dataclass(frozen=True)
-class MarketDataRequest:
-    symbols: List[str]
-    timeframe: str
-    category: str = "market_data"  # intraday_market_data, eod_market_data
-    lookback_bars: Optional[int] = None
-    start: Optional[datetime] = None
-    end: Optional[datetime] = None
-    provider: Optional[str] = None
-    force_refresh: bool = False
-    extra: Dict[str, Any] = field(default_factory=dict)
-
-@dataclass(frozen=True)
-class SentimentDataRequest:
-    symbols: List[str]
-    lookback_days: Optional[int] = None
-    start: Optional[datetime] = None
-    end: Optional[datetime] = None
-    provider: Optional[str] = None
-    force_refresh: bool = False
-    extra: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass(frozen=True)
 class AlgorithmContext:
@@ -39,10 +17,13 @@ class AlgorithmContext:
     """
 
     config: Any
-    #: Daily OHLCV per symbol, already truncated to what the algorithm may see.
+    #: Daily OHLCV per symbol, already truncated to what the algorithm may see. Kept distinct
+    #: because the moving-average and regime gates are statements about daily closes.
     bars_by_symbol: Dict[str, pd.DataFrame] = field(default_factory=dict)
-    #: Intraday OHLCV per symbol, when ``AlgorithmRequirements.intraday_lookback_bars`` asks.
-    intraday_bars_by_symbol: Dict[str, pd.DataFrame] = field(default_factory=dict)
+    #: Timestamped OHLCV per symbol covering ``AlgorithmRequirements.history_lookback_minutes``,
+    #: at whatever resolution was available -- possibly blending fine bars recently with
+    #: coarser ones further back. Read it through ``src/data/bars.py``, never by position.
+    history_bars_by_symbol: Dict[str, pd.DataFrame] = field(default_factory=dict)
     #: Per-symbol sentiment score, plus the universe-wide average.
     sentiment_scores: Dict[str, float] = field(default_factory=dict)
     market_sentiment: float = 0.0
@@ -67,21 +48,19 @@ class AlgorithmRequirements:
     daily_ma_days: int = 0
     daily_extra_buffer_days: int = 0
     include_latest_daily: bool = True
-    intraday_lookback_bars: int = 0
-    #: Bar size for ``intraday_lookback_bars``, which the algorithm must state. There is no
-    #: default on purpose: a lookback counted in bars only means a span of time once the grid
-    #: is known, so a base-class default would silently define every algorithm's horizons.
-    #: Left at 0 when no intraday data is wanted.
-    intraday_bar_minutes: int = 0
+    #: How far back the algorithm needs timestamped bars, in minutes the market was open --
+    #: 4800 is about twelve sessions, not three and a bit days. Stated in minutes rather than
+    #: bars because a bar count only means a span of time once the grid is known, and the grid
+    #: is now the feed's business: Schwab serves 1/5/10/15/30-minute bars where yfinance served
+    #: 15. The lookback resolves against whichever resolution the cache holds -- down to daily,
+    #: at the far end of a long window. See ``src/data/bars.py``.
+    history_lookback_minutes: int = 0
+    #: The finest grid the algorithm would like, when it has a preference. 0 takes the
+    #: configured default. A provider that cannot serve it supplies its nearest coarser grid
+    #: rather than failing, because the horizons no longer depend on getting an exact one.
+    preferred_bar_minutes: int = 0
     needs_sentiment: bool = False
     paper_only: bool = False
-
-    def __post_init__(self) -> None:
-        if self.intraday_lookback_bars > 0 and self.intraday_bar_minutes <= 0:
-            raise ValueError(
-                "An algorithm asking for intraday bars must declare intraday_bar_minutes; "
-                f"got {self.intraday_lookback_bars} bars on an unstated grid"
-            )
 
 #: An algorithm's intent list is the complete portfolio: a held symbol absent from it is exited.
 MODE_TARGET = "target"
@@ -196,15 +175,53 @@ class SignalView:
     summary: List[Dict[str, str]] = field(default_factory=list)
     wired: bool = True
 
-class MarketDataConnector(ABC):
-    @abstractmethod
-    def fetch_bars(self, request: MarketDataRequest) -> Dict[str, pd.DataFrame]:
-        pass
+@dataclass(frozen=True)
+class CashDividend:
+    """One cash distribution, as the event it actually is.
 
-class SentimentDataConnector(ABC):
+    Deliberately not a yield or an adjustment factor. A yield is a derived, point-in-time
+    summary; back-projecting one across history invents payments that were never made, which
+    matters most for the funds whose whole return *is* the distribution -- SGOV and BIL pay
+    the T-bill rate, and that went from ~0% in 2022 to over 5% and back to ~4%.
+
+    Two dates, because they answer different questions. ``ex_date`` decides *entitlement*:
+    hold the shares before it and the payment is yours. ``payable_date`` is when the cash
+    actually lands, which is what a ledger should credit -- typically a few days later, and
+    that gap is real cash drag rather than a rounding detail.
+    """
+
+    symbol: str
+    ex_date: date
+    amount: float
+    payable_date: Optional[date] = None
+    record_date: Optional[date] = None
+    special: bool = False
+    source: str = ""
+
+
+class DividendProvider(ABC):
+    """A source of cash-distribution history.
+
+    Separate from the market-data providers on purpose. Dividends are corporate actions, not
+    prices: they are discrete, they are append-only once published, and they must never be
+    folded into ``market_bars``. Keeping the two apart is what lets the price cache stay a
+    faithful record of what the market printed while the ledger still books real income.
+    """
+
+    #: Provider name as it appears in configuration and in ``CashDividend.source``.
+    name: str = ""
+
     @abstractmethod
-    def fetch_sentiment(self, request: SentimentDataRequest) -> List[Dict[str, Any]]:
-        pass
+    def fetch_dividends(
+        self, symbols: List[str], start: date, end: date
+    ) -> List[CashDividend]:
+        """Every cash distribution for ``symbols`` with an ex-date in ``[start, end]``.
+
+        Ordering is not guaranteed. A symbol that pays nothing simply contributes no rows,
+        which is a fact about the symbol rather than a failure -- GLD and IBIT never appear.
+        """
+        raise NotImplementedError
+
 
 @dataclass(frozen=True)
 class OrderRequest:
@@ -244,6 +261,21 @@ class Brokerage(ABC):
     def is_market_open(self) -> bool:
         """Return whether the market is currently open for trading."""
         return bool(self.get_account_state().get("is_market_open", False))
+
+    def get_dividend_activity(
+        self, start: Optional[date] = None, end: Optional[date] = None
+    ) -> List[Dict[str, Any]]:
+        """Cash distributions this account actually received.
+
+        Read from the broker rather than reconstructed from the dividend ledger: the ledger
+        says what the *market* paid per share, only the broker knows what *this* account was
+        credited, after the withholding and the odd-lot rounding that make the two differ.
+
+        Rows are ``{symbol, date, amount, description}`` with ``amount`` in account currency.
+        Defaults to empty so a brokerage that cannot report income degrades to showing none
+        rather than failing the account page.
+        """
+        return []
 
     def validate_short_sale_feasibility(
         self, symbol: str, quantity: float, target_shares: float, latest_price: float

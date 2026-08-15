@@ -27,15 +27,21 @@ def test_invest_spy_config_loads_state_knobs() -> None:
 
 
 def test_invest_spy_price_features_use_intraday_meso_and_daily_macro() -> None:
+    # A 15-minute grid, so 30 and 60 minutes are 2 and 4 observations back.
     config = InvestSpyConfig(
-        micro_momentum_lookback_bars=2,
-        meso_momentum_lookback_bars=4,
+        micro_momentum_lookback_minutes=30,
+        meso_momentum_lookback_minutes=60,
         macro_trend_lookback_days=3,
     )
-    intraday = pd.DataFrame({"close": [100, 101, 103, 106, 110, 115]})
+    history = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-06-04 14:30", periods=6, freq="15min", tz="UTC"),
+            "close": [100, 101, 103, 106, 110, 115],
+        }
+    )
     daily = pd.DataFrame({"close": [100, 101, 102, 104, 108]})
 
-    features = compute_invest_spy_price_features("SPY", intraday, daily, config)
+    features = compute_invest_spy_price_features("SPY", history, daily, config)
 
     assert features["micro_return"] == 115 / 106 - 1
     assert features["meso_return"] == 115 / 101 - 1

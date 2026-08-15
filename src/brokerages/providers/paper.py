@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from datetime import date, datetime, timezone
+from typing import Any, Dict, Optional
 from uuid import uuid4
 
 from ..base import BaseBrokerage
@@ -47,6 +48,86 @@ class PaperBrokerage(BaseBrokerage):
         prices = self.state.get("prices", {})
         return sum(shares * float(prices.get(symbol, 0.0)) for symbol, shares in self.state["positions"].items())
 
+    def credit_dividends(self, as_of: Optional[date] = None) -> Dict[str, Any]:
+        """Book distributions that have gone ex since this account was last credited.
+
+        A real account receives this cash whether or not anything asked it to, so the paper
+        book has to as well -- otherwise every dividend payer is quietly marked down by its
+        own yield and the paper equity curve stops matching the live one it exists to
+        rehearse. Prices stay raw; the income arrives as cash, exactly as the statement shows.
+
+        Idempotent by watermark: each payment is credited once, and re-running on the same day
+        is a no-op rather than a second payday.
+        """
+        from src.data.dividends import read_dividends
+
+        as_of = as_of or datetime.now(timezone.utc).date()
+        positions = {s: v for s, v in self.state.get("positions", {}).items() if v}
+        if not positions:
+            self.state["dividends_credited_through"] = as_of.isoformat()
+            self._save()
+            return {"credited": 0.0, "events": 0}
+
+        watermark = self.state.get("dividends_credited_through")
+        # First run on an existing book starts from today rather than back-paying history the
+        # account never actually held through.
+        start = date.fromisoformat(watermark) if watermark else as_of
+
+        frame = read_dividends(sorted(positions), start=start, end=as_of)
+        credited = 0.0
+        events = 0
+        paid: list[Dict[str, Any]] = list(self.state.get("dividend_activity", []))
+        for row in frame.to_dict(orient="records"):
+            # DuckDB hands a DATE column back as a pandas Timestamp, which will not compare
+            # against a ``date``; normalise before the watermark test rather than after.
+            ex_date = row["ex_date"]
+            ex_date = ex_date.date() if hasattr(ex_date, "date") else ex_date
+            if watermark and ex_date <= start:
+                continue  # already counted under a previous watermark
+            shares = float(positions.get(str(row["symbol"]).upper(), 0.0))
+            if abs(shares) < 1e-9:
+                continue
+            value = shares * float(row["amount"])
+            credited += value
+            events += 1
+            paid.append(
+                {
+                    "symbol": str(row["symbol"]).upper(),
+                    "ex_date": str(ex_date),
+                    "amount_per_share": float(row["amount"]),
+                    "shares": shares,
+                    "cash": value,
+                }
+            )
+
+        self.state["cash"] = float(self.state.get("cash", 0.0)) + credited
+        self.state["dividend_income"] = float(self.state.get("dividend_income", 0.0)) + credited
+        # Bounded so a long-lived paper book does not grow an unbounded blob in app_state.
+        self.state["dividend_activity"] = paid[-200:]
+        self.state["dividends_credited_through"] = as_of.isoformat()
+        self._save()
+        return {"credited": credited, "events": events}
+
+    def get_dividend_activity(self, start=None, end=None) -> list:
+        """What ``credit_dividends`` booked. No broker exists here, so this book is the record."""
+        rows = []
+        for item in self.state.get("dividend_activity", []) or []:
+            stamp = str(item.get("ex_date") or "")
+            if start and stamp and stamp < start.isoformat():
+                continue
+            if end and stamp and stamp > end.isoformat():
+                continue
+            rows.append(
+                {
+                    "symbol": str(item.get("symbol") or ""),
+                    "date": stamp,
+                    "amount": float(item.get("cash") or 0.0),
+                    "description": f"{item.get('shares', 0)} sh x {item.get('amount_per_share', 0)}",
+                }
+            )
+        rows.sort(key=lambda row: row["date"], reverse=True)
+        return rows
+
     def get_account_state(self) -> Dict[str, Any]:
         cash = float(self.state.get("cash", 0.0))
         equity = cash + self._market_value()
@@ -55,6 +136,8 @@ class PaperBrokerage(BaseBrokerage):
             "cash": cash,
             "buying_power": max(cash, 0.0),
             "is_market_open": True,
+            # Surfaced separately so income is legible rather than buried in equity.
+            "dividend_income": float(self.state.get("dividend_income", 0.0)),
         }
 
     def get_positions(self) -> Dict[str, float]:

@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import pytest
+
 from src.api.api_payloads import account_activity_payload, accounts_payload, positions_payload
 from src.brokerages.providers.paper import PaperBrokerage
-from src.core.config import get_config
+from src.core.config import (
+    UNNAMED_ACCOUNT_ID,
+    Config,
+    UnknownAccountError,
+    get_account_broker_type,
+    get_config,
+)
 from src.core.interfaces import OrderRequest
 from src.data.order_journal import record_orders
 from src.data.state_store import ephemeral_state
@@ -12,6 +20,29 @@ LOCAL = "local_paper"
 
 def _order(symbol: str, action: str, quantity: float, price: float) -> OrderRequest:
     return OrderRequest(symbol=symbol, action=action, quantity=quantity, extra={"latest_price": price})
+
+
+
+def _patch_payloads(monkeypatch, name, value):
+    """Patch ``name`` on every payload module that resolves it.
+
+    ``api_payloads`` is a facade now: the implementations live in ``src/api/payloads/`` and
+    each module resolves its imports in its own namespace, so setting an attribute on the
+    facade has no effect. Patching wherever the name actually exists keeps these tests stating
+    an intent ("this dependency returns X") rather than a location.
+    """
+    import importlib
+    import pkgutil
+
+    import src.api.payloads as payloads_package
+
+    patched = 0
+    for info in pkgutil.iter_modules(payloads_package.__path__):
+        module = importlib.import_module(f"src.api.payloads.{info.name}")
+        if hasattr(module, name):
+            monkeypatch.setattr(module, name, value)
+            patched += 1
+    assert patched, f"no payload module defines {name!r}"
 
 
 def test_local_paper_is_a_configured_account_needing_no_credentials() -> None:
@@ -68,12 +99,36 @@ def test_closing_a_position_forgets_its_basis() -> None:
 
 
 def test_two_local_accounts_do_not_share_one_book() -> None:
+    """Books are keyed by account, so one account's fill is invisible to another.
+
+    The second account is built directly rather than looked up: ``get_config`` now refuses an
+    account that is not configured instead of quietly handing back the default one, and the
+    property under test is about the book key, not about config resolution.
+    """
     with ephemeral_state():
         PaperBrokerage(get_config(account_id=LOCAL)).submit_order(_order("SPY", "buy", 3, 100.0))
 
-        other = PaperBrokerage(get_config(account_id="another_paper"))
+        other = PaperBrokerage(Config(account_id="another_paper"))
 
         assert other.get_positions() == {}
+
+
+def test_asking_for_an_account_that_does_not_exist_is_an_error() -> None:
+    """It must never resolve to a different account.
+
+    Silently substituting the default meant an account page could show another account's
+    money under the requested name, and -- because ``live_runner.run_once(account_id=...)``
+    resolves the same way -- a binding naming a renamed or deleted account would have sent its
+    orders to the default book.
+    """
+    with pytest.raises(UnknownAccountError):
+        get_config(account_id="no_such_account")
+
+    with pytest.raises(UnknownAccountError):
+        get_account_broker_type("no_such_account")
+
+    # A bare config carries the "no account named" sentinel, which is not a lookup failure.
+    assert get_account_broker_type(UNNAMED_ACCOUNT_ID)
 
 
 def test_positions_payload_reads_the_book_instead_of_calling_a_broker() -> None:
@@ -120,14 +175,14 @@ def test_a_non_alpaca_account_is_not_reported_from_alpaca(monkeypatch) -> None:
         def get_positions(self):
             return {"SPY": 3.0}
 
-    monkeypatch.setattr(api_payloads, "get_account_broker_type", lambda _account: "schwab")
+    _patch_payloads(monkeypatch, "get_account_broker_type", lambda _account: "schwab")
     monkeypatch.setattr("src.core.pipeline.resolve_brokerage", lambda _config: FakeBrokerage())
-    monkeypatch.setattr(api_payloads, "load_latest_prices", lambda symbols, config, client: {"SPY": 100.0})
+    _patch_payloads(monkeypatch, "load_latest_prices", lambda symbols, config, client: {"SPY": 100.0})
 
     def fail(*_args, **_kwargs):
         raise AssertionError("the Alpaca client must not be used for a Schwab account")
 
-    monkeypatch.setattr(api_payloads, "create_trading_client", fail)
+    _patch_payloads(monkeypatch, "create_trading_client", fail)
 
     payload = api_payloads.positions_payload("schwab_individual")
 

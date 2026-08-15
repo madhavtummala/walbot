@@ -383,3 +383,48 @@ def submit_option_limit_order(
         position_intent=intent,
     )
     return trading_client.submit_order(order_data=order)
+
+
+#: Alpaca's activity types for cash distributions. ``DIV`` is the ordinary case; the rest cover
+#: capital gains, return of capital, and the withholding variants, all of which are still cash
+#: moving into or out of the account and belong in an income figure.
+DIVIDEND_ACTIVITY_TYPES = ("DIV", "DIVCGL", "DIVCGS", "DIVNRA", "DIVROC", "DIVTXEX", "DIVWH")
+
+
+def get_account_activities(
+    config: Config,
+    activity_types: "tuple[str, ...] | None" = None,
+    *,
+    page_size: int = 100,
+    after: "datetime | None" = None,
+    timeout_seconds: float = 20.0,
+) -> list[dict]:
+    """Raw account activities for this Alpaca account.
+
+    Lives here rather than at the call site because ``alpaca-py`` 0.43 exposes no wrapper for
+    ``/v2/account/activities`` -- ``TradingClient`` has ``get_account`` and nothing for
+    activities. Keeping the request in the client module means the rest of the codebase still
+    talks to a brokerage, not to an endpoint.
+    """
+    import requests
+
+    base = (config.alpaca_base_url or "").rstrip("/")
+    if not base or not config.alpaca_api_key:
+        return []
+    params: dict = {"page_size": int(page_size)}
+    if activity_types:
+        params["activity_types"] = ",".join(activity_types)
+    if after is not None:
+        params["after"] = after.isoformat()
+    response = requests.get(
+        f"{base}/v2/account/activities",
+        headers={
+            "APCA-API-KEY-ID": config.alpaca_api_key,
+            "APCA-API-SECRET-KEY": config.alpaca_api_secret,
+        },
+        params=params,
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    return payload if isinstance(payload, list) else []

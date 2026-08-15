@@ -6,9 +6,10 @@ from typing import Any
 import math
 import pandas as pd
 
-from .base import BaseAlgorithm
+from .base import BaseAlgorithm, minutes_knob
 from .fast_momentum import apply_risk_guards, compute_composite_scores
 from ..core.interfaces import DAILY_AT_OPEN, AlgorithmContext, AlgorithmDecision, AlgorithmRequirements
+from ..data.bars import realized_volatility, return_over_minutes, signal_price
 
 
 @dataclass(frozen=True)
@@ -19,12 +20,13 @@ class InvestSpyConfig:
     equity_income_universe: list[str] = field(default_factory=lambda: ["XYLD"])
     defensive_universe: list[str] = field(default_factory=lambda: ["BIL"])
     crisis_hedge_universe: list[str] = field(default_factory=lambda: ["SH", "VXX"])
-    #: The grid the ``*_lookback_bars`` knobs below are counted on. 15 minutes is what they
-    #: were fitted against -- meso 26 is exactly one session of 15m bars -- so changing it
-    #: rescales those horizons in wall-clock terms. Backtest before moving it.
-    intraday_bar_minutes: int = 15
-    micro_momentum_lookback_bars: int = 3
-    meso_momentum_lookback_bars: int = 26
+    #: Preferred bar resolution, in minutes. Fidelity only: the horizons below are market-time,
+    #: so a finer grid resolves them more precisely and a coarser one still answers them.
+    #: 0 takes whatever the feed is configured to prefer.
+    intraday_bar_minutes: int = 0
+    micro_momentum_lookback_minutes: int = 45
+    #: One trading session.
+    meso_momentum_lookback_minutes: int = 390
     macro_trend_lookback_days: int = 60
     sentiment_lookback_minutes: int = 60
     max_gross_exposure: float = 1.0
@@ -61,7 +63,8 @@ class InvestSpyConfig:
     pullback_micro_z_threshold: float = -0.5
     pullback_micro_z_cap: float = 3.0
     pullback_min_meso_return: float = 0.0
-    volatility_lookback_bars: int = 20
+    volatility_lookback_minutes: int = 300
+    #: Quoted per 15-minute bar whatever the feed's grid is -- see ``data/bars.py``.
     max_intraday_volatility: float = 0.08
     high_volatility_weight_scale: float = 0.7
     intraday_drawdown_limit: float = -0.03
@@ -114,8 +117,12 @@ class InvestSpyConfig:
             defensive_universe=symbols("defensive_universe", defaults.defensive_universe),
             crisis_hedge_universe=symbols("crisis_hedge_universe", defaults.crisis_hedge_universe),
             intraday_bar_minutes=integer("intraday_bar_minutes", defaults.intraday_bar_minutes),
-            micro_momentum_lookback_bars=integer("micro_momentum_lookback_bars", defaults.micro_momentum_lookback_bars),
-            meso_momentum_lookback_bars=integer("meso_momentum_lookback_bars", defaults.meso_momentum_lookback_bars),
+            micro_momentum_lookback_minutes=minutes_knob(
+                raw, "micro_momentum_lookback_minutes", defaults.micro_momentum_lookback_minutes
+            ),
+            meso_momentum_lookback_minutes=minutes_knob(
+                raw, "meso_momentum_lookback_minutes", defaults.meso_momentum_lookback_minutes
+            ),
             macro_trend_lookback_days=integer("macro_trend_lookback_days", defaults.macro_trend_lookback_days),
             sentiment_lookback_minutes=integer("sentiment_lookback_minutes", defaults.sentiment_lookback_minutes),
             max_gross_exposure=number("max_gross_exposure", defaults.max_gross_exposure),
@@ -147,7 +154,9 @@ class InvestSpyConfig:
             w_price_meso=number("w_price_meso", defaults.w_price_meso),
             w_price_macro=number("w_price_macro", defaults.w_price_macro),
             w_sentiment=number("w_sentiment", defaults.w_sentiment),
-            volatility_lookback_bars=integer("volatility_lookback_bars", defaults.volatility_lookback_bars),
+            volatility_lookback_minutes=minutes_knob(
+                raw, "volatility_lookback_minutes", defaults.volatility_lookback_minutes
+            ),
             max_intraday_volatility=number("max_intraday_volatility", defaults.max_intraday_volatility),
             high_volatility_weight_scale=number("high_volatility_weight_scale", defaults.high_volatility_weight_scale),
             intraday_drawdown_limit=number("intraday_drawdown_limit", defaults.intraday_drawdown_limit),
@@ -163,12 +172,12 @@ class InvestSpyConfig:
         )
 
     @property
-    def required_intraday_bars(self) -> int:
+    def required_history_minutes(self) -> int:
         return max(
-            self.micro_momentum_lookback_bars,
-            self.meso_momentum_lookback_bars,
-            self.volatility_lookback_bars,
-        ) + 1
+            self.micro_momentum_lookback_minutes,
+            self.meso_momentum_lookback_minutes,
+            self.volatility_lookback_minutes,
+        )
 
 
 def _return_over(closes: pd.Series, bars: int) -> float:
@@ -181,19 +190,22 @@ def _return_over(closes: pd.Series, bars: int) -> float:
 
 def compute_invest_spy_price_features(
     symbol: str,
-    intraday_bars: pd.DataFrame,
+    history_bars: pd.DataFrame,
     daily_bars: pd.DataFrame,
     config: InvestSpyConfig,
 ) -> dict[str, Any]:
-    intraday = intraday_bars.copy() if isinstance(intraday_bars, pd.DataFrame) else pd.DataFrame()
+    """State-detection inputs: two wall-clock horizons plus the daily macro trend."""
     daily = daily_bars.copy() if isinstance(daily_bars, pd.DataFrame) else pd.DataFrame()
-    closes = pd.to_numeric(intraday.get("close", pd.Series(dtype=float)), errors="coerce").dropna()
-    daily_closes = pd.to_numeric(daily.get("close", pd.Series(dtype=float)), errors="coerce").dropna()
-    intraday_returns = closes.pct_change().dropna().tail(config.volatility_lookback_bars)
-    realized_volatility = float(intraday_returns.std()) if not intraday_returns.empty else 0.0
+    daily_closes = signal_price(daily).dropna() if not daily.empty else pd.Series(dtype=float)
+    closes = (
+        signal_price(history_bars).dropna()
+        if isinstance(history_bars, pd.DataFrame) and not history_bars.empty
+        else pd.Series(dtype=float)
+    )
+    volatility = realized_volatility(history_bars, config.volatility_lookback_minutes)
     macro_return = _return_over(daily_closes, config.macro_trend_lookback_days)
-    micro_return = _return_over(closes, config.micro_momentum_lookback_bars)
-    meso_return = _return_over(closes, config.meso_momentum_lookback_bars)
+    micro_return = return_over_minutes(history_bars, config.micro_momentum_lookback_minutes)
+    meso_return = return_over_minutes(history_bars, config.meso_momentum_lookback_minutes)
     return {
         "symbol": symbol.upper(),
         "nano_return": micro_return,
@@ -201,7 +213,7 @@ def compute_invest_spy_price_features(
         "meso_return": meso_return,
         "macro_return": macro_return,
         "macro_trend_ok": macro_return > 0.0,
-        "realized_volatility": 0.0 if math.isnan(realized_volatility) else realized_volatility,
+        "realized_volatility": 0.0 if math.isnan(volatility) else volatility,
         "close": float(closes.iloc[-1]) if not closes.empty else 0.0,
     }
 
@@ -318,7 +330,7 @@ def score_universe(
     features = {
         symbol: compute_invest_spy_price_features(
             symbol,
-            context.intraday_bars_by_symbol.get(symbol, pd.DataFrame()),
+            context.history_bars_by_symbol.get(symbol, pd.DataFrame()),
             context.bars_by_symbol.get(symbol, pd.DataFrame()),
             strategy_config,
         )
@@ -372,8 +384,8 @@ class InvestSpyAlgorithm(BaseAlgorithm):
         return AlgorithmRequirements(
             price_symbols=sorted(set(strategy_config.symbols) | set(current_positions)),
             daily_lookback_days=strategy_config.macro_trend_lookback_days,
-            intraday_lookback_bars=strategy_config.required_intraday_bars,
-            intraday_bar_minutes=strategy_config.intraday_bar_minutes,
+            history_lookback_minutes=strategy_config.required_history_minutes,
+            preferred_bar_minutes=strategy_config.intraday_bar_minutes,
             needs_sentiment=True,
             paper_only=True,
         )

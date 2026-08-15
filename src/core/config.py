@@ -71,9 +71,18 @@ MARKET_DATA_PROVIDER_ORDER: list[str] = []
 INTRADAY_MARKET_DATA_PROVIDER_ORDER: list[str] = ["yfinance"]
 EOD_MARKET_DATA_PROVIDER_ORDER: list[str] = []
 NEWS_SENTIMENT_PROVIDER_ORDER: list[str] = []
+#: Alpaca first because it carries ``payable_date`` and flags special distributions; yfinance
+#: is the credential-free fallback. Both were measured to report identical events.
+DIVIDEND_PROVIDER_ORDER: list[str] = ["alpaca", "yfinance"]
 MARKET_DATA_CACHE_TTL_SECONDS = 1800
 INTRADAY_MARKET_DATA_CACHE_TTL_SECONDS = 900
 EOD_MARKET_DATA_CACHE_TTL_SECONDS = 1800
+#: Preferred resolution for fine-grained bars, in minutes. Five rather than the old fifteen
+#: because the grid used to be dictated by yfinance's floor, and Schwab -- now the primary
+#: feed -- serves 1/5/10/15/30 in real time. Algorithm horizons are stated in minutes, so
+#: this only sets fidelity: a finer grid resolves them more precisely, a coarser one still
+#: answers them. Providers that cannot serve it fall back to their nearest coarser grid.
+MARKET_DATA_BAR_MINUTES = 5
 NEWS_SENTIMENT_CACHE_TTL_SECONDS = 1800
 REQUIRE_TRADE_APPROVAL = False
 TRADE_APPROVAL_TIMEOUT_SECONDS = 300
@@ -97,6 +106,32 @@ ALGORITHM_IDS = {
 
 #: Used wherever no strategy was selected, and as the fallback for a retired id.
 DEFAULT_STRATEGY_ID = "fast_momentum"
+
+
+#: Stands for "no account was named" -- the value ``Config.account_id`` carries before any
+#: accounts config is read, and the id used when none is configured. Distinct from a real
+#: account id, so asking for it is not the same as asking for an account that does not exist.
+UNNAMED_ACCOUNT_ID = "default"
+
+
+class UnknownAccountError(KeyError):
+    """A named account is not in the accounts config.
+
+    Its own type so callers can tell "you asked for an account that does not exist" apart from
+    "the broker is unreachable". The first is a configuration mistake that must never be
+    papered over with a different account; the second is weather.
+    """
+
+    def __init__(self, account_id: str, known: list[str] | None = None) -> None:
+        self.account_id = account_id
+        self.known = known or []
+        super().__init__(
+            f"Unknown account {account_id!r}"
+            + (f"; configured accounts are {', '.join(self.known)}" if self.known else "")
+        )
+
+    def __str__(self) -> str:
+        return self.args[0] if self.args else f"Unknown account {self.account_id!r}"
 
 
 def _project_root() -> Path:
@@ -442,16 +477,23 @@ def _normalize_accounts_config(raw: dict[str, Any]) -> tuple[str, dict[str, dict
 
 
 def get_account_broker_type(account_id: str) -> str:
-    """Resolve the broker type for a given account ID from accounts config."""
+    """Resolve the broker type for a given account ID from accounts config.
+
+    Raises rather than guessing. This decides which brokerage an order is sent to, so
+    defaulting an unrecognised account to Alpaca is the one failure mode that could move real
+    money in the wrong account.
+    """
     raw = load_accounts_config()
     _, items = _normalize_accounts_config(raw)
     account = items.get(account_id, {})
-    if not account and items:
-        default_id = raw.get("default", "")
-        if isinstance(default_id, str) and default_id in items:
-            account = items[default_id]
-        elif items:
-            account = next(iter(items.values()), {})
+    if not account:
+        named = bool(account_id) and account_id != UNNAMED_ACCOUNT_ID
+        if items and named:
+            raise UnknownAccountError(str(account_id), sorted(items))
+        if items:
+            default_id = raw.get("default", "")
+            account = items.get(default_id, {}) if isinstance(default_id, str) else {}
+            account = account or next(iter(items.values()), {})
     return str(account.get("broker", "alpaca")).strip().lower()
 
 
@@ -640,6 +682,8 @@ class Config:
     eod_market_data_provider_order: list[str] = field(default_factory=lambda: list(EOD_MARKET_DATA_PROVIDER_ORDER))
     news_sentiment_provider_order: list[str] = field(default_factory=lambda: list(NEWS_SENTIMENT_PROVIDER_ORDER))
     sentiment_data_provider_order: list[str] = field(default_factory=lambda: list(NEWS_SENTIMENT_PROVIDER_ORDER))
+    dividend_provider_order: list[str] = field(default_factory=lambda: list(DIVIDEND_PROVIDER_ORDER))
+    market_data_bar_minutes: int = MARKET_DATA_BAR_MINUTES
     market_data_cache_ttl_seconds: int = MARKET_DATA_CACHE_TTL_SECONDS
     intraday_market_data_cache_ttl_seconds: int = INTRADAY_MARKET_DATA_CACHE_TTL_SECONDS
     eod_market_data_cache_ttl_seconds: int = EOD_MARKET_DATA_CACHE_TTL_SECONDS
@@ -665,10 +709,18 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
     raw_accounts_config = load_accounts_config()
     default_account_id, account_items = _normalize_accounts_config(raw_accounts_config)
     if not default_account_id:
-        default_account_id = os.getenv("TRADING_ACCOUNT_ID") or "default"
+        default_account_id = os.getenv("TRADING_ACCOUNT_ID") or UNNAMED_ACCOUNT_ID
     selected_account_id = str(account_id or os.getenv("TRADING_ACCOUNT_ID") or default_account_id)
     account_config = _section(account_items, selected_account_id)
     if not account_config and account_items:
+        # Asking for a *specific* account and getting a different one is never the right
+        # answer. This used to substitute the default silently, which meant an account page
+        # could show another account's money under the requested name -- and worse, that
+        # ``live_runner.run_once(account_id=...)`` would resolve a renamed or deleted binding
+        # to the default account and send its orders there. Falling back is only defensible
+        # when no account was named at all.
+        if account_id and account_id != UNNAMED_ACCOUNT_ID:
+            raise UnknownAccountError(str(account_id), sorted(account_items))
         selected_account_id = default_account_id if default_account_id in account_items else next(iter(account_items))
         account_config = _section(account_items, selected_account_id)
 
@@ -713,6 +765,7 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
     intraday_market_sources = _section(data_sources, "intraday_market_data")
     eod_market_sources = _section(data_sources, "eod_market_data")
     news_sources = _section(data_sources, "news_sentiment")
+    dividend_sources = _section(data_sources, "dividends")
     sentiment_sources = _section(data_sources, "sentiment_data")
 
     # Env only, deliberately. It is a deployment-level brake for an emergency, not a control
@@ -850,6 +903,16 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
         sentiment_data_provider_order=_as_list(
             _config_value(sentiment_sources, "provider_order", "SENTIMENT_DATA_PROVIDER_ORDER", NEWS_SENTIMENT_PROVIDER_ORDER),
             NEWS_SENTIMENT_PROVIDER_ORDER,
+        ),
+        dividend_provider_order=_as_list(
+            _config_value(dividend_sources, "provider_order", "DIVIDEND_PROVIDER_ORDER", DIVIDEND_PROVIDER_ORDER),
+            DIVIDEND_PROVIDER_ORDER,
+        ),
+        market_data_bar_minutes=_as_int(
+            _config_value(
+                intraday_market_sources, "bar_minutes", "MARKET_DATA_BAR_MINUTES", MARKET_DATA_BAR_MINUTES
+            ),
+            MARKET_DATA_BAR_MINUTES,
         ),
         market_data_cache_ttl_seconds=_as_int(
             _config_value(market_sources, "cache_ttl_seconds", "MARKET_DATA_CACHE_TTL_SECONDS", MARKET_DATA_CACHE_TTL_SECONDS),

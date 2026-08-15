@@ -27,6 +27,51 @@ def json_number(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+#: The grid every ``*_bars`` knob in this project was written against, before horizons moved
+#: to wall-clock minutes. Used only to convert configs saved under the old names.
+LEGACY_BAR_MINUTES = 15
+
+_warned_legacy_keys: set[str] = set()
+
+
+def minutes_knob(raw: Dict[str, Any], key: str, default: int, *, legacy_key: str | None = None) -> int:
+    """Read a minute-valued knob, converting a config still written in bar counts.
+
+    Horizons used to be counted in bars on an assumed 15-minute grid, so a saved
+    ``micro_momentum_lookback_bars: 78`` means 1170 minutes and nothing else. Dashboard tuning
+    lives in ``config/walbot.yaml``, which nobody is going to hand-migrate, so the old key is
+    honoured and converted rather than silently ignored -- being ignored would drop the knob
+    back to its default and quietly change how the strategy trades.
+    """
+    if not isinstance(raw, dict):
+        return default
+    if key in raw:
+        try:
+            return int(raw[key])
+        except (TypeError, ValueError):
+            return default
+    legacy_key = legacy_key or key.replace("_minutes", "_bars")
+    if legacy_key not in raw:
+        return default
+    try:
+        bars = int(raw[legacy_key])
+    except (TypeError, ValueError):
+        return default
+    try:
+        grid = int(raw.get("intraday_bar_minutes", LEGACY_BAR_MINUTES)) or LEGACY_BAR_MINUTES
+    except (TypeError, ValueError):
+        grid = LEGACY_BAR_MINUTES
+    minutes = bars * grid
+    if legacy_key not in _warned_legacy_keys:
+        _warned_legacy_keys.add(legacy_key)
+        logger.info(
+            "Config knob %s is counted in bars; reading it as %s=%s (%s bars x %sm). "
+            "Save the algorithm from the dashboard to store it in minutes.",
+            legacy_key, key, minutes, bars, grid,
+        )
+    return minutes
+
+
 def signal_view_from_decision(decision: AlgorithmDecision, latest_prices: Dict[str, float] | None = None) -> SignalView:
     """Build a generic dashboard view from an algorithm decision's signals and target weights."""
     latest_prices = latest_prices or {}

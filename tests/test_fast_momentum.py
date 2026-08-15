@@ -43,29 +43,59 @@ def _daily(prices: list[float]) -> pd.DataFrame:
 
 
 def test_price_features_use_intraday_and_daily_momentum() -> None:
+    # _intraday is on a 30-minute grid, so these horizons are 2 and 4 bars back.
     config = DefensiveMomentumConfig(
-        nano_momentum_lookback_bars=2,
-        micro_momentum_lookback_bars=4,
+        nano_momentum_lookback_minutes=60,
+        micro_momentum_lookback_minutes=120,
         meso_trend_lookback_days=2,
         macro_trend_lookback_days=3,
     )
+    history = _intraday([100, 101, 103, 106, 110, 115, 121])
 
-    features = compute_price_features("SPY", _intraday([100, 101, 103, 106, 110, 115, 121]), _daily([100, 101, 103, 106, 110]), config)
+    features = compute_price_features("SPY", history, _daily([100, 101, 103, 106, 110]), config)
 
-    assert features["nano_return"] > 0
-    assert features["micro_return"] > 0
+    assert features["nano_return"] == 121 / 110 - 1
+    assert features["micro_return"] == 121 / 103 - 1
     assert features["meso_return"] > 0
     assert features["macro_return"] > 0
     assert features["macro_trend_ok"] is True
     assert features["realized_volatility"] >= 0
 
 
+def test_a_horizon_in_minutes_means_the_same_span_on_any_grid() -> None:
+    """The whole point of the change: the feed's resolution must not move the answer."""
+    config = DefensiveMomentumConfig(
+        nano_momentum_lookback_minutes=60,
+        micro_momentum_lookback_minutes=180,
+    )
+
+    def ramp(freq: str, periods: int) -> pd.DataFrame:
+        stamps = pd.date_range("2026-05-22 14:00", periods=periods, freq=freq, tz="UTC")
+        closes = [100.0 * (1.0002 ** index) for index in range(periods)]
+        return pd.DataFrame(
+            {"timestamp": stamps, "open": closes, "high": closes, "low": closes,
+             "close": closes, "volume": [1_000 for _ in closes]}
+        )
+
+    # The same four-hour path, sampled every 5 minutes and every 15.
+    fine = ramp("5min", 49)
+    coarse = fine.iloc[::3].reset_index(drop=True)
+
+    fine_features = compute_price_features("SPY", fine, _daily([100, 101]), config)
+    coarse_features = compute_price_features("SPY", coarse, _daily([100, 101]), config)
+
+    assert round(fine_features["nano_return"], 10) == round(coarse_features["nano_return"], 10)
+    assert round(fine_features["micro_return"], 10) == round(coarse_features["micro_return"], 10)
+    # Volatility is quoted per 15-minute bar on either grid, so the thresholds still bind.
+    assert abs(fine_features["realized_volatility"] - coarse_features["realized_volatility"]) < 1e-6
+
+
 def test_fast_momentum_config_uses_named_horizons() -> None:
     runtime = Config(
         algorithm_configs={
             "fast_momentum": {
-                "nano_momentum_lookback_bars": 10,
-                "micro_momentum_lookback_bars": 78,
+                "nano_momentum_lookback_minutes": 150,
+                "micro_momentum_lookback_minutes": 1170,
                 "meso_trend_lookback_days": 60,
                 "macro_trend_lookback_days": 180,
                 "max_positions": 4,
@@ -80,8 +110,8 @@ def test_fast_momentum_config_uses_named_horizons() -> None:
 
     config = DefensiveMomentumConfig.from_runtime_config(runtime)
 
-    assert config.nano_momentum_lookback_bars == 10
-    assert config.micro_momentum_lookback_bars == 78
+    assert config.nano_momentum_lookback_minutes == 150
+    assert config.micro_momentum_lookback_minutes == 1170
     assert config.meso_trend_lookback_days == 60
     assert config.macro_trend_lookback_days == 180
     assert config.max_positions == 4

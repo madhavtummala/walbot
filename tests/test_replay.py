@@ -155,13 +155,16 @@ def test_incremental_mode_leaves_untouched_holdings_alone() -> None:
     assert desired["BBB"] == 5.0
 
 
-def test_coverage_reports_symbols_the_intraday_cache_could_not_supply() -> None:
+def test_coverage_reports_the_history_the_cache_could_not_supply() -> None:
     """A window the cache cannot reach scores every symbol near zero, which reads as a poor
-    strategy rather than an unsupported window unless it is reported."""
-    coverage = Coverage(intraday_requested=10, intraday_supplied=4, missing_symbols={"AAA"})
+    strategy rather than an unsupported window unless it is reported.
+
+    Measured in minutes, not symbols: a symbol the cache holds two sessions of, against a
+    twelve-session horizon, is not covered in any sense the score would recognise."""
+    coverage = Coverage(history_requested=10_000, history_supplied=4_000, missing_symbols={"AAA"})
     reported = coverage.as_dict()
 
-    assert reported["intraday_ratio"] == 0.4
+    assert reported["history_ratio"] == 0.4
     assert reported["missing_symbols"] == ["AAA"]
     assert reported["complete"] is False
     assert Coverage().as_dict()["complete"] is True

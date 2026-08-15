@@ -8,16 +8,18 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from src.connectors.service import EOD_MARKET_CATEGORY, INTRADAY_MARKET_CATEGORY
-from src.core.config import get_config, load_algorithms_config
-from src.data.duckdb_store import clear_market_bars, market_bars_summary
+from src.connectors.service import INTRADAY_MARKET_CATEGORY, resolve_bar_minutes
+from src.core.config import MARKET_DATA_BAR_MINUTES, get_config, load_algorithms_config
+from src.data.duckdb_store import DAILY_INTERVAL_MINUTES, clear_market_bars, market_bars_summary
 from src.data.provider_cache import clear_cached_payloads
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_BACKTEST_BUFFER_BARS = 10
-DEFAULT_INTRADAY_LOOKBACK_BARS = 78
-DEFAULT_INTRADAY_BAR_MINUTES = 15
+#: Three trading sessions, the shortest window any algorithm's fast horizons need.
+DEFAULT_LOOKBACK_MINUTES = 1170
+DEFAULT_BAR_MINUTES = MARKET_DATA_BAR_MINUTES
+TRADING_MINUTES_PER_DAY = 390
 MARKET_TIMEZONE = ZoneInfo("America/Chicago")
 EOD_TIMEZONE = ZoneInfo("America/New_York")
 
@@ -51,13 +53,21 @@ def _algorithm_symbols(algorithm_id: str | None = None) -> list[str]:
 
 
 def _wanted_symbols(symbols: list[str] | None, algorithm_id: str | None = None) -> list[str]:
+    """Which symbols to warm: explicit list, else one algorithm's universe, else everything.
+
+    "Everything" means the tradable universe, not the union of what the algorithms currently
+    hold. That is the whole point of the universe -- its own config comment says it "decides
+    what gets priced and cached", so that widening it is an edit rather than a data-gathering
+    exercise. Defaulting to the algorithm universes quietly broke that promise: a symbol added
+    to the universe was never warmed until some algorithm already traded it, which is backwards.
+    """
     explicit = [symbol.strip().upper() for symbol in (symbols or []) if symbol.strip()]
     if explicit:
         return sorted(set(explicit))
-    configured = _algorithm_symbols(algorithm_id)
-    if configured:
-        return sorted(set(configured))
-    return sorted(set(get_config().symbols))
+    if algorithm_id:
+        return sorted(set(_algorithm_symbols(algorithm_id)))
+    universe = sorted(set(get_config().symbols))
+    return universe or sorted(set(_algorithm_symbols(None)))
 
 
 def _count_rows(bars_by_symbol: dict[str, Any]) -> dict[str, int]:
@@ -97,18 +107,15 @@ def _eod_timezone(provider: str) -> ZoneInfo:
     return ZoneInfo("UTC") if provider.lower() in {"yfinance", "finnhub"} else EOD_TIMEZONE
 
 
-def _range_lookback_bars(
+def _range_lookbacks(
     start_date: datetime | None,
     end_date: datetime | None,
-    *,
-    intraday_bar_minutes: int,
 ) -> tuple[int | None, int | None]:
+    """Daily bars and trading minutes spanned by an explicit date range."""
     if start_date is None or end_date is None:
         return None, None
     calendar_days = max((end_date.date() - start_date.date()).days, 1)
-    eod_bars = calendar_days + 1
-    intraday_bars = calendar_days * max(390 // max(intraday_bar_minutes, 1), 1)
-    return eod_bars, intraday_bars
+    return calendar_days + 1, calendar_days * TRADING_MINUTES_PER_DAY
 
 
 def _clear_market_cache(
@@ -116,26 +123,24 @@ def _clear_market_cache(
     *,
     eod_provider: str,
     intraday_provider: str,
-    intraday_bar_minutes: int,
+    bar_minutes: int,
     warm_eod: bool,
     warm_intraday: bool,
 ) -> dict[str, int]:
     deleted: dict[str, int] = {}
     if warm_eod:
         deleted["eod_duckdb_rows"] = clear_market_bars(
-            category=EOD_MARKET_CATEGORY,
             provider=eod_provider,
             symbols=symbols,
-            timeframe="1d",
+            interval_minutes=DAILY_INTERVAL_MINUTES,
         )
     if warm_intraday:
         deleted["intraday_duckdb_rows"] = clear_market_bars(
-            category=INTRADAY_MARKET_CATEGORY,
             provider=intraday_provider,
             symbols=symbols,
-            timeframe=f"{int(intraday_bar_minutes)}m",
+            interval_minutes=bar_minutes,
         )
-        prefixes = [f"{symbol.upper()}:{int(intraday_bar_minutes)}:" for symbol in symbols]
+        prefixes = [f"{symbol.upper()}:{int(bar_minutes)}:" for symbol in symbols]
         deleted["intraday_payload_rows"] = clear_cached_payloads(
             category=INTRADAY_MARKET_CATEGORY,
             provider=intraday_provider,
@@ -152,15 +157,15 @@ def warm_market_data_cache(
     eod_provider: str | None = None,
     intraday_provider: str | None = None,
     eod_lookback_bars: int | None = None,
-    intraday_lookback_bars: int | None = None,
-    intraday_bar_minutes: int = DEFAULT_INTRADAY_BAR_MINUTES,
+    lookback_minutes: int | None = None,
+    bar_minutes: int = DEFAULT_BAR_MINUTES,
     start_date: str | None = None,
     end_date: str | None = None,
     warm_eod: bool = True,
     warm_intraday: bool = True,
     clear: bool = False,
 ) -> dict[str, Any]:
-    from src.connectors import fetch_eod_market_bars, fetch_intraday_market_bars
+    from src.connectors import fetch_eod_market_bars, fetch_market_history
 
     if not warm_eod and not warm_intraday:
         raise ValueError("At least one of EOD or intraday warming must be enabled")
@@ -182,27 +187,26 @@ def warm_market_data_cache(
         end_date,
         timezone_name=_eod_timezone(actual_eod_provider),
     )
-    range_eod_bars, range_intraday_bars = _range_lookback_bars(
-        range_start,
-        range_end,
-        intraday_bar_minutes=intraday_bar_minutes,
-    )
+    range_eod_bars, range_minutes = _range_lookbacks(range_start, range_end)
     eod_lookback_bars = int(eod_lookback_bars or range_eod_bars or _default_eod_lookback_bars())
-    intraday_lookback_bars = int(intraday_lookback_bars or range_intraday_bars or DEFAULT_INTRADAY_LOOKBACK_BARS)
+    lookback_minutes = int(lookback_minutes or range_minutes or DEFAULT_LOOKBACK_MINUTES)
+    # The grid actually written, so ``--clear`` targets the rows the fetch will replace rather
+    # than the ones the caller asked for and the provider could not serve.
+    actual_bar_minutes = resolve_bar_minutes(actual_intraday_provider, bar_minutes)
 
     logger.info("Warming market data cache for %s symbols...", len(wanted))
     if warm_eod:
-        logger.info("  EOD: provider=%s, lookback=%s bars", actual_eod_provider, eod_lookback_bars)
+        logger.info("  Daily: provider=%s, lookback=%s bars", actual_eod_provider, eod_lookback_bars)
     if warm_intraday:
-        logger.info("  Intraday: provider=%s, lookback=%s bars, timeframe=%sm", 
-                    actual_intraday_provider, intraday_lookback_bars, intraday_bar_minutes)
+        logger.info("  Intraday: provider=%s, lookback=%s minutes, grid=%sm",
+                    actual_intraday_provider, lookback_minutes, actual_bar_minutes)
 
     deleted = (
         _clear_market_cache(
             wanted,
             eod_provider=actual_eod_provider,
             intraday_provider=actual_intraday_provider,
-            intraday_bar_minutes=intraday_bar_minutes,
+            bar_minutes=actual_bar_minutes,
             warm_eod=warm_eod,
             warm_intraday=warm_intraday,
         )
@@ -230,11 +234,11 @@ def warm_market_data_cache(
         logger.info("Fetched %s EOD bars total", total_eod)
 
     intraday = (
-        fetch_intraday_market_bars(
+        fetch_market_history(
             wanted,
             config,
-            lookback_bars=intraday_lookback_bars,
-            bar_minutes=intraday_bar_minutes,
+            lookback_minutes=lookback_minutes,
+            bar_minutes=bar_minutes,
             force_refresh=True,
             provider=actual_intraday_provider,
             start_date=range_start,
@@ -259,10 +263,12 @@ def warm_market_data_cache(
             "start_date": start_date,
             "end_date": end_date,
         },
-        "categories": {
-            "eod": warm_eod,
+        "warmed": {
+            "daily": warm_eod,
             "intraday": warm_intraday,
         },
+        "bar_minutes": actual_bar_minutes,
+        "lookback_minutes": lookback_minutes,
         "cleared": deleted,
         "fetched": {
             "eod_rows": _count_rows(eod),
@@ -277,18 +283,28 @@ def warm_market_data_cache(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Clear, warm, and verify local market-data cache.")
     scope = parser.add_mutually_exclusive_group()
-    scope.add_argument("--symbols", nargs="*", help="Symbols to warm. Defaults to configured algorithm universes.")
+    scope.add_argument("--symbols", nargs="*", help="Symbols to warm. Defaults to the whole tradable universe.")
     scope.add_argument("--algorithm", help="Warm only the symbols configured for one algorithm, such as fast_momentum.")
     parser.add_argument("--provider", default=None, help="Global provider override for both EOD and intraday.")
     parser.add_argument("--eod-provider", help="Provider for EOD data (e.g., alpaca, yfinance).")
     parser.add_argument("--intraday-provider", help="Provider for intraday data (e.g., yfinance).")
     parser.add_argument("--start-date", help="First America/Chicago market date to fetch, in YYYY-MM-DD format.")
     parser.add_argument("--end-date", help="Last America/Chicago market date to fetch, in YYYY-MM-DD format.")
-    parser.add_argument("--eod", action="store_true", help="Warm EOD bars only, unless --intraday is also supplied.")
+    parser.add_argument("--eod", action="store_true", help="Warm daily bars only, unless --intraday is also supplied.")
     parser.add_argument("--intraday", action="store_true", help="Warm intraday bars only, unless --eod is also supplied.")
     parser.add_argument("--eod-lookback-bars", default=None, type=int)
-    parser.add_argument("--intraday-lookback-bars", default=DEFAULT_INTRADAY_LOOKBACK_BARS, type=int)
-    parser.add_argument("--intraday-bar-minutes", default=DEFAULT_INTRADAY_BAR_MINUTES, type=int)
+    parser.add_argument(
+        "--lookback-minutes",
+        default=DEFAULT_LOOKBACK_MINUTES,
+        type=int,
+        help="Trading minutes of intraday history to warm. 1170 is three sessions.",
+    )
+    parser.add_argument(
+        "--bar-minutes",
+        default=DEFAULT_BAR_MINUTES,
+        type=int,
+        help="Preferred bar resolution. Snapped down to whatever the provider serves.",
+    )
     parser.add_argument("--clear", action="store_true", help="Clear matching local cache rows before fetching.")
     args = parser.parse_args()
     warm_eod = args.eod or not args.intraday
@@ -302,8 +318,8 @@ def main() -> None:
                 eod_provider=args.eod_provider,
                 intraday_provider=args.intraday_provider,
                 eod_lookback_bars=args.eod_lookback_bars,
-                intraday_lookback_bars=args.intraday_lookback_bars,
-                intraday_bar_minutes=args.intraday_bar_minutes,
+                lookback_minutes=args.lookback_minutes,
+                bar_minutes=args.bar_minutes,
                 start_date=args.start_date,
                 end_date=args.end_date,
                 warm_eod=warm_eod,

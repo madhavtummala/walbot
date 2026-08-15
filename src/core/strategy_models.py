@@ -5,6 +5,7 @@ from typing import Any
 
 import pandas as pd
 
+from src.data.bars import signal_price
 from src.data.signals.signals import compute_social_trend_score
 
 STRATEGY_LABELS = {
@@ -45,17 +46,24 @@ def prepared_strategy_frame(df: pd.DataFrame) -> pd.DataFrame:
     work["close"] = pd.to_numeric(work["close"], errors="coerce")
     work["open"] = pd.to_numeric(work.get("open", work["close"]), errors="coerce").fillna(work["close"])
     work["volume"] = pd.to_numeric(work.get("volume", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
-    work["ret_21"] = work["close"] / work["close"].shift(21) - 1
-    work["ret_63"] = work["close"] / work["close"].shift(63) - 1
-    work["ret_126"] = work["close"] / work["close"].shift(126) - 1
-    work["ret_252"] = work["close"] / work["close"].shift(252) - 1
-    work["sma_20"] = work["close"].rolling(20).mean()
-    work["sma_50"] = work["close"].rolling(50).mean()
-    work["sma_200"] = work["close"].rolling(200).mean()
-    work["daily_ret"] = work["close"].pct_change()
+    # Performance questions are asked of the total-return series, price-level questions of the
+    # raw one. ``close`` stays exactly what printed, because the replay fills against it and an
+    # order executes at a real price; every "how has this done" feature below reads ``signal``
+    # so a dividend payer is not marked down for having paid. The two must not be mixed inside
+    # one feature -- a raw close against a total-return average is a comparison of different
+    # quantities, which is how ``z_20`` and the trend gate would silently drift.
+    signal = signal_price(work)
+    work["ret_21"] = signal / signal.shift(21) - 1
+    work["ret_63"] = signal / signal.shift(63) - 1
+    work["ret_126"] = signal / signal.shift(126) - 1
+    work["ret_252"] = signal / signal.shift(252) - 1
+    work["sma_20"] = signal.rolling(20).mean()
+    work["sma_50"] = signal.rolling(50).mean()
+    work["sma_200"] = signal.rolling(200).mean()
+    work["daily_ret"] = signal.pct_change()
     work["realized_vol"] = work["daily_ret"].rolling(20).std() * math.sqrt(252)
     work["realized_vol_252"] = work["daily_ret"].rolling(252).std() * math.sqrt(252)
-    work["z_20"] = (work["close"] - work["sma_20"]) / work["close"].rolling(20).std().replace(0, pd.NA)
+    work["z_20"] = (signal - work["sma_20"]) / signal.rolling(20).std().replace(0, pd.NA)
     work["high_55"] = pd.to_numeric(work.get("high", work["close"]), errors="coerce").rolling(55).max()
     work["low_55"] = pd.to_numeric(work.get("low", work["close"]), errors="coerce").rolling(55).min()
     log_volume = work["volume"].map(math.log1p)

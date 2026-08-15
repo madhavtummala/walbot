@@ -63,6 +63,29 @@ def _fresh_bars(periods: int = 280, price: float = 100.0) -> pd.DataFrame:
     )
 
 
+
+def _patch_payloads(monkeypatch, name, value):
+    """Patch ``name`` on every payload module that resolves it.
+
+    ``api_payloads`` is a facade now: the implementations live in ``src/api/payloads/`` and
+    each module resolves its imports in its own namespace, so setting an attribute on the
+    facade has no effect. Patching wherever the name actually exists keeps these tests stating
+    an intent ("this dependency returns X") rather than a location.
+    """
+    import importlib
+    import pkgutil
+
+    import src.api.payloads as payloads_package
+
+    patched = 0
+    for info in pkgutil.iter_modules(payloads_package.__path__):
+        module = importlib.import_module(f"src.api.payloads.{info.name}")
+        if hasattr(module, name):
+            monkeypatch.setattr(module, name, value)
+            patched += 1
+    assert patched, f"no payload module defines {name!r}"
+
+
 def test_status_payload_redacts_secret_values() -> None:
     payload = status_payload()
 
@@ -152,13 +175,13 @@ tradable_universe:
     )
     monkeypatch.setenv("TRADING_UNIVERSE_FILE", str(universe_yaml))
     monkeypatch.delenv("TRADABLES_CSV", raising=False)
-    monkeypatch.setattr(api_payloads, "create_data_client", lambda config: object())
+    _patch_payloads(monkeypatch, "create_data_client", lambda config: object())
 
     def fake_fetch_daily_bars(symbols, **kwargs):
         assert kwargs["force_refresh"] is True
         return {symbol: _fresh_bars(price=100.0 + index) for index, symbol in enumerate(symbols)}
 
-    monkeypatch.setattr(api_payloads, "fetch_daily_bars", fake_fetch_daily_bars)
+    _patch_payloads(monkeypatch, "fetch_daily_bars", fake_fetch_daily_bars)
 
     payload = api_payloads.recommend_universe_payload({"max_symbols": 5, "refresh": True})
 
@@ -229,22 +252,24 @@ def test_save_controls_payload_does_not_wake_runtimes(tmp_path, monkeypatch) -> 
     assert payload["controls"]["active_strategy"] == "dca"
     assert payload["controls"]["algorithm_enabled"] is False
     assert payload["controls"]["options_trading_enabled"] is False
-    assert not hasattr(api_payloads.bot_runtime, "wake_algorithm")
-    assert not hasattr(api_payloads.bot_runtime, "wake_options")
+    # Asserted on the module that owns the controls payload: ``api_payloads`` is a facade and
+    # forwards only the names it exports, so a runtime handle would not be visible through it.
+    from src.api.payloads import controls as controls_payloads
+
+    assert not hasattr(controls_payloads.bot_runtime, "wake_algorithm")
+    assert not hasattr(controls_payloads.bot_runtime, "wake_options")
 
 
 def test_cache_only_backtest_does_not_compute_without_cached_rows(monkeypatch) -> None:
     def fail_compute(*_args, **_kwargs):
         raise AssertionError("cache-only request should not compute a backtest")
 
-    monkeypatch.setattr(api_payloads, "universe_payload", lambda: {"rows": []})
-    monkeypatch.setattr(
-        api_payloads,
-        "load_dca_plan",
+    _patch_payloads(monkeypatch, "universe_payload", lambda: {"rows": []})
+    _patch_payloads(monkeypatch, "load_dca_plan",
         lambda rows, **kwargs: {"buy": {"items": []}, "sell": {"items": []}},
     )
-    monkeypatch.setattr(api_payloads, "_load_backtest_cache", lambda: {"version": 2, "items": {}})
-    monkeypatch.setattr(api_payloads, "_compute_backtest", fail_compute)
+    _patch_payloads(monkeypatch, "_load_backtest_cache", lambda: {"version": 2, "items": {}})
+    _patch_payloads(monkeypatch, "_compute_backtest", fail_compute)
 
     payload = backtest_payload({"strategy": "fast_momentum", "period": "6m", "cache_only": True})
 
@@ -258,14 +283,12 @@ def test_non_refresh_backtest_does_not_compute_without_cached_rows(monkeypatch) 
     def fail_compute(*_args, **_kwargs):
         raise AssertionError("non-refresh request should not compute a backtest")
 
-    monkeypatch.setattr(api_payloads, "universe_payload", lambda: {"rows": []})
-    monkeypatch.setattr(
-        api_payloads,
-        "load_dca_plan",
+    _patch_payloads(monkeypatch, "universe_payload", lambda: {"rows": []})
+    _patch_payloads(monkeypatch, "load_dca_plan",
         lambda rows, **kwargs: {"buy": {"items": []}, "sell": {"items": []}},
     )
-    monkeypatch.setattr(api_payloads, "_load_backtest_cache", lambda: {"version": 4, "items": {}})
-    monkeypatch.setattr(api_payloads, "_compute_backtest", fail_compute)
+    _patch_payloads(monkeypatch, "_load_backtest_cache", lambda: {"version": 4, "items": {}})
+    _patch_payloads(monkeypatch, "_compute_backtest", fail_compute)
 
     payload = backtest_payload({"strategy": "fast_momentum", "period": "2m"})
 
@@ -287,15 +310,13 @@ def test_refresh_backtest_computes_with_market_data_refresh(monkeypatch) -> None
             "rows": [{"timestamp": "2026-05-01", "equity": 10_000.0}],
         }
 
-    monkeypatch.setattr(api_payloads, "universe_payload", lambda: {"rows": []})
-    monkeypatch.setattr(
-        api_payloads,
-        "load_dca_plan",
+    _patch_payloads(monkeypatch, "universe_payload", lambda: {"rows": []})
+    _patch_payloads(monkeypatch, "load_dca_plan",
         lambda rows, **kwargs: {"buy": {"items": []}, "sell": {"items": []}},
     )
-    monkeypatch.setattr(api_payloads, "_load_backtest_cache", lambda: {"version": 4, "items": {}})
-    monkeypatch.setattr(api_payloads, "_save_backtest_cache", lambda cache: None)
-    monkeypatch.setattr(api_payloads, "_compute_backtest", fake_compute)
+    _patch_payloads(monkeypatch, "_load_backtest_cache", lambda: {"version": 4, "items": {}})
+    _patch_payloads(monkeypatch, "_save_backtest_cache", lambda cache: None)
+    _patch_payloads(monkeypatch, "_compute_backtest", fake_compute)
 
     payload = backtest_payload({"strategy": "trend_following", "period": "6m", "refresh": True})
 
@@ -361,14 +382,14 @@ def test_fast_momentum_backtest_honors_configured_max_positions(monkeypatch) -> 
         },
     )
 
-    monkeypatch.setattr(api_payloads, "get_config", lambda *args, **kwargs: config)
-    monkeypatch.setattr(api_payloads, "create_data_client", lambda config: object())
+    _patch_payloads(monkeypatch, "get_config", lambda *args, **kwargs: config)
+    _patch_payloads(monkeypatch, "create_data_client", lambda config: object())
 
     def fake_fetch_daily_bars(requested_symbols, **kwargs):
         captured_fetch.update({"symbols": requested_symbols, **kwargs})
         return {symbol: bars[symbol] for symbol in requested_symbols}
 
-    monkeypatch.setattr(api_payloads, "fetch_daily_bars", fake_fetch_daily_bars)
+    _patch_payloads(monkeypatch, "fetch_daily_bars", fake_fetch_daily_bars)
     payload = api_payloads._compute_backtest("fast_momentum", "1m", {})
     history = pd.DataFrame(payload["rows"]).set_index("timestamp")
 
@@ -380,42 +401,42 @@ def test_fast_momentum_backtest_honors_configured_max_positions(monkeypatch) -> 
     assert captured_fetch["extra_buffer_days"] >= 22 + 10
 
 
-def test_fast_momentum_intraday_backtest_reads_configured_provider_order(monkeypatch) -> None:
+def test_history_backtest_reads_configured_provider_order(monkeypatch) -> None:
     calls = []
     config = Config(intraday_market_data_provider_order=["finnhub", "yfinance"])
+    # Two sessions of 15-minute bars ending at the signal date, which covers the window asked
+    # for below and so stops the walk before it reaches the all-providers read.
+    covering = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-04-30 13:30", periods=53, freq="15min", tz="UTC"),
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.5,
+            "volume": 1000.0,
+            "adjusted_close": 100.5,
+        }
+    )
 
-    def fake_read_market_bars(category, provider, symbol, timeframe, **kwargs):
-        calls.append((category, provider, symbol, timeframe, kwargs))
-        if provider == "finnhub":
-            return pd.DataFrame()
-        return pd.DataFrame(
-            {
-                "timestamp": pd.to_datetime(["2026-05-01"], utc=True),
-                "open": [100.0],
-                "high": [101.0],
-                "low": [99.0],
-                "close": [100.5],
-                "volume": [1000],
-                "adjusted_close": [100.5],
-            }
-        )
+    def fake_read_history(symbol, *, lookback_minutes, end, provider=None, **kwargs):
+        calls.append((symbol, provider, lookback_minutes, end))
+        return pd.DataFrame() if provider == "finnhub" else covering
 
-    monkeypatch.setattr(replay_module, "read_market_bars", fake_read_market_bars)
+    monkeypatch.setattr(replay_module, "read_history", fake_read_history)
 
     coverage = replay_module.Coverage()
-    bars = replay_module._read_intraday(
+    bars = replay_module._read_history(
         ["SPY"],
         pd.Timestamp("2026-05-01", tz="UTC"),
-        providers=api_payloads._configured_intraday_providers(config),
-        lookback_bars=79,
-        bar_minutes=15,
+        providers=api_payloads._configured_history_providers(config),
+        lookback_minutes=780,
         coverage=coverage,
     )
 
     assert not bars["SPY"].empty
     assert [call[1] for call in calls] == ["finnhub", "yfinance"]
     # Falling back to a second provider still counts as covered.
-    assert coverage.as_dict()["intraday_ratio"] == 1.0
+    assert coverage.as_dict()["history_ratio"] == 1.0
     assert coverage.missing_symbols == set()
 
 
@@ -433,21 +454,38 @@ def test_spy_rotation_backtest_uses_spy_state_logic(monkeypatch) -> None:
                 "defensive_universe": ["BIL"],
                 "crisis_hedge_universe": ["SH"],
                 "macro_trend_lookback_days": 60,
-                "micro_momentum_lookback_bars": 3,
-                "meso_momentum_lookback_bars": 26,
+                "micro_momentum_lookback_minutes": 45,
+                "meso_momentum_lookback_minutes": 390,
                 "max_gross_exposure": 1.0,
                 "max_single_position_weight": 1.0,
             }
         },
     )
 
-    monkeypatch.setattr(api_payloads, "get_config", lambda *args, **kwargs: config)
-    monkeypatch.setattr(api_payloads, "create_data_client", lambda config: object())
-    monkeypatch.setattr(
-        api_payloads,
-        "fetch_daily_bars",
+    _patch_payloads(monkeypatch, "get_config", lambda *args, **kwargs: config)
+    _patch_payloads(monkeypatch, "create_data_client", lambda config: object())
+    _patch_payloads(monkeypatch, "fetch_daily_bars",
         lambda symbols, *args, **kwargs: {symbol: bars[symbol] for symbol in symbols},
     )
+
+    # The replay's history read is stubbed rather than left to hit the shared bar store: the
+    # store holds real cached bars for these very symbols, so without this the assertions
+    # below would quietly depend on what the market did last week.
+    def fake_read_history(symbol, *, lookback_minutes, end, provider=None, **kwargs):
+        closes = [100 + index * 0.4 for index in range(60)]
+        return pd.DataFrame(
+            {
+                "timestamp": pd.date_range(end - pd.Timedelta(minutes=15 * 60), periods=60, freq="15min"),
+                "close": closes,
+                "open": closes,
+                "high": closes,
+                "low": closes,
+                "volume": [1_000 for _ in closes],
+                "interval_minutes": 15,
+            }
+        )
+
+    monkeypatch.setattr(replay_module, "read_history", fake_read_history)
 
     payload = api_payloads._compute_backtest("spy_rotation", "6m", {})
     history = pd.DataFrame(payload["rows"]).set_index("timestamp")
@@ -468,8 +506,8 @@ def test_dca_view_states_its_cadence_and_planned_total(monkeypatch) -> None:
         "buy": {"items": [{"symbol": "SPY", "amount": 250.0}]},
         "sell": {"items": []},
     }
-    monkeypatch.setattr(api_payloads, "universe_payload", lambda: {"rows": [{"symbol": "SPY"}]})
-    monkeypatch.setattr(api_payloads, "load_dca_plan", lambda rows, **kwargs: plan)
+    _patch_payloads(monkeypatch, "universe_payload", lambda: {"rows": [{"symbol": "SPY"}]})
+    _patch_payloads(monkeypatch, "load_dca_plan", lambda rows, **kwargs: plan)
     monkeypatch.setattr(dca_bot.DCAAlgorithm, "plan", lambda self, config: plan)
     monkeypatch.setattr(dca, "unknown_plan_symbols", lambda *a, **kw: [])
     monkeypatch.setattr(dca_bot, "unknown_plan_symbols", lambda *a, **kw: [])
@@ -494,9 +532,9 @@ def _dca_backtest_history(monkeypatch, strategy, plan, *, price=100.0, equity=10
     config = Config(symbols=symbols, cash_buffer=0.0, transaction_cost_bps=0.0,
                     backtest_starting_equity=equity)
 
-    monkeypatch.setattr(api_payloads, "get_config", lambda *a, **kw: config)
-    monkeypatch.setattr(api_payloads, "create_data_client", lambda config: object())
-    monkeypatch.setattr(api_payloads, "fetch_daily_bars", lambda syms, **kw: {s: bars[s] for s in syms})
+    _patch_payloads(monkeypatch, "get_config", lambda *a, **kw: config)
+    _patch_payloads(monkeypatch, "create_data_client", lambda config: object())
+    _patch_payloads(monkeypatch, "fetch_daily_bars", lambda syms, **kw: {s: bars[s] for s in syms})
     monkeypatch.setattr(dca_bot.DCAAlgorithm, "plan", lambda self, config: plan)
     monkeypatch.setattr(dca_bot, "broker_supports_fractional_shares", lambda account_id: True)
 
@@ -559,8 +597,21 @@ def test_defensive_momentum_signals_include_inactive_universe_rows(monkeypatch) 
     from src.core.interfaces import AlgorithmContext
 
     def intraday(symbol: str) -> pd.DataFrame:
+        # Genuinely minute-spaced, because the fast horizons are wall-clock: 200 fifteen-minute
+        # bars span ~50 hours, enough to reach the 1170-minute micro lookback. Daily bars here
+        # would put every horizon inside a single observation and score the field flat.
         step = 0.8 if symbol == "XSD" else -0.2 if symbol == "VXX" else 0.05
-        return _strategy_bars([100 + index * step for index in range(80)])
+        prices = [100 + index * step for index in range(200)]
+        return pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2024-01-02 14:30", periods=len(prices), freq="15min", tz="UTC"),
+                "open": prices,
+                "high": [price * 1.01 for price in prices],
+                "low": [price * 0.99 for price in prices],
+                "close": [price * 1.002 for price in prices],
+                "volume": [1_000_000 + index for index in range(len(prices))],
+            }
+        )
 
     def daily(symbol: str) -> pd.DataFrame:
         step = 0.5 if symbol in {"SPY", "XSD"} else -0.2 if symbol == "VXX" else 0.05
@@ -571,7 +622,7 @@ def test_defensive_momentum_signals_include_inactive_universe_rows(monkeypatch) 
         return AlgorithmContext(
             config=config,
             bars_by_symbol={symbol: daily(symbol) for symbol in symbols},
-            intraday_bars_by_symbol={symbol: intraday(symbol) for symbol in symbols},
+            history_bars_by_symbol={symbol: intraday(symbol) for symbol in symbols},
             sentiment_scores={"SPY": 0.5, "XSD": 0.3},
             latest_prices={symbol: float(daily(symbol)["close"].iloc[-1]) for symbol in symbols},
         )
