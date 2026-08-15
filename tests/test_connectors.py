@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 
+import pytest
+
 import pandas as pd
 
 from src.brokerages import alpaca_client
@@ -301,6 +303,9 @@ def test_fetch_schwab_eod_bars_parses_price_history(monkeypatch) -> None:
     )
 
     def fake_request(provider, category, url, params=None, headers=None):
+        # The EOD fetch makes two calls now: dividend metadata, then the price history.
+        if url.endswith("/quotes"):
+            return {"SPY": {"fundamental": {"divAmount": 0.0, "divFreq": 0}}}
         captured.update({"provider": provider, "category": category, "params": params, "headers": headers})
         return {
             "candles": [
@@ -566,3 +571,38 @@ def test_a_symbol_no_provider_can_answer_comes_back_empty() -> None:
 
     assert not bars["AAA"].empty
     assert bars["MISSING"].empty
+
+
+def test_schwab_closes_are_back_adjusted_for_dividends() -> None:
+    """Schwab's /pricehistory has no adjustment parameter, so the connector applies one.
+
+    Without it a cash sleeve reads as flat -- SGOV loses its whole 3.8% a year -- and every
+    dividend payer is marked down against non-payers in a cross-sectional ranking.
+    """
+    import pandas as pd
+
+    from src.connectors.service import _apply_dividend_adjustment
+
+    dates = pd.date_range("2026-01-01", periods=5, freq="D", tz="UTC")
+    bars = pd.DataFrame({"timestamp": dates, "close": [100.0] * 5,
+                         "open": [100.0] * 5, "high": [100.0] * 5, "low": [100.0] * 5})
+    # One $1 payment going ex on the 3rd, quarterly so no earlier payment lands in range.
+    dividend = {"amount": 1.0, "frequency": 4, "ex_date": pd.Timestamp("2026-01-03", tz="UTC")}
+
+    adjusted = _apply_dividend_adjustment(bars, dividend)
+
+    before = adjusted["close"].iloc[:2].tolist()
+    after = adjusted["close"].iloc[2:].tolist()
+    assert all(value == pytest.approx(99.0) for value in before), "pre-ex prices scale down by the payment"
+    assert all(value == 100.0 for value in after), "prices from the ex-date onward are untouched"
+
+
+def test_a_symbol_without_dividend_metadata_is_left_alone() -> None:
+    import pandas as pd
+
+    from src.connectors.service import _apply_dividend_adjustment
+
+    bars = pd.DataFrame({"timestamp": pd.date_range("2026-01-01", periods=3, freq="D", tz="UTC"),
+                         "close": [10.0, 11.0, 12.0]})
+
+    assert _apply_dividend_adjustment(bars, {}).equals(bars)
