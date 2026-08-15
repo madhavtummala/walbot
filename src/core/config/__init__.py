@@ -72,7 +72,6 @@ from .defaults import (  # noqa: F401
     TRANSACTION_COST_BPS,
     UNIVERSE_FILE,
     UNNAMED_ACCOUNT_ID,
-    UnknownAccountError,
     VOLUME_LOOKBACK_DAYS,
     VOLUME_MOMENTUM_WEIGHT,
 )
