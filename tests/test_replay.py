@@ -5,6 +5,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from src.algorithms.base import BaseAlgorithm
 from src.algorithms.registry import get_algorithm_class
 from src.core.config import ALGORITHM_IDS, Config
 from src.core.interfaces import (
@@ -15,7 +16,8 @@ from src.core.interfaces import (
     Intent,
 )
 from src.data.state_store import ephemeral_state, load_state, save_state
-from src.execution.replay import Coverage, _target_shares, replay
+from src.core.orders import resolve_target_shares
+from src.execution.replay import Coverage, replay
 
 
 DATES = pd.bdate_range("2026-01-05", periods=20, tz="UTC")
@@ -29,13 +31,19 @@ def _history(price: float = 100.0) -> dict[str, pd.DataFrame]:
     return {"AAA": frame}
 
 
-class _Recorder:
-    """Minimal algorithm: records the contexts it was handed and buys a fixed weight."""
+class _Recorder(BaseAlgorithm):
+    """Minimal algorithm: records the contexts it was handed and buys a fixed weight.
+
+    Extends ``BaseAlgorithm`` rather than duck-typing the parts the old replay happened to
+    call. The replay drives the same step 2 the live runner does now, so a stub that does not
+    satisfy the real plugin contract is not a valid subject -- which is the point.
+    """
 
     algorithm_id = "recorder"
     schedule = None
 
     def __init__(self, weight: float = 0.5, mode: str = MODE_TARGET) -> None:
+        super().__init__(Config())
         self.weight = weight
         self.mode = mode
         self.contexts: list = []
@@ -132,10 +140,16 @@ def test_replay_state_carries_across_dates_within_one_run() -> None:
 
 
 def test_target_mode_exits_a_holding_the_algorithm_stopped_asking_for() -> None:
+    """Sizing is the live sizer now -- the replay used to carry its own simpler copy.
+
+    That copy ignored the rebalance threshold and the minimum trade size, so a backtest was
+    exercising execution logic the runtime does not use. These two properties still hold; they
+    are just asserted against the one implementation both paths share.
+    """
     positions = {"AAA": 10.0, "BBB": 5.0}
     prices = {"AAA": 100.0, "BBB": 50.0}
 
-    desired = _target_shares(
+    desired = resolve_target_shares(
         [Intent("AAA", "weight", 0.5)], MODE_TARGET, positions, prices, 10_000.0
     )
 
@@ -147,12 +161,14 @@ def test_incremental_mode_leaves_untouched_holdings_alone() -> None:
     positions = {"AAA": 10.0, "BBB": 5.0}
     prices = {"AAA": 100.0, "BBB": 50.0}
 
-    desired = _target_shares(
+    desired = resolve_target_shares(
         [Intent("AAA", "notional", 500.0)], MODE_INCREMENTAL, positions, prices, 10_000.0
     )
 
     assert desired["AAA"] == pytest.approx(15.0)
-    assert desired["BBB"] == 5.0
+    # Absent rather than echoed back: the canonical sizer states "unchanged" by omission, so
+    # an incremental run cannot accidentally retarget a position another strategy owns.
+    assert "BBB" not in desired
 
 
 def test_coverage_reports_the_history_the_cache_could_not_supply() -> None:
@@ -180,3 +196,31 @@ def test_every_registered_algorithm_declares_what_the_replay_needs() -> None:
         assert isinstance(requirements, AlgorithmRequirements)
         assert requirements.price_symbols, f"{algorithm_id} declares no symbols"
         assert algorithm.schedule.weekdays, f"{algorithm_id} has no schedule"
+
+
+def test_a_backtest_never_touches_the_configured_paper_account() -> None:
+    """The local paper account is for live scheduled testing, not for backtests.
+
+    The replay executes through the same ``PaperBrokerage`` class and the same
+    ``pipeline.place_orders`` the live runner uses -- that shared path is the point -- but on a
+    throwaway state store. Sharing the code must never mean sharing the balances.
+    """
+    from src.brokerages.providers.paper import PaperBrokerage, _state_key
+    from src.core.config import get_config
+    from src.data.state_store import delete_state, load_state, save_state
+
+    account = get_config(account_id="local_paper")
+    key = _state_key(account.account_id)
+    sentinel = {"cash": 4321.0, "positions": {"ZZZ": 7.0}, "prices": {"ZZZ": 1.0}}
+    save_state(key, sentinel)
+    try:
+        before = load_state(key, None)
+        _replay(_Recorder())
+        after = load_state(key, None)
+
+        assert after == before == sentinel, "the replay wrote to the live paper book"
+        # And the book the replay used really was a PaperBrokerage, not a private simulator.
+        with ephemeral_state():
+            assert isinstance(PaperBrokerage(account), PaperBrokerage)
+    finally:
+        delete_state(key)

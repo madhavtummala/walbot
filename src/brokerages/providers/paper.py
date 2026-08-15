@@ -149,6 +149,17 @@ class PaperBrokerage(BaseBrokerage):
             raise ValueError(f"Paper brokerage needs a price for {request.symbol} to fill an order")
 
         signed = request.quantity if request.action == "buy" else -request.quantity
+        cash = float(self.state.get("cash", 0.0))
+        if signed > 0 and signed * price > cash + 1e-9:
+            # A real broker refuses an order it cannot fund, and ``submit_planned_orders``
+            # already models that -- it catches the refusal, records the leg as rejected and
+            # carries on with the rest of the batch. Without this the book simply went
+            # negative: the backtest carried its own cash clamp to compensate, and a scheduled
+            # live paper run could spend money the account did not have.
+            raise ValueError(
+                f"Insufficient buying power for {request.symbol}: "
+                f"{signed * price:.2f} required, {cash:.2f} available"
+            )
         positions = dict(self.state.get("positions", {}))
         held = positions.get(request.symbol, 0.0)
         positions[request.symbol] = held + signed
@@ -157,7 +168,7 @@ class PaperBrokerage(BaseBrokerage):
 
         self._update_basis(request.symbol, held=held, signed=signed, price=price)
         self.state["positions"] = positions
-        self.state["cash"] = float(self.state.get("cash", 0.0)) - signed * price
+        self.state["cash"] = cash - signed * price
         self.state.setdefault("prices", {})[request.symbol] = price
         self._save()
 
