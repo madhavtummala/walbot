@@ -121,3 +121,44 @@ def test_importing_a_facade_stays_cheap(package: str) -> None:
     )
     result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
     assert result.stdout.strip() == "0", result.stdout + result.stderr
+
+
+def test_a_package_facade_never_exports_two_classes_with_one_name() -> None:
+    """A duplicated definition is worse than a duplicated line.
+
+    Splitting ``config.py`` left ``UnknownAccountError`` defined in both ``defaults`` and
+    ``accounts``. Both imported, both looked right, and the package facade exported one while
+    the code that raises used the other -- so ``except UnknownAccountError`` silently stopped
+    catching. Nothing failed until a test asserted the raise.
+
+    Scoped to what a facade re-exports, because two algorithms each defining their own
+    ``score_universe`` is not a clash -- nobody imports them through one name.
+    """
+    import importlib
+
+    files, _ = _module_graph()
+    packages = [m for m, p in files.items() if p.endswith("__init__.py")]
+
+    clashes: dict[str, list[str]] = {}
+    for package in packages:
+        try:
+            module = importlib.import_module(package)
+        except Exception:  # pragma: no cover - import errors are other tests' business
+            continue
+        for name in getattr(module, "__all__", []) or []:
+            exported = getattr(module, name, None)
+            if not isinstance(exported, type):
+                continue
+            defined_in = [
+                candidate
+                for candidate, path in files.items()
+                if candidate.startswith(package + ".")
+                and any(
+                    isinstance(node, ast.ClassDef) and node.name == name
+                    for node in ast.parse(open(path).read()).body
+                )
+            ]
+            if len(defined_in) > 1:
+                clashes[f"{package}.{name}"] = sorted(defined_in)
+
+    assert not clashes, f"exported name defined in more than one module: {clashes}"

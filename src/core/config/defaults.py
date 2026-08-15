@@ -112,23 +112,3 @@ DEFAULT_STRATEGY_ID = "fast_momentum"
 #: accounts config is read, and the id used when none is configured. Distinct from a real
 #: account id, so asking for it is not the same as asking for an account that does not exist.
 UNNAMED_ACCOUNT_ID = "default"
-
-
-class UnknownAccountError(KeyError):
-    """A named account is not in the accounts config.
-
-    Its own type so callers can tell "you asked for an account that does not exist" apart from
-    "the broker is unreachable". The first is a configuration mistake that must never be
-    papered over with a different account; the second is weather.
-    """
-
-    def __init__(self, account_id: str, known: list[str] | None = None) -> None:
-        self.account_id = account_id
-        self.known = known or []
-        super().__init__(
-            f"Unknown account {account_id!r}"
-            + (f"; configured accounts are {', '.join(self.known)}" if self.known else "")
-        )
-
-    def __str__(self) -> str:
-        return self.args[0] if self.args else f"Unknown account {self.account_id!r}"
