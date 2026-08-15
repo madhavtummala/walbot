@@ -80,6 +80,12 @@ def _provider_configured(config: Config, category: str, provider: str) -> bool:
     return False
 
 
+#: Providers that authenticate with something other than an api_key in the connector config:
+#: Alpaca reads its key pair from the environment, Schwab holds an OAuth token. Without this
+#: they look unconfigured and get skipped, however high they sit in the provider order.
+EXTERNAL_AUTH_PROVIDERS = {"alpaca", "schwab"}
+
+
 def _enabled(config: Config, category: str, provider: str, *, uses_external_auth: bool = False) -> bool:
     if not _provider_configured(config, category, provider):
         return False
@@ -1335,7 +1341,7 @@ def fetch_latest_market_quotes(
 
     has_enabled_provider = any(
         provider in MARKET_FETCHERS
-        and _enabled(config, MARKET_CATEGORY, provider, uses_external_auth=(provider == "alpaca"))
+        and _enabled(config, MARKET_CATEGORY, provider, uses_external_auth=(provider in EXTERNAL_AUTH_PROVIDERS))
         for provider in providers
     )
 
@@ -1353,7 +1359,7 @@ def fetch_latest_market_quotes(
         for index, provider in enumerate(providers):
             if provider not in MARKET_FETCHERS:
                 continue
-            next_provider = _next_provider_name(providers, index, MARKET_FETCHERS, config, MARKET_CATEGORY, {"alpaca"})
+            next_provider = _next_provider_name(providers, index, MARKET_FETCHERS, config, MARKET_CATEGORY, EXTERNAL_AUTH_PROVIDERS)
             if provider_is_limited(provider):
                 log = logger.info if next_provider else logger.warning
                 log(
@@ -1362,7 +1368,7 @@ def fetch_latest_market_quotes(
                     _fallback_suffix(next_provider),
                 )
                 continue
-            if not _enabled(config, MARKET_CATEGORY, provider, uses_external_auth=(provider == "alpaca")):
+            if not _enabled(config, MARKET_CATEGORY, provider, uses_external_auth=(provider in EXTERNAL_AUTH_PROVIDERS)):
                 continue
 
             missing = [symbol for symbol in wanted if symbol not in quotes]

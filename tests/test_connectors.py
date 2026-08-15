@@ -606,3 +606,26 @@ def test_a_symbol_without_dividend_metadata_is_left_alone() -> None:
                          "close": [10.0, 11.0, 12.0]})
 
     assert _apply_dividend_adjustment(bars, {}).equals(bars)
+
+
+def test_schwab_counts_as_configured_without_an_api_key() -> None:
+    """It authenticates with an OAuth token, not a key in the connector config.
+
+    _enabled treated "no api_key" as "not configured", so Schwab was skipped for quotes
+    however high it sat in the provider order -- the watchlist and the prices used to size
+    orders silently kept coming from Alpaca's IEX feed.
+    """
+    from src.connectors.service import EXTERNAL_AUTH_PROVIDERS, MARKET_CATEGORY, _enabled
+
+    config = Config(data_source_configs={"market_data": {"providers": {"schwab": {}}}})
+
+    assert "schwab" in EXTERNAL_AUTH_PROVIDERS
+    assert _enabled(config, MARKET_CATEGORY, "schwab", uses_external_auth=True) is True
+
+
+def test_a_provider_switched_off_explicitly_stays_off() -> None:
+    from src.connectors.service import MARKET_CATEGORY, _enabled
+
+    config = Config(data_source_configs={"market_data": {"providers": {"schwab": {"enabled": False}}}})
+
+    assert _enabled(config, MARKET_CATEGORY, "schwab", uses_external_auth=True) is False
