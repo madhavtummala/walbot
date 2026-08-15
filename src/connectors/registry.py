@@ -78,6 +78,20 @@ class _LazyFetchers(dict):
     def get(self, name, default=None):  # type: ignore[override]
         return self[name] if name in self._paths else default
 
+    # Every value-producing accessor has to resolve, not just ``[]``. Subclassing ``dict`` and
+    # seeding it with ``None`` placeholders means the inherited ``values()``, ``items()`` and
+    # ``copy()`` would hand back those placeholders -- a mapping that answers ``in`` and ``[]``
+    # correctly while quietly reporting ``None`` for anything not yet imported. Nothing calls
+    # them today, which is exactly why it would have been found late.
+    def values(self):  # type: ignore[override]
+        return [self[name] for name in self._paths]
+
+    def items(self):  # type: ignore[override]
+        return [(name, self[name]) for name in self._paths]
+
+    def copy(self) -> dict:  # type: ignore[override]
+        return dict(self.items())
+
 
 QUOTE_FETCHER_REGISTRY = _LazyFetchers(QUOTE_FETCHERS)
 INTRADAY_BAR_REGISTRY = _LazyFetchers(INTRADAY_BAR_FETCHERS)

@@ -706,3 +706,20 @@ def test_importing_connectors_does_not_import_every_provider_dependency() -> Non
         capture_output=True, text=True,
     )
     assert result.stdout.strip() == "0", result.stdout + result.stderr
+
+
+def test_the_lazy_registry_resolves_under_every_dict_accessor() -> None:
+    """It subclasses ``dict``, so it has to behave like one everywhere, not just on ``[]``.
+
+    Entries start as ``None`` placeholders and resolve on lookup. The inherited ``values()``,
+    ``items()`` and ``copy()`` returned those placeholders -- a mapping that answered ``in``
+    and ``[]`` correctly while reporting ``None`` for anything not yet imported. Nothing in the
+    codebase calls them today, which is exactly why it would have been found late and from a
+    confusing direction.
+    """
+    from src.connectors.registry import EOD_BAR_REGISTRY
+
+    assert all(callable(f) for f in EOD_BAR_REGISTRY.values())
+    assert all(callable(f) for _, f in EOD_BAR_REGISTRY.items())
+    assert all(callable(f) for f in EOD_BAR_REGISTRY.copy().values())
+    assert all(callable(EOD_BAR_REGISTRY[name]) for name in EOD_BAR_REGISTRY)
