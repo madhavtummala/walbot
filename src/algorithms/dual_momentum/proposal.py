@@ -13,7 +13,6 @@ from .scoring import base_scores, compute_features
 
 
 import logging
-from datetime import datetime
 from typing import Any
 
 import pandas as pd
@@ -21,13 +20,6 @@ import pandas as pd
 from ...core.interfaces import AlgorithmContext
 
 logger = logging.getLogger(__name__)
-
-STATE_KEY = "dual_momentum_runtime"
-
-EPSILON = 1e-9
-
-#: Trading days per year, for annualising a daily volatility estimate.
-TRADING_DAYS = 252
 
 
 
@@ -80,14 +72,13 @@ def build_signals(
     vol: dict[str, Any],
     covariance: dict[str, dict[str, float]],
     defensive_book: dict[str, float],
-    as_of: datetime,
     config: DualMomentumConfig,
 ) -> dict[str, dict[str, Any]]:
     """Per-symbol rows: the dashboard's view, step 2's input, and the audit record.
 
-    Run-level facts (regime, volatility scale, timestamp) are denormalised onto every row
-    because ``refine`` receives only these signals -- decision metadata does not travel with
-    them.
+    Run-level facts (regime, volatility scale) are denormalised onto every row because
+    ``refine`` receives only these signals -- decision metadata does not travel with them. The
+    timestamp is not among them any more: ``refine`` takes it as an argument.
     """
     signals: dict[str, dict[str, Any]] = {}
     for symbol, row in scored.items():
@@ -134,7 +125,6 @@ def build_signals(
             "vol_scale": float(vol.get("scale", 1.0)),
             "portfolio_volatility": float(vol.get("portfolio_volatility", 0.0)),
             "vol_below_floor": 1 if vol.get("below_floor") else 0,
-            "as_of": as_of.isoformat(),
         }
     return signals
 

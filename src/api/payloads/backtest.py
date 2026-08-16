@@ -305,11 +305,11 @@ def _backtest_response(
     }
 
 
-def _strategy_history_bars(strategy: str, period: str, config) -> dict[str, pd.DataFrame]:
+def _fetch_backtest_history(strategy: str, period: str, config) -> dict[str, pd.DataFrame]:
     algorithm = get_algorithm_class(strategy).from_config(config)
     requirements = algorithm.requirements(config, {})
     symbols = requirements.price_symbols or config.symbols
-    return fetch_daily_bars(
+    bars_by_symbol = fetch_daily_bars(
         symbols,
         config=config,
         lookback_days=int(requirements.daily_lookback_days or config.momentum_lookback_days),
@@ -318,6 +318,15 @@ def _strategy_history_bars(strategy: str, period: str, config) -> dict[str, pd.D
         data_client=create_data_client(config),
         include_latest=True,
     )
+
+    daily_history: dict[str, pd.DataFrame] = {}
+    for symbol, frame in bars_by_symbol.items():
+        work = prepared_strategy_frame(frame)
+        if work.empty:
+            continue
+        work["timestamp"] = pd.to_datetime(work["timestamp"], utc=True)
+        daily_history[symbol] = work.sort_values("timestamp").set_index("timestamp")
+    return daily_history
 
 
 def _configured_history_providers(config) -> list[str]:
@@ -336,27 +345,16 @@ def _compute_backtest(strategy: str, period: str) -> dict[str, Any]:
     algorithm declares in ``requirements()`` is what the replay loads, and whatever ``analyze``
     decides is what gets traded -- so a backtest cannot test different logic than the runtime.
     """
-    # One connection for the whole replay. Thousands of cache reads happen below, and paying
-    # the open-plus-schema-init cost on each made the connection the dominant expense. Scoped
-    # to this call so the long-running services keep their short-lived connections and can
-    # still share the database file -- see ``pooled_connections``.
-    with pooled_connections():
-        return _replay_backtest(strategy, period)
-
-
-def _replay_backtest(strategy: str, period: str) -> dict[str, Any]:
     starting_equity = _backtest_starting_equity()
     config = get_config(strategy_id=strategy)
     algorithm = get_algorithm_class(strategy).from_config(config)
     schedule = algorithm.schedule
 
-    daily_history: dict[str, pd.DataFrame] = {}
-    for symbol, frame in _strategy_history_bars(strategy, period, config).items():
-        work = prepared_strategy_frame(frame)
-        if work.empty:
-            continue
-        work["timestamp"] = pd.to_datetime(work["timestamp"], utc=True)
-        daily_history[symbol] = work.sort_values("timestamp").set_index("timestamp")
+    # The fetch happens outside any pooled connection. It is network I/O that writes provider
+    # bars into the cache, and holding the database file open across minutes of provider calls
+    # locks every other process out -- the MCP server's reads abort with "Conflicting lock is
+    # held". Short-lived connections keep the file free while the fetch runs.
+    daily_history = _fetch_backtest_history(strategy, period, config)
     if not daily_history:
         raise RuntimeError("No historical bars were available for the backtest.")
 
@@ -367,15 +365,20 @@ def _replay_backtest(strategy: str, period: str) -> dict[str, Any]:
     if len(trade_dates) < 2:
         raise RuntimeError("No common trading dates were available for the backtest period.")
 
-    history_df, coverage = replay(
-        algorithm,
-        config,
-        daily_history=daily_history,
-        trade_dates=trade_dates,
-        should_run=lambda date: int(date.dayofweek) in schedule.weekdays,
-        starting_equity=starting_equity,
-        history_providers=_configured_history_providers(config),
-    )
+    # The replay issues thousands of cache reads but never writes, so it gets the read-only
+    # pool: a held read-write connection would lock other processes out for the whole replay,
+    # while read-only connections let every other process keep reading -- see
+    # ``pooled_connections``.
+    with pooled_connections(read_only=True):
+        history_df, coverage = replay(
+            algorithm,
+            config,
+            daily_history=daily_history,
+            trade_dates=trade_dates,
+            should_run=lambda date: int(date.dayofweek) in schedule.weekdays,
+            starting_equity=starting_equity,
+            history_providers=_configured_history_providers(config),
+        )
     payload = _backtest_response(
         history_df,
         strategy=strategy,

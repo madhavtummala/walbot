@@ -19,7 +19,11 @@ from typing import Any, Iterable
 import pandas as pd
 
 from src.core.interfaces import CashDividend
-from src.data.duckdb_store import DUCKDB_STATE_PATH, _connect, create_dividends_table
+from src.data.duckdb_store import (
+    _connect,
+    connection_is_read_only,
+    create_dividends_table,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +85,7 @@ def _collapse(dividends: Iterable[CashDividend]) -> list[CashDividend]:
 def write_dividends(
     dividends: Iterable[CashDividend],
     *,
-    db_path: str = DUCKDB_STATE_PATH,
+    db_path: str | None = None,
 ) -> int:
     """Upsert distributions keyed by ``(symbol, ex_date)``.
 
@@ -126,7 +130,7 @@ def read_dividends(
     *,
     start: date | None = None,
     end: date | None = None,
-    db_path: str = DUCKDB_STATE_PATH,
+    db_path: str | None = None,
 ) -> pd.DataFrame:
     """Distributions as a frame, oldest ex-date first."""
     clauses: list[str] = []
@@ -143,7 +147,11 @@ def read_dividends(
         params.append(end)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     with _connect(db_path) as connection:
-        create_dividends_table(connection)
+        # A read-only connection (inside a read-only batch pool) cannot run the CREATE, but
+        # then it does not need to: the table was created by whichever read-write connection
+        # opened the file first. See ``connection_is_read_only``.
+        if not connection_is_read_only(connection):
+            create_dividends_table(connection)
         frame = connection.execute(
             f"SELECT {', '.join(DIVIDEND_COLUMNS)} FROM dividends {where} ORDER BY symbol, ex_date",
             params,
@@ -158,7 +166,7 @@ def dividends_by_symbol(
     *,
     start: date | None = None,
     end: date | None = None,
-    db_path: str = DUCKDB_STATE_PATH,
+    db_path: str | None = None,
 ) -> dict[str, pd.Series]:
     """``{symbol: Series(amount, indexed by ex-date)}`` -- the shape both consumers want."""
     frame = read_dividends(symbols, start=start, end=end, db_path=db_path)
@@ -174,46 +182,3 @@ def dividends_by_symbol(
     return out
 
 
-def sync_dividends(
-    symbols: list[str],
-    config: Any,
-    *,
-    start: date,
-    end: date | None = None,
-    provider_order: list[str] | None = None,
-    db_path: str = DUCKDB_STATE_PATH,
-) -> dict[str, Any]:
-    """Fetch and store distributions, walking the configured providers until one answers.
-
-    Falls through on failure rather than on emptiness: a symbol with no distributions is a
-    real answer, not a gap to retry against the next source.
-    """
-    from src.connectors.dividends import (
-        DEFAULT_DIVIDEND_PROVIDER_ORDER,
-        DIVIDEND_PROVIDERS,
-    )
-
-    end = end or datetime.now(timezone.utc).date()
-    order = provider_order or getattr(
-        config, "dividend_provider_order", DEFAULT_DIVIDEND_PROVIDER_ORDER
-    )
-    errors: dict[str, str] = {}
-    for name in order:
-        factory = DIVIDEND_PROVIDERS.get(str(name).lower())
-        if factory is None:
-            continue
-        try:
-            provider = factory(config)
-            fetched = provider.fetch_dividends(symbols, start, end)
-        except Exception as error:
-            errors[str(name)] = f"{type(error).__name__}: {error}"
-            logger.warning("Dividend provider %s failed: %s", name, error)
-            continue
-        written = write_dividends(fetched, db_path=db_path)
-        return {
-            "provider": str(name),
-            "events": written,
-            "symbols": len(symbols),
-            "errors": errors,
-        }
-    return {"provider": None, "events": 0, "symbols": len(symbols), "errors": errors}

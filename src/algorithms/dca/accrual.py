@@ -13,9 +13,11 @@ and lets missed runs self-correct because the next run observes a longer interva
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
+from ...common.config_utils import as_float
+from ...common.timeutils import parse_iso_utc as _parse_timestamp
 from ...data.state_store import load_state, save_state
 
 #: Average hours in a calendar month (365.25 * 24 / 12).
@@ -51,27 +53,12 @@ class SymbolState:
         if not isinstance(raw, dict):
             return cls()
         return cls(
-            accrued=_as_float(raw.get("accrued")),
+            accrued=as_float(raw.get("accrued")),
             last_run_at=str(raw.get("last_run_at") or ""),
-            deployed_this_month=_as_float(raw.get("deployed_this_month")),
+            deployed_this_month=as_float(raw.get("deployed_this_month")),
             month=str(raw.get("month") or ""),
             path_started_at=str(raw.get("path_started_at") or ""),
         )
-
-
-def _as_float(value: Any, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _parse_timestamp(value: str) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def accrue(

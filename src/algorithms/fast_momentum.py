@@ -1,21 +1,19 @@
 from __future__ import annotations
 
-from ..data.signals.sentiment import sentiment_scores_from_records
-
-import dataclasses
 import logging
 import math
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import datetime
 from typing import Any
 
 import pandas as pd
 
-from .base import BaseAlgorithm, minutes_knob
-from ..connectors import fetch_latest_news_sentiment, fetch_market_history
+from .allocation import allocate_by_score, rank_by_score, scale_to_gross
+from .base import BaseAlgorithm
+from .risk import session_drawdown_breached
+from ..common.config_utils import account_sizing_fallbacks, load_tuning, tuning_section
 from ..core.interfaces import AlgorithmContext, AlgorithmDecision, AlgorithmRequirements, Schedule
-from ..data import fetch_daily_bars
-from ..data.bars import realized_volatility, return_over_minutes, signal_price
+from ..data.bars import closes_of, realized_volatility, return_over_minutes, return_over_periods
 from ..data.state_store import load_state, save_state
 
 logger = logging.getLogger(__name__)
@@ -66,73 +64,10 @@ class DefensiveMomentumConfig:
 
     @classmethod
     def from_runtime_config(cls, config: Any) -> "DefensiveMomentumConfig":
-        raw = {}
-        if isinstance(getattr(config, "algorithm_configs", None), dict):
-            raw = config.algorithm_configs.get("fast_momentum", {}) or {}
-        if not isinstance(raw, dict):
-            raw = {}
-
-        def number(key: str, default: float) -> float:
-            try:
-                return float(raw.get(key, default))
-            except (TypeError, ValueError):
-                return default
-
-        def integer(key: str, default: int) -> int:
-            try:
-                return int(raw.get(key, default))
-            except (TypeError, ValueError):
-                return default
-
-        def symbols(key: str, default: list[str]) -> list[str]:
-            value = raw.get(key, default)
-            if isinstance(value, str):
-                parsed = [item.strip().upper() for item in value.split(",") if item.strip()]
-            elif isinstance(value, list):
-                parsed = [str(item).strip().upper() for item in value if str(item).strip()]
-            else:
-                parsed = []
-            return parsed or list(default)
-
-        defaults = cls()
-        return cls(
-            risk_on_universe=symbols("risk_on_universe", defaults.risk_on_universe),
-            defensive_universe=symbols("defensive_universe", defaults.defensive_universe),
-            intraday_bar_minutes=integer("intraday_bar_minutes", defaults.intraday_bar_minutes),
-            nano_momentum_lookback_minutes=minutes_knob(
-                raw, "nano_momentum_lookback_minutes", defaults.nano_momentum_lookback_minutes
-            ),
-            micro_momentum_lookback_minutes=minutes_knob(
-                raw, "micro_momentum_lookback_minutes", defaults.micro_momentum_lookback_minutes
-            ),
-            meso_trend_lookback_days=integer("meso_trend_lookback_days", defaults.meso_trend_lookback_days),
-            macro_trend_lookback_days=integer("macro_trend_lookback_days", defaults.macro_trend_lookback_days),
-            sentiment_lookback_minutes=integer("sentiment_lookback_minutes", defaults.sentiment_lookback_minutes),
-            max_gross_exposure=number("max_gross_exposure", defaults.max_gross_exposure),
-            max_single_position_weight=number("max_single_position_weight", defaults.max_single_position_weight),
-            max_positions=integer("max_positions", defaults.max_positions),
-            min_risk_on_score=number("min_risk_on_score", defaults.min_risk_on_score),
-            min_risk_on_micro_return=number("min_risk_on_micro_return", defaults.min_risk_on_micro_return),
-            min_defensive_score=number("min_defensive_score", defaults.min_defensive_score),
-            min_score_delta_to_replace=number("min_score_delta_to_replace", defaults.min_score_delta_to_replace),
-            per_trade_value_min=number("per_trade_value_min", getattr(config, "min_trade_dollars", defaults.per_trade_value_min)),
-            rebalance_threshold=number("rebalance_threshold", getattr(config, "rebalance_threshold", defaults.rebalance_threshold)),
-            w_price_nano=number("w_price_nano", defaults.w_price_nano),
-            w_price_micro=number("w_price_micro", defaults.w_price_micro),
-            w_price_meso=number("w_price_meso", defaults.w_price_meso),
-            w_price_macro=number("w_price_macro", defaults.w_price_macro),
-            w_sentiment=number("w_sentiment", defaults.w_sentiment),
-            w_pullback_uptrend=number("w_pullback_uptrend", defaults.w_pullback_uptrend),
-            pullback_meso_z_threshold=number("pullback_meso_z_threshold", defaults.pullback_meso_z_threshold),
-            pullback_nano_z_threshold=number("pullback_nano_z_threshold", defaults.pullback_nano_z_threshold),
-            pullback_nano_z_cap=number("pullback_nano_z_cap", defaults.pullback_nano_z_cap),
-            pullback_min_micro_return=number("pullback_min_micro_return", defaults.pullback_min_micro_return),
-            volatility_lookback_minutes=minutes_knob(
-                raw, "volatility_lookback_minutes", defaults.volatility_lookback_minutes
-            ),
-            max_intraday_volatility=number("max_intraday_volatility", defaults.max_intraday_volatility),
-            high_volatility_weight_scale=number("high_volatility_weight_scale", defaults.high_volatility_weight_scale),
-            intraday_drawdown_limit=number("intraday_drawdown_limit", defaults.intraday_drawdown_limit),
+        return load_tuning(
+            cls,
+            tuning_section(config, "fast_momentum"),
+            fallbacks=account_sizing_fallbacks(config),
         )
 
     @property
@@ -152,15 +87,6 @@ class DefensiveMomentumConfig:
         return max(self.meso_trend_lookback_days, self.macro_trend_lookback_days)
 
 
-def _return_over(closes: pd.Series, bars: int) -> float:
-    """Positional return, still used for the daily series where a bar *is* a day."""
-    if len(closes) <= bars or bars <= 0:
-        return 0.0
-    start = float(closes.iloc[-bars - 1])
-    end = float(closes.iloc[-1])
-    return end / start - 1.0 if start > 0 else 0.0
-
-
 def compute_price_features(
     symbol: str,
     history_bars: pd.DataFrame,
@@ -174,20 +100,15 @@ def compute_price_features(
     The two slow ones stay positional on daily closes: "the 60-day return" is a statement
     about sessions, not about elapsed time.
     """
-    daily = daily_bars.copy() if isinstance(daily_bars, pd.DataFrame) else pd.DataFrame()
-    daily_closes = signal_price(daily).dropna() if not daily.empty else pd.Series(dtype=float)
+    daily_closes = closes_of(daily_bars)
 
     volatility = realized_volatility(history_bars, config.volatility_lookback_minutes)
     nano_return = return_over_minutes(history_bars, config.nano_momentum_lookback_minutes)
     micro_return = return_over_minutes(history_bars, config.micro_momentum_lookback_minutes)
-    meso_return = _return_over(daily_closes, config.meso_trend_lookback_days)
-    macro_return = _return_over(daily_closes, config.macro_trend_lookback_days)
+    meso_return = return_over_periods(daily_closes, config.meso_trend_lookback_days)
+    macro_return = return_over_periods(daily_closes, config.macro_trend_lookback_days)
 
-    closes = (
-        signal_price(history_bars).dropna()
-        if isinstance(history_bars, pd.DataFrame) and not history_bars.empty
-        else pd.Series(dtype=float)
-    )
+    closes = closes_of(history_bars)
     return {
         "symbol": symbol.upper(),
         "nano_return": nano_return,
@@ -250,61 +171,7 @@ def compute_composite_scores(
     return scored
 
 
-def get_history_bars(
-    symbols: list[str],
-    lookback_minutes: int,
-    config: Any,
-    data_client: Any = None,
-    bar_minutes: int | None = None,
-) -> dict[str, pd.DataFrame]:
-    """Fetch the trailing ``lookback_minutes`` of bars per symbol, at the best grid available."""
-    return fetch_market_history(
-        symbols,
-        config,
-        lookback_minutes=lookback_minutes,
-        bar_minutes=bar_minutes or DefensiveMomentumConfig.from_runtime_config(config).intraday_bar_minutes,
-        data_client=data_client,
-    )
 
-
-def get_daily_bars(symbols: list[str], lookback_days: int, config: Any, data_client: Any = None) -> dict[str, pd.DataFrame]:
-    """Fetch daily OHLCV bars for the absolute momentum trend filter."""
-    return fetch_daily_bars(
-        symbols,
-        lookback_days=lookback_days,
-        ma_days=0,
-        extra_buffer_days=5,
-        data_client=data_client,
-        include_latest=True,
-        config=config,
-    )
-
-
-def get_sentiment_snapshot(
-    symbols: list[str],
-    lookback_minutes: int,
-    config: Any,
-) -> tuple[dict[str, float], float]:
-    """Normalize recent provider sentiment records into symbol and market scores."""
-    records: list[dict[str, Any]] = []
-    providers = [str(item).lower() for item in getattr(config, "sentiment_data_provider_order", [])]
-    if not providers:
-        providers = [str(item).lower() for item in getattr(config, "news_sentiment_provider_order", [])]
-    if not providers:
-        providers = [""]
-    for provider in providers:
-        provider_config = config
-        if provider and dataclasses.is_dataclass(config):
-            provider_config = dataclasses.replace(config, news_sentiment_provider_order=[provider])
-        try:
-            records.extend(fetch_latest_news_sentiment(symbols, provider_config))
-        except Exception as exc:
-            logger.warning("Sentiment provider %s unavailable; continuing with neutral fallback: %s", provider or "default", exc)
-
-    symbol_sentiment, market_sentiment, _metadata, _providers = sentiment_scores_from_records(
-        symbols, records, lookback_minutes
-    )
-    return symbol_sentiment, market_sentiment
 
 
 def _defensive_momentum_reason(
@@ -352,18 +219,14 @@ def decide_target_weights(
         *,
         require_macro_trend: bool = True,
     ) -> list[dict[str, Any]]:
-        candidates = [
-            scores_by_symbol[symbol]
-            for symbol in symbols
-            if symbol in scores_by_symbol
-            and (not require_macro_trend or bool(scores_by_symbol[symbol].get("macro_trend_ok")))
-            and float(scores_by_symbol[symbol].get("score", 0.0)) >= min_score
-            and (
-                min_micro_return is None
-                or float(scores_by_symbol[symbol].get("micro_return", 0.0)) >= min_micro_return
-            )
-        ]
-        return sorted(candidates, key=lambda item: float(item.get("score", 0.0)), reverse=True)
+        return rank_by_score(
+            scores_by_symbol,
+            symbols,
+            min_score=min_score,
+            gate_key="micro_return",
+            min_gate=min_micro_return,
+            require_trend=require_macro_trend,
+        )
 
     candidates = ranked(config.risk_on_universe, config.min_risk_on_score, config.min_risk_on_micro_return)
     candidates.extend(ranked(config.defensive_universe, config.min_defensive_score))
@@ -387,41 +250,15 @@ def decide_target_weights(
     if not selected:
         selected = ranked(config.defensive_universe, config.min_defensive_score, require_macro_trend=False)[: max(config.max_positions, 0)]
 
-    remaining = list(selected)
-    remaining_exposure = max(config.max_gross_exposure, 0.0)
-    while remaining and remaining_exposure > 0:
-        positive_scores = [max(float(row.get("score", 0.0)), 0.0) for row in remaining]
-        total_score = sum(positive_scores)
-        allocated_any = False
-        next_remaining: list[dict[str, Any]] = []
-        for row, score in zip(remaining, positive_scores):
-            raw_weight = (
-                remaining_exposure / len(remaining)
-                if total_score <= 0
-                else remaining_exposure * score / total_score
-            )
-            if raw_weight >= config.max_single_position_weight:
-                weights[str(row["symbol"])] = config.max_single_position_weight
-                remaining_exposure -= config.max_single_position_weight
-                allocated_any = True
-            else:
-                next_remaining.append(row)
-        if not allocated_any:
-            for row, score in zip(remaining, positive_scores):
-                weight = (
-                    remaining_exposure / len(remaining)
-                    if total_score <= 0
-                    else remaining_exposure * score / total_score
-                )
-                weights[str(row["symbol"])] = max(0.0, min(weight, config.max_single_position_weight))
-            break
-        remaining = next_remaining
-
-    gross = sum(abs(weight) for weight in weights.values())
-    if gross > config.max_gross_exposure > 0:
-        scale = config.max_gross_exposure / gross
-        weights = {symbol: weight * scale for symbol, weight in weights.items()}
-    return weights
+    weights.update(
+        allocate_by_score(
+            selected,
+            config.max_gross_exposure,
+            config.max_positions,
+            config.max_single_position_weight,
+        )
+    )
+    return scale_to_gross(weights, config.max_gross_exposure)
 
 
 def apply_risk_guards(
@@ -430,9 +267,10 @@ def apply_risk_guards(
     current_weights: dict[str, float],
     equity: float,
     config: DefensiveMomentumConfig,
+    as_of: datetime,
 ) -> dict[str, float]:
     """Apply position caps, volatility filters, turnover threshold, and drawdown kill-switch."""
-    if intraday_kill_switch_triggered(equity, config):
+    if intraday_kill_switch_triggered(equity, config, as_of):
         logger.warning("Fast Momentum kill-switch active; target weights set to zero")
         return {symbol: 0.0 for symbol in target_weights}
 
@@ -451,37 +289,24 @@ def apply_risk_guards(
             capped = current_weights.get(symbol, 0.0)
         guarded[symbol] = capped
 
-    gross = sum(abs(weight) for weight in guarded.values())
-    if gross > config.max_gross_exposure > 0:
-        scale = config.max_gross_exposure / gross
-        guarded = {symbol: weight * scale for symbol, weight in guarded.items()}
-    return guarded
+    return scale_to_gross(guarded, config.max_gross_exposure)
 
 
-def intraday_kill_switch_triggered(equity: float, config: DefensiveMomentumConfig) -> bool:
-    """Track account equity from the first run of the day and stop entries after a drawdown breach."""
-    today = date.today().isoformat()
+def intraday_kill_switch_triggered(
+    equity: float, config: DefensiveMomentumConfig, as_of: datetime
+) -> bool:
+    """Track account equity from the first run of the session and flatten after a breach.
+
+    ``as_of`` is the moment the algorithm is reasoning about, and is required: it used to be
+    ``date.today()``, which is right live and wrong under replay, where every simulated date is
+    "today". See ``algorithms/risk.py``.
+    """
     state = load_state(STATE_KEY, {})
-    if state.get("date") != today:
-        state = {"date": today, "start_equity": equity, "halted": False}
-    start_equity = float(state.get("start_equity") or equity)
-    drawdown = equity / start_equity - 1.0 if start_equity > 0 else 0.0
-    if drawdown <= config.intraday_drawdown_limit:
-        state["halted"] = True
-    state["last_equity"] = equity
-    state["drawdown"] = drawdown
+    if not isinstance(state, dict):
+        state = {}
+    breached = session_drawdown_breached(state, equity, config.intraday_drawdown_limit, as_of)
     save_state(STATE_KEY, state)
-    return bool(state.get("halted"))
-
-
-def weights_from_positions(current_positions: dict[str, int], latest_prices: dict[str, float], equity: float) -> dict[str, float]:
-    """Convert current share positions to portfolio weights for turnover control."""
-    if equity <= 0:
-        return {}
-    return {
-        symbol: (shares * latest_prices.get(symbol, 0.0)) / equity
-        for symbol, shares in current_positions.items()
-    }
+    return breached
 
 
 def rows_from_scores(
@@ -684,6 +509,7 @@ class FastMomentumAlgorithm(BaseAlgorithm):
         snapshot: Any,
         latest_prices: dict[str, float],
         config: Any,
+        as_of: datetime,
     ) -> dict[str, float]:
         """Protect incumbents from churn, then apply the position-aware risk guards."""
         strategy_config = DefensiveMomentumConfig.from_runtime_config(config)
@@ -693,4 +519,6 @@ class FastMomentumAlgorithm(BaseAlgorithm):
             row.setdefault("symbol", symbol)
 
         kept = apply_stickiness(target_weights, scores, current_weights, strategy_config)
-        return apply_risk_guards(kept, scores, current_weights, snapshot.equity, strategy_config)
+        return apply_risk_guards(
+            kept, scores, current_weights, snapshot.equity, strategy_config, as_of
+        )

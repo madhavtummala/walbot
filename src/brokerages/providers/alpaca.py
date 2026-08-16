@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from ..base import BaseBrokerage
 from ...core.interfaces import OrderRequest
 from src.brokerages.alpaca_client import (

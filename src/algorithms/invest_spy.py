@@ -1,22 +1,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 import math
 import pandas as pd
 
-from .base import BaseAlgorithm, minutes_knob
+from .allocation import allocate_by_score, rank_by_score
+from .base import BaseAlgorithm
 from .fast_momentum import apply_risk_guards, compute_composite_scores
+from ..common.config_utils import account_sizing_fallbacks, load_tuning, tuning_section
 from ..core.interfaces import DAILY_AT_OPEN, AlgorithmContext, AlgorithmDecision, AlgorithmRequirements
-from ..data.bars import realized_volatility, return_over_minutes, signal_price
+from ..data.bars import closes_of, realized_volatility, return_over_minutes, return_over_periods
 
 
 @dataclass(frozen=True)
 class InvestSpyConfig:
     """SPY-specific state strategy with separate growth, flat, falling, and crisis behavior."""
 
-    spy_symbol: str = "SPY"
+    spy_symbol: str = field(default="SPY", metadata={"coerce": "symbol"})
     equity_income_universe: list[str] = field(default_factory=lambda: ["XYLD"])
     defensive_universe: list[str] = field(default_factory=lambda: ["BIL"])
     crisis_hedge_universe: list[str] = field(default_factory=lambda: ["SH", "VXX"])
@@ -71,95 +74,13 @@ class InvestSpyConfig:
 
     @classmethod
     def from_runtime_config(cls, config: Any) -> "InvestSpyConfig":
-        raw = {}
-        if isinstance(getattr(config, "algorithm_configs", None), dict):
-            # Read every id this algorithm has had: it is ``spy_rotation`` now, but tuning
-            # saved earlier is filed under ``regime_rotation`` or ``invest_spy``, and the key
-            # on disk is still the oldest of the three.
-            sections = config.algorithm_configs
-            raw = next(
-                (
-                    sections[key]
-                    for key in ("spy_rotation", "regime_rotation", "invest_spy")
-                    if sections.get(key)
-                ),
-                {},
-            )
-        if not isinstance(raw, dict):
-            raw = {}
-
-        def number(key: str, default: float) -> float:
-            try:
-                return float(raw.get(key, default))
-            except (TypeError, ValueError):
-                return default
-
-        def integer(key: str, default: int) -> int:
-            try:
-                return int(raw.get(key, default))
-            except (TypeError, ValueError):
-                return default
-
-        def symbols(key: str, default: list[str]) -> list[str]:
-            value = raw.get(key, default)
-            if isinstance(value, str):
-                parsed = [item.strip().upper() for item in value.split(",") if item.strip()]
-            elif isinstance(value, list):
-                parsed = [str(item).strip().upper() for item in value if str(item).strip()]
-            else:
-                parsed = []
-            return parsed or list(default)
-
-        defaults = cls()
-        return cls(
-            spy_symbol=str(raw.get("spy_symbol", defaults.spy_symbol) or defaults.spy_symbol).strip().upper(),
-            equity_income_universe=symbols("equity_income_universe", defaults.equity_income_universe),
-            defensive_universe=symbols("defensive_universe", defaults.defensive_universe),
-            crisis_hedge_universe=symbols("crisis_hedge_universe", defaults.crisis_hedge_universe),
-            intraday_bar_minutes=integer("intraday_bar_minutes", defaults.intraday_bar_minutes),
-            micro_momentum_lookback_minutes=minutes_knob(
-                raw, "micro_momentum_lookback_minutes", defaults.micro_momentum_lookback_minutes
-            ),
-            meso_momentum_lookback_minutes=minutes_knob(
-                raw, "meso_momentum_lookback_minutes", defaults.meso_momentum_lookback_minutes
-            ),
-            macro_trend_lookback_days=integer("macro_trend_lookback_days", defaults.macro_trend_lookback_days),
-            sentiment_lookback_minutes=integer("sentiment_lookback_minutes", defaults.sentiment_lookback_minutes),
-            max_gross_exposure=number("max_gross_exposure", defaults.max_gross_exposure),
-            max_single_position_weight=number("max_single_position_weight", defaults.max_single_position_weight),
-            max_defensive_positions=integer("max_defensive_positions", defaults.max_defensive_positions),
-            max_crisis_hedge_positions=integer("max_crisis_hedge_positions", defaults.max_crisis_hedge_positions),
-            flat_equity_income_exposure=number("flat_equity_income_exposure", defaults.flat_equity_income_exposure),
-            max_crisis_hedge_exposure=number("max_crisis_hedge_exposure", defaults.max_crisis_hedge_exposure),
-            max_crisis_hedge_weight=number("max_crisis_hedge_weight", defaults.max_crisis_hedge_weight),
-            min_income_score=number("min_income_score", defaults.min_income_score),
-            min_defensive_score=number("min_defensive_score", defaults.min_defensive_score),
-            min_crisis_hedge_score=number("min_crisis_hedge_score", defaults.min_crisis_hedge_score),
-            min_crisis_hedge_meso_return=number("min_crisis_hedge_meso_return", defaults.min_crisis_hedge_meso_return),
-            growth_macro_return=number("growth_macro_return", defaults.growth_macro_return),
-            growth_meso_return=number("growth_meso_return", defaults.growth_meso_return),
-            pullback_micro_return=number("pullback_micro_return", defaults.pullback_micro_return),
-            falling_macro_return=number("falling_macro_return", defaults.falling_macro_return),
-            falling_meso_return=number("falling_meso_return", defaults.falling_meso_return),
-            crisis_macro_return=number("crisis_macro_return", defaults.crisis_macro_return),
-            crisis_meso_return=number("crisis_meso_return", defaults.crisis_meso_return),
-            crisis_micro_return=number("crisis_micro_return", defaults.crisis_micro_return),
-            sentiment_positive=number("sentiment_positive", defaults.sentiment_positive),
-            sentiment_negative=number("sentiment_negative", defaults.sentiment_negative),
-            sentiment_crisis=number("sentiment_crisis", defaults.sentiment_crisis),
-            per_trade_value_min=number("per_trade_value_min", getattr(config, "min_trade_dollars", defaults.per_trade_value_min)),
-            rebalance_threshold=number("rebalance_threshold", getattr(config, "rebalance_threshold", defaults.rebalance_threshold)),
-            w_price_nano=number("w_price_nano", defaults.w_price_nano),
-            w_price_micro=number("w_price_micro", defaults.w_price_micro),
-            w_price_meso=number("w_price_meso", defaults.w_price_meso),
-            w_price_macro=number("w_price_macro", defaults.w_price_macro),
-            w_sentiment=number("w_sentiment", defaults.w_sentiment),
-            volatility_lookback_minutes=minutes_knob(
-                raw, "volatility_lookback_minutes", defaults.volatility_lookback_minutes
-            ),
-            max_intraday_volatility=number("max_intraday_volatility", defaults.max_intraday_volatility),
-            high_volatility_weight_scale=number("high_volatility_weight_scale", defaults.high_volatility_weight_scale),
-            intraday_drawdown_limit=number("intraday_drawdown_limit", defaults.intraday_drawdown_limit),
+        # Read every id this algorithm has had: it is ``spy_rotation`` now, but tuning saved
+        # earlier is filed under ``regime_rotation`` or ``invest_spy``, and the key on disk is
+        # still the oldest of the three.
+        return load_tuning(
+            cls,
+            tuning_section(config, "spy_rotation", "regime_rotation", "invest_spy"),
+            fallbacks=account_sizing_fallbacks(config),
         )
 
     @property
@@ -180,14 +101,6 @@ class InvestSpyConfig:
         )
 
 
-def _return_over(closes: pd.Series, bars: int) -> float:
-    if len(closes) <= bars or bars <= 0:
-        return 0.0
-    start = float(closes.iloc[-bars - 1])
-    end = float(closes.iloc[-1])
-    return end / start - 1.0 if start > 0 else 0.0
-
-
 def compute_invest_spy_price_features(
     symbol: str,
     history_bars: pd.DataFrame,
@@ -195,15 +108,10 @@ def compute_invest_spy_price_features(
     config: InvestSpyConfig,
 ) -> dict[str, Any]:
     """State-detection inputs: two wall-clock horizons plus the daily macro trend."""
-    daily = daily_bars.copy() if isinstance(daily_bars, pd.DataFrame) else pd.DataFrame()
-    daily_closes = signal_price(daily).dropna() if not daily.empty else pd.Series(dtype=float)
-    closes = (
-        signal_price(history_bars).dropna()
-        if isinstance(history_bars, pd.DataFrame) and not history_bars.empty
-        else pd.Series(dtype=float)
-    )
+    daily_closes = closes_of(daily_bars)
+    closes = closes_of(history_bars)
     volatility = realized_volatility(history_bars, config.volatility_lookback_minutes)
-    macro_return = _return_over(daily_closes, config.macro_trend_lookback_days)
+    macro_return = return_over_periods(daily_closes, config.macro_trend_lookback_days)
     micro_return = return_over_minutes(history_bars, config.micro_momentum_lookback_minutes)
     meso_return = return_over_minutes(history_bars, config.meso_momentum_lookback_minutes)
     return {
@@ -248,18 +156,14 @@ def _ranked(
     *,
     require_macro_trend: bool = True,
 ) -> list[dict[str, Any]]:
-    candidates = [
-        scores_by_symbol[symbol]
-        for symbol in symbols
-        if symbol in scores_by_symbol
-        and (not require_macro_trend or bool(scores_by_symbol[symbol].get("macro_trend_ok")))
-        and float(scores_by_symbol[symbol].get("score", 0.0)) >= min_score
-        and (
-            min_meso_return is None
-            or float(scores_by_symbol[symbol].get("meso_return", 0.0)) >= min_meso_return
-        )
-    ]
-    return sorted(candidates, key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    return rank_by_score(
+        scores_by_symbol,
+        symbols,
+        min_score=min_score,
+        gate_key="meso_return",
+        min_gate=min_meso_return,
+        require_trend=require_macro_trend,
+    )
 
 
 def _allocate_dynamic(
@@ -269,14 +173,7 @@ def _allocate_dynamic(
     max_positions: int,
     max_weight: float,
 ) -> None:
-    selected = candidates[: max(max_positions, 0)]
-    if not selected or exposure <= 0:
-        return
-    scores = [max(float(row.get("score", 0.0)), 0.0) for row in selected]
-    total_score = sum(scores)
-    for row, score in zip(selected, scores):
-        weight = exposure / len(selected) if total_score <= 0 else exposure * score / total_score
-        weights[str(row["symbol"])] = max(0.0, min(weight, max_weight))
+    weights.update(allocate_by_score(candidates, exposure, max_positions, max_weight))
 
 
 def decide_invest_spy_weights(
@@ -346,7 +243,8 @@ def score_universe(
 
 
 def signals_from_scores(
-    scores_by_symbol: dict[str, dict[str, Any]], target_weights: dict[str, float]
+    scores_by_symbol: dict[str, dict[str, Any]],
+    target_weights: dict[str, float],
 ) -> dict[str, dict[str, Any]]:
     """Per-symbol signal rows the dashboard and step 2 both read."""
     return {
@@ -421,9 +319,17 @@ class InvestSpyAlgorithm(BaseAlgorithm):
         snapshot: Any,
         latest_prices: dict[str, float],
         config: Any,
+        as_of: datetime,
     ) -> dict[str, float]:
         """Apply the position-aware risk guards to a reviewed set of weights."""
         strategy_config = InvestSpyConfig.from_runtime_config(config)
         current_weights = snapshot.weights(latest_prices)
         scores = {symbol: dict(row) for symbol, row in signals.items()}
-        return apply_risk_guards(target_weights, scores, current_weights, snapshot.equity, strategy_config)
+        return apply_risk_guards(
+            target_weights,
+            scores,
+            current_weights,
+            snapshot.equity,
+            strategy_config,
+            as_of,
+        )

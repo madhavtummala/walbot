@@ -8,33 +8,29 @@ from .config import DualMomentumConfig
 
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import datetime
 from typing import Any
 
-
+from ...common.timeutils import minutes_between as _minutes_between, parse_iso_utc as _parse_time
+from ..risk import session_drawdown_breached
 
 logger = logging.getLogger(__name__)
 
-STATE_KEY = "dual_momentum_runtime"
-
-EPSILON = 1e-9
-
-#: Trading days per year, for annualising a daily volatility estimate.
-TRADING_DAYS = 252
-
-
-
 
 def _run_facts(signals: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """Read the run-level fields ``analyze`` denormalised onto every row."""
+    """Read the run-level fields ``analyze`` denormalised onto every row.
+
+    The timestamp used to be one of them. It is a parameter of ``refine`` now, so it no longer
+    has to be copied onto every signal row and parsed back out -- and a caller cannot lose it
+    by handing over signals it built itself.
+    """
     for row in signals.values():
         return {
             "regime_risk_on": bool(row.get("regime_risk_on")),
             "regime_detail": str(row.get("regime_detail", "")),
             "vol_scale": float(row.get("vol_scale", 1.0) or 1.0),
-            "as_of": str(row.get("as_of", "")),
         }
-    return {"regime_risk_on": False, "regime_detail": "no signals", "vol_scale": 1.0, "as_of": ""}
+    return {"regime_risk_on": False, "regime_detail": "no signals", "vol_scale": 1.0}
 
 
 def _defensive_book(rows: dict[str, dict[str, Any]]) -> dict[str, float]:
@@ -44,20 +40,6 @@ def _defensive_book(rows: dict[str, dict[str, Any]]) -> dict[str, float]:
         for symbol, row in rows.items()
         if float(row.get("defensive_weight", 0.0) or 0.0) > 0
     }
-
-
-def _parse_time(value: str) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(str(value))
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-
-
-def _minutes_between(later: datetime | None, earlier: datetime | None) -> float:
-    if later is None or earlier is None:
-        return float("inf")
-    return abs((later - earlier).total_seconds()) / 60.0
 
 
 def confirm_regime(state: dict[str, Any], raw_risk_on: bool, config: DualMomentumConfig) -> dict[str, Any]:
@@ -86,23 +68,10 @@ def intraday_drawdown_breached(
     state: dict[str, Any],
     equity: float,
     config: DualMomentumConfig,
-    session: str = "",
+    as_of: datetime,
 ) -> bool:
-    """Session circuit breaker: once tripped it stays tripped until the next session.
-
-    ``session`` comes from the algorithm's own timestamp rather than the wall clock, because
-    in a replay every step would otherwise be "today": the breaker would trip once on the
-    first bad day and stay latched for the entire backtest, which is not what it does live.
-    """
-    today = session or date.today().isoformat()
-    if state.get("session") != today:
-        state.update({"session": today, "session_start_equity": equity, "halted": False})
-    start = float(state.get("session_start_equity") or equity)
-    drawdown = (equity / start - 1.0) if start > 0 else 0.0
-    if drawdown <= config.intraday_drawdown_limit:
-        state["halted"] = True
-    state["session_drawdown"] = drawdown
-    return bool(state.get("halted"))
+    """This algorithm's binding of the shared session breaker -- see ``algorithms/risk.py``."""
+    return session_drawdown_breached(state, equity, config.intraday_drawdown_limit, as_of)
 
 
 def apply_turnover_filters(

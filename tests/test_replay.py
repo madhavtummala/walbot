@@ -48,6 +48,7 @@ class _Recorder(BaseAlgorithm):
         self.mode = mode
         self.contexts: list = []
         self.settled: list = []
+        self.refined_at: list = []
 
     def requirements(self, config, positions) -> AlgorithmRequirements:
         # Daily bars are handed over only when they are declared, live and replayed alike.
@@ -61,7 +62,8 @@ class _Recorder(BaseAlgorithm):
             intents=[Intent("AAA", "weight", self.weight)], mode=self.mode
         )
 
-    def refine(self, intents, signals, snapshot, latest_prices, config):
+    def refine(self, intents, signals, snapshot, latest_prices, config, as_of):
+        self.refined_at.append(as_of)
         return list(intents)
 
     def settle(self, config, order_results, intents) -> None:
@@ -237,11 +239,12 @@ def test_the_replay_source_answers_strictly_as_of_the_signal_date() -> None:
     one past date -- if any of them reached past it, no test of the loop would notice.
     """
     from src.core.interfaces import AlgorithmRequirements
-    from src.execution.replay import Coverage, ReplayContextSource
+    from src.execution.replay import Coverage, HistoryCache, ReplayContextSource
 
     history = _history()
     as_of = DATES[5]
-    source = ReplayContextSource(as_of, history, providers=[], coverage=Coverage())
+    empty = HistoryCache(["AAA"], [as_of], providers=[], lookback_minutes=0)
+    source = ReplayContextSource(as_of, history, history=empty, coverage=Coverage())
 
     assert pd.Timestamp(source.timestamp()) == as_of
     # Prices are that date's closes, not the newest the frame happens to hold.
@@ -265,3 +268,45 @@ def test_live_and_replay_share_one_context_assembler() -> None:
     assert issubclass(ReplayContextSource, ContextSource)
     # One assembler, and the only thing that varies is where the data comes from.
     assert "source" in inspect.signature(build_algorithm_context).parameters
+
+
+def test_the_replay_reads_the_bar_store_once_per_symbol_not_once_per_date(monkeypatch) -> None:
+    """History is loaded for the whole replay and sliced, the way daily bars always were.
+
+    This is what a twelve-month backtest cost before: 14 symbols x 2 provider attempts x 250
+    trade dates was 21,000 database round trips and 97 of its 99 seconds, which put it past the
+    dashboard's request timeout and surfaced to the user as an aborted fetch. Reads must scale
+    with the number of symbols, not with the length of the window.
+    """
+    from src.execution import replay as replay_module
+
+    reads: list[tuple[str, object]] = []
+    bars = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-01-01 14:30", periods=600, freq="15min", tz="UTC"),
+            "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5,
+            "volume": 1000.0, "adjusted_close": 100.5,
+        }
+    )
+
+    def counting_read_history(symbol, *, lookback_minutes, end, provider=None, **kwargs):
+        reads.append((symbol, provider))
+        return bars
+
+    monkeypatch.setattr(replay_module, "read_history", counting_read_history)
+
+    class _NeedsHistory(_Recorder):
+        def requirements(self, config, positions) -> AlgorithmRequirements:
+            return AlgorithmRequirements(
+                price_symbols=["AAA"], daily_lookback_days=30, history_lookback_minutes=780
+            )
+
+    algorithm = _NeedsHistory()
+    _replay(algorithm)
+
+    dates_stepped = len(algorithm.contexts)
+    assert dates_stepped > 5, "the replay did not step through its dates"
+    # One read per symbol per provider attempt, for the whole replay -- not per date. The
+    # provider order is still walked, and still in order.
+    assert reads == [("AAA", "yfinance"), ("AAA", None)], reads
+    assert len(reads) < dates_stepped, "reads still scale with the length of the window"

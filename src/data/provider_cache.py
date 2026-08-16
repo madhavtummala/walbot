@@ -8,7 +8,6 @@ from typing import Any
 import pandas as pd
 
 from .duckdb_store import _connect
-from .state_store import STATE_DUCKDB_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +30,7 @@ def load_cached_payload(
     provider: str,
     cache_key: str,
     *,
-    db_path: str = STATE_DUCKDB_PATH,
+    db_path: str | None = None,
 ) -> Any | None:
     with _connect(db_path) as connection:
         row = connection.execute(
@@ -60,7 +59,7 @@ def save_cached_payload(
     payload: Any,
     ttl_seconds: int,
     *,
-    db_path: str = STATE_DUCKDB_PATH,
+    db_path: str | None = None,
 ) -> None:
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(seconds=max(int(ttl_seconds), 0))
@@ -87,7 +86,7 @@ def clear_cached_payloads(
     category: str | None = None,
     provider: str | None = None,
     cache_key_prefixes: list[str] | None = None,
-    db_path: str = STATE_DUCKDB_PATH,
+    db_path: str | None = None,
 ) -> int:
     clauses: list[str] = []
     params: list[Any] = []
@@ -108,7 +107,7 @@ def clear_cached_payloads(
         return deleted
 
 
-def provider_is_limited(provider: str, *, db_path: str = STATE_DUCKDB_PATH) -> bool:
+def provider_is_limited(provider: str, *, db_path: str | None = None) -> bool:
     with _connect(db_path) as connection:
         row = connection.execute(
             "SELECT limited_until FROM api_provider_state WHERE provider = ?",
@@ -120,7 +119,7 @@ def provider_is_limited(provider: str, *, db_path: str = STATE_DUCKDB_PATH) -> b
     return bool(limited_until is not None and limited_until > _now())
 
 
-def record_provider_success(category: str, provider: str, *, db_path: str = STATE_DUCKDB_PATH) -> None:
+def record_provider_success(category: str, provider: str, *, db_path: str | None = None) -> None:
     now = datetime.now(timezone.utc)
     with _connect(db_path) as connection:
         connection.execute(
@@ -140,7 +139,7 @@ def record_provider_limited(
     error: str,
     *,
     retry_after_seconds: int = 3600,
-    db_path: str = STATE_DUCKDB_PATH,
+    db_path: str | None = None,
 ) -> None:
     now_dt = datetime.now(timezone.utc)
     limited_until = now_dt + timedelta(seconds=max(int(retry_after_seconds), 60))

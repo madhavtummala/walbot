@@ -40,13 +40,6 @@ class Registry(Generic[T]):
 
     # -- registration ---------------------------------------------------------------------
 
-    def register(self, name: str, implementation: str | Type[T]) -> None:
-        """Add or replace an implementation. Accepts a class or a lazy path."""
-        normalized = self.normalize(name)
-        if not normalized:
-            raise ValueError(f"{self.label} name is required")
-        self._entries[normalized] = implementation
-
     def alias(self, alias: str, target: str) -> None:
         self._aliases[self.normalize(alias)] = self.normalize(target)
 

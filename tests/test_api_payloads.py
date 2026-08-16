@@ -422,16 +422,21 @@ def test_history_backtest_reads_configured_provider_order(monkeypatch) -> None:
     monkeypatch.setattr(replay_module, "read_history", fake_read_history)
 
     coverage = replay_module.Coverage()
-    bars = replay_module._read_history(
+    as_of = pd.Timestamp("2026-05-01", tz="UTC")
+    history = replay_module.HistoryCache(
         ["SPY"],
-        pd.Timestamp("2026-05-01", tz="UTC"),
+        [as_of],
         providers=api_payloads._configured_history_providers(config),
         lookback_minutes=780,
-        coverage=coverage,
     )
+    bars = history.bars_as_of(["SPY"], as_of, coverage)
 
     assert not bars["SPY"].empty
-    assert [call[1] for call in calls] == ["finnhub", "yfinance"]
+    # The provider walk happens once for the whole replay rather than once per date, but it
+    # still walks the configured order, and a provider with nothing to say falls through to
+    # the next. The trailing ``None`` reads across all providers, which is only reached
+    # because this fixture cannot cover the whole replay span from one of them.
+    assert [call[1] for call in calls] == ["finnhub", "yfinance", None]
     # Falling back to a second provider still counts as covered.
     assert coverage.as_dict()["history_ratio"] == 1.0
     assert coverage.missing_symbols == set()

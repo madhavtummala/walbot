@@ -30,7 +30,7 @@ def ephemeral_state(initial: dict[str, Any] | None = None) -> Iterator[dict[str,
         _EPHEMERAL_STATE.reset(token)
 
 
-def load_state(key: str, default: Any, db_path: str = STATE_DUCKDB_PATH) -> Any:
+def load_state(key: str, default: Any, db_path: str | None = None) -> Any:
     store = _EPHEMERAL_STATE.get()
     if store is not None:
         return store.get(key, default)
@@ -45,7 +45,7 @@ def load_state(key: str, default: Any, db_path: str = STATE_DUCKDB_PATH) -> Any:
     return default
 
 
-def save_state(key: str, value: Any, db_path: str = STATE_DUCKDB_PATH) -> Any:
+def save_state(key: str, value: Any, db_path: str | None = None) -> Any:
     store = _EPHEMERAL_STATE.get()
     if store is not None:
         store[key] = value
@@ -63,6 +63,6 @@ def save_state(key: str, value: Any, db_path: str = STATE_DUCKDB_PATH) -> Any:
     return value
 
 
-def delete_state(key: str, db_path: str = STATE_DUCKDB_PATH) -> None:
+def delete_state(key: str, db_path: str | None = None) -> None:
     with _connect(db_path) as connection:
         connection.execute("DELETE FROM app_state WHERE key = ?", [key])

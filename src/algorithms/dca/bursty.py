@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 import pandas as pd
@@ -54,6 +54,20 @@ class BurstyConfig:
     #: Cap on cumulative deployment per symbol per month, also in multiples of the budget.
     max_monthly_multiple: float = 3.0
     value_averaging: bool = True
+    #: Months of undeployed budget at which the oversold test stops being picky at all.
+    #:
+    #: Waiting for a dip is the strategy; waiting *forever* is not. In a market that only ever
+    #: rises, %B never breaks the lower band and RSI(2) never reaches 10, so the budget accrues
+    #: and the eventual entry happens at a higher price than any of the ones declined -- the
+    #: opposite of the intent. This relaxes the two oversold thresholds in proportion to how far
+    #: behind the budget has fallen, reaching "buy on anything" at this many months.
+    #:
+    #: The regime gate is deliberately *not* relaxed. That is the component stopping the
+    #: strategy accumulating into a genuine decline, which is this design's main failure mode;
+    #: loosening it would trade a small problem for the large one.
+    #:
+    #: 0 disables the whole mechanism, which is the behaviour this had before.
+    backlog_relax_months: float = 0.0
 
     @classmethod
     def from_runtime_config(cls, config: Any) -> BurstyConfig:
@@ -83,7 +97,29 @@ def _latest(series: pd.Series) -> float:
         return float("nan")
 
 
-def evaluate_trigger(bars: pd.DataFrame | None, buying: bool, settings: BurstyConfig) -> dict[str, Any]:
+def relaxed_thresholds(settings: BurstyConfig, months_behind: float) -> tuple[float, float]:
+    """The oversold thresholds to use, given how much budget is waiting to be deployed.
+
+    Each is interpolated toward the value at which it always fires -- %B at 1.0, RSI at 100 --
+    so a symbol that is on schedule keeps the configured pickiness and one that is months behind
+    stops declining entries. Linear rather than a step, so there is no month where behaviour
+    jumps.
+    """
+    if settings.backlog_relax_months <= 0:
+        return settings.percent_b_threshold, settings.rsi_threshold
+    fraction = min(max(months_behind, 0.0) / settings.backlog_relax_months, 1.0)
+    return (
+        settings.percent_b_threshold + fraction * (1.0 - settings.percent_b_threshold),
+        settings.rsi_threshold + fraction * (100.0 - settings.rsi_threshold),
+    )
+
+
+def evaluate_trigger(
+    bars: pd.DataFrame | None,
+    buying: bool,
+    settings: BurstyConfig,
+    months_behind: float = 0.0,
+) -> dict[str, Any]:
     """Decide whether now is a moment to act on ``bars``, and say why in plain words."""
     if bars is None or bars.empty or "close" not in bars:
         return {"fires": False, "reason": "No price history", "detail": {}}
@@ -100,26 +136,30 @@ def evaluate_trigger(bars: pd.DataFrame | None, buying: bool, settings: BurstyCo
         )
     )
     rsi = _latest(compute_rsi(bars, lookback=settings.rsi_lookback))
+    percent_b_threshold, rsi_threshold = relaxed_thresholds(settings, months_behind)
     detail = {
         "close": close,
         "ma_200": round(moving_average, 4),
         "percent_b": None if pd.isna(percent_b) else round(percent_b, 4),
         "rsi_2": None if pd.isna(rsi) else round(rsi, 2),
+        "months_behind": round(months_behind, 2),
+        "rsi_threshold": round(rsi_threshold, 2),
     }
 
     if buying:
         if close < moving_average:
             return {"fires": False, "reason": f"Below {settings.regime_ma_days}-day MA", "detail": detail}
-        oversold = (not pd.isna(percent_b) and percent_b < settings.percent_b_threshold) or (
-            not pd.isna(rsi) and rsi < settings.rsi_threshold
+        oversold = (not pd.isna(percent_b) and percent_b < percent_b_threshold) or (
+            not pd.isna(rsi) and rsi < rsi_threshold
         )
         if not oversold:
             return {"fires": False, "reason": "Waiting for valley", "detail": detail}
-        return {"fires": True, "reason": "Valley", "detail": detail}
+        behind = f" (relaxed, {months_behind:.1f}m behind)" if months_behind and settings.backlog_relax_months else ""
+        return {"fires": True, "reason": f"Valley{behind}", "detail": detail}
 
     # Sell side is the mirror: trim into a peak rather than accumulate into a decline.
-    overbought = (not pd.isna(percent_b) and percent_b > (1.0 - settings.percent_b_threshold)) or (
-        not pd.isna(rsi) and rsi > (100.0 - settings.rsi_threshold)
+    overbought = (not pd.isna(percent_b) and percent_b > (1.0 - percent_b_threshold)) or (
+        not pd.isna(rsi) and rsi > (100.0 - rsi_threshold)
     )
     if not overbought:
         return {"fires": False, "reason": "Waiting for peak", "detail": detail}
@@ -142,10 +182,16 @@ class BurstyDCAAlgorithm(DCAAlgorithm):
             daily_ma_days=settings.regime_ma_days,
         )
 
-    def trigger(self, symbol: str, context: AlgorithmContext, plan: dict[str, Any]) -> dict[str, Any]:
+    def trigger(
+        self,
+        symbol: str,
+        context: AlgorithmContext,
+        plan: dict[str, Any],
+        months_behind: float = 0.0,
+    ) -> dict[str, Any]:
         settings = BurstyConfig.from_runtime_config(context.config)
         buying = plan_budgets(plan).get(symbol, 0.0) >= 0
-        return evaluate_trigger(context.bars_by_symbol.get(symbol), buying, settings)
+        return evaluate_trigger(context.bars_by_symbol.get(symbol), buying, settings, months_behind)
 
     def refine(
         self,
@@ -154,19 +200,23 @@ class BurstyDCAAlgorithm(DCAAlgorithm):
         snapshot: PortfolioSnapshot,
         latest_prices: dict[str, float],
         config: Any,
+        as_of: datetime,
     ) -> list[Intent]:
         """Size the trade by value averaging, then apply both guards.
 
         Value averaging needs the position's current value, which step 1 cannot see, so this
         is the first point where the trade size can be known at all.
+
+        How far along the value path a symbol should be is a question about elapsed time, so it
+        is measured from ``as_of`` rather than from the wall clock. Reading the clock here put
+        the path wherever the machine happened to be -- months out, in a replay.
         """
         settings = BurstyConfig.from_runtime_config(config)
         if not settings.value_averaging:
-            return super().refine(intents, signals, snapshot, latest_prices, config)
+            return super().refine(intents, signals, snapshot, latest_prices, config, as_of)
 
         account_id = getattr(config, "account_id", "") or ""
         state = load_accrual_state(self.algorithm_id, account_id)
-        now = datetime.now(timezone.utc)
 
         refined: list[Intent] = []
         for intent in intents:
@@ -178,7 +228,7 @@ class BurstyDCAAlgorithm(DCAAlgorithm):
                 continue
             symbol_state = state.get(intent.symbol, SymbolState())
 
-            elapsed_months = path_months(symbol_state, now)
+            elapsed_months = path_months(symbol_state, as_of)
             path_value = budget * elapsed_months
             held_value = float(snapshot.positions.get(intent.symbol, 0.0)) * price
             gap = path_value - held_value

@@ -400,3 +400,52 @@ def test_the_tradable_universe_covers_every_symbol_an_algorithm_can_hold() -> No
     universe = set(document["tradable_universe"]["symbols"])
 
     assert held <= universe, f"tradable_universe is missing {sorted(held - universe)}"
+
+
+def test_an_explicitly_empty_universe_is_honoured_not_replaced_by_the_default() -> None:
+    """``defensive_universe: []`` must mean "no sleeve", not "the five-name default".
+
+    Absent and empty were the same value here, so a setting written to turn something off
+    looked obeyed and restored the default instead.
+    """
+    from src.common.config_utils import parse_symbols
+
+    assert parse_symbols([], ["BIL", "GLD"]) == []
+    assert parse_symbols(None, ["BIL", "GLD"]) == ["BIL", "GLD"]
+    # A blank string is still "unset": that is what an empty form field sends.
+    assert parse_symbols("", ["BIL", "GLD"]) == ["BIL", "GLD"]
+    assert parse_symbols("spy, qqq", ["BIL"]) == ["SPY", "QQQ"]
+
+
+def test_as_bool_falls_back_rather_than_guessing() -> None:
+    """One truth table, and an unrecognised value is not silently true.
+
+    There were five bool coercions and they disagreed: this one reached ``bool(value)`` for
+    anything it did not recognise, so ``enabled: mabye`` in a config file read as *on*, while
+    the dashboard's own coercer read the same typo as *off*.
+    """
+    from src.common.config_utils import as_bool
+
+    for truthy in ("true", "1", "yes", "y", "on", "  TRUE  ", True):
+        assert as_bool(truthy) is True, truthy
+    for falsey in ("false", "0", "no", "n", "off", False):
+        assert as_bool(falsey, default=True) is False, falsey
+
+    # The divergence that mattered: unrecognised means "use the default", both ways.
+    assert as_bool("mabye", default=False) is False
+    assert as_bool("mabye", default=True) is True
+    assert as_bool(None, default=True) is True
+
+
+def test_as_float_rejects_infinity_as_well_as_nan() -> None:
+    """``isnan`` alone let ``inf`` through, where it survives arithmetic and only surfaces
+    later as an unserialisable weight. The private ``_finite`` copies this replaced were the
+    strict ones, so consolidating onto the shared helper had to tighten it, not loosen them."""
+    from src.common.config_utils import as_float
+
+    assert as_float(float("inf"), 0.5) == 0.5
+    assert as_float(float("-inf"), 0.5) == 0.5
+    assert as_float(float("nan"), 0.5) == 0.5
+    assert as_float("not a number", 0.5) == 0.5
+    assert as_float(None, 0.5) == 0.5
+    assert as_float("2.5") == 2.5

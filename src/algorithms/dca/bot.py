@@ -136,7 +136,10 @@ class DCAAlgorithm(BaseAlgorithm):
         account_id = getattr(config, "account_id", "") or ""
         plan = self.plan(config)
         budgets = plan_budgets(plan)
-        now = context.timestamp if context.timestamp.tzinfo else datetime.now(timezone.utc)
+        # A naive timestamp is read as UTC rather than replaced by the wall clock. Substituting
+        # "now" for a historical bar is how a replay ends up accruing a whole backtest's budget
+        # against the moment it was run.
+        now = context.timestamp if context.timestamp.tzinfo else context.timestamp.replace(tzinfo=timezone.utc)
         fractional = broker_supports_fractional_shares(account_id)
         min_trade_dollars = float(getattr(config, "min_trade_dollars", 0.0) or 0.0)
 
@@ -150,7 +153,10 @@ class DCAAlgorithm(BaseAlgorithm):
 
             price = float(context.latest_prices.get(symbol, 0.0) or 0.0)
             floor_dollars = min_executable(price, min_trade_dollars, fractional)
-            trigger = self.trigger(symbol, context, plan)
+            # How many months of budget are sitting undeployed. A variant that waits for a
+            # dip needs this to know when waiting has stopped being a strategy.
+            months_behind = symbol_state.accrued / abs(monthly_budget) if monthly_budget else 0.0
+            trigger = self.trigger(symbol, context, plan, months_behind)
             ready = symbol_state.accrued >= floor_dollars
 
             notional = 0.0
@@ -185,7 +191,13 @@ class DCAAlgorithm(BaseAlgorithm):
             },
         )
 
-    def trigger(self, symbol: str, context: AlgorithmContext, plan: dict[str, Any]) -> dict[str, Any]:
+    def trigger(
+        self,
+        symbol: str,
+        context: AlgorithmContext,
+        plan: dict[str, Any],
+        months_behind: float = 0.0,
+    ) -> dict[str, Any]:
         """Steady DCA has no timing condition: accrual alone decides."""
         return {"fires": True, "detail": {}}
 
@@ -257,6 +269,7 @@ class DCAAlgorithm(BaseAlgorithm):
         snapshot: PortfolioSnapshot,
         latest_prices: dict[str, float],
         config: Any,
+        as_of: datetime,
     ) -> list[Intent]:
         """Never sell more than is held: a DCA sell trims a position, it does not open a short."""
         refined: list[Intent] = []

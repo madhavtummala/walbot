@@ -6,7 +6,7 @@ those questions and nothing else.
 
 from __future__ import annotations
 
-from .config import DualMomentumConfig
+from .config import EPSILON, TRADING_DAYS, DualMomentumConfig
 from .scoring import _closes
 
 
@@ -19,13 +19,6 @@ import pandas as pd
 
 
 logger = logging.getLogger(__name__)
-
-STATE_KEY = "dual_momentum_runtime"
-
-EPSILON = 1e-9
-
-#: Trading days per year, for annualising a daily volatility estimate.
-TRADING_DAYS = 252
 
 
 

@@ -32,7 +32,7 @@ def audit(
     *,
     intraday_interval: int = 5,
     provider: str = "schwab",
-    db_path: str = DUCKDB_STATE_PATH,
+    db_path: str | None = None,
 ) -> dict[str, Any]:
     """Compare each session's daily close against the intraday bar covering the same instant."""
     wanted = sorted({symbol.upper() for symbol in get_config().symbols})
@@ -92,7 +92,7 @@ def main() -> None:
     parser.add_argument("--provider", default="schwab")
     parser.add_argument("--db-path", default=DUCKDB_STATE_PATH)
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logging.basicConfig(level=logging.WARNING, format="%(message)s")
     print(json.dumps(audit(intraday_interval=args.intraday_interval, provider=args.provider,
                            db_path=args.db_path), indent=2, sort_keys=True))
 

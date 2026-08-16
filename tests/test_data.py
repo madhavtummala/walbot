@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -381,3 +382,150 @@ def test_audit_flags_a_tier_disagreement_at_the_session_close(tmp_path, monkeypa
     assert by_symbol["DIVERGE"]["match_rate"] == 0.0
     assert by_symbol["DIVERGE"]["median_rel_gap"] == pytest.approx(2 / 98, abs=1e-4)
     assert report["symbols_without_overlap"] == ["LONELY"]
+
+
+def test_read_only_pool_reads_cheaply(tmp_path) -> None:
+    """A backtest's read pool must never lock other readers out.
+
+    DuckDB read-only connections coexist with other processes' read-only connections, which
+    is the whole reason the replay gets one.
+    """
+    db_path = str(tmp_path / "ro.duckdb")
+    duckdb_store.write_market_bars("yfinance", "SPY", 1440, _bars(["2026-01-02"]), db_path=db_path)
+
+    with duckdb_store.pooled_connections(db_path, read_only=True):
+        with duckdb_store._connect(db_path) as connection:
+            assert duckdb_store.connection_is_read_only(connection) is True
+        assert len(duckdb_store.read_bars("SPY", interval_minutes=1440, db_path=db_path)) == 1
+
+
+def test_read_only_pool_upgrades_rather_than_failing_a_write(tmp_path) -> None:
+    """A read-only batch describes that job, not the whole process.
+
+    The scheduler still writes its run state while a backtest reads, and DuckDB fixes the mode
+    per file per process -- so the write upgrades the shared handle instead of raising
+    "Can't open a connection to same database file with a different configuration".
+    """
+    db_path = str(tmp_path / "upgrade.duckdb")
+    duckdb_store.write_market_bars("yfinance", "SPY", 1440, _bars(["2026-01-02"]), db_path=db_path)
+
+    with duckdb_store.pooled_connections(db_path, read_only=True):
+        assert duckdb_store._HANDLES[str(duckdb_store.resolve_project_path(db_path))].read_only is True
+
+        written = duckdb_store.write_market_bars("yfinance", "SPY", 1440, _bars(["2026-01-05"]), db_path=db_path)
+
+        assert written == 1
+        assert duckdb_store._HANDLES[str(duckdb_store.resolve_project_path(db_path))].read_only is False
+        assert len(duckdb_store.read_bars("SPY", interval_minutes=1440, db_path=db_path)) == 2
+
+
+def test_other_threads_keep_reading_through_a_read_only_pool(tmp_path) -> None:
+    """The crash this pool caused: another thread's plain read died mid-backtest.
+
+    Pooling was thread-local while DuckDB's mode is per process, so any other thread opening
+    the same file -- read-write by default, even to read a row -- was refused outright.
+    """
+    db_path = str(tmp_path / "threads.duckdb")
+    duckdb_store.write_market_bars("yfinance", "SPY", 1440, _bars(["2026-01-02"]), db_path=db_path)
+    outcome: dict[str, object] = {}
+
+    def read_from_another_thread() -> None:
+        try:
+            outcome["rows"] = len(duckdb_store.read_bars("SPY", interval_minutes=1440, db_path=db_path))
+        except Exception as exc:  # noqa: BLE001 - the failure under test
+            outcome["error"] = exc
+
+    with duckdb_store.pooled_connections(db_path, read_only=True):
+        thread = threading.Thread(target=read_from_another_thread)
+        thread.start()
+        thread.join(timeout=10)
+
+    assert outcome.get("error") is None
+    assert outcome["rows"] == 1
+
+
+def test_write_pool_still_writes(tmp_path) -> None:
+    """The default pool keeps its read-write mode: schema work and cache writes need it."""
+    db_path = str(tmp_path / "rw.duckdb")
+
+    with duckdb_store.pooled_connections(db_path):
+        connection = duckdb_store._connect(db_path)
+        assert duckdb_store.connection_is_read_only(connection) is False
+        written = duckdb_store.write_market_bars("yfinance", "SPY", 1440, _bars(["2026-01-02"]), db_path=db_path)
+        assert written == 1
+        assert len(duckdb_store.read_bars("SPY", interval_minutes=1440, db_path=db_path)) == 1
+
+
+def test_read_only_pool_creates_a_missing_file_as_read_write(tmp_path) -> None:
+    """There is nothing to read in a file that does not exist yet.
+
+    A read-only connection cannot create one, so the fallback opens read-write to build the
+    schema and then lets the batch go back to reading.
+    """
+    db_path = str(tmp_path / "fresh.duckdb")
+
+    with duckdb_store.pooled_connections(db_path, read_only=True):
+        assert duckdb_store.read_bars("SPY", db_path=db_path).empty
+        # A schema-ensure write on the read-only connection is skipped, not fatal.
+        assert duckdb_store.read_bars("SPY", interval_minutes=5, db_path=db_path).empty
+
+
+def test_read_only_pool_closes_its_connection_on_exit(tmp_path) -> None:
+    """The cached handle must not leak across batch jobs or test runs."""
+    db_path = str(tmp_path / "ro-exit.duckdb")
+    duckdb_store.write_market_bars("yfinance", "SPY", 1440, _bars(["2026-01-02"]), db_path=db_path)
+
+    with duckdb_store.pooled_connections(db_path, read_only=True):
+        duckdb_store.read_bars("SPY", interval_minutes=1440, db_path=db_path)
+        assert len(duckdb_store._HANDLES) == 1
+
+    assert len(duckdb_store._HANDLES) == 0
+
+
+def test_a_locked_database_is_waited_for_rather_than_failed_on(tmp_path, monkeypatch) -> None:
+    """Another process holding the file is usually a short write, not a permanent state.
+
+    DuckDB has no busy-timeout of its own -- ``connect()`` fails the instant the lock is
+    incompatible -- so the waiting is done here. Without it, any overlap between the dashboard
+    and a batch job surfaced as an error page.
+    """
+    db_path = str(tmp_path / "locked.duckdb")
+    attempts = {"n": 0}
+
+    def flaky_connect(path, **kwargs):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise RuntimeError("Conflicting lock is held in /proc/other")
+        return duckdb_store._duckdb().connect(path, **kwargs)
+
+    monkeypatch.setattr(duckdb_store, "LOCK_RETRY_SECONDS", 0.01)
+    connection = duckdb_store._open_with_retry(lambda: flaky_connect(db_path), db_path)
+
+    assert attempts["n"] == 3, "it gave up instead of waiting for the lock"
+    connection.close()
+
+
+def test_waiting_for_a_lock_is_bounded(tmp_path, monkeypatch) -> None:
+    """A request thread that waits is a server thread held, so the wait has to end."""
+    monkeypatch.setattr(duckdb_store, "LOCK_RETRY_SECONDS", 0.01)
+    monkeypatch.setattr(duckdb_store, "LOCK_WAIT_SECONDS", 0.05)
+
+    def always_locked():
+        raise RuntimeError("Conflicting lock is held")
+
+    with pytest.raises(RuntimeError, match="Conflicting lock"):
+        duckdb_store._open_with_retry(always_locked, "never.duckdb")
+
+
+def test_an_unrelated_error_is_not_retried(tmp_path, monkeypatch) -> None:
+    """Only a lock conflict is worth waiting on; anything else must surface immediately."""
+    monkeypatch.setattr(duckdb_store, "LOCK_RETRY_SECONDS", 10.0)  # would hang if retried
+    attempts = {"n": 0}
+
+    def broken():
+        attempts["n"] += 1
+        raise RuntimeError("no such table: market_bars")
+
+    with pytest.raises(RuntimeError, match="no such table"):
+        duckdb_store._open_with_retry(broken, "x.duckdb")
+    assert attempts["n"] == 1

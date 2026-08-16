@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+from datetime import datetime, timezone
 
 from src.core.config import Config
 from src.algorithms.fast_momentum import (
@@ -9,9 +10,12 @@ from src.algorithms.fast_momentum import (
     compute_composite_scores,
     compute_price_features,
     decide_target_weights,
-    get_sentiment_snapshot,
+    intraday_kill_switch_triggered,
     rows_from_scores,
 )
+from src.data.signals.sentiment import sentiment_scores_from_records
+from src.data.state_store import ephemeral_state
+
 
 
 def _intraday(prices: list[float]) -> pd.DataFrame:
@@ -308,7 +312,7 @@ def test_risk_guards_scale_high_volatility_and_preserve_small_drifts(monkeypatch
         "TLT": {"realized_volatility": 0.01},
     }
 
-    guarded = apply_risk_guards({"QQQ": 0.2, "TLT": 0.201}, scores, {"TLT": 0.2}, 10_000.0, config)
+    guarded = apply_risk_guards({"QQQ": 0.2, "TLT": 0.201}, scores, {"TLT": 0.2}, 10_000.0, config, _at(2))
 
     assert guarded["QQQ"] == 0.1
     assert guarded["TLT"] == 0.2
@@ -324,38 +328,72 @@ def test_risk_guards_do_not_keep_unselected_positions(monkeypatch) -> None:
         {"QQQ": 0.25, "TLT": 0.01},
         1_000.0,
         config,
+        _at(2),
     )
 
     assert guarded["QQQ"] == 0.25
     assert guarded["TLT"] == 0.0
 
 
-def test_sentiment_snapshot_defaults_missing_records_to_neutral(monkeypatch) -> None:
-    monkeypatch.setattr("src.algorithms.fast_momentum.fetch_latest_news_sentiment", lambda *_args, **_kwargs: [])
-
-    symbol_sentiment, market_sentiment = get_sentiment_snapshot(["SPY", "QQQ"], 60, Config())
+def test_sentiment_snapshot_defaults_missing_records_to_neutral() -> None:
+    symbol_sentiment, market_sentiment, metadata, providers = sentiment_scores_from_records(["SPY", "QQQ"], [], 60)
 
     assert symbol_sentiment == {"SPY": 0.0, "QQQ": 0.0}
     assert market_sentiment == 0.0
+    assert metadata["records_seen"] == 0
 
 
-def test_sentiment_snapshot_combines_configured_providers(monkeypatch) -> None:
-    seen_orders = []
+def test_sentiment_snapshot_combines_configured_providers() -> None:
+    records = [
+        {"symbol": "SPY", "timestamp": pd.Timestamp.now(tz="UTC").isoformat(), "sentiment": 0.6, "provider": "marketaux"},
+        {"symbol": "SPY", "timestamp": pd.Timestamp.now(tz="UTC").isoformat(), "sentiment": -0.2, "provider": "stocktwits"},
+    ]
 
-    def fake_fetch(_symbols, config):
-        provider = config.news_sentiment_provider_order[0]
-        seen_orders.append(provider)
-        sentiment = 0.6 if provider == "marketaux" else -0.2
-        return [{"symbol": "SPY", "timestamp": pd.Timestamp.now(tz="UTC").isoformat(), "sentiment": sentiment}]
+    symbol_sentiment, market_sentiment, metadata, providers = sentiment_scores_from_records(["SPY"], records, 60)
 
-    monkeypatch.setattr("src.algorithms.fast_momentum.fetch_latest_news_sentiment", fake_fetch)
-
-    symbol_sentiment, market_sentiment = get_sentiment_snapshot(
-        ["SPY"],
-        60,
-        Config(news_sentiment_provider_order=["marketaux", "stocktwits"]),
-    )
-
-    assert seen_orders == ["marketaux", "stocktwits"]
+    assert providers == ["marketaux", "stocktwits"]
     assert abs(symbol_sentiment["SPY"] - 0.2) < 1e-12
     assert abs(market_sentiment - 0.2) < 1e-12
+
+
+
+def _at(day: int, hour: int = 15) -> datetime:
+    return datetime(2026, 3, day, hour, tzinfo=timezone.utc)
+
+
+def test_the_kill_switch_resets_each_simulated_session() -> None:
+    """The backtest bug: the breaker latched on day one and stayed latched for months.
+
+    ``intraday_kill_switch_triggered`` keyed its session on ``date.today()``, so a replay --
+    where every step is "today" -- measured the drawdown from the *first* day of the backtest
+    rather than from the start of each simulated session. The first simulated 2% fall halted
+    the algorithm for the remainder of the run, and every later date logged the warning and
+    proposed an all-cash book that looked like a decision.
+    """
+    config = DefensiveMomentumConfig(intraday_drawdown_limit=-0.02)
+
+    with ephemeral_state():
+        assert intraday_kill_switch_triggered(10_000.0, config, _at(2, 9)) is False
+        # Down 3% inside that session: halted for the rest of it, whatever equity does next.
+        assert intraday_kill_switch_triggered(9_700.0, config, _at(2, 12)) is True
+        assert intraday_kill_switch_triggered(9_900.0, config, _at(2, 15)) is True
+
+        # A new session re-anchors on the equity it opens with, so a backtest keeps trading.
+        assert intraday_kill_switch_triggered(9_900.0, config, _at(3, 9)) is False
+        assert intraday_kill_switch_triggered(9_800.0, config, _at(3, 15)) is False
+
+
+def test_step_two_takes_the_moment_as_an_argument_not_from_a_clock() -> None:
+    """``refine`` reads no clock, so the guards below it cannot read one either."""
+    import inspect
+
+    from src.algorithms.risk import session_drawdown_breached
+
+    # A default would put the wall clock back the first time a caller forgot to pass one.
+    for function in (session_drawdown_breached, intraday_kill_switch_triggered, apply_risk_guards):
+        parameter = inspect.signature(function).parameters["as_of"]
+        assert parameter.default is inspect.Parameter.empty, function.__name__
+
+    state: dict = {}
+    assert session_drawdown_breached(state, 10_000.0, -0.02, _at(2)) is False
+    assert state["session"] == "2026-03-02"

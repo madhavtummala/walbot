@@ -46,10 +46,6 @@ def _redact(value: str) -> str:
     return redacted
 
 
-def _safe_error(error: Exception) -> dict[str, str]:
-    return {"error": _redact(str(error))}
-
-
 def _file_info(path: str) -> dict[str, Any]:
     if not path:
         return {"path": path, "exists": False}

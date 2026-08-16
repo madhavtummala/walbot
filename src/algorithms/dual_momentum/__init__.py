@@ -11,10 +11,6 @@ from .config import (  # noqa: F401
     DualMomentumConfig,
 )
 from .scoring import (  # noqa: F401
-    _closes,
-    _return_over,
-    _risk_scales,
-    _rolling_volatility,
     base_scores,
     compute_features,
     zscores,
@@ -31,20 +27,17 @@ from .layers import (  # noqa: F401
     volatility_scale,
 )
 from .proposal import (  # noqa: F401
-    _selection_reason,
     allocation_mode,
     analyze_universe,
     build_signals,
     rank_candidates,
 )
+# The three underscored names are the step-2 internals the tests drive directly; everything
+# else private stays inside its module rather than being re-exported for the sake of it.
 from .stateful import (  # noqa: F401
-    _defensive_book,
     _in_cooldown,
-    _minutes_between,
-    _parse_time,
     _record_exits,
     _resolve_replacements,
-    _run_facts,
     apply_turnover_filters,
     confirm_regime,
     intraday_drawdown_breached,

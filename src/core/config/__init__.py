@@ -120,8 +120,6 @@ from .coercion import (  # noqa: F401
     _as_int,
     _as_list,
     _config_value,
-    _direct_or_env,
-    _env_ref,
     _normalize_data_sources,
     _normalize_keyed_items,
     _parse_symbols,

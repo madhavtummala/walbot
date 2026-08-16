@@ -11,7 +11,8 @@ from typing import Any
 
 from ...data.universe import load_tradable_names
 
-from .coercion import _algorithm_sections, _as_float, _as_int, _as_list, _config_value, _direct_or_env, _normalize_data_sources, _parse_symbols, _provider_credential, _provider_secret, _section, _str_to_bool
+from ...common.config_utils import direct_or_env
+from .coercion import _algorithm_sections, _config_value, _normalize_data_sources, _parse_symbols, _provider_credential, _provider_secret, _section, _str_to_bool, reader
 from .defaults import ALGORITHM_EQUITY_CAP, ALPACA_BASE_URL, ALPACA_DATA_FEED, ALPHA_VANTAGE_MAX_SYMBOLS, ALPHA_VANTAGE_NEWS_CSV, ALPHA_VANTAGE_NEWS_LIMIT, ALPHA_VANTAGE_NEWS_LOOKBACK_DAYS, ALPHA_VANTAGE_REQUEST_DELAY_SECONDS, BACKTEST_PERIOD, BACKTEST_STARTING_EQUITY, CASH_BUFFER, DEFAULT_STRATEGY_ID, DIVIDEND_PROVIDER_ORDER, EOD_MARKET_DATA_CACHE_TTL_SECONDS, EOD_MARKET_DATA_PROVIDER_ORDER, HISTORY_EXTRA_BUFFER_DAYS, INTRADAY_MARKET_DATA_CACHE_TTL_SECONDS, INTRADAY_MARKET_DATA_PROVIDER_ORDER, KILL_SWITCH, LONG_MA_DAYS, MARKET_DATA_BAR_MINUTES, MARKET_DATA_CACHE_TTL_SECONDS, MARKET_DATA_PROVIDER_ORDER, MAX_LONGS, MAX_PORTFOLIO_EXPOSURE, MAX_WEIGHT_PER_SYMBOL, MIN_COMPOSITE_SCORE, MIN_TRADE_DOLLARS, MOMENTUM_LOOKBACK_DAYS, NEWS_SENTIMENT_CACHE_TTL_SECONDS, NEWS_SENTIMENT_PROVIDER_ORDER, OPTIONS_SWING_DTE_MAX, OPTIONS_SWING_DTE_MIN, OPTIONS_SWING_MAX_CONTRACTS, OPTIONS_SWING_MAX_DELTA, OPTIONS_SWING_MAX_PREMIUM, OPTIONS_SWING_MAX_SPREAD_PCT, OPTIONS_SWING_MIN_DELTA, OPTIONS_SWING_MIN_OPEN_INTEREST, OPTIONS_SWING_STRIKE_RANGE_PCT, PRICE_MOMENTUM_WEIGHT, REBALANCE_THRESHOLD, REQUIRE_TRADE_APPROVAL, SHORT_MOMENTUM_LOOKBACK_DAYS, SOCIAL_LOOKBACK_DAYS, SOCIAL_MOMENTUM_WEIGHT, SYMBOLS, TARGET_ANNUAL_VOL, TRADABLES_CSV, TRADE_APPROVAL_POLL_SECONDS, TRADE_APPROVAL_TIMEOUT_SECONDS, TRANSACTION_COST_BPS, UNNAMED_ACCOUNT_ID, VOLUME_LOOKBACK_DAYS, VOLUME_MOMENTUM_WEIGHT
 from .yaml_io import load_accounts_config, load_algorithm_bot_config, load_algorithms_config, load_connectors_config, load_options_bot_config, load_universe_config
 
@@ -160,11 +161,25 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
     dividend_sources = _section(data_sources, "dividends")
     sentiment_sources = _section(data_sources, "sentiment_data")
 
+    # One reader per section: ``read_x("key", DEFAULT)`` casts by the default's type and looks
+    # for the key upper-cased in the environment. See ``coercion.reader``.
+    read_account_config = reader(account_config)
+    read_algorithm = reader(algorithm)
+    read_alpha_vantage = reader(alpha_vantage)
+    read_dividend_sources = reader(dividend_sources)
+    read_eod_market_sources = reader(eod_market_sources)
+    read_intraday_market_sources = reader(intraday_market_sources)
+    read_market_sources = reader(market_sources)
+    read_news_sources = reader(news_sources)
+    read_options = reader(options)
+    read_runtime = reader(runtime)
+    read_sentiment_sources = reader(sentiment_sources)
+
     # Env only, deliberately. It is a deployment-level brake for an emergency, not a control
     # the dashboard offers: whether an algorithm trades is its binding's own switch.
     kill_switch = _str_to_bool(os.getenv("KILL_SWITCH"), KILL_SWITCH)
-    api_key = _direct_or_env(account_config, "api_key", "api_key_env", "ALPACA_API_KEY")
-    api_secret = _direct_or_env(account_config, "api_secret", "api_secret_env", "ALPACA_API_SECRET")
+    api_key = direct_or_env(account_config, "api_key", "api_key_env", "ALPACA_API_KEY")
+    api_secret = direct_or_env(account_config, "api_secret", "api_secret_env", "ALPACA_API_SECRET")
     alpaca_data_api_key = _provider_credential(
         data_sources,
         "eod_market_data",
@@ -206,7 +221,7 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
     if not symbols:
         raise ValueError("Configured trading universe must include at least one symbol.")
     alpha_vantage_api_key = (
-        _direct_or_env(alpha_vantage, "api_key", "api_key_env", "ALPHA_VANTAGE_API_KEY")
+        direct_or_env(alpha_vantage, "api_key", "api_key_env", "ALPHA_VANTAGE_API_KEY")
         or _provider_secret(data_sources, "market_data", "alpha_vantage", "ALPHA_VANTAGE_API_KEY")
         or _provider_secret(data_sources, "news_sentiment", "alpha_vantage", "ALPHA_VANTAGE_API_KEY")
     )
@@ -220,142 +235,74 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
     return Config(
         account_id=selected_account_id,
         account_label=str(account_config.get("label") or selected_account_id),
-
         algorithm_id=selected_strategy_id,
         symbols=symbols,
-        momentum_lookback_days=_as_int(_config_value(algorithm, "momentum_lookback_days", "MOMENTUM_LOOKBACK_DAYS", MOMENTUM_LOOKBACK_DAYS), MOMENTUM_LOOKBACK_DAYS),
-        short_momentum_lookback_days=_as_int(_config_value(algorithm, "short_momentum_lookback_days", "SHORT_MOMENTUM_LOOKBACK_DAYS", SHORT_MOMENTUM_LOOKBACK_DAYS), SHORT_MOMENTUM_LOOKBACK_DAYS),
-        long_ma_days=_as_int(_config_value(algorithm, "long_ma_days", "LONG_MA_DAYS", LONG_MA_DAYS), LONG_MA_DAYS),
-        volume_lookback_days=_as_int(_config_value(algorithm, "volume_lookback_days", "VOLUME_LOOKBACK_DAYS", VOLUME_LOOKBACK_DAYS), VOLUME_LOOKBACK_DAYS),
-        social_lookback_days=_as_int(_config_value(algorithm, "social_lookback_days", "SOCIAL_LOOKBACK_DAYS", SOCIAL_LOOKBACK_DAYS), SOCIAL_LOOKBACK_DAYS),
-        max_weight_per_symbol=_as_float(_config_value(algorithm, "max_weight_per_symbol", "MAX_WEIGHT_PER_SYMBOL", MAX_WEIGHT_PER_SYMBOL), MAX_WEIGHT_PER_SYMBOL),
-        max_portfolio_exposure=_as_float(_config_value(algorithm, "max_portfolio_exposure", "MAX_PORTFOLIO_EXPOSURE", MAX_PORTFOLIO_EXPOSURE), MAX_PORTFOLIO_EXPOSURE),
-        max_longs=_as_int(_config_value(algorithm, "max_longs", "MAX_LONGS", MAX_LONGS), MAX_LONGS),
-        min_composite_score=_as_float(_config_value(algorithm, "min_composite_score", "MIN_COMPOSITE_SCORE", MIN_COMPOSITE_SCORE), MIN_COMPOSITE_SCORE),
-        price_momentum_weight=_as_float(_config_value(algorithm, "price_momentum_weight", "PRICE_MOMENTUM_WEIGHT", PRICE_MOMENTUM_WEIGHT), PRICE_MOMENTUM_WEIGHT),
-        social_momentum_weight=_as_float(_config_value(algorithm, "social_momentum_weight", "SOCIAL_MOMENTUM_WEIGHT", SOCIAL_MOMENTUM_WEIGHT), SOCIAL_MOMENTUM_WEIGHT),
-        volume_momentum_weight=_as_float(_config_value(algorithm, "volume_momentum_weight", "VOLUME_MOMENTUM_WEIGHT", VOLUME_MOMENTUM_WEIGHT), VOLUME_MOMENTUM_WEIGHT),
-        target_annual_vol=_as_float(_config_value(algorithm, "target_annual_vol", "TARGET_ANNUAL_VOL", TARGET_ANNUAL_VOL), TARGET_ANNUAL_VOL),
-        cash_buffer=_as_float(_config_value(algorithm, "cash_buffer", "CASH_BUFFER", CASH_BUFFER), CASH_BUFFER),
-        min_trade_dollars=_as_float(_config_value(algorithm, "min_trade_dollars", "MIN_TRADE_DOLLARS", MIN_TRADE_DOLLARS), MIN_TRADE_DOLLARS),
-        rebalance_threshold=_as_float(_config_value(algorithm, "rebalance_threshold", "REBALANCE_THRESHOLD", REBALANCE_THRESHOLD), REBALANCE_THRESHOLD),
-        transaction_cost_bps=_as_float(_config_value(algorithm, "transaction_cost_bps", "TRANSACTION_COST_BPS", TRANSACTION_COST_BPS), TRANSACTION_COST_BPS),
-        backtest_starting_equity=_as_float(_config_value(algorithm, "backtest_starting_equity", "BACKTEST_STARTING_EQUITY", BACKTEST_STARTING_EQUITY), BACKTEST_STARTING_EQUITY),
+        momentum_lookback_days=read_algorithm("momentum_lookback_days", MOMENTUM_LOOKBACK_DAYS),
+        short_momentum_lookback_days=read_algorithm("short_momentum_lookback_days", SHORT_MOMENTUM_LOOKBACK_DAYS),
+        long_ma_days=read_algorithm("long_ma_days", LONG_MA_DAYS),
+        volume_lookback_days=read_algorithm("volume_lookback_days", VOLUME_LOOKBACK_DAYS),
+        social_lookback_days=read_algorithm("social_lookback_days", SOCIAL_LOOKBACK_DAYS),
+        max_weight_per_symbol=read_algorithm("max_weight_per_symbol", MAX_WEIGHT_PER_SYMBOL),
+        max_portfolio_exposure=read_algorithm("max_portfolio_exposure", MAX_PORTFOLIO_EXPOSURE),
+        max_longs=read_algorithm("max_longs", MAX_LONGS),
+        min_composite_score=read_algorithm("min_composite_score", MIN_COMPOSITE_SCORE),
+        price_momentum_weight=read_algorithm("price_momentum_weight", PRICE_MOMENTUM_WEIGHT),
+        social_momentum_weight=read_algorithm("social_momentum_weight", SOCIAL_MOMENTUM_WEIGHT),
+        volume_momentum_weight=read_algorithm("volume_momentum_weight", VOLUME_MOMENTUM_WEIGHT),
+        target_annual_vol=read_algorithm("target_annual_vol", TARGET_ANNUAL_VOL),
+        cash_buffer=read_algorithm("cash_buffer", CASH_BUFFER),
+        min_trade_dollars=read_algorithm("min_trade_dollars", MIN_TRADE_DOLLARS),
+        rebalance_threshold=read_algorithm("rebalance_threshold", REBALANCE_THRESHOLD),
+        transaction_cost_bps=read_algorithm("transaction_cost_bps", TRANSACTION_COST_BPS),
+        backtest_starting_equity=read_algorithm("backtest_starting_equity", BACKTEST_STARTING_EQUITY),
         backtest_period=str(_config_value(runtime, "backtest_period", "BACKTEST_PERIOD", BACKTEST_PERIOD)).strip().lower() or BACKTEST_PERIOD,
-        algorithm_equity_cap=_as_float(_config_value(algorithm, "algorithm_equity_cap", "ALGORITHM_EQUITY_CAP", ALGORITHM_EQUITY_CAP), ALGORITHM_EQUITY_CAP),
+        algorithm_equity_cap=read_algorithm("algorithm_equity_cap", ALGORITHM_EQUITY_CAP),
         kill_switch=kill_switch,
         alpaca_api_key=api_key,
         alpaca_api_secret=api_secret,
         alpaca_data_api_key=alpaca_data_api_key,
         alpaca_data_api_secret=alpaca_data_api_secret,
         alpaca_base_url=base_url,
-        alpaca_data_feed=str(_config_value(account_config, "data_feed", "ALPACA_DATA_FEED", ALPACA_DATA_FEED)),
-        schwab_app_key=str(_config_value(account_config, "schwab_app_key", "SCHWAB_APP_KEY", "") or ""),
-        schwab_app_secret=str(_config_value(account_config, "schwab_app_secret", "SCHWAB_APP_SECRET", "") or ""),
-        schwab_refresh_token=str(_config_value(account_config, "schwab_refresh_token", "SCHWAB_REFRESH_TOKEN", "") or ""),
-        schwab_account_number=str(_config_value(account_config, "schwab_account_number", "SCHWAB_ACCOUNT_NUMBER", "") or ""),
-        schwab_callback_url=str(_config_value(account_config, "schwab_callback_url", "SCHWAB_CALLBACK_URL", "") or ""),
-        history_extra_buffer_days=_as_int(_config_value(algorithm, "history_extra_buffer_days", "HISTORY_EXTRA_BUFFER_DAYS", HISTORY_EXTRA_BUFFER_DAYS), HISTORY_EXTRA_BUFFER_DAYS),
+        alpaca_data_feed=read_account_config("data_feed", ALPACA_DATA_FEED, env="ALPACA_DATA_FEED"),
+        schwab_app_key=read_account_config("schwab_app_key", ""),
+        schwab_app_secret=read_account_config("schwab_app_secret", ""),
+        schwab_refresh_token=read_account_config("schwab_refresh_token", ""),
+        schwab_account_number=read_account_config("schwab_account_number", ""),
+        schwab_callback_url=read_account_config("schwab_callback_url", ""),
+        history_extra_buffer_days=read_algorithm("history_extra_buffer_days", HISTORY_EXTRA_BUFFER_DAYS),
         social_trends_csv=social_trends_csv,
         tradables_csv=tradables_csv,
         alpha_vantage_api_key=alpha_vantage_api_key,
         alpha_vantage_news_csv=alpha_vantage_news_csv,
-        alpha_vantage_news_lookback_days=_as_int(_config_value(alpha_vantage, "news_lookback_days", "ALPHA_VANTAGE_NEWS_LOOKBACK_DAYS", ALPHA_VANTAGE_NEWS_LOOKBACK_DAYS), ALPHA_VANTAGE_NEWS_LOOKBACK_DAYS),
-        alpha_vantage_news_limit=_as_int(_config_value(alpha_vantage, "news_limit", "ALPHA_VANTAGE_NEWS_LIMIT", ALPHA_VANTAGE_NEWS_LIMIT), ALPHA_VANTAGE_NEWS_LIMIT),
-        alpha_vantage_max_symbols=_as_int(_config_value(alpha_vantage, "max_symbols", "ALPHA_VANTAGE_MAX_SYMBOLS", ALPHA_VANTAGE_MAX_SYMBOLS), ALPHA_VANTAGE_MAX_SYMBOLS),
-        alpha_vantage_request_delay_seconds=_as_float(_config_value(alpha_vantage, "request_delay_seconds", "ALPHA_VANTAGE_REQUEST_DELAY_SECONDS", ALPHA_VANTAGE_REQUEST_DELAY_SECONDS), ALPHA_VANTAGE_REQUEST_DELAY_SECONDS),
+        alpha_vantage_news_lookback_days=read_alpha_vantage("news_lookback_days", ALPHA_VANTAGE_NEWS_LOOKBACK_DAYS, env="ALPHA_VANTAGE_NEWS_LOOKBACK_DAYS"),
+        alpha_vantage_news_limit=read_alpha_vantage("news_limit", ALPHA_VANTAGE_NEWS_LIMIT, env="ALPHA_VANTAGE_NEWS_LIMIT"),
+        alpha_vantage_max_symbols=read_alpha_vantage("max_symbols", ALPHA_VANTAGE_MAX_SYMBOLS, env="ALPHA_VANTAGE_MAX_SYMBOLS"),
+        alpha_vantage_request_delay_seconds=read_alpha_vantage("request_delay_seconds", ALPHA_VANTAGE_REQUEST_DELAY_SECONDS, env="ALPHA_VANTAGE_REQUEST_DELAY_SECONDS"),
         account_options=account_options,
         algorithm_configs=algorithm_configs,
-        market_data_provider_order=_as_list(
-            _config_value(market_sources, "provider_order", "MARKET_DATA_PROVIDER_ORDER", MARKET_DATA_PROVIDER_ORDER),
-            MARKET_DATA_PROVIDER_ORDER,
-        ),
-        intraday_market_data_provider_order=_as_list(
-            _config_value(
-                intraday_market_sources,
-                "provider_order",
-                "INTRADAY_MARKET_DATA_PROVIDER_ORDER",
-                INTRADAY_MARKET_DATA_PROVIDER_ORDER,
-            ),
-            INTRADAY_MARKET_DATA_PROVIDER_ORDER,
-        ),
-        eod_market_data_provider_order=_as_list(
-            _config_value(
-                eod_market_sources,
-                "provider_order",
-                "EOD_MARKET_DATA_PROVIDER_ORDER",
-                EOD_MARKET_DATA_PROVIDER_ORDER,
-            ),
-            EOD_MARKET_DATA_PROVIDER_ORDER,
-        ),
-        news_sentiment_provider_order=_as_list(
-            _config_value(news_sources, "provider_order", "NEWS_SENTIMENT_PROVIDER_ORDER", NEWS_SENTIMENT_PROVIDER_ORDER),
-            NEWS_SENTIMENT_PROVIDER_ORDER,
-        ),
-        sentiment_data_provider_order=_as_list(
-            _config_value(sentiment_sources, "provider_order", "SENTIMENT_DATA_PROVIDER_ORDER", NEWS_SENTIMENT_PROVIDER_ORDER),
-            NEWS_SENTIMENT_PROVIDER_ORDER,
-        ),
-        dividend_provider_order=_as_list(
-            _config_value(dividend_sources, "provider_order", "DIVIDEND_PROVIDER_ORDER", DIVIDEND_PROVIDER_ORDER),
-            DIVIDEND_PROVIDER_ORDER,
-        ),
-        market_data_bar_minutes=_as_int(
-            _config_value(
-                intraday_market_sources, "bar_minutes", "MARKET_DATA_BAR_MINUTES", MARKET_DATA_BAR_MINUTES
-            ),
-            MARKET_DATA_BAR_MINUTES,
-        ),
-        market_data_cache_ttl_seconds=_as_int(
-            _config_value(market_sources, "cache_ttl_seconds", "MARKET_DATA_CACHE_TTL_SECONDS", MARKET_DATA_CACHE_TTL_SECONDS),
-            MARKET_DATA_CACHE_TTL_SECONDS,
-        ),
-        intraday_market_data_cache_ttl_seconds=_as_int(
-            _config_value(
-                intraday_market_sources,
-                "cache_ttl_seconds",
-                "INTRADAY_MARKET_DATA_CACHE_TTL_SECONDS",
-                INTRADAY_MARKET_DATA_CACHE_TTL_SECONDS,
-            ),
-            INTRADAY_MARKET_DATA_CACHE_TTL_SECONDS,
-        ),
-        eod_market_data_cache_ttl_seconds=_as_int(
-            _config_value(
-                eod_market_sources,
-                "cache_ttl_seconds",
-                "EOD_MARKET_DATA_CACHE_TTL_SECONDS",
-                EOD_MARKET_DATA_CACHE_TTL_SECONDS,
-            ),
-            EOD_MARKET_DATA_CACHE_TTL_SECONDS,
-        ),
-        news_sentiment_cache_ttl_seconds=_as_int(
-            _config_value(news_sources, "cache_ttl_seconds", "NEWS_SENTIMENT_CACHE_TTL_SECONDS", NEWS_SENTIMENT_CACHE_TTL_SECONDS),
-            NEWS_SENTIMENT_CACHE_TTL_SECONDS,
-        ),
-        sentiment_data_cache_ttl_seconds=_as_int(
-            _config_value(sentiment_sources, "cache_ttl_seconds", "SENTIMENT_DATA_CACHE_TTL_SECONDS", NEWS_SENTIMENT_CACHE_TTL_SECONDS),
-            NEWS_SENTIMENT_CACHE_TTL_SECONDS,
-        ),
+        market_data_provider_order=read_market_sources("provider_order", MARKET_DATA_PROVIDER_ORDER, env="MARKET_DATA_PROVIDER_ORDER"),
+        intraday_market_data_provider_order=read_intraday_market_sources("provider_order", INTRADAY_MARKET_DATA_PROVIDER_ORDER, env="INTRADAY_MARKET_DATA_PROVIDER_ORDER"),
+        eod_market_data_provider_order=read_eod_market_sources("provider_order", EOD_MARKET_DATA_PROVIDER_ORDER, env="EOD_MARKET_DATA_PROVIDER_ORDER"),
+        news_sentiment_provider_order=read_news_sources("provider_order", NEWS_SENTIMENT_PROVIDER_ORDER, env="NEWS_SENTIMENT_PROVIDER_ORDER"),
+        sentiment_data_provider_order=read_sentiment_sources("provider_order", NEWS_SENTIMENT_PROVIDER_ORDER, env="SENTIMENT_DATA_PROVIDER_ORDER"),
+        dividend_provider_order=read_dividend_sources("provider_order", DIVIDEND_PROVIDER_ORDER, env="DIVIDEND_PROVIDER_ORDER"),
+        market_data_bar_minutes=read_intraday_market_sources("bar_minutes", MARKET_DATA_BAR_MINUTES, env="MARKET_DATA_BAR_MINUTES"),
+        market_data_cache_ttl_seconds=read_market_sources("cache_ttl_seconds", MARKET_DATA_CACHE_TTL_SECONDS, env="MARKET_DATA_CACHE_TTL_SECONDS"),
+        intraday_market_data_cache_ttl_seconds=read_intraday_market_sources("cache_ttl_seconds", INTRADAY_MARKET_DATA_CACHE_TTL_SECONDS, env="INTRADAY_MARKET_DATA_CACHE_TTL_SECONDS"),
+        eod_market_data_cache_ttl_seconds=read_eod_market_sources("cache_ttl_seconds", EOD_MARKET_DATA_CACHE_TTL_SECONDS, env="EOD_MARKET_DATA_CACHE_TTL_SECONDS"),
+        news_sentiment_cache_ttl_seconds=read_news_sources("cache_ttl_seconds", NEWS_SENTIMENT_CACHE_TTL_SECONDS, env="NEWS_SENTIMENT_CACHE_TTL_SECONDS"),
+        sentiment_data_cache_ttl_seconds=read_sentiment_sources("cache_ttl_seconds", NEWS_SENTIMENT_CACHE_TTL_SECONDS, env="SENTIMENT_DATA_CACHE_TTL_SECONDS"),
         data_source_configs=data_sources,
-        require_trade_approval=_str_to_bool(
-            str(_config_value(runtime, "require_trade_approval", "REQUIRE_TRADE_APPROVAL", REQUIRE_TRADE_APPROVAL)),
-            REQUIRE_TRADE_APPROVAL,
-        ),
-        trade_approval_timeout_seconds=_as_int(
-            _config_value(runtime, "trade_approval_timeout_seconds", "TRADE_APPROVAL_TIMEOUT_SECONDS", TRADE_APPROVAL_TIMEOUT_SECONDS),
-            TRADE_APPROVAL_TIMEOUT_SECONDS,
-        ),
-        trade_approval_poll_seconds=_as_int(
-            _config_value(runtime, "trade_approval_poll_seconds", "TRADE_APPROVAL_POLL_SECONDS", TRADE_APPROVAL_POLL_SECONDS),
-            TRADE_APPROVAL_POLL_SECONDS,
-        ),
-        options_swing_dte_min=_as_int(_config_value(options, "swing_dte_min", "OPTIONS_SWING_DTE_MIN", OPTIONS_SWING_DTE_MIN), OPTIONS_SWING_DTE_MIN),
-        options_swing_dte_max=_as_int(_config_value(options, "swing_dte_max", "OPTIONS_SWING_DTE_MAX", OPTIONS_SWING_DTE_MAX), OPTIONS_SWING_DTE_MAX),
-        options_swing_min_delta=_as_float(_config_value(options, "swing_min_delta", "OPTIONS_SWING_MIN_DELTA", OPTIONS_SWING_MIN_DELTA), OPTIONS_SWING_MIN_DELTA),
-        options_swing_max_delta=_as_float(_config_value(options, "swing_max_delta", "OPTIONS_SWING_MAX_DELTA", OPTIONS_SWING_MAX_DELTA), OPTIONS_SWING_MAX_DELTA),
-        options_swing_max_contracts=_as_int(_config_value(options, "swing_max_contracts", "OPTIONS_SWING_MAX_CONTRACTS", OPTIONS_SWING_MAX_CONTRACTS), OPTIONS_SWING_MAX_CONTRACTS),
-        options_swing_max_premium=_as_float(_config_value(options, "swing_max_premium", "OPTIONS_SWING_MAX_PREMIUM", OPTIONS_SWING_MAX_PREMIUM), OPTIONS_SWING_MAX_PREMIUM),
-        options_swing_min_open_interest=_as_int(_config_value(options, "swing_min_open_interest", "OPTIONS_SWING_MIN_OPEN_INTEREST", OPTIONS_SWING_MIN_OPEN_INTEREST), OPTIONS_SWING_MIN_OPEN_INTEREST),
-        options_swing_max_spread_pct=_as_float(_config_value(options, "swing_max_spread_pct", "OPTIONS_SWING_MAX_SPREAD_PCT", OPTIONS_SWING_MAX_SPREAD_PCT), OPTIONS_SWING_MAX_SPREAD_PCT),
-        options_swing_strike_range_pct=_as_float(_config_value(options, "swing_strike_range_pct", "OPTIONS_SWING_STRIKE_RANGE_PCT", OPTIONS_SWING_STRIKE_RANGE_PCT), OPTIONS_SWING_STRIKE_RANGE_PCT),
+        require_trade_approval=read_runtime("require_trade_approval", REQUIRE_TRADE_APPROVAL),
+        trade_approval_timeout_seconds=read_runtime("trade_approval_timeout_seconds", TRADE_APPROVAL_TIMEOUT_SECONDS),
+        trade_approval_poll_seconds=read_runtime("trade_approval_poll_seconds", TRADE_APPROVAL_POLL_SECONDS),
+        options_swing_dte_min=read_options("swing_dte_min", OPTIONS_SWING_DTE_MIN, env="OPTIONS_SWING_DTE_MIN"),
+        options_swing_dte_max=read_options("swing_dte_max", OPTIONS_SWING_DTE_MAX, env="OPTIONS_SWING_DTE_MAX"),
+        options_swing_min_delta=read_options("swing_min_delta", OPTIONS_SWING_MIN_DELTA, env="OPTIONS_SWING_MIN_DELTA"),
+        options_swing_max_delta=read_options("swing_max_delta", OPTIONS_SWING_MAX_DELTA, env="OPTIONS_SWING_MAX_DELTA"),
+        options_swing_max_contracts=read_options("swing_max_contracts", OPTIONS_SWING_MAX_CONTRACTS, env="OPTIONS_SWING_MAX_CONTRACTS"),
+        options_swing_max_premium=read_options("swing_max_premium", OPTIONS_SWING_MAX_PREMIUM, env="OPTIONS_SWING_MAX_PREMIUM"),
+        options_swing_min_open_interest=read_options("swing_min_open_interest", OPTIONS_SWING_MIN_OPEN_INTEREST, env="OPTIONS_SWING_MIN_OPEN_INTEREST"),
+        options_swing_max_spread_pct=read_options("swing_max_spread_pct", OPTIONS_SWING_MAX_SPREAD_PCT, env="OPTIONS_SWING_MAX_SPREAD_PCT"),
+        options_swing_strike_range_pct=read_options("swing_strike_range_pct", OPTIONS_SWING_STRIKE_RANGE_PCT, env="OPTIONS_SWING_STRIKE_RANGE_PCT"),
     )

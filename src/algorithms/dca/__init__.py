@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from ...common.config_utils import as_float
 from ...core.config import load_dca_config, save_dca_config
 
 DCA_PLAN_SECTION = "dca_plan"
@@ -46,14 +47,6 @@ DEFAULT_DCA_PLAN: dict[str, Any] = {
 BUCKETS = ("buy", "sell")
 
 
-def _as_float(value: Any, default: float = 0.0) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return default
-    return max(parsed, 0.0)
-
-
 def _universe_lookup(universe_rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {str(row["symbol"]).upper(): row for row in universe_rows if row.get("symbol")}
 
@@ -71,7 +64,7 @@ def sanitize_dca_plan(plan: dict[str, Any] | None, universe_rows: list[dict[str,
     universe = _universe_lookup(universe_rows)
     sanitized = {
         "max_item_amount": min(
-            max(_as_float(raw_plan.get("max_item_amount"), default=DCA_MAX_ITEM_AMOUNT), 1.0),
+            max(as_float(raw_plan.get("max_item_amount"), default=DCA_MAX_ITEM_AMOUNT), 1.0),
             DCA_MAX_ITEM_AMOUNT,
         ),
     }
@@ -87,7 +80,7 @@ def sanitize_dca_plan(plan: dict[str, Any] | None, universe_rows: list[dict[str,
                 continue
             assigned_symbols.add(symbol)
             amount = min(
-                _as_float(item.get("amount"), default=0.0),
+                as_float(item.get("amount"), default=0.0),
                 sanitized["max_item_amount"],
                 DCA_MAX_ITEM_AMOUNT,
             )
@@ -185,12 +178,12 @@ def allocation_preview(plan: dict[str, Any]) -> list[dict[str, Any]]:
     for bucket in BUCKETS:
         bucket_plan = plan.get(bucket, {})
         items = bucket_plan.get("items", [])
-        bucket_total = sum(_as_float(item.get("amount")) for item in items)
+        bucket_total = sum(as_float(item.get("amount")) for item in items)
         if bucket_total <= 0 or not items:
             continue
 
         for index, item in enumerate(items):
-            notional = _as_float(item.get("amount"))
+            notional = as_float(item.get("amount"))
             if notional <= 0:
                 continue
             weight = notional / bucket_total if bucket_total else 0.0
@@ -207,3 +200,4 @@ def allocation_preview(plan: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
     return rows
+

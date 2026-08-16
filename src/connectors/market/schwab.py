@@ -17,7 +17,7 @@ from ...core.config import Config
 from ..support import (
     EOD_CACHE_TTL_SECONDS, EOD_MARKET_CATEGORY, INTRADAY_CACHE_TTL_SECONDS,
     INTRADAY_MARKET_CATEGORY, MARKET_CATEGORY, ProviderUnavailable, _bearer_auth_header,
-    _empty_bars, _finite,
+    _empty_bars, json_number,
     _fresh_cached_bars, _normalize_quote, _provider_bars, _read_duckdb_bars, _request_json,
     _schwab_token, _write_duckdb_bars, bars_for_minutes, calendar_days_for, default_bar_minutes,
     DAILY_INTERVAL_MINUTES, resolve_bar_minutes,
@@ -184,11 +184,11 @@ def _fetch_schwab_quotes(symbols: list[str], config: Config) -> dict[str, dict[s
     for symbol in wanted:
         row = payload.get(symbol) or {}
         raw_quote = row.get("quote", row) or {}
-        price = _finite(raw_quote.get("lastPrice"))
+        price = json_number(raw_quote.get("lastPrice"))
         if not price or price <= 0:
-            bid = _finite(raw_quote.get("bidPrice")) or 0.0
-            ask = _finite(raw_quote.get("askPrice")) or 0.0
-            price = (bid + ask) / 2 if bid > 0 and ask > 0 else _finite(raw_quote.get("closePrice"))
+            bid = json_number(raw_quote.get("bidPrice")) or 0.0
+            ask = json_number(raw_quote.get("askPrice")) or 0.0
+            price = (bid + ask) / 2 if bid > 0 and ask > 0 else json_number(raw_quote.get("closePrice"))
         timestamp = raw_quote.get("quoteTime") or raw_quote.get("tradeTime")
         quote = _normalize_quote(
             "schwab",

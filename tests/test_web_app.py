@@ -262,6 +262,23 @@ def test_backtest_period_is_selectable() -> None:
     assert 'id="backtestPeriodSelect"' in app_js
     # Switching period clears cached curves so the chart cannot show the wrong window.
     assert "configureBacktestPeriod(event.target.value);" in app_js
+    # A <select> keeps focus after its own change event, and render() defers while a control
+    # is focused -- so without forcing, the cached payload for the newly chosen window landed
+    # in state and was never painted. It only appeared once something else moved focus, which
+    # made "Run backtest" look like the only way to change period.
+    assert "render({ force: true });" in app_js
+
+
+def test_a_deferred_repaint_is_not_silently_dropped() -> None:
+    """render() skips while a control has focus; the skipped paint still has to happen.
+
+    Otherwise any state that arrives during an interaction -- a cached backtest, a background
+    poll -- is applied to state and never reaches the screen.
+    """
+    app_js, _, _ = _assets()
+
+    assert "renderDeferred = true;" in app_js
+    assert 'addEventListener("focusout"' in app_js
 
 
 def test_watchlist_can_be_reordered_by_drag() -> None:
@@ -328,7 +345,7 @@ def test_frontend_keeps_the_configured_backtest_period_and_chart() -> None:
     assert "chart-crosshair" in app_js
     assert "backtestPositions(row.positions)" in app_js
     assert "renderUniverseProposalRows" in app_js
-    assert "app.js?v=20260813-sidebar" in index_html
+    assert "app.js?v=20260815-backtest-periods" in index_html
 
 
 def test_options_and_carousel_stay_gone() -> None:

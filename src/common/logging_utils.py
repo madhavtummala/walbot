@@ -30,7 +30,7 @@ def demote_uvicorn_access_logs_to_debug() -> None:
 def _resolve_log_level(level: int | str | None = None) -> int:
     if isinstance(level, int):
         return level
-    raw_level = str(level or os.getenv("TRADING_LOG_LEVEL", "INFO")).strip().upper()
+    raw_level = str(level or os.getenv("TRADING_LOG_LEVEL", "WARNING")).strip().upper()
     if raw_level == "WARN":
         raw_level = "WARNING"
     resolved = logging.getLevelName(raw_level)

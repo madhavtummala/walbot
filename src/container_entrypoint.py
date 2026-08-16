@@ -3,9 +3,6 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
-import subprocess
-import sys
-import time
 from pathlib import Path
 
 import uvicorn
@@ -43,26 +40,6 @@ def prepare_config() -> str:
     return f"Seeded {target} from the image defaults"
 
 
-def _start_mcp_server(host: str, port: int, transport: str) -> subprocess.Popen:
-    process = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "src.mcp_server",
-            "--host",
-            host,
-            "--port",
-            str(port),
-            "--transport",
-            transport,
-        ]
-    )
-    time.sleep(0.5)
-    if process.poll() is not None:
-        raise RuntimeError(f"MCP server exited during startup with code {process.returncode}")
-    return process
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Start the Walbot container runtime.")
     # No --bot/--mcp modes. Whether an algorithm is driven by the scheduler or by an agent is
@@ -84,26 +61,23 @@ def main() -> None:
     if note:
         print(note, flush=True)
 
-    mcp_process: subprocess.Popen | None = None
-    try:
-        if not args.no_mcp_server:
-            try:
-                mcp_process = _start_mcp_server(args.mcp_host, args.mcp_port, args.mcp_transport)
-            except Exception as error:  # noqa: BLE001 - the dashboard must still come up
-                print(f"MCP tool server did not start: {error}", flush=True)
-        uvicorn.run(
-            "src.api.api_app:app",
-            host=args.host,
-            port=args.port,
-            log_level=os.getenv("UVICORN_LOG_LEVEL", "warning"),
-        )
-    finally:
-        if mcp_process and mcp_process.poll() is None:
-            mcp_process.terminate()
-            try:
-                mcp_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                mcp_process.kill()
+    if not args.no_mcp_server:
+        # In this process, not beside it: two processes on one DuckDB file is what produced
+        # "Conflicting lock is held" whenever a tool call and the dashboard overlapped. See
+        # ``serve_in_thread``. The daemon thread needs no shutdown handling of its own.
+        from src.mcp_server import serve_in_thread
+
+        try:
+            serve_in_thread(host=args.mcp_host, port=args.mcp_port, transport=args.mcp_transport)
+        except Exception as error:  # noqa: BLE001 - the dashboard must still come up
+            print(f"MCP tool server did not start: {error}", flush=True)
+
+    uvicorn.run(
+        "src.api.api_app:app",
+        host=args.host,
+        port=args.port,
+        log_level=os.getenv("UVICORN_LOG_LEVEL", "warning"),
+    )
 
 
 if __name__ == "__main__":

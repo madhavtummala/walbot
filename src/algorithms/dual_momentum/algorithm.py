@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from .config import DualMomentumConfig
+from .config import STATE_KEY, DualMomentumConfig
 from .layers import score_to_weights, volatility_scale
 from .proposal import allocation_mode, analyze_universe, build_signals
 from .stateful import _defensive_book, _in_cooldown, _minutes_between, _parse_time, _record_exits, _resolve_replacements, _run_facts, apply_turnover_filters, confirm_regime, intraday_drawdown_breached
@@ -11,6 +11,7 @@ from .stateful import _defensive_book, _in_cooldown, _minutes_between, _parse_ti
 
 
 import logging
+from datetime import datetime
 from typing import Any
 
 
@@ -19,13 +20,6 @@ from ...core.interfaces import AlgorithmContext, AlgorithmDecision, AlgorithmReq
 from ...data.state_store import load_state, save_state
 
 logger = logging.getLogger(__name__)
-
-STATE_KEY = "dual_momentum_runtime"
-
-EPSILON = 1e-9
-
-#: Trading days per year, for annualising a daily volatility estimate.
-TRADING_DAYS = 252
 
 
 class DualMomentumAlgorithm(BaseAlgorithm):
@@ -75,7 +69,6 @@ class DualMomentumAlgorithm(BaseAlgorithm):
                 outcome["volatility"],
                 outcome["covariance"],
                 outcome["defensive_book"],
-                context.timestamp,
                 strategy_config,
             ),
             metadata={
@@ -95,6 +88,7 @@ class DualMomentumAlgorithm(BaseAlgorithm):
         snapshot: Any,
         latest_prices: dict[str, float],
         config: Any,
+        as_of: datetime,
     ) -> dict[str, float]:
         """Position-aware layer: regime hysteresis, hold/exit asymmetry, cooldown, risk stops.
 
@@ -109,7 +103,11 @@ class DualMomentumAlgorithm(BaseAlgorithm):
             state = {}
 
         facts = _run_facts(signals)
-        now = _parse_time(facts["as_of"])
+        # ``as_of`` is the only clock this layer reads, and it arrives as an argument rather
+        # than from a lookup: every elapsed-time decision below -- the re-entry cooldown, the
+        # selection throttle, the session breaker -- has to measure against the moment step 1
+        # described, which in a replay is a date months ago.
+        stamp = as_of.isoformat()
         current = snapshot.weights(latest_prices)
         held = {symbol for symbol, weight in current.items() if weight > 0}
         defensive = {name.upper() for name in strategy_config.defensive_universe}
@@ -128,12 +126,11 @@ class DualMomentumAlgorithm(BaseAlgorithm):
                 float(snapshot.equity or 0.0),
                 strategy_config,
             )
-            _record_exits(state, held, {s for s, weight in result.items() if weight > 0}, facts["as_of"])
+            _record_exits(state, held, {s for s, weight in result.items() if weight > 0}, stamp)
             save_state(state_key, state)
             return result
 
-        session = now.date().isoformat() if now else ""
-        if intraday_drawdown_breached(state, float(snapshot.equity or 0.0), strategy_config, session):
+        if intraday_drawdown_breached(state, float(snapshot.equity or 0.0), strategy_config, as_of):
             logger.warning(
                 "Dual Momentum drawdown breaker active (%.2f%%); holding the defensive sleeve only",
                 100 * float(state.get("session_drawdown", 0.0)),
@@ -168,7 +165,7 @@ class DualMomentumAlgorithm(BaseAlgorithm):
         # A free slot is exempt -- the throttle exists to stop churn between comparable names,
         # and sitting in cash while a qualified name waits out the hour is lag, not risk
         # management.
-        since_selection = _minutes_between(now, _parse_time(str(state.get("last_selection_at", ""))))
+        since_selection = _minutes_between(as_of, _parse_time(str(state.get("last_selection_at", ""))))
         may_reselect = (
             since_selection >= max(strategy_config.signal_refresh_minutes, 0)
             or len(keep) < max(strategy_config.max_positions, 0)
@@ -176,9 +173,9 @@ class DualMomentumAlgorithm(BaseAlgorithm):
 
         if may_reselect:
             entrants = {symbol for symbol in proposed if symbol not in keep}
-            entrants = {symbol for symbol in entrants if not _in_cooldown(state, symbol, now, strategy_config)}
+            entrants = {symbol for symbol in entrants if not _in_cooldown(state, symbol, as_of, strategy_config)}
             selection = _resolve_replacements(keep, entrants, rows, strategy_config)
-            state["last_selection_at"] = facts["as_of"]
+            state["last_selection_at"] = stamp
         else:
             selection = set(keep)
 

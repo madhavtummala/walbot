@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from .config import DualMomentumConfig
+from .config import EPSILON, TRADING_DAYS, DualMomentumConfig
 
 
 
@@ -13,35 +13,16 @@ from typing import Any
 
 import pandas as pd
 
-from ...data.bars import bar_interval_minutes, ema, realized_volatility, return_path, signal_price
+from ...data.bars import (
+    bar_interval_minutes,
+    closes_of as _closes,
+    ema,
+    realized_volatility,
+    return_over_periods as _return_over,
+    return_path,
+)
 
 logger = logging.getLogger(__name__)
-
-STATE_KEY = "dual_momentum_runtime"
-
-EPSILON = 1e-9
-
-#: Trading days per year, for annualising a daily volatility estimate.
-TRADING_DAYS = 252
-
-
-
-
-def _closes(bars: Any) -> pd.Series:
-    """Total-return closes -- see ``data.bars.signal_price`` for why not the raw price."""
-    frame = bars if isinstance(bars, pd.DataFrame) else pd.DataFrame()
-    if frame.empty:
-        return pd.Series(dtype=float)
-    return signal_price(frame).dropna()
-
-
-def _return_over(closes: pd.Series, periods: int) -> float:
-    """Simple return across ``periods`` observations, 0.0 when the history is too short."""
-    if periods <= 0 or len(closes) <= periods:
-        return 0.0
-    start = float(closes.iloc[-periods - 1])
-    end = float(closes.iloc[-1])
-    return end / start - 1.0 if start > 0 else 0.0
 
 
 def _rolling_volatility(closes: pd.Series, window: int) -> float:

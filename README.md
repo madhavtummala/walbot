@@ -33,11 +33,15 @@ pip install -r requirements.txt
 
 Edit files under `config/` to set provider order, runtime behavior, universes, and account wiring. Keep secrets in environment variables referenced by `*_env` fields, not directly in YAML.
 
-### Running the Dashboard Bot
+### Running the Dashboard
 
 ```bash
-python -m src.container_entrypoint --bot
+python -m src.container_entrypoint
 ```
+
+This starts the dashboard/API on port `8000` and the MCP tool server for external agents on
+port `8001`. The built-in bot scheduler also runs, but nothing fires unless a binding is
+switched on in the dashboard (see below).
 
 Open the dashboard at:
 
@@ -45,11 +49,15 @@ Open the dashboard at:
 http://localhost:8000
 ```
 
-`--bot` uses port `8000` by default. Override it with `--port` or the `PORT` environment variable:
+Override the ports with `--port` / `--mcp-port` or the `PORT` / `MCP_PORT` environment
+variables:
 
 ```bash
-python -m src.container_entrypoint --bot --port 8010
+python -m src.container_entrypoint --port 8010
 ```
+
+Logging defaults to `WARNING`. Raise it with `TRADING_LOG_LEVEL=INFO` or lower it with
+`DEBUG` (which also turns Uvicorn's per-request access logs back on).
 
 ## Local Development
 
@@ -75,12 +83,15 @@ STATE_DUCKDB_PATH=data/walbot.duckdb
 ALPHA_VANTAGE_NEWS_CSV=data/social_trends.csv
 ```
 
-After setup, run the dashboard bot with the command in [Running the Dashboard Bot](#running-the-dashboard-bot).
+After setup, run the dashboard with the command in [Running the Dashboard](#running-the-dashboard).
 
-Runtime modes:
-
-- `--bot`: dashboard/API plus the built-in non-AI bot scheduler.
-- `--mcp`: dashboard/API on port `8000` with the internal scheduler disabled, plus an MCP tool server on port `8001` for an external agent such as OpenClaw.
+There are no `--bot` / `--mcp` process-wide modes. The dashboard, the bot scheduler, and the
+MCP tool server all start together; whether an algorithm is driven by the clock or by an
+agent is a property of its *binding* in the dashboard. Each binding declares a `frequency`
+for the scheduler -- `15m`, `30m`, `1hr`, `2hr`, `1d` -- or `mcp` to park it, switched on but
+waiting for an external agent to drive it. A `--mcp` process mode could only contradict the
+binding's own frequency, and it did: the dashboard reported "MCP mode" with every algorithm
+switched off.
 
 Built-in bot scheduling and approval behavior is configured in `algorithm_bot.yaml`:
 
@@ -96,7 +107,10 @@ algorithm_bot:
 
 When `require_trade_approval` is true, planned orders are sent to Telegram for approval before submission. You can approve or deny with the inline buttons or by replying `/approve <approval_id>` / `/deny <approval_id>`.
 
-In `--mcp` mode, an external agent such as OpenClaw should use the `request_trade_approval` MCP tool for the same Telegram approval flow. That keeps approval behavior consistent between agent-driven runs and the built-in bot runtime.
+An external agent such as OpenClaw drives a binding parked on `mcp` through the MCP tool
+server on port `8001`, and uses the `request_trade_approval` MCP tool for the same Telegram
+approval flow. That keeps approval behavior consistent between agent-driven runs and the
+built-in bot runtime.
 
 Current config files:
 
@@ -156,16 +170,29 @@ python -m src.data.cache_warmup --algorithm fast_momentum --start-date 2026-06-0
 
 Use `--eod` or `--intraday` to warm only that bar category. Use `--symbols SPY QQQM` instead of `--algorithm` to warm an explicit symbol list.
 
-Docker defaults to `--bot`. To run agent-facing tool mode:
+Long backtests (e.g. 12M) fetch a lot of history and replay thousands of cached reads. The
+replay runs on read-only DuckDB connections, so other *processes* -- a cache warmup, CLI tools
+-- can keep reading while it runs. The network fetch itself holds no database lock at all.
+
+DuckDB allows one read-write process per database file, and while a process holds it
+read-write no other process can open the file at all -- not even read-only. So the dashboard,
+the scheduler and the MCP tool server all share a single process rather than contending for
+`data/walbot.duckdb`; inside that process DuckDB's own MVCC interleaves readers and writers.
+Running a CLI tool against the same file while the dashboard is up is still the one case that
+can collide, and it retries briefly before failing (`LOCK_WAIT_SECONDS` in
+`src/data/duckdb_store.py`).
+
+Docker starts the dashboard, the scheduler, and the MCP tool server together (there is no mode
+flag -- see [Running the Dashboard](#running-the-dashboard)):
 
 ```bash
-docker run --rm -p 8000:8000 -p 8001:8001 ghcr.io/madhavtummala/walbot:latest --mcp
+docker run --rm -p 8000:8000 -p 8001:8001 ghcr.io/madhavtummala/walbot:latest
 ```
 
 With compose:
 
 ```bash
-WALBOT_MODE=--mcp docker compose up
+docker compose up
 ```
 
 Run tests:
@@ -184,7 +211,7 @@ pytest
 - `src/execution/` - live runner and backtest execution
 - `src/notifications/` - notification provider connectors
 - `src/mcp_server.py` - MCP tools for external agent runtimes
-- `src/container_entrypoint.py` - Docker/local runtime mode entrypoint
+- `src/container_entrypoint.py` - Docker/local runtime entrypoint: dashboard, scheduler, and MCP server
 - `web/` - dashboard HTML, CSS, and JavaScript
 - `config/` - committed non-secret runtime config
 - `Dockerfile` - production image

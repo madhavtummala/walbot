@@ -21,8 +21,8 @@ def test_configure_logging_uses_console_only(monkeypatch) -> None:
 
         assert len(handlers) == 1
         assert isinstance(handlers[0], logging.StreamHandler)
-        assert root.level == logging.INFO
-        assert handlers[0].level == logging.INFO
+        assert root.level == logging.WARNING
+        assert handlers[0].level == logging.WARNING
     finally:
         root.handlers = original_handlers
         root.setLevel(original_level)

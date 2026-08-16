@@ -9,7 +9,7 @@ let BACKTEST_LABEL = "4M";
 
 //: Selectable backtest windows. The configured default from status still wins on first load;
 //: this only lets you look at a different window without editing config.
-const BACKTEST_PERIOD_CHOICES = ["1m", "2m", "3m", "4m", "6m", "12m", "24m"];
+const BACKTEST_PERIOD_CHOICES = ["1m", "3m", "6m", "12m", "24m"];
 
 const ENABLED_COLORS = {
   buy: "#024c4a",
@@ -155,9 +155,35 @@ async function api(path, options = {}) {
       signal: controller.signal,
       ...fetchOptions,
     });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || `Request failed: ${response.status}`);
+    // Read as text first. A 500 from FastAPI's default handler is plain "Internal Server
+    // Error", not JSON, so parsing before checking the status threw the parser's complaint
+    // instead of the server's -- in Safari, "The string did not match the expected pattern",
+    // which names neither the request nor the cause.
+    const body = await response.text();
+    let payload;
+    try {
+      payload = body ? JSON.parse(body) : {};
+    } catch {
+      if (!response.ok) throw new Error(`Request failed: ${response.status} ${body.trim().slice(0, 200)}`.trim());
+      throw new Error(`${path} returned ${response.status} but not JSON: ${body.trim().slice(0, 200)}`);
+    }
+    // ``detail`` is what FastAPI's HTTPException produces; ``error`` is what the payload
+    // builders return for a failure they handled themselves.
+    if (!response.ok) {
+      throw new Error(payload.error || payload.detail || `Request failed: ${response.status}`);
+    }
     return payload;
+  } catch (error) {
+    // Every browser words an aborted fetch differently -- "fetch aborted", "The user aborted
+    // a request", "signal is aborted without reason" -- and none of them say that *we* gave
+    // up waiting, which is the only thing the reader can act on. The request itself is still
+    // running on the server, so a retry usually finds the answer cached.
+    if (error.name === "AbortError") {
+      throw new Error(
+        `Timed out after ${Math.round(timeoutMs / 1000)}s. The server may still be working; try again in a moment.`,
+      );
+    }
+    throw error;
   } finally {
     window.clearTimeout(timeout);
   }
@@ -1005,7 +1031,10 @@ async function loadBacktest(strategyKey, refresh, options = {}) {
     const payload = await api("/api/backtest", {
       method: "POST",
       body: JSON.stringify({ strategy: strategyKey, period: BACKTEST_PERIOD, refresh, cache_only: cacheOnly }),
-      timeoutMs: 60000,
+      // A fresh replay is the longest request the dashboard makes, and it grows with the
+      // window: the 24M option covers roughly five times the trade dates the 4M one does.
+      // The cache probe is a lookup and stays on the short timeout.
+      timeoutMs: cacheOnly ? 15000 : 300000,
     });
     if (isBacktestPayload(payload)) {
       state.backtests[strategyKey] = payload;
@@ -1846,16 +1875,28 @@ function tabBar(strategyKey, activeTab) {
   </nav>`;
 }
 
-function render() {
+//: A repaint that was deferred because a control had focus, and still owes the screen an
+//: update. Dropping it outright is what left a freshly selected backtest period showing
+//: nothing: the cached payload arrived, went into state, and no paint ever followed.
+let renderDeferred = false;
+
+function render(options = {}) {
   const route = currentRoute();
   renderSidebar();
   const content = $("#content");
   if (!content) return;
   // Rebuilding the body under an open <select> closes it mid-click, and under a focused
-  // input it discards what is being typed. While the user is holding a control, leave the
-  // body alone -- the next state change repaints it.
+  // input it discards what is being typed. While the user is holding a control, defer --
+  // but remember that a paint is owed, and flush it when focus leaves.
+  //
+  // ``force`` is for the handler of that control's own change event: a change means the
+  // interaction finished, so there is nothing left to disturb.
   const active = document.activeElement;
-  if (active && active.matches?.("select, input, textarea") && content.contains?.(active)) return;
+  if (!options.force && active && active.matches?.("select, input, textarea") && content.contains?.(active)) {
+    renderDeferred = true;
+    return;
+  }
+  renderDeferred = false;
   if (route.page === "account") renderAccountPage(content, route.id);
   else renderAlgorithmPage(content, route.id, route.tab);
   closeNavOnMobile();
@@ -2557,9 +2598,21 @@ function wireEvents() {
     }
     if (event.target.id === "backtestPeriodSelect") {
       configureBacktestPeriod(event.target.value);
-      render();
+      // Forced: the select still holds focus after its own change event, so an ordinary
+      // render would defer, and the cached payload for the newly chosen window would sit in
+      // state unpainted until something else moved focus.
+      render({ force: true });
       loadBacktest(currentRoute().id, false, { cacheOnly: true });
     }
+  });
+
+  // Whatever was deferred while a control had focus still owes the screen a paint. The
+  // timeout lets focus settle, since focusout fires before the new activeElement is set.
+  $("#content")?.addEventListener("focusout", () => {
+    if (!renderDeferred) return;
+    window.setTimeout(() => {
+      if (renderDeferred) render();
+    }, 0);
   });
 
   $("#navFooter")?.addEventListener("click", (event) => {

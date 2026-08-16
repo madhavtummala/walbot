@@ -89,6 +89,10 @@ def run_algorithm(strategy: str, config, *, data_client: Any = None) -> Algorith
         latest_prices=latest_prices,
         metadata={**decision.metadata, "requirements": requirements},
         mode=decision.mode,
+        # The moment the context described, which live is now and in a replay is the signal
+        # date. Taking it from the context rather than defaulting to the wall clock is what
+        # lets step 2 measure elapsed time without a clock of its own.
+        as_of=context.timestamp,
     )
 
 
@@ -160,7 +164,9 @@ def place_orders(
         )
 
     sizing = algorithm.sizing(config)
-    final_intents = algorithm.refine(proposed, result.signals, snapshot, latest_prices, config)
+    final_intents = algorithm.refine(
+        proposed, result.signals, snapshot, latest_prices, config, result.as_of
+    )
 
     investable_equity = snapshot.equity * max(0.0, min(1.0, 1.0 - sizing["cash_buffer"]))
     sized_shares = resolve_target_shares(
