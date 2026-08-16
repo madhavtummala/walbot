@@ -47,10 +47,14 @@ class DualMomentumAlgorithm(BaseAlgorithm):
         )
 
     def sizing(self, config: Any) -> dict[str, float]:
-        """No cash buffer: gross exposure is already bounded inside the weights."""
+        """Honor the configured cash buffer so the plan never targets the full book.
+
+        The reserved cash keeps the defensive sleeve's buy under available funds even when a
+        sub-threshold residual position is deliberately left in place.
+        """
         strategy_config = DualMomentumConfig.from_runtime_config(config)
         return {
-            "cash_buffer": 0.0,
+            "cash_buffer": float(getattr(config, "cash_buffer", 0.0) or 0.0),
             "min_trade_dollars": strategy_config.minimum_trade_notional,
             "rebalance_threshold": strategy_config.rebalance_weight_threshold,
         }
