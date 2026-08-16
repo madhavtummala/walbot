@@ -30,6 +30,14 @@ from src.core.pipeline import (
 )
 from src.data.order_journal import record_orders
 
+from mcp.server.fastmcp.server import Settings as FastMCPSettings
+
+# The mcp library's Settings model annotates ``lifespan`` with a forward reference that
+# resolves only after the whole module is loaded; constructing it before then makes
+# pydantic-settings warn that the field definition is incomplete. Rebuild once against the
+# library's own namespace so server construction stays quiet.
+FastMCPSettings.model_rebuild()
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_ALGORITHM = "fast_momentum"
