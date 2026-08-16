@@ -56,10 +56,13 @@ logger = logging.getLogger(__name__)
 # allowed to be -- and because the cross-sectional z-score means adding a name changes every
 # other name's score, so these are genuinely different strategies, not a size knob.
 
-CURRENT = ["QQQM", "XSD", "XBI", "XOP", "KRE", "XRT", "IJH", "IEMG", "EWJ", "VGK", "GLD", "IBIT", "USO"]
+#: What is deployed for dual_momentum now: the thematic set plus broad US and quality/value
+#: exposure, the exploration's ``wide`` -- less thematic, more index-like.
+CURRENT = ["QQQM", "XSD", "XBI", "XOP", "KRE", "XRT", "IJH", "IEMG", "EWJ", "VGK", "GLD", "IBIT", "USO",
+           "SPY", "IWM", "RSP", "QUAL", "VTV", "SCHD", "SLV"]
 
-#: The current set plus broad US and quality/value exposure: less thematic, more index-like.
-WIDE = CURRENT + ["SPY", "IWM", "RSP", "QUAL", "VTV", "SCHD", "SLV"]
+#: Alias for the ``wide`` stage functions, which take the deployed set as their starting point.
+WIDE = CURRENT
 
 #: Everything tradable that is a plausible long, including the low-beta and income sleeves.
 BROAD = WIDE + ["INDA", "ASHR", "SCZ", "IWO", "HYG", "KBE", "PBW", "USMV", "JEPQ"]
@@ -67,7 +70,7 @@ BROAD = WIDE + ["INDA", "ASHR", "SCZ", "IWO", "HYG", "KBE", "PBW", "USMV", "JEPQ
 #: Thematic only -- the high-dispersion end, to test whether breadth or dispersion is what pays.
 NARROW = ["QQQM", "XSD", "XBI", "XOP", "KRE", "XRT", "IBIT", "USO", "GLD"]
 
-UNIVERSES = {"narrow": NARROW, "current": CURRENT, "wide": WIDE, "broad": BROAD}
+UNIVERSES = {"narrow": NARROW, "current": CURRENT, "broad": BROAD}
 
 DEFENSIVE_SETS = {
     "sgov": ["SGOV"],
@@ -320,8 +323,11 @@ def dual_axes() -> list[tuple[str, dict[str, Any]]]:
     base = _dual_baseline()
     variants = [("baseline", dict(base))]
     for name, symbols in UNIVERSES.items():
-        if name != "current":
-            variants.append(_axis(base, f"universe={name}", risk_on_universe=list(symbols)))
+        # Skip whichever set the algorithm deploys now -- by value, not by name, so the skip
+        # still holds when a config exploration promotes a different set to deployed.
+        if list(symbols) == base.get("risk_on_universe"):
+            continue
+        variants.append(_axis(base, f"universe={name}", risk_on_universe=list(symbols)))
     for positions in (3, 5, 6, 8):
         # Ranks move with the book: entry as wide as the book, exit two wider, which is the
         # asymmetry the strategy is built on.
@@ -351,15 +357,18 @@ def dual_axes() -> list[tuple[str, dict[str, Any]]]:
         if name != "sgov":
             variants.append(_axis(base, f"defensive={name}", defensive_universe=list(symbols)))
     variants.append(_axis(base, "benchmark=SPY", benchmark="SPY"))
-    return variants
+    # A variant that equals the deployed baseline is not an axis, it is a restatement -- and a
+    # configuration change can promote one silently. Drop it rather than let it read as a win.
+    return [variant for variant in variants if variant[0] == "baseline" or variant[1] != base]
 
 
 def fast_axes() -> list[tuple[str, dict[str, Any]]]:
     base = _fast_baseline()
     variants = [("baseline", dict(base))]
     for name, symbols in UNIVERSES.items():
-        if name != "current":
-            variants.append(_axis(base, f"universe={name}", risk_on_universe=list(symbols)))
+        if list(symbols) == base.get("risk_on_universe"):
+            continue
+        variants.append(_axis(base, f"universe={name}", risk_on_universe=list(symbols)))
     for positions in (3, 5, 6, 8):
         variants.append(_axis(base, f"max_positions={positions}", max_positions=positions))
     for cap in (0.25, 0.35):
@@ -385,7 +394,7 @@ def fast_axes() -> list[tuple[str, dict[str, Any]]]:
     for name, symbols in DEFENSIVE_SETS.items():
         if name != "sgov":
             variants.append(_axis(base, f"defensive={name}", defensive_universe=list(symbols)))
-    return variants
+    return [variant for variant in variants if variant[0] == "baseline" or variant[1] != base]
 
 
 def dual_wide() -> list[tuple[str, dict[str, Any]]]:
