@@ -4,12 +4,15 @@ import json
 import logging
 import os
 import threading
+import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+from src.common.timeutils import utc_now
 from src.data.universe import resolve_project_path
 
 
@@ -93,7 +96,7 @@ def _drop_unclosed_bars(bars: pd.DataFrame, interval_minutes: int, now: datetime
     """
     if bars.empty:
         return bars
-    cutoff = pd.Timestamp(now or _now())
+    cutoff = pd.Timestamp(now or utc_now())
     return bars.loc[pd.to_datetime(bars["timestamp"], utc=True) <= cutoff].reset_index(drop=True)
 
 
@@ -115,41 +118,226 @@ def _duckdb():
     return duckdb
 
 
-#: One live connection per database file, per thread, held only while a batch job asks for it.
-#: DuckDB connections are not thread-safe, so they are never shared across threads.
-_CONNECTIONS: dict[tuple[int, str], Any] = {}
-_CONNECTION_LOCK = threading.Lock()
+#: At most one live connection per database file, for the whole process, held only while a
+#: batch job asks for it.
+#:
+#: Per *process*, not per thread, because that is the granularity DuckDB enforces: a file may
+#: not be open read-only and read-write at the same time within one process, whatever thread
+#: each connection belongs to. Pooling used to be thread-local, so a backtest holding a
+#: read-only connection made every other request thread's ``duckdb.connect`` fail with
+#: "Can't open a connection to same database file with a different configuration" -- including
+#: plain reads, which only opened read-write because that is the default. One handle per path
+#: cannot get into that state.
+#:
+#: Threads share the handle through ``connection.cursor()``, which is DuckDB's supported way to
+#: use one database from several threads; the connection object itself is never handed out.
+_HANDLES: dict[str, "_Handle"] = {}
 
-#: Whether this thread is inside :func:`pooled_connections`.
-_POOLING = threading.local()
+#: Guards ``_HANDLES`` and every handle's counters. Also the condition an upgrade waits on for
+#: outstanding cursors to drain.
+_IDLE = threading.Condition(threading.RLock())
+
+#: How long an upgrade waits for other threads to release their cursors before swapping the
+#: connection anyway. Cursors are only held inside a ``with`` block, so this is generous.
+UPGRADE_WAIT_SECONDS = 5.0
+
+#: How long to wait for another *process* to release the database file before giving up.
+#:
+#: DuckDB has no busy-timeout of its own -- there is no setting equivalent to SQLite's
+#: ``PRAGMA busy_timeout``, and ``connect()`` fails the instant the lock is incompatible. So
+#: the waiting is done here. Most contention is a short write finishing, and a caller that
+#: waits a moment gets its answer instead of a 500.
+#:
+#: Deliberately short. A request thread that waits is a server thread held, so a long wait
+#: under concurrency trades one failed request for a stalled dashboard -- and when the holder
+#: is a multi-minute backtest, no bearable timeout would have helped anyway. That case is
+#: solved by the holder taking a *read-only* lock, which readers can share.
+LOCK_WAIT_SECONDS = 5.0
+LOCK_RETRY_SECONDS = 0.25
+
+
+def _is_lock_conflict(exc: Exception) -> bool:
+    """Whether another process holds the file in an incompatible mode."""
+    text = str(exc).lower()
+    return "conflicting lock" in text or "different configuration" in text
+
+
+def _open_with_retry(open_call, path: str):
+    """Open the database, waiting briefly for another process to let go.
+
+    Retries rather than blocking inside DuckDB because DuckDB offers no way to block: the
+    alternative is failing on the first attempt, which is what turned an ordinary overlap
+    between the dashboard and a batch job into an error page.
+    """
+    deadline = time.monotonic() + LOCK_WAIT_SECONDS
+    attempts = 0
+    while True:
+        try:
+            return open_call()
+        except Exception as exc:
+            attempts += 1
+            if not _is_lock_conflict(exc) or time.monotonic() >= deadline:
+                if attempts > 1:
+                    logger.warning("Gave up waiting for %s after %ss: %s", path, LOCK_WAIT_SECONDS, exc)
+                raise
+            time.sleep(LOCK_RETRY_SECONDS)
+
+
+class _Handle:
+    """One process-wide connection to one database file, and what is currently using it."""
+
+    __slots__ = ("path", "connection", "read_only", "scopes", "cursors")
+
+    def __init__(self, path: str, connection: Any, read_only: bool) -> None:
+        self.path = path
+        self.connection = connection
+        self.read_only = read_only
+        #: Open :func:`pooled_connections` scopes; the last one out closes the connection.
+        self.scopes = 0
+        #: Cursors handed out and not yet released, which an upgrade must wait for.
+        self.cursors = 0
+
+
+def _open_connection(path: str, read_only: bool) -> tuple[Any, bool]:
+    """Open ``path``, preferring read-only when asked, and report the mode actually obtained.
+
+    Read-only is a request rather than a guarantee: there is nothing to read in a file that does
+    not exist yet, and a connection already open read-write elsewhere in the process fixes the
+    configuration for everyone. Either way the honest answer is a read-write connection, so the
+    caller is told which it got instead of being left to assume.
+    """
+    resolved = Path(path)
+    if read_only and resolved.exists():
+        try:
+            return _duckdb().connect(path, read_only=True), True
+        except Exception as exc:  # already open read-write in this process
+            logger.info("Falling back to a read-write connection for %s: %s", path, exc)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    connection = _open_with_retry(lambda: _duckdb().connect(path), path)
+    initialize_schema(connection)
+    return connection, False
 
 
 class _PooledConnection:
-    """A cached connection that survives its ``with`` block.
+    """A cursor onto the shared handle, closed when its ``with`` block ends.
 
-    Every caller here writes ``with _connect(path) as connection:``, and DuckDB's own
-    ``__exit__`` closes the connection -- so a pool cannot simply hand back the cached object.
-    This wrapper delegates everything and makes the context manager a no-op, which keeps all
-    ~30 call sites unchanged while the connection outlives them.
+    Every caller writes ``with _connect(path) as connection:``, and DuckDB's own ``__exit__``
+    would close whatever it was given -- so what is handed out is a cursor, which is cheap to
+    create and safe to close, rather than the shared connection itself.
+
+    ``__enter__`` hands back the wrapper, not the raw cursor, so a caller that needs to know --
+    ``read_dividends`` skips a schema-ensure write on a read-only connection -- can still see
+    the ``_read_only`` flag.
     """
 
-    __slots__ = ("_connection",)
+    __slots__ = ("_cursor", "_handle", "_read_only")
 
-    def __init__(self, connection: Any) -> None:
-        self._connection = connection
+    def __init__(self, cursor: Any, *, handle: "_Handle | None" = None, read_only: bool = False) -> None:
+        self._cursor = cursor
+        self._handle = handle
+        self._read_only = read_only
 
     def __enter__(self):
-        return self._connection
+        return self
 
     def __exit__(self, *_exc) -> bool:
+        self.close()
         return False
 
+    def close(self) -> None:
+        cursor, self._cursor = self._cursor, None
+        if cursor is None:
+            return
+        try:
+            cursor.close()
+        except Exception:  # pragma: no cover - closing a dead cursor is not an error
+            pass
+        if self._handle is not None:
+            with _IDLE:
+                self._handle.cursors -= 1
+                _IDLE.notify_all()
+
+    def execute(self, *args: Any, **kwargs: Any) -> Any:
+        return self._run("execute", *args, **kwargs)
+
+    def executemany(self, *args: Any, **kwargs: Any) -> Any:
+        return self._run("executemany", *args, **kwargs)
+
+    def _run(self, method: str, *args: Any, **kwargs: Any) -> Any:
+        """Run a statement, upgrading the shared handle if it turns out a write was needed.
+
+        A read-only batch is a statement about what *that* job does, not about the rest of the
+        process: the scheduler still writes its run state while a backtest reads. Rather than
+        make every one of ~30 call sites declare read or write intent, the write is attempted
+        and the handle upgraded if DuckDB refuses it.
+        """
+        try:
+            return getattr(self._cursor, method)(*args, **kwargs)
+        except Exception as exc:
+            if self._handle is None or not self._handle.read_only or not _is_read_only_error(exc):
+                raise
+            self._upgrade()
+            return getattr(self._cursor, method)(*args, **kwargs)
+
+    def _upgrade(self) -> None:
+        handle = self._handle
+        with _IDLE:
+            if handle.read_only:
+                # Everyone else's cursors belong to the connection about to be closed. They are
+                # only held inside a ``with`` block, so waiting for them is short; past the
+                # deadline the swap happens anyway rather than blocking a write indefinitely.
+                deadline = time.monotonic() + UPGRADE_WAIT_SECONDS
+                while handle.cursors > 1 and time.monotonic() < deadline:
+                    _IDLE.wait(0.05)
+                logger.info("Upgrading the read-only connection to %s for a write", handle.path)
+                # The old connection has to go *first*: while it is open, its read-only mode is
+                # the file's configuration for this whole process, and opening a second
+                # connection read-write is exactly what DuckDB refuses.
+                self._close_cursor()
+                try:
+                    handle.connection.close()
+                except Exception:  # pragma: no cover - closing a dead handle is not an error
+                    pass
+                handle.connection, handle.read_only = _duckdb().connect(handle.path), False
+                initialize_schema(handle.connection)
+            else:
+                self._close_cursor()
+            self._cursor = handle.connection.cursor()
+            self._read_only = False
+
+    def _close_cursor(self) -> None:
+        try:
+            self._cursor.close()
+        except Exception:  # pragma: no cover - the stale connection may already have closed it
+            pass
+
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._connection, name)
+        return getattr(self._cursor, name)
+
+
+def _is_read_only_error(exc: Exception) -> bool:
+    """Whether DuckDB refused a statement because the connection cannot write.
+
+    Matched on the message rather than the exception type: the same
+    ``InvalidInputException`` covers many unrelated problems, and only this one is worth
+    reopening the database for.
+    """
+    text = str(exc).lower()
+    return "read-only" in text or "read only" in text
+
+
+def connection_is_read_only(connection: Any) -> bool:
+    """Whether ``connection`` currently refuses writes.
+
+    A read path that also "ensures" a table exists -- ``read_dividends`` runs
+    ``CREATE TABLE IF NOT EXISTS`` on its way to a ``SELECT`` -- skips that write on a read-only
+    connection rather than provoking an upgrade for a table that already exists.
+    """
+    return bool(getattr(connection, "_read_only", False))
 
 
 @contextmanager
-def pooled_connections(db_path: str = DUCKDB_STATE_PATH):
+def pooled_connections(db_path: str | None = None, *, read_only: bool = False):
     """Hold one connection open for the duration of a batch job.
 
     Opening a connection costs ~3ms and ``initialize_schema`` another ~2ms -- six
@@ -163,61 +351,60 @@ def pooled_connections(db_path: str = DUCKDB_STATE_PATH):
     assumed: a second process attempting a read against a held connection fails outright with
     "Conflicting lock is held". Short-lived connections are what lets those coexist, so the
     default stays short-lived and only batch work opts in.
+
+    ``read_only=True`` asks for DuckDB read-only mode, which is a different bargain with the
+    file lock: other *processes* can open their own read-only connections while the batch runs.
+    Within this process the mode is shared, so a thread that does need to write upgrades the
+    handle instead of failing -- see :meth:`_PooledConnection.execute`.
+
+    Nesting is safe, and so is opening a scope on a path another thread already scoped: both
+    join the existing handle and only the last scope out closes it.
     """
-    resolved = str(resolve_project_path(db_path))
-    key = (threading.get_ident(), resolved)
-    depth = getattr(_POOLING, "depth", 0)
-    _POOLING.depth = depth + 1
+    resolved = str(resolve_project_path(db_path or DUCKDB_STATE_PATH))
+    with _IDLE:
+        handle = _HANDLES.get(resolved)
+        if handle is None:
+            connection, actual_read_only = _open_connection(resolved, read_only)
+            handle = _HANDLES[resolved] = _Handle(resolved, connection, actual_read_only)
+        handle.scopes += 1
     try:
         yield
     finally:
-        _POOLING.depth = depth
-        if depth == 0:  # outermost scope closes it, so nesting is safe
-            with _CONNECTION_LOCK:
-                connection = _CONNECTIONS.pop(key, None)
-            if connection is not None:
+        with _IDLE:
+            handle.scopes -= 1
+            if handle.scopes <= 0:
+                _HANDLES.pop(resolved, None)
                 try:
-                    connection.close()
+                    handle.connection.close()
                 except Exception:  # pragma: no cover - closing a dead handle is not an error
                     pass
 
 
-def _connect(db_path: str = DUCKDB_STATE_PATH):
-    """A connection to ``db_path``. Reused only inside :func:`pooled_connections`."""
-    resolved = resolve_project_path(db_path)
-    if not getattr(_POOLING, "depth", 0):
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-        connection = _duckdb().connect(str(resolved))
-        initialize_schema(connection)
-        return connection
+def _connect(db_path: str | None = None):
+    """A connection to ``db_path``, shared with any batch job holding the same file open."""
+    resolved = str(resolve_project_path(db_path or DUCKDB_STATE_PATH))
+    with _IDLE:
+        handle = _HANDLES.get(resolved)
+        if handle is not None:
+            handle.cursors += 1
+            return _PooledConnection(handle.connection.cursor(), handle=handle, read_only=handle.read_only)
 
-    key = (threading.get_ident(), str(resolved))
-    cached = _CONNECTIONS.get(key)
-    if cached is not None:
-        try:
-            # Cheapest possible liveness check. A tmp-dir database can be deleted out from
-            # under a cached handle between tests, and a stale one must be replaced rather
-            # than raised through a caller that only asked to read a row.
-            cached.execute("SELECT 1")
-            return _PooledConnection(cached)
-        except Exception:
-            _CONNECTIONS.pop(key, None)
-
-    resolved.parent.mkdir(parents=True, exist_ok=True)
-    connection = _duckdb().connect(str(resolved))
+    # Nothing is holding the file, so open and close per call: that is what lets the MCP server,
+    # the warmup job and the CLI keep working against the same database between batch jobs.
+    path = Path(resolved)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = _open_with_retry(lambda: _duckdb().connect(resolved), resolved)
     initialize_schema(connection)
-    with _CONNECTION_LOCK:
-        _CONNECTIONS[key] = connection
-    return _PooledConnection(connection)
+    return connection
 
 
 def close_connections() -> None:
-    """Drop every pooled connection for this thread. For tests and shutdown."""
-    ident = threading.get_ident()
-    with _CONNECTION_LOCK:
-        for key in [k for k in _CONNECTIONS if k[0] == ident]:
+    """Drop every pooled connection. For tests and shutdown."""
+    with _IDLE:
+        for resolved in list(_HANDLES):
+            handle = _HANDLES.pop(resolved)
             try:
-                _CONNECTIONS.pop(key).close()
+                handle.connection.close()
             except Exception:  # pragma: no cover - closing a dead handle is not an error
                 pass
 
@@ -338,7 +525,7 @@ def _migrate_bar_timestamps(connection) -> None:
     connection.execute("DROP TABLE market_bars_restamp")
     connection.execute(
         "INSERT OR REPLACE INTO app_state (key, value, updated_at) VALUES (?, ?, ?)",
-        ["market_bars_schema_version", str(MARKET_BARS_SCHEMA_VERSION), _now()],
+        ["market_bars_schema_version", str(MARKET_BARS_SCHEMA_VERSION), utc_now()],
     )
     logger.info(
         "Restamped %s cached bars to bar-end timestamps (%s collapsed as duplicates)",
@@ -423,10 +610,6 @@ def initialize_schema(connection) -> None:
     _migrate_bar_timestamps(connection)
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 def _normalize_bars(df: pd.DataFrame | None) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=MARKET_BAR_COLUMNS)
@@ -453,7 +636,7 @@ def available_intervals(
     symbol: str,
     *,
     provider: str | None = None,
-    db_path: str = DUCKDB_STATE_PATH,
+    db_path: str | None = None,
 ) -> list[int]:
     """Cached resolutions for ``symbol``, finest first."""
     clauses = ["symbol = ?"]
@@ -478,7 +661,7 @@ def read_bars(
     start: datetime | None = None,
     end: datetime | None = None,
     limit: int | None = None,
-    db_path: str = DUCKDB_STATE_PATH,
+    db_path: str | None = None,
 ) -> pd.DataFrame:
     """Bars for one symbol at one resolution, oldest first.
 
@@ -527,7 +710,7 @@ def write_market_bars(
     bars: pd.DataFrame,
     *,
     ttl_seconds: int | None = None,
-    db_path: str = DUCKDB_STATE_PATH,
+    db_path: str | None = None,
 ) -> int:
     normalized = _normalize_bars(bars)
     if normalized.empty:
@@ -594,7 +777,7 @@ def clear_market_bars(
     provider: str | None = None,
     symbols: list[str] | None = None,
     interval_minutes: int | None = None,
-    db_path: str = DUCKDB_STATE_PATH,
+    db_path: str | None = None,
 ) -> int:
     where, params = _market_bar_filters(provider, symbols, interval_minutes)
     with _connect(db_path) as connection:
@@ -608,7 +791,7 @@ def market_bars_summary(
     provider: str | None = None,
     symbols: list[str] | None = None,
     interval_minutes: int | None = None,
-    db_path: str = DUCKDB_STATE_PATH,
+    db_path: str | None = None,
 ) -> list[dict[str, Any]]:
     where, params = _market_bar_filters(provider, symbols, interval_minutes)
     query = f"""
@@ -641,7 +824,7 @@ def read_sentiment_records(
     *,
     start: datetime | None = None,
     end: datetime | None = None,
-    db_path: str = DUCKDB_STATE_PATH,
+    db_path: str | None = None,
 ) -> list[dict[str, Any]]:
     wanted = [symbol.upper() for symbol in symbols]
     clauses = ["provider = ?", "symbol IN (" + ",".join(["?"] * len(wanted)) + ")"]
@@ -684,7 +867,7 @@ def write_sentiment_records(
     records: list[dict[str, Any]],
     *,
     ttl_seconds: int | None = None,
-    db_path: str = DUCKDB_STATE_PATH,
+    db_path: str | None = None,
 ) -> int:
     if not records:
         return 0
@@ -720,6 +903,6 @@ def write_sentiment_records(
     return len(rows)
 
 
-def compact_storage(db_path: str = DUCKDB_STATE_PATH) -> None:
-    with _connect(db_path) as connection:
+def compact_storage(db_path: str | None = None) -> None:
+    with _connect(db_path or DUCKDB_STATE_PATH) as connection:
         connection.execute("CHECKPOINT")

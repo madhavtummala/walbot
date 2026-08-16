@@ -33,6 +33,12 @@ The common algorithm contract is the `AlgorithmPlugin` abstract base class in `s
 
 Plugins are registered in `src/algorithms/registry.py`. The live runner resolves the selected strategy through that registry instead of branching on individual strategy ids.
 
+Three modules hold what more than one algorithm needs, so a rule cannot be fixed in one place and left broken in another:
+
+- `src/algorithms/allocation.py`: ranking a scored universe, spreading an exposure budget by score under a per-name cap, and holding a weight set inside a gross limit.
+- `src/algorithms/risk.py`: the session drawdown breaker, keyed on the timestamp the algorithm saw rather than on the wall clock so a replay does not latch it for the whole backtest.
+- `src/common/config_utils.py`: `load_tuning(cls, section)` builds a tuning dataclass from saved config, coercing each field by its declared type. A new knob is a dataclass field and nothing else -- there is no parser to update alongside it.
+
 DCA and options strategies live in the same hierarchy as equity algorithms:
 
 - `src/algorithms/dca/`
@@ -69,19 +75,30 @@ An agent runtime such as OpenClaw can then run the scheduled workflow externally
 2. call an algorithm decision tool.
 3. call an order preview tool.
 4. summarize the proposed position changes.
-5. call the `request_trade_approval` MCP tool so approval uses the same Telegram flow as `--bot` mode.
+5. call the `request_trade_approval` MCP tool so approval uses the same Telegram flow as the built-in scheduler.
 6. call `submit_approved_orders` only after approval.
 7. call notification delivery with the final submitted-order summary.
 
 This keeps strategy math, approval mechanics, and brokerage execution deterministic inside this repo, while the agent handles orchestration, external search/sentiment tools, and natural-language summaries.
 
-## Runtime Modes
+## Runtime
 
-The container entrypoint supports two modes:
+The container entrypoint starts the dashboard/API, the built-in bot scheduler, and the MCP
+tool server together, in one process -- the MCP server runs on its own port from a thread
+(`src.mcp_server.serve_in_thread`). One process, because DuckDB permits a single read-write
+process per database file and locks every other opener out entirely; a separate MCP process
+contended with the dashboard for `data/walbot.duckdb` and one of the two would fail with
+"Conflicting lock is held". There is no `--bot` / `--mcp` process-wide mode: whether an algorithm is
+driven by the clock or by an external agent is a property of its *binding*, not of the
+process. Each binding declares a `frequency` for the scheduler -- `15m`, `30m`, `1hr`, `2hr`,
+`1d` -- or `mcp` to park it, switched on but waiting for an agent-driven request. A process
+mode could only contradict the binding's own frequency, so the dashboard reports per-binding
+scheduler state instead.
 
-- `--bot`: starts the dashboard/API and the built-in deterministic bot scheduler.
-- `--mcp`: starts the dashboard/API with the internal scheduler disabled and launches the MCP tool server for an external agent runtime.
+`algorithm_bot.yaml` can narrow the scheduler window with `trading_start_time` and
+`trading_end_time`. Setting `require_trade_approval: true` makes the built-in bot send planned
+orders to Telegram and wait for an approve/deny response before submitting. The same approval
+flow is available to agent-driven bindings through the `request_trade_approval` MCP tool.
 
-Both modes keep the same dashboard API. The difference is who owns scheduling and execution orchestration: this repo in `--bot`, or an external agent such as OpenClaw in `--mcp`.
-
-In `--bot` mode, `algorithm_bot.yaml` can narrow the scheduler window with `trading_start_time` and `trading_end_time`. Setting `require_trade_approval: true` makes the built-in bot send planned orders to Telegram and wait for an approve/deny response before submitting.
+Logging defaults to `WARNING`. `TRADING_LOG_LEVEL` (INFO, DEBUG, ...) overrides it, and DEBUG
+also re-enables Uvicorn's per-request access logs.

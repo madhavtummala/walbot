@@ -81,17 +81,3 @@ def load_social_trends_csv(path: str, symbols: list[str] | None = None) -> dict[
     return trends_by_symbol
 
 
-def truncate_social_history(
-    social_by_symbol: dict[str, pd.DataFrame],
-    end_timestamp: pd.Timestamp,
-) -> dict[str, pd.DataFrame]:
-    """Return social data available at or before end_timestamp."""
-    end_timestamp = pd.to_datetime(end_timestamp, utc=True)
-    truncated: dict[str, pd.DataFrame] = {}
-    for symbol, df in social_by_symbol.items():
-        if df.empty:
-            truncated[symbol] = df
-            continue
-        timestamps = pd.to_datetime(df["timestamp"], utc=True)
-        truncated[symbol] = df[timestamps <= end_timestamp].reset_index(drop=True)
-    return truncated

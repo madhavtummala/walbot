@@ -1,14 +1,6 @@
 from __future__ import annotations
 
-import math
-
-
-def _as_finite_float(value, default: float = 0.0) -> float:
-    try:
-        result = float(value)
-    except (TypeError, ValueError):
-        return default
-    return result if math.isfinite(result) else default
+from ..common.config_utils import as_float
 
 
 def _allocate_with_caps(raw_scores: dict[str, float], max_weight: float, target_exposure: float) -> dict[str, float]:
@@ -57,11 +49,11 @@ def compute_target_weights(
         if int(info.get("signal", 0)) != 1:
             continue
 
-        score = max(_as_finite_float(info.get("score", info.get("ret_N", 0.0))), 0.0)
+        score = max(as_float(info.get("score", info.get("ret_N", 0.0))), 0.0)
         if score <= 0:
             continue
 
-        realized_vol = _as_finite_float(info.get("realized_vol"), default=0.20)
+        realized_vol = as_float(info.get("realized_vol"), default=0.20)
         realized_vol = max(realized_vol, 0.05)
         risk_adjusted_score = score / realized_vol
         candidates.append((symbol, risk_adjusted_score, realized_vol))
@@ -87,10 +79,3 @@ def compute_target_weights(
     return {symbol: allocated.get(symbol, 0.0) for symbol in signals.keys()}
 
 
-def cap_total_leverage(weights: dict[str, float], max_leverage: float = 1.0) -> dict[str, float]:
-    """Optionally scale weights so the portfolio does not exceed max leverage."""
-    total = sum(abs(weight) for weight in weights.values())
-    if total <= max_leverage or total == 0:
-        return weights
-    scale = max_leverage / total
-    return {symbol: weight * scale for symbol, weight in weights.items()}

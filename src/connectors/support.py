@@ -19,11 +19,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from base64 import b64encode
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
 
+from ..common.config_utils import json_number
 from ..core.config import Config
 from ..data.bars import TRADING_MINUTES_PER_DAY, calendar_days_for
 from ..data.duckdb_store import DAILY_INTERVAL_MINUTES, bar_end_timestamps
@@ -63,7 +64,9 @@ PROVIDER_BAR_MINUTES: dict[str, tuple[int, ...]] = {
     "yfinance": (15, 30, 60),
 }
 
-#: Providers that authenticate with an OAuth token rather than an API key in config.
+#: Providers that authenticate with something other than an api_key in the connector config:
+#: Alpaca reads its key pair from the environment, Schwab holds an OAuth token. Without this
+#: they look unconfigured and get skipped, however high they sit in the provider order.
 EXTERNAL_AUTH_PROVIDERS = {"alpaca", "schwab"}
 
 _filter_bar_range = filter_bar_range
@@ -118,10 +121,6 @@ class ProviderRateLimited(ProviderUnavailable):
     pass
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _provider_config(config: Config, category: str, provider: str) -> dict[str, Any]:
     root = config.data_source_configs if isinstance(config.data_source_configs, dict) else {}
     for candidate_category in _CATEGORY_ALIASES.get(category, (category,)):
@@ -141,12 +140,6 @@ def _provider_configured(config: Config, category: str, provider: str) -> bool:
         if provider in providers:
             return True
     return False
-
-
-#: Providers that authenticate with something other than an api_key in the connector config:
-#: Alpaca reads its key pair from the environment, Schwab holds an OAuth token. Without this
-#: they look unconfigured and get skipped, however high they sit in the provider order.
-EXTERNAL_AUTH_PROVIDERS = {"alpaca", "schwab"}
 
 
 def _enabled(config: Config, category: str, provider: str, *, uses_external_auth: bool = False) -> bool:
@@ -273,14 +266,6 @@ def _schwab_token(config: Config, category: str) -> str:
             logger.info("Schwab OAuth session unavailable, falling back: %s", error)
             return ""
     return _access_token(config, category, "schwab")
-
-
-def _finite(value: Any) -> float | None:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if math.isfinite(parsed) else None
 
 
 def _quote_cache_key(symbol: str) -> str:
@@ -456,7 +441,7 @@ def _write_duckdb_sentiment(provider: str, records: list[dict[str, Any]], *, ttl
 
 
 def _normalize_quote(provider: str, symbol: str, price: Any, raw: Any, timestamp: Any = None) -> dict[str, Any] | None:
-    parsed_price = _finite(price)
+    parsed_price = json_number(price)
     if parsed_price is None or parsed_price <= 0:
         return None
     parsed_timestamp = pd.to_datetime(timestamp, utc=True, errors="coerce") if timestamp is not None else pd.NaT
@@ -518,7 +503,7 @@ def _news_record(provider: str, symbol: str, timestamp: Any, title: str, url: st
     parsed_timestamp = pd.to_datetime(timestamp, utc=True, errors="coerce")
     if pd.isna(parsed_timestamp):
         parsed_timestamp = pd.Timestamp.now(tz="UTC")
-    sentiment_value = _finite(sentiment)
+    sentiment_value = json_number(sentiment)
     sentiment_value = 0.0 if sentiment_value is None else max(-1.0, min(1.0, sentiment_value))
     return {
         "timestamp": parsed_timestamp.isoformat(),

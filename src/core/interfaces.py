@@ -390,12 +390,20 @@ class AlgorithmPlugin(ABC):
         snapshot: PortfolioSnapshot,
         latest_prices: Dict[str, float],
         config: Any,
+        as_of: datetime,
     ) -> List[Intent]:
         """Step 2: adjust the proposed intents for what is already held.
 
         This is where hysteresis lives -- stickiness, turnover thresholds, per-trade minimums,
         exposure caps. ``intents`` may have been edited by a reviewing agent, so honour them as
         the intent rather than re-deriving from ``signals``. Defaults to a passthrough.
+
+        ``as_of`` is the moment step 1 described, and is the *only* clock step 2 may read.
+        Everything stateful here -- a session drawdown breaker, a re-entry cooldown, a value
+        averaging path -- is a statement about elapsed time, and reading the wall clock instead
+        makes those answers wrong in a replay, where every step would be "now". It is a
+        required argument rather than an optional one for exactly that reason: a default would
+        put the wall clock back one forgetful call site at a time.
         """
         return list(intents)
 

@@ -26,6 +26,7 @@ from ...core.config import (
     load_accounts_config,
     save_accounts_config,
 )
+from ...common.config_utils import json_number
 from ...data.order_journal import load_order_journal
 from ...core.market_context import load_latest_prices
 
@@ -359,9 +360,9 @@ def account_activity_payload(account_id: str = "", limit: int = 40) -> dict[str,
                     "symbol": str(getattr(order, "symbol", "")),
                     "side": _enum_value(getattr(order, "side", "")),
                     "status": _enum_value(getattr(order, "status", "")),
-                    "qty": _as_float(getattr(order, "qty", None)),
-                    "filled_qty": _as_float(getattr(order, "filled_qty", None)),
-                    "filled_avg_price": _as_float(getattr(order, "filled_avg_price", None)),
+                    "qty": json_number(getattr(order, "qty", None)),
+                    "filled_qty": json_number(getattr(order, "filled_qty", None)),
+                    "filled_avg_price": json_number(getattr(order, "filled_avg_price", None)),
                     "submitted_at": submitted.isoformat() if hasattr(submitted, "isoformat") else str(submitted or ""),
                 }
             )
@@ -373,15 +374,12 @@ def account_activity_payload(account_id: str = "", limit: int = 40) -> dict[str,
     return payload
 
 
+#: Broker payload fields arrive as strings, and an unparseable one must serialise as null
+#: rather than as a zero that reads like a real quantity.
+
+
 def _enum_value(value: Any) -> str:
     return str(getattr(value, "value", value) or "")
-
-
-def _as_float(value: Any) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 #: Watchlist symbols live in the state store, not a config file: it is a per-user view

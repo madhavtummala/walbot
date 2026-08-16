@@ -3,6 +3,8 @@ import logging
 import math
 from datetime import datetime, timedelta, timezone
 
+from ..common.config_utils import as_bool
+
 try:
     import pandas as pd
 except ImportError:  # type: ignore
@@ -65,10 +67,7 @@ def get_positions(trading_client: TradingClient) -> dict[str, float]:
 
 
 def _bool_attr(obj, name: str, default: bool = False) -> bool:
-    value = getattr(obj, name, default)
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
+    return as_bool(getattr(obj, name, default), default)
 
 
 def _float_attr(obj, name: str, default: float = 0.0) -> float:

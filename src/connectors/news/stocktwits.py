@@ -14,7 +14,7 @@ from typing import Any
 
 from ...core.config import Config
 from ..support import (
-    NEWS_CATEGORY, _basic_auth_header, _finite,
+    NEWS_CATEGORY, _basic_auth_header, json_number,
     _news_record, _request_json, _provider_config,
 )
 
@@ -54,7 +54,7 @@ def _fetch_stocktwits_news(symbols: list[str], _config: Config) -> list[dict[str
                 sentiment,
                 payload,
             )
-            record["mentions"] = float(_finite(mentions) or 1.0)
+            record["mentions"] = float(json_number(mentions) or 1.0)
             records.append(record)
         if records:
             return records

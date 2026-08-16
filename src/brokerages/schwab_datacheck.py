@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
-from src.connectors.service import ProviderUnavailable, fetch_schwab_eod_bars, fetch_schwab_intraday_bars
+from src.connectors import ProviderUnavailable, fetch_schwab_eod_bars, fetch_schwab_intraday_bars
 from src.core.config import get_config
 from src.data import fetch_daily_bars
 

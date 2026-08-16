@@ -19,6 +19,7 @@ from src.brokerages.alpaca_client import (
     is_market_open,
     submit_option_limit_order,
 )
+from src.common.config_utils import as_float
 from src.core.config import Config, get_config
 from src.api.controls import load_controls
 from src.common.logging_utils import log_position_changes
@@ -45,14 +46,6 @@ class OptionCandidate:
     quantity: int
     estimated_premium: float
     score: float
-
-
-def _as_float(value: Any, default: float = 0.0) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed
 
 
 def _attr(obj: Any, *names: str, default: Any = None) -> Any:
@@ -89,8 +82,8 @@ def _quote_for_symbol(quotes: Any, symbol: str) -> Any:
 
 
 def _quote_prices(quote: Any) -> tuple[float, float]:
-    bid = _as_float(_attr(quote, "bid_price", "bp", "bid", default=0.0))
-    ask = _as_float(_attr(quote, "ask_price", "ap", "ask", default=0.0))
+    bid = as_float(_attr(quote, "bid_price", "bp", "bid", default=0.0))
+    ask = as_float(_attr(quote, "ask_price", "ap", "ask", default=0.0))
     return bid, ask
 
 
@@ -98,16 +91,17 @@ def _contract_delta(contract: Any, quote: Any = None) -> float | None:
     for source in (contract, quote):
         value = _attr(source, "delta", default=None)
         if value is not None:
-            return _as_float(value)
+            return as_float(value)
         greeks = _attr(source, "greeks", default=None)
         value = _attr(greeks, "delta", default=None)
         if value is not None:
-            return _as_float(value)
+            return as_float(value)
     return None
 
 
 def _contract_open_interest(contract: Any) -> int:
-    return int(_as_float(_attr(contract, "open_interest", default=0.0)))
+    return int(as_float(_attr(contract, "open_interest", default=0.0)))
+
 
 
 def _option_type_for_signal(side: str) -> str:
@@ -159,7 +153,7 @@ def dual_momentum_option_signals(config: Config, data_client=None) -> list[dict[
     )
     rows = strategy_signal_rows("dual_momentum", bars_by_symbol)
     active = [row for row in rows if str(row.get("side")) in {"LONG", "SHORT"}]
-    active.sort(key=lambda row: abs(_as_float(row.get("score"))), reverse=True)
+    active.sort(key=lambda row: abs(as_float(row.get("score"))), reverse=True)
     return active[: max(int(config.options_swing_max_contracts), 1)]
 
 
@@ -231,7 +225,7 @@ def select_option_candidate(
         contract_symbol=_contract_symbol(contract),
         contract_type=_contract_type(contract) or contract_type,
         expiration_date=_contract_expiration(contract),
-        strike_price=_as_float(_attr(contract, "strike_price", default=0.0)),
+        strike_price=as_float(_attr(contract, "strike_price", default=0.0)),
         delta=_contract_delta(contract, quote),
         bid=bid,
         ask=ask,
@@ -280,9 +274,10 @@ def run_options_once(account_id: str | None = None) -> list[dict[str, Any]]:
             option_data_client,
             underlying,
             side,
-            score=_as_float(signal.get("score")),
+            score=as_float(signal.get("score")),
             underlying_price=underlying_price,
         )
+
         if candidate is None:
             continue
         if current_positions.get(candidate.contract_symbol, 0) > 0:

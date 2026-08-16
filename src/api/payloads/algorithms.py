@@ -80,16 +80,6 @@ def algorithm_activity_payload(strategy: str = "", limit: int = 40) -> dict[str,
     }
 
 
-def _json_number(value: Any) -> float | None:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    if pd.isna(parsed) or parsed in {float("inf"), float("-inf")}:
-        return None
-    return round(parsed, 2)
-
-
 def strategy_signals_payload(strategy: str = DEFAULT_STRATEGY_ID) -> dict[str, Any]:
     """Dashboard signal payload: dispatch to the algorithm's own ``signal_view``.
 

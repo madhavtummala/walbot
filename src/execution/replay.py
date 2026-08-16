@@ -28,8 +28,7 @@ from ..brokerages.providers.paper import PaperBrokerage
 from ..core.interfaces import AlgorithmPlugin, AlgorithmResult, CashDividend
 from ..core.market_context import ContextSource, build_algorithm_context
 from ..core.pipeline import place_orders
-from ..data.bars import coverage_minutes
-from ..data.bars import read_history
+from ..data.bars import TRADING_MINUTES_PER_DAY, calendar_days_for, coverage_minutes, read_history
 from ..data.state_store import ephemeral_state
 
 logger = logging.getLogger(__name__)
@@ -138,46 +137,103 @@ def _slice_daily(history: dict[str, pd.DataFrame], as_of: pd.Timestamp) -> dict[
     return sliced
 
 
-def _read_history(
-    symbols: list[str],
-    as_of: pd.Timestamp,
-    *,
-    providers: list[str],
-    lookback_minutes: int,
-    coverage: Coverage,
-) -> dict[str, pd.DataFrame]:
-    """Bars from the accumulating cache covering the window ending at ``as_of``.
+class HistoryCache:
+    """Every symbol's cached bars, read once for the whole replay and sliced per date.
 
-    The cache is written through on every live fetch, so it deepens over time, and
-    ``read_history`` blends whatever resolutions it holds -- fine bars where they exist,
-    daily further back. A symbol whose window it cannot fill is measured, not silently
-    returned short.
+    Daily bars have always been loaded once and sliced -- see :func:`_slice_daily` -- but the
+    intraday window was re-read from the store on every trade date, for every symbol, for every
+    configured provider. A twelve-month Fast Momentum backtest spent 97 of its 99 seconds on
+    21,000 database round trips, which put it past the dashboard's request timeout and surfaced
+    as an aborted fetch rather than as anything explicable.
+
+    The window one date needs is a sub-range of the window the whole replay needs, so a single
+    read per symbol answers all of them. Slicing reproduces ``read_history``'s own window --
+    ``[end - calendar_days_for(lookback), end]`` -- so a date sees exactly the rows it saw
+    before, including the blend of fine bars recently and daily bars further back.
     """
-    end = as_of + pd.Timedelta(hours=20)
-    bars_by_symbol: dict[str, pd.DataFrame] = {}
-    for symbol in symbols:
-        coverage.history_requested += lookback_minutes
-        # Deepest wins, not first. Taking the first provider with *any* rows let a two-day
-        # sliver from the preferred provider shadow months of history from another, and the
-        # symbol then scored as flat with nothing in the output saying why. A provider of
-        # ``None`` reads across all of them, which is the usual case.
-        best = pd.DataFrame()
-        for provider in [*providers, None]:
-            try:
-                bars = read_history(symbol, lookback_minutes=lookback_minutes, end=end, provider=provider)
-            except Exception as exc:
-                logger.warning("History cache read failed provider=%s symbol=%s: %s", provider, symbol, exc)
+
+    def __init__(
+        self,
+        symbols: list[str],
+        trade_dates: list[pd.Timestamp],
+        *,
+        providers: list[str],
+        lookback_minutes: int,
+    ) -> None:
+        self.lookback_minutes = lookback_minutes
+        # ``None`` reads across every provider, which is the usual case; a named provider is
+        # tried first so a deliberate preference wins when it can answer in full.
+        self.providers: list[str | None] = [*providers, None]
+        self.window_days = calendar_days_for(lookback_minutes) if lookback_minutes > 0 else 0
+        self._frames: dict[tuple[str, str | None], tuple[pd.DataFrame, Any]] = {}
+        if lookback_minutes <= 0 or not trade_dates:
+            return
+
+        ordered = sorted(trade_dates)
+        end = ordered[-1] + pd.Timedelta(hours=20)
+        # Enough to cover the replay itself plus the lookback behind its first date.
+        span_days = (ordered[-1] - ordered[0]).days + self.window_days + 1
+        span_minutes = int(span_days * TRADING_MINUTES_PER_DAY)
+
+        for symbol in symbols:
+            for provider in self.providers:
+                try:
+                    bars = read_history(symbol, lookback_minutes=span_minutes, end=end, provider=provider)
+                except Exception as exc:
+                    logger.warning("History cache read failed provider=%s symbol=%s: %s", provider, symbol, exc)
+                    continue
+                if bars.empty:
+                    continue
+                stamps = pd.DatetimeIndex(pd.to_datetime(bars["timestamp"], utc=True))
+                self._frames[(symbol, provider)] = (bars, stamps)
+                if coverage_minutes(bars) >= span_minutes:
+                    # This provider reaches the whole replay, so it reaches every date inside
+                    # it: there is nothing a later provider could add.
+                    break
+
+    def _window(self, symbol: str, provider: str | None, as_of: pd.Timestamp) -> pd.DataFrame:
+        """The rows a read for ``as_of`` would have returned, without going to the store."""
+        entry = self._frames.get((symbol, provider))
+        if entry is None:
+            return pd.DataFrame()
+        bars, stamps = entry
+        end = as_of + pd.Timedelta(hours=20)
+        floor = end - pd.Timedelta(days=self.window_days)
+        # A tz-aware DatetimeIndex against tz-aware bounds: the comparison stays in pandas so
+        # a provider frame carrying object-dtype timestamps cannot silently mismatch.
+        left = int(stamps.searchsorted(floor, side="left"))
+        right = int(stamps.searchsorted(end, side="right"))
+        return bars.iloc[left:right] if right > left else pd.DataFrame()
+
+    def bars_as_of(
+        self, symbols: list[str], as_of: pd.Timestamp, coverage: Coverage
+    ) -> dict[str, pd.DataFrame]:
+        """Each symbol's history window ending at ``as_of``, measuring what it could supply."""
+        bars_by_symbol: dict[str, pd.DataFrame] = {}
+        for symbol in symbols:
+            coverage.history_requested += self.lookback_minutes
+            # Deepest wins, not first. Taking the first provider with *any* rows let a two-day
+            # sliver from the preferred provider shadow months of history from another, and the
+            # symbol then scored as flat with nothing in the output saying why.
+            #
+            # Each window is measured once and the number carried, rather than re-measuring the
+            # incumbent on every comparison: measuring a window rebuilds its frame and its
+            # market-minute axis, which made this bookkeeping cost more than the scoring it
+            # feeds.
+            best, best_covered = pd.DataFrame(), 0
+            for provider in self.providers:
+                window = self._window(symbol, provider, as_of)
+                covered = coverage_minutes(window)
+                if covered > best_covered:
+                    best, best_covered = window, covered
+                if best_covered >= self.lookback_minutes:
+                    break
+            if best.empty:
+                coverage.missing_symbols.add(symbol)
                 continue
-            if coverage_minutes(bars) > coverage_minutes(best):
-                best = bars
-            if coverage_minutes(best) >= lookback_minutes:
-                break
-        if best.empty:
-            coverage.missing_symbols.add(symbol)
-            continue
-        bars_by_symbol[symbol] = best
-        coverage.history_supplied += min(coverage_minutes(best), lookback_minutes)
-    return bars_by_symbol
+            bars_by_symbol[symbol] = best
+            coverage.history_supplied += min(best_covered, self.lookback_minutes)
+        return bars_by_symbol
 
 class ReplayContextSource(ContextSource):
     """Satisfies the same requirements from cached history, as of one past date.
@@ -196,12 +252,12 @@ class ReplayContextSource(ContextSource):
         as_of: pd.Timestamp,
         daily_history: dict[str, pd.DataFrame],
         *,
-        providers: list[str],
+        history: HistoryCache,
         coverage: Coverage,
     ) -> None:
         self.as_of = as_of
         self.daily_history = daily_history
-        self.providers = providers
+        self.history = history
         self.coverage = coverage
 
     def timestamp(self) -> datetime:
@@ -220,13 +276,9 @@ class ReplayContextSource(ContextSource):
         return _slice_daily(self.daily_history, self.as_of)
 
     def history_bars(self, symbols: list[str], requirements, config) -> dict[str, Any]:
-        return _read_history(
-            sorted(self.daily_history),
-            self.as_of,
-            providers=self.providers,
-            lookback_minutes=requirements.history_lookback_minutes,
-            coverage=self.coverage,
-        )
+        # Sliced out of the read the whole replay shares, for the same reason the daily bars
+        # above are: only the right edge of the window moves from one date to the next.
+        return self.history.bars_as_of(sorted(self.daily_history), self.as_of, self.coverage)
 
 
 
@@ -241,6 +293,7 @@ def replay(
     history_providers: list[str] | None = None,
     fractional: bool = True,
     dividends: dict[str, list[CashDividend]] | None = None,
+    history: "HistoryCache | None" = None,
 ) -> tuple[pd.DataFrame, Coverage]:
     """Step ``algorithm`` through ``trade_dates``, trading at each date's close.
 
@@ -250,11 +303,22 @@ def replay(
 
     Signals are computed from bars up to the *previous* date and executed at this date's
     close, so no decision can see the price it trades at.
+
+    ``history`` lets a caller replaying the same symbols over the same dates many times -- a
+    parameter sweep -- read the bar store once for all of them instead of once per run. It is
+    a pure cache of what the store holds, so sharing it cannot make two runs differ.
     """
     requirements = algorithm.requirements(config, {})
-    providers = history_providers or ["yfinance"]
     coverage = Coverage()
     records: list[dict[str, Any]] = []
+
+    # One read per symbol for the whole replay, sliced per date below.
+    history = history or HistoryCache(
+        sorted(daily_history),
+        trade_dates,
+        providers=history_providers or ["yfinance"],
+        lookback_minutes=requirements.history_lookback_minutes,
+    )
 
     schedule = dividend_schedule(sorted(daily_history), trade_dates, dividends)
     pending: list[tuple[pd.Timestamp, str, float]] = []
@@ -313,7 +377,7 @@ def replay(
                     positions={s: int(v) for s, v in positions.items()},
                     equity=equity,
                     source=ReplayContextSource(
-                        signal_date, daily_history, providers=providers, coverage=coverage
+                        signal_date, daily_history, history=history, coverage=coverage
                     ),
                 )
                 decision = algorithm.analyze(context)
@@ -332,6 +396,10 @@ def replay(
                     latest_prices=closes,
                     metadata={**decision.metadata, "requirements": requirements},
                     mode=decision.mode,
+                    # The signal date, not the wall clock. ``as_of`` is the only clock step 2
+                    # reads, so leaving it to default to ``now`` would tell every stateful
+                    # guard in ``refine`` that the whole backtest happened this instant.
+                    as_of=context.timestamp,
                 )
                 outcome = place_orders(
                     result,

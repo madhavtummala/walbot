@@ -71,7 +71,7 @@ class Simulation:
         assert result.mode == MODE_INCREMENTAL
         snapshot = PortfolioSnapshot(positions=dict(self.positions), equity=100_000.0)
         intents = self.algorithm.refine(
-            result.resolved_intents(), result.signals, snapshot, self.prices, self.config
+            result.resolved_intents(), result.signals, snapshot, self.prices, self.config, now
         )
 
         order_results = []
@@ -242,7 +242,7 @@ def _bursty_simulation(monkeypatch, *, prices, plan, fires, settings=None) -> Si
     monkeypatch.setattr(
         BurstyDCAAlgorithm,
         "trigger",
-        lambda self, symbol, context, plan: {
+        lambda self, symbol, context, plan, months_behind=0.0: {
             "fires": context.timestamp in fires,
             "reason": "Valley" if context.timestamp in fires else "Waiting for valley",
             "detail": {},
@@ -353,3 +353,50 @@ def test_the_budget_line_restates_a_monthly_budget_at_a_human_scale() -> None:
     assert budget_line(100.0) == "$100/month ~ $4.60/trading day"
     assert budget_line(100.0, equity=9_000.0).endswith("~ 1.1% of equity")
     assert budget_line(0.0) == ""
+
+
+# =========================================================================================
+# Backlog-aware pickiness
+# =========================================================================================
+
+
+def test_the_oversold_test_relaxes_as_the_budget_falls_behind() -> None:
+    """Waiting for a dip is the strategy; waiting forever is not.
+
+    In a market that only rises, %B never breaks the lower band and RSI(2) never reaches 10, so
+    the budget accrues and the eventual entry lands above every price that was declined. This
+    lets the two oversold thresholds ease in proportion to how far behind the budget has fallen.
+    """
+    from src.algorithms.dca.bursty import relaxed_thresholds
+
+    strict = BurstyConfig(backlog_relax_months=0.0)
+    assert relaxed_thresholds(strict, months_behind=6.0) == (strict.percent_b_threshold, strict.rsi_threshold)
+
+    adaptive = BurstyConfig(backlog_relax_months=3.0, rsi_threshold=10.0, percent_b_threshold=0.0)
+    assert relaxed_thresholds(adaptive, 0.0) == (0.0, 10.0)
+    # Halfway behind: halfway between picky and "buy on anything" (%B 1.0, RSI 100).
+    percent_b, rsi = relaxed_thresholds(adaptive, 1.5)
+    assert percent_b == pytest.approx(0.5)
+    assert rsi == pytest.approx(55.0)
+    # Past the horizon it stops easing rather than running away.
+    assert relaxed_thresholds(adaptive, 99.0) == (1.0, 100.0)
+
+
+def test_a_backlogged_symbol_buys_where_an_on_schedule_one_waits() -> None:
+    """The whole point: same bars, same day, different answer because of the backlog."""
+    rising = _bars([100 + index * 0.5 for index in range(260)])
+    adaptive = BurstyConfig(backlog_relax_months=3.0)
+
+    assert not evaluate_trigger(rising, buying=True, settings=adaptive, months_behind=0.0)["fires"]
+    assert evaluate_trigger(rising, buying=True, settings=adaptive, months_behind=3.0)["fires"]
+
+
+def test_the_regime_gate_never_relaxes() -> None:
+    """Relaxing the trend filter would trade a small problem for this design's worst one."""
+    falling = _bars([200 - index * 0.5 for index in range(260)])
+
+    outcome = evaluate_trigger(falling, buying=True, settings=BurstyConfig(backlog_relax_months=3.0),
+                               months_behind=99.0)
+
+    assert not outcome["fires"]
+    assert "day MA" in outcome["reason"]

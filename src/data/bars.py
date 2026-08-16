@@ -31,10 +31,9 @@ from typing import Any, Iterable, Sequence
 
 import pandas as pd
 
+from src.common.timeutils import utc_now
 from src.data.duckdb_store import (
-    DUCKDB_STATE_PATH,
     MARKET_BAR_COLUMNS,
-    _now,
     available_intervals,
     read_bars,
 )
@@ -151,6 +150,33 @@ def signal_price(bars: pd.DataFrame) -> pd.Series:
     return pd.to_numeric(bars.get("close", pd.Series(dtype=float)), errors="coerce")
 
 
+def closes_of(bars: Any) -> pd.Series:
+    """The signal-price series of ``bars``, or an empty series when there is nothing to read.
+
+    The one-liner every algorithm was writing for itself -- ``signal_price(frame).dropna()``
+    behind an ``isinstance``/``empty`` guard -- with the guard in one place so a missing symbol
+    yields an empty series rather than an ``AttributeError`` at three separate call sites.
+    """
+    if not isinstance(bars, pd.DataFrame) or bars.empty or "close" not in bars:
+        return pd.Series(dtype=float)
+    return signal_price(bars).dropna()
+
+
+def return_over_periods(closes: pd.Series, periods: int) -> float:
+    """Simple return across ``periods`` observations, 0.0 when the history is too short.
+
+    Positional, and deliberately so: this is for the *daily* series, where one observation is
+    one session and "the 60-day return" is a statement about sessions rather than about elapsed
+    time. Intraday horizons use :func:`return_over_minutes`, because there a bar count only
+    means a span once the grid is known.
+    """
+    if periods <= 0 or len(closes) <= periods:
+        return 0.0
+    start = float(closes.iloc[-periods - 1])
+    end = float(closes.iloc[-1])
+    return end / start - 1.0 if start > 0 else 0.0
+
+
 #: Marks a frame that has already been through :func:`_frame`. Reading it back is what makes
 #: ``_frame`` cheap to call defensively: the horizon helpers take raw bars from algorithms but
 #: also hand frames to each other, and rebuilding an already-clean frame was the single largest
@@ -258,19 +284,6 @@ def _close_at_offset(work: pd.DataFrame, axis: pd.Series, minutes_back: float) -
     if work.empty:
         return 0.0
     return float(_closes_at_offsets(work, axis, [minutes_back])[0])
-
-
-def latest_timestamp(bars: Any) -> pd.Timestamp | None:
-    work = _frame(bars)
-    return None if work.empty else pd.Timestamp(work["timestamp"].iloc[-1])
-
-
-def close_at_minutes_ago(bars: Any, minutes: int) -> float:
-    """Close as of ``minutes`` of market time ago, or the earliest close if that is older."""
-    work = _frame(bars)
-    if work.empty:
-        return 0.0
-    return _close_at_offset(work, _market_minutes_axis(work), minutes)
 
 
 def return_over_minutes(bars: Any, minutes: int, *, offset_minutes: float = 0.0) -> float:
@@ -416,16 +429,6 @@ def calendar_days_for(minutes: int) -> int:
     return max(int(sessions * 1.6) + 4, 7)
 
 
-def finest_interval(frames: Sequence[Any]) -> int:
-    """The finest resolution present across several symbols' frames.
-
-    Scores are cross-sectional, so horizons must be sampled on one common step or two symbols
-    on different feeds would be compared over different spans.
-    """
-    intervals = [bar_interval_minutes(frame) for frame in frames if isinstance(frame, pd.DataFrame) and not frame.empty]
-    return min(intervals) if intervals else REFERENCE_INTERVAL_MINUTES
-
-
 # =========================================================================================
 # Reads that blend resolutions
 # =========================================================================================
@@ -442,7 +445,7 @@ def read_history(
     end: datetime | None = None,
     max_interval_minutes: int | None = None,
     provider: str | None = None,
-    db_path: str = DUCKDB_STATE_PATH,
+    db_path: str | None = None,
 ) -> pd.DataFrame:
     """The best available view of ``symbol`` over the trailing window, blending resolutions.
 
@@ -455,7 +458,7 @@ def read_history(
     That blend is the point of stating horizons in minutes: a lookup only needs *an*
     observation near the moment it asks about, not one on a particular grid.
     """
-    end_ts = pd.Timestamp(end or _now())
+    end_ts = pd.Timestamp(end or utc_now())
     floor = end_ts - pd.Timedelta(days=calendar_days_for(lookback_minutes))
     intervals = [
         interval

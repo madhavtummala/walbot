@@ -39,7 +39,7 @@ def _universe() -> set[str]:
     return {symbol.upper() for symbol in get_config().symbols}
 
 
-def plan(db_path: str = DUCKDB_STATE_PATH) -> dict[str, Any]:
+def plan(db_path: str | None = None) -> dict[str, Any]:
     """What would be deleted, and what would remain, without touching anything."""
     wanted = _universe()
     rows = market_bars_summary(db_path=db_path)
@@ -66,7 +66,7 @@ def plan(db_path: str = DUCKDB_STATE_PATH) -> dict[str, Any]:
     }
 
 
-def prune(*, db_path: str = DUCKDB_STATE_PATH, apply: bool = False) -> dict[str, Any]:
+def prune(*, db_path: str | None = None, apply: bool = False) -> dict[str, Any]:
     """Delete everything outside the kept provider, intervals, and universe."""
     outcome = plan(db_path=db_path)
     if not apply:
@@ -100,7 +100,7 @@ def main() -> None:
     parser.add_argument("--apply", action="store_true", help="Actually delete. Omit for a dry run.")
     parser.add_argument("--db-path", default=DUCKDB_STATE_PATH)
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logging.basicConfig(level=logging.WARNING, format="%(message)s")
     print(json.dumps(prune(db_path=args.db_path, apply=args.apply), indent=2, sort_keys=True))
 
 

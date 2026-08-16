@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Callable
+
+from ...common.config_utils import as_bool, direct_or_env
 
 
 
@@ -36,7 +38,7 @@ def _normalize_data_sources(raw: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(sources, dict):
         return {}
     normalized: dict[str, Any] = {}
-    for category in ("market_data", "intraday_market_data", "eod_market_data", "interday_market_data", "news_sentiment", "sentiment_data"):
+    for category in ("market_data", "intraday_market_data", "eod_market_data", "interday_market_data", "news_sentiment", "sentiment_data", "dividends"):
         section = sources.get(category, {})
         if not isinstance(section, dict):
             normalized[category] = {"provider_order": [], "providers": {}}
@@ -58,15 +60,6 @@ def _normalize_data_sources(raw: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def _direct_or_env(section: dict[str, Any], key: str, env_key: str, fallback_env: str = "") -> str:
-    if section.get(key):
-        return _env_ref(section.get(key), "")
-    env_name = str(section.get(env_key) or "").strip()
-    if env_name:
-        return os.getenv(env_name, "")
-    return os.getenv(fallback_env, "") if fallback_env else ""
-
-
 def _provider_credential(
     data_sources: dict[str, Any],
     category: str,
@@ -75,27 +68,14 @@ def _provider_credential(
     env_key: str,
     fallback_env: str = "",
 ) -> str:
-    section = _section(data_sources, category)
-    providers = _section(section, "providers")
-    provider_config = _section(providers, provider)
-    if provider_config.get(key):
-        return _env_ref(provider_config.get(key), "")
-    env_name = str(provider_config.get(env_key) or "").strip()
-    if env_name:
-        return os.getenv(env_name, "")
-    return os.getenv(fallback_env, "") if fallback_env else ""
+    providers = _section(_section(data_sources, category), "providers")
+    return direct_or_env(_section(providers, provider), key, env_key, fallback_env)
 
 
 def _provider_secret(data_sources: dict[str, Any], category: str, provider: str, fallback_env: str = "") -> str:
     return _provider_credential(data_sources, category, provider, "api_key", "api_key_env", fallback_env)
 
 
-def _env_ref(value: Any, default: str = "") -> str:
-    if value is None:
-        return default
-    if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
-        return os.getenv(value[2:-1], default)
-    return str(value)
 
 
 def _config_value(section: dict[str, Any], key: str, env_name: str, default: Any) -> Any:
@@ -104,10 +84,37 @@ def _config_value(section: dict[str, Any], key: str, env_name: str, default: Any
     return section.get(key, default)
 
 
+def reader(section: dict[str, Any]) -> Callable[..., Any]:
+    """A ``read(key, default)`` bound to one config section.
+
+    The cast follows the default's type and the environment variable defaults to the key in
+    upper case, which is the convention every one of these fields already followed. Spelling
+    all three out per field meant writing the default twice -- once to look up, once to fall
+    back on -- and the two could drift apart without anything failing.
+
+    Pass ``env=`` for the handful whose environment name is not simply the key: the options
+    knobs are stored as ``swing_dte_min`` but read ``OPTIONS_SWING_DTE_MIN``.
+    """
+
+    def read(key: str, default: Any, *, env: str | None = None) -> Any:
+        value = _config_value(section, key, env or key.upper(), default)
+        if isinstance(default, bool):  # before int: bool is a subclass of it
+            return _str_to_bool(str(value), default)
+        if isinstance(default, int):
+            return _as_int(value, default)
+        if isinstance(default, float):
+            return _as_float(value, default)
+        if isinstance(default, list):
+            return _as_list(value, default)
+        # An explicitly null YAML key means "not set", so it takes the default rather than
+        # stringifying to "None" -- which is what several of these fields used to do.
+        return default if value is None else str(value)
+
+    return read
+
+
 def _str_to_bool(value: str | None, default: bool) -> bool:
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return as_bool(value, default)
 
 
 def _parse_symbols(value: str | None, default: list[str]) -> list[str]:

@@ -256,9 +256,9 @@ def test_an_entry_needs_timing_but_a_holding_does_not() -> None:
         holder = PortfolioSnapshot(positions={"AAA": 10}, equity=10_000.0)
         # Two runs: the first confirms the regime, the second acts on it.
         algorithm.refine_weights(dict(decision.target_weights), decision.signals, holder,
-                                 context.latest_prices, config)
+                                 context.latest_prices, config, context.timestamp)
         kept = algorithm.refine_weights(dict(decision.target_weights), decision.signals, holder,
-                                        context.latest_prices, config)
+                                        context.latest_prices, config, context.timestamp)
 
     assert kept["AAA"] > 0, "an eligible, ranked holding is kept even with the timing flag false"
 
@@ -553,12 +553,15 @@ def test_the_drawdown_breaker_latches_for_the_session_and_resets_the_next_one() 
     config = DualMomentumConfig(intraday_drawdown_limit=-0.015)
     state: dict = {}
 
-    assert intraday_drawdown_breached(state, 10_000.0, config, "2026-06-05") is False
-    assert intraday_drawdown_breached(state, 9_800.0, config, "2026-06-05") is True
+    session = datetime(2026, 6, 5, 15, tzinfo=timezone.utc)
+    next_session = datetime(2026, 6, 6, 15, tzinfo=timezone.utc)
+
+    assert intraday_drawdown_breached(state, 10_000.0, config, session) is False
+    assert intraday_drawdown_breached(state, 9_800.0, config, session) is True
     # Recovering within the same session does not un-trip it.
-    assert intraday_drawdown_breached(state, 10_050.0, config, "2026-06-05") is True
+    assert intraday_drawdown_breached(state, 10_050.0, config, session) is True
     # A new session starts clean, which is what makes a backtest meaningful.
-    assert intraday_drawdown_breached(state, 10_050.0, config, "2026-06-06") is False
+    assert intraday_drawdown_breached(state, 10_050.0, config, next_session) is False
 
 
 def test_the_breaker_parks_the_book_in_the_defensive_sleeve() -> None:
@@ -573,10 +576,10 @@ def test_the_breaker_parks_the_book_in_the_defensive_sleeve() -> None:
     with ephemeral_state():
         healthy = PortfolioSnapshot(positions={}, equity=10_000.0)
         algorithm.refine_weights(dict(decision.target_weights), decision.signals, healthy,
-                                 context.latest_prices, config)
+                                 context.latest_prices, config, context.timestamp)
         crashed = PortfolioSnapshot(positions={}, equity=9_000.0)
         final = algorithm.refine_weights(dict(decision.target_weights), decision.signals, crashed,
-                                         context.latest_prices, config)
+                                         context.latest_prices, config, context.timestamp)
 
     assert final["BIL"] > 0
     assert final["AAA"] == 0
@@ -636,5 +639,5 @@ def test_every_signal_row_carries_the_audit_trail() -> None:
     for key in ("base_score", "rank", "eligible", "eligibility_reason", "timing", "timing_reason",
                 "momentum_change", "annual_volatility", "target_weight", "defensive_weight",
                 "regime_risk_on", "regime_detail", "regime_breadth", "vol_scale",
-                "portfolio_volatility", "reason", "as_of"):
+                "portfolio_volatility", "reason"):
         assert key in row, key
