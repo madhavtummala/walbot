@@ -7,6 +7,8 @@ unrelated domains. The public names are unchanged and still importable from ``ap
 
 from __future__ import annotations
 
+from .strategy_config import config_for_strategy_view
+
 from ...algorithms.registry import canonical_algorithm_id
 from ...brokerages.alpaca_client import create_data_client
 from ...algorithms.registry import get_algorithm_class
@@ -137,14 +139,18 @@ def _save_backtest_cache(cache: dict[str, Any], path: str = BACKTEST_CACHE_PATH)
     cache_path.write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def _cache_key(strategy: str, period: str) -> str:
+def _cache_key(strategy: str, period: str, account_id: str = "") -> str:
     """Hash of everything a cached backtest's validity depends on.
 
     The algorithm declares its own half through ``config_fingerprint`` -- which is how DCA's
     plan gets in without this function knowing DCA exists. It used to be passed a ``dca_plan``
     argument threaded down from the request handler purely to reach this hash.
+
+    The account is part of the basis because some of that config is per account: two DCA
+    bindings on different accounts have different plans, and without this they collided on one
+    cache entry, so whichever ran first answered for both.
     """
-    config = get_config(strategy_id=strategy)
+    config = config_for_strategy_view(strategy, account_id)
     try:
         algorithm_basis = get_algorithm_class(strategy).from_config(config).config_fingerprint(config)
     except (KeyError, TypeError, ValueError):
@@ -154,6 +160,7 @@ def _cache_key(strategy: str, period: str) -> str:
     cache_basis = {
         "strategy": strategy,
         "period": period,
+        "account": getattr(config, "account_id", ""),
         "data_feed": config.alpaca_data_feed,
         "starting_equity": _backtest_starting_equity(),
         # Shared knobs every algorithm is sized and costed by, whatever it decides.
@@ -338,15 +345,19 @@ def _configured_history_providers(config) -> list[str]:
     return providers or ["yfinance"]
 
 
-def _compute_backtest(strategy: str, period: str) -> dict[str, Any]:
+def _compute_backtest(strategy: str, period: str, account_id: str = "") -> dict[str, Any]:
     """Backtest by replaying the algorithm itself.
 
     One path for every algorithm. There is no per-strategy branch here any more: whatever the
     algorithm declares in ``requirements()`` is what the replay loads, and whatever ``analyze``
     decides is what gets traded -- so a backtest cannot test different logic than the runtime.
+
+    Replayed against the account the strategy is deployed on, for the same reason the signal
+    view is: a DCA plan is per account, so the default account backtests a different plan than
+    the one the dashboard edits.
     """
     starting_equity = _backtest_starting_equity()
-    config = get_config(strategy_id=strategy)
+    config = config_for_strategy_view(strategy, account_id)
     algorithm = get_algorithm_class(strategy).from_config(config)
     schedule = algorithm.schedule
 
@@ -389,6 +400,8 @@ def _compute_backtest(strategy: str, period: str) -> dict[str, Any]:
     # Surfaced, not buried: a window the bar cache cannot reach scores every symbol near
     # zero, which would otherwise read as a poor strategy rather than an unsupported window.
     payload["coverage"] = coverage.as_dict()
+    # Which deployment this curve describes, for the same reason the signal view says so.
+    payload["account_id"] = getattr(config, "account_id", "")
     return payload
 
 
@@ -398,7 +411,8 @@ def backtest_payload(body: dict[str, Any] | None = None) -> dict[str, Any]:
     strategy = canonical_algorithm_id(str(body.get("strategy") or DEFAULT_STRATEGY_ID))[:80]
     refresh = bool(body.get("refresh"))
     cache_only = bool(body.get("cache_only") or body.get("cacheOnly"))
-    key = _cache_key(strategy, period)
+    account_id = str(body.get("account_id") or body.get("accountId") or "")[:80]
+    key = _cache_key(strategy, period, account_id)
     cache = _load_backtest_cache()
 
     if key in cache["items"] and not refresh:
@@ -415,7 +429,7 @@ def backtest_payload(body: dict[str, Any] | None = None) -> dict[str, Any]:
             "error": f"No cached {_period_label(period)} backtest is available.",
         }
 
-    payload = _compute_backtest(strategy, period)
+    payload = _compute_backtest(strategy, period, account_id)
     payload["cached"] = False
     cache["items"][key] = payload
     _save_backtest_cache(cache)

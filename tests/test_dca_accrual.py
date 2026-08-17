@@ -400,3 +400,41 @@ def test_the_regime_gate_never_relaxes() -> None:
 
     assert not outcome["fires"]
     assert "day MA" in outcome["reason"]
+
+
+def test_a_repaying_symbol_does_not_read_as_accruing_negative_dollars() -> None:
+    """``settle`` subtracts the filled notional with no floor, so accrual can go negative.
+
+    That is deliberate -- it is what keeps the long-run spend rate honest after Bursty DCA
+    sizes a trade above what had accrued in order to catch up to its value path. Rendered
+    raw, though, it reached the dashboard as "Accruing ($-450 of $1)".
+    """
+    from src.algorithms.dca.bot import DCAAlgorithm
+
+    reason = DCAAlgorithm({}).reason(
+        SymbolState(accrued=-450.0),
+        floor_dollars=1.0,
+        trigger={"fires": True, "detail": {}},
+        ready=False,
+    )
+
+    assert reason == "Ahead of plan (repaying $450)"
+
+
+def test_bursty_never_promises_a_trade_value_averaging_can_still_veto() -> None:
+    """The signal view is step 1; value averaging sizes the trade in step 2.
+
+    A symbol already at or above its value path is dropped in ``refine``, which the view
+    cannot see -- it has no portfolio. A bare "Ready" told the reader an order was coming that
+    would never be placed, so the row has to stop short of promising one.
+    """
+    from src.algorithms.dca.bursty import BurstyDCAAlgorithm
+
+    algorithm = BurstyDCAAlgorithm({})
+    ready_state = SymbolState(accrued=500.0)
+    fires = {"fires": True, "detail": {"value_averaged": True}}
+
+    assert algorithm.reason(ready_state, 1.0, fires, ready=True) == "Ready (sized to value path)"
+    # With value averaging off, step 2 takes the intent as sized, so "Ready" is the truth.
+    plain = {"fires": True, "detail": {"value_averaged": False}}
+    assert algorithm.reason(ready_state, 1.0, plain, ready=True) == "Ready"

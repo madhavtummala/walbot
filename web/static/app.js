@@ -91,6 +91,12 @@ const state = {
   accounts: { rows: [] },
   bot: null,
   dca: null,
+  //: Account whose plan is currently being fetched, so a re-render mid-flight does not start
+  //: a second request for the same one.
+  dcaPlanLoading: "",
+  //: "", "saving" or the time of the last successful plan save. The board has no save button
+  //: -- it writes on every gesture -- so this is the only feedback that an edit landed.
+  planSaveStatus: "",
   layout: null,
   nodes: [],
   invalidNodes: [],
@@ -899,13 +905,50 @@ function algorithmChoices() {
 }
 
 //: Bindings are pairs of algorithm and account. Signals and backtests are keyed by strategy,
-//: so two bindings on the same strategy share those views; the account only changes execution.
+//: but they are *computed* per account: a DCA plan is per account, so the account is not only
+//: an execution detail. ``accountForStrategy`` is the frontend half of the same rule the API
+//: applies in ``controls.account_for_strategy`` -- both pick the same binding, so the plan the
+//: board edits is the plan the signal view and the backtest read.
 function bindings() {
   return state.controls?.bindings || [];
 }
 
+function accountForStrategy(strategyKey) {
+  const candidates = bindings().filter((binding) => binding.strategy === strategyKey);
+  if (!candidates.length) return "";
+  return (candidates.find((binding) => binding.enabled) || candidates[0]).account_id || "";
+}
+
 function primaryDcaBindingId() {
   return bindings().find((binding) => DCA_ALGORITHM_KEYS.includes(binding.strategy))?.id || "";
+}
+
+//: The account whose plan the bubble board should show. A DCA page uses its own binding's
+//: account; anything else falls back to the first DCA binding, which is all the board can
+//: mean when it is not being rendered for a DCA algorithm.
+function dcaAccountForStrategy(strategyKey) {
+  if (DCA_ALGORITHM_KEYS.includes(strategyKey)) {
+    const account = accountForStrategy(strategyKey);
+    if (account) return account;
+  }
+  return bindingById(primaryDcaBindingId())?.account_id || "";
+}
+
+async function ensureDcaPlan(strategyKey) {
+  const wanted = dcaAccountForStrategy(strategyKey);
+  if (state.dca && (state.dca.account_id || "") === wanted) return;
+  if (state.dcaPlanLoading === wanted) return;
+  state.dcaPlanLoading = wanted;
+  try {
+    const payload = await api(`/api/dca?account_id=${encodeURIComponent(wanted)}`, { timeoutMs: 5000 });
+    state.dca = payload;
+    state.dca.plan.max_item_amount = MAX_AMOUNT;
+    render();
+  } catch (error) {
+    showToast(`Could not load the ${accountLabel(wanted)} plan: ${error.message}`);
+  } finally {
+    state.dcaPlanLoading = "";
+  }
 }
 
 function bindingById(bindingId) {
@@ -1028,7 +1071,15 @@ async function loadBacktest(strategyKey, refresh, options = {}) {
   try {
     const payload = await api("/api/backtest", {
       method: "POST",
-      body: JSON.stringify({ strategy: strategyKey, period: BACKTEST_PERIOD, refresh, cache_only: cacheOnly }),
+      body: JSON.stringify({
+        strategy: strategyKey,
+        period: BACKTEST_PERIOD,
+        refresh,
+        cache_only: cacheOnly,
+        // Same account as the signal view and the Tune board: a DCA plan is per account, so
+        // replaying the default account backtested a plan nobody was editing.
+        account_id: accountForStrategy(strategyKey),
+      }),
       // A fresh replay is the longest request the dashboard makes, and it grows with the
       // window: the 24M option covers roughly five times the trade dates the 4M one does.
       // The cache probe is a lookup and stays on the short timeout.
@@ -1092,7 +1143,7 @@ async function applyUniverseProposal() {
     state.signals = {};
     state.backtests = {};
     const dcaPayload = await api(
-      `/api/dca?account_id=${encodeURIComponent(state.dca?.account_id || bindings()[0]?.account_id || "")}`,
+      `/api/dca?account_id=${encodeURIComponent(state.dca?.account_id || dcaAccountForStrategy(currentRoute().id))}`,
       { timeoutMs: 5000 },
     );
     state.dca = dcaPayload;
@@ -1119,9 +1170,12 @@ async function loadSignals(strategyKey) {
   state.signalLoading[strategyKey] = true;
   render();
   try {
-    state.signals[strategyKey] = await api(`/api/strategy-signals?strategy=${encodeURIComponent(strategyKey)}`, {
-      timeoutMs: 60000,
-    });
+    // Sent explicitly so the view is computed against the same account the Tune board writes.
+    const account = accountForStrategy(strategyKey);
+    state.signals[strategyKey] = await api(
+      `/api/strategy-signals?strategy=${encodeURIComponent(strategyKey)}&account_id=${encodeURIComponent(account)}`,
+      { timeoutMs: 60000 },
+    );
   } catch (error) {
     state.signals[strategyKey] = { error: error.message };
   } finally {
@@ -1497,8 +1551,24 @@ function percent(value) {
 //: settles rather than one per tick.
 const PLAN_SAVE_DEBOUNCE_MS = 500;
 
+//: What the board says about its own saving. The board writes on every gesture and has no
+//: save button, so without this an edit that reached the server and one that failed silently
+//: looked exactly the same -- which is how a plan being written to the wrong account went
+//: unnoticed for as long as it did.
+function planSaveStatusText() {
+  if (state.planSaveStatus === "saving") return "Saving.";
+  return state.planSaveStatus ? `Saved ${state.planSaveStatus}` : "Saves automatically.";
+}
+
+function setPlanSaveStatus(status) {
+  state.planSaveStatus = status;
+  const node = $("#planSaveStatus");
+  if (node) node.textContent = planSaveStatusText();
+}
+
 function schedulePlanSave() {
   window.clearTimeout(schedulePlanSave.timer);
+  setPlanSaveStatus("saving");
   schedulePlanSave.timer = window.setTimeout(() => {
     // Saving swaps in the server's copy of the plan and re-renders the board, which would
     // yank it out from under a gesture that is still going. Wait for the hands to come off.
@@ -1531,9 +1601,11 @@ async function savePlan(quiet = true) {
       delete state.signals[key];
     });
     renderDca();
+    setPlanSaveStatus(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
     if (!quiet) showToast("Saved");
   } catch (error) {
-    showToast(error.message);
+    setPlanSaveStatus("");
+    showToast(`Plan not saved: ${error.message}`);
   }
 }
 
@@ -2032,37 +2104,54 @@ function explainerCard(strategy) {
     </section>`;
 }
 
+// The two halves of an algorithm's tuning are separate things and both belong here. DCA's
+// budgets live in its plan (the bubble board, per account); everything else an algorithm
+// exposes lives in config/algorithms.yaml (the parameter form). DCA used to get only the
+// board, which left Bursty DCA's regime gate, RSI and value-averaging knobs -- all of them
+// present in config and served by /api/algorithm-config -- with no way to edit them at all.
 function renderTuneTab(body, strategy) {
   const isDca = DCA_ALGORITHM_KEYS.includes(strategy.key);
   ensureAlgorithmConfig(strategy.key);
   body.innerHTML = `
     ${explainerCard(strategy)}
+    ${isDca ? `
     <section class="card tuneCard">
       <div class="cardHead">
-        <h2>Configuration</h2>
+        <h2>Budgets</h2>
         <span class="cardHint" id="tuneHint"></span>
       </div>
+      <div class="tuneBody" id="dcaBoard"></div>
+    </section>` : ""}
+    <section class="card tuneCard">
+      <div class="cardHead">
+        <h2>${isDca ? "Parameters" : "Configuration"}</h2>
+        <span class="cardHint" id="configHint"></span>
+      </div>
       <div class="tuneBody" id="tuneBody"></div>
-      ${isDca ? "" : `<div class="cardActions"><button class="ctl" type="button" id="saveConfigButton">Save changes</button></div>`}
+      <div class="cardActions" id="configActions" hidden><button class="ctl" type="button" id="saveConfigButton">Save changes</button></div>
     </section>`;
-  const host = $("#tuneBody");
-  if (isDca) renderDcaTuner(host, strategy);
-  else renderConfigForm(host, strategy);
+  if (isDca) renderDcaTuner($("#dcaBoard"), strategy);
+  renderConfigForm($("#tuneBody"), strategy);
 }
 
 function renderDcaTuner(host, strategy) {
   const hint = $("#tuneHint");
   const plan = state.algorithmConfigs[strategy.key]?.explainer?.parameters?.__plan__;
+  // The board edits the plan of the account *this* algorithm is deployed on. It used to edit
+  // the first DCA binding's account whichever page you were on, so the plan you changed was
+  // not necessarily the plan that would trade -- or the one the signal view rendered.
+  ensureDcaPlan(strategy.key);
   if (hint) hint.textContent = `Dollars per month, per symbol · ${accountLabel(state.dca?.account_id)}`;
   host.innerHTML = `<svg class="bubbleBoard" id="bubbleBoard" role="img"
     aria-label="Interactive buy and sell budget bubbles"></svg>
-    <p class="cardHint">${escapeHtml(plan?.effect || "")} Scroll a bubble to change its budget, drag between buckets, double-click to add. Saves automatically.</p>`;
+    <p class="cardHint">${escapeHtml(plan?.effect || "")} Scroll a bubble to change its budget, drag between buckets, double-click to add.
+      <span id="planSaveStatus" class="saveStatus">${escapeHtml(planSaveStatusText())}</span></p>`;
   renderDca();
 }
 
 function renderConfigForm(host, strategy) {
   const entry = state.algorithmConfigs[strategy.key];
-  const hint = $("#tuneHint");
+  const hint = $("#configHint");
   if (!entry) {
     host.innerHTML = `<p class="emptyState">Loading configuration.</p>`;
     ensureAlgorithmConfig(strategy.key);
@@ -2074,6 +2163,10 @@ function renderConfigForm(host, strategy) {
   host.innerHTML = fields.length
     ? `<div class="configForm">${fields.map(([key, value]) => renderConfigField(key, value, docs[key])).join("")}</div>`
     : `<p class="emptyState">This algorithm has no tunable parameters.</p>`;
+  // Plain DCA has no parameters of its own -- its config is the plan on the board above -- so
+  // it would otherwise offer a button that saves an empty object over its config section.
+  const actions = $("#configActions");
+  if (actions) actions.hidden = !fields.length;
 }
 
 function renderBacktestTab(body, strategy) {
@@ -2564,8 +2657,10 @@ async function init() {
     state.controls = controlsPayload.controls || state.controls;
     state.bot = controlsPayload.bot || statusPayload.bot || null;
     await loadAccounts();
-    // Plans are per account, so the plan to load is only knowable once controls are in.
-    const dcaAccount = bindingById(primaryDcaBindingId())?.account_id || "";
+    // Plans are per account, so the plan to load is only knowable once controls are in. The
+    // page being opened decides which one -- ``renderDcaTuner`` re-resolves on every render,
+    // so navigating to another DCA algorithm swaps the plan rather than showing a stale one.
+    const dcaAccount = dcaAccountForStrategy(currentRoute().id);
     state.dca = await api(`/api/dca?account_id=${encodeURIComponent(dcaAccount)}`, { timeoutMs: 5000 });
     state.dca.plan.max_item_amount = MAX_AMOUNT;
   } catch (error) {

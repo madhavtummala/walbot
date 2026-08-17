@@ -297,8 +297,8 @@ def test_non_refresh_backtest_does_not_compute_without_cached_rows(monkeypatch) 
 def test_refresh_backtest_computes_with_market_data_refresh(monkeypatch) -> None:
     calls = []
 
-    def fake_compute(strategy, period):
-        calls.append((strategy, period))
+    def fake_compute(strategy, period, account_id=""):
+        calls.append((strategy, period, account_id))
         return {
             "strategy": strategy,
             "period": period,
@@ -318,7 +318,7 @@ def test_refresh_backtest_computes_with_market_data_refresh(monkeypatch) -> None
     payload = backtest_payload({"strategy": "trend_following", "period": "6m", "refresh": True})
 
     assert payload["strategy"] == "trend_following"
-    assert calls == [("trend_following", "6m")]
+    assert calls == [("trend_following", "6m", "")]
 
 
 def test_backtest_response_explains_profit_loss_breakdown() -> None:
@@ -502,8 +502,25 @@ def test_none_strategy_resolves_to_dca(monkeypatch) -> None:
     assert canonical_algorithm_id("none") == "dca"
 
 
-def test_dca_view_states_its_cadence_and_planned_total(monkeypatch) -> None:
-    """The dashboard has no cadence control, so the view is where the schedule is readable."""
+def test_dca_view_states_the_cadence_its_binding_will_actually_use(monkeypatch) -> None:
+    """The schedule row has to describe the deployment, not the algorithm class.
+
+    The class declares the weekday set and the session window, but the runtime buckets on the
+    *binding's* ``frequency`` -- so reading ``self.schedule`` alone reported "Mondays at 08:30"
+    for a binding that was in fact firing every hour, and the view is the only place a reader
+    can find out when the algorithm next acts.
+    """
+    from src.api import controls as controls_module
+
+    monkeypatch.setattr(
+        controls_module,
+        "load_controls",
+        lambda *a, **kw: {
+            "bindings": [
+                {"id": "b1", "strategy": "dca", "account_id": "", "enabled": True, "frequency": "1hr"}
+            ]
+        },
+    )
     plan = {
         "buy": {"items": [{"symbol": "SPY", "amount": 250.0}]},
         "sell": {"items": []},
@@ -521,9 +538,90 @@ def test_dca_view_states_its_cadence_and_planned_total(monkeypatch) -> None:
     rows = {row["symbol"]: row for row in payload["leaders"]}
     assert rows["SPY"]["reason"].startswith("Accruing")
     assert payload["summary"][0] == {"label": "Mode", "value": "DCA"}
-    assert payload["summary"][1] == {"label": "Schedule", "value": "Mondays at 08:30"}
+    # Mondays from the class, every 60m from the binding -- neither source alone is the truth.
+    assert payload["summary"][1] == {
+        "label": "Schedule",
+        "value": "Mondays, every 60m from 08:30 to 15:00",
+    }
     # The configured monthly total, not what happens to be deployable this minute.
     assert payload["summary"][2] == {"label": "Planned", "value": "$250/month"}
+
+
+def _binding_controls(strategy: str, account_id: str) -> dict:
+    return {
+        "bindings": [
+            {"id": "b1", "strategy": strategy, "account_id": account_id, "enabled": True, "frequency": "1hr"}
+        ]
+    }
+
+
+def test_signal_view_is_computed_for_the_account_the_strategy_is_deployed_on(monkeypatch) -> None:
+    """A DCA plan is per account, so which account the view reads is not a detail.
+
+    The signal view used to build its config with no account at all, so it fell back to the
+    default account while the dashboard's bubble board wrote the plan of the binding's account.
+    The two never showed the same plan, an edit appeared to do nothing, and -- because
+    ``analyze`` persists accrual -- the preview wrote a ledger under the wrong account too.
+    """
+    from src.api import controls as controls_module
+    from src.api.payloads import strategy_config
+
+    captured: dict = {}
+
+    def capturing_get_config(account_id=None, strategy_id=None):
+        captured["account_id"] = account_id
+        return Config(symbols=["SPY"], account_id=str(account_id or ""))
+
+    monkeypatch.setattr(controls_module, "load_controls", lambda *a, **kw: _binding_controls("dca", "local_paper"))
+    monkeypatch.setattr(strategy_config, "get_config", capturing_get_config)
+
+    assert strategy_config.config_for_strategy_view("dca").account_id == "local_paper"
+    assert captured["account_id"] == "local_paper"
+
+    # An explicit account still wins: the dashboard sends the one its own editor is writing.
+    assert strategy_config.config_for_strategy_view("dca", "paper").account_id == "paper"
+
+
+def test_signal_view_survives_a_binding_naming_a_deleted_account(monkeypatch) -> None:
+    """``sanitize_binding`` never checks the account exists, so a binding can outlive one.
+
+    Refusing here would take the whole dashboard down for a stale binding, so the view falls
+    back to the default account. It reports which account it used, so the substitution is
+    visible rather than silent.
+    """
+    from src.api import controls as controls_module
+    from src.api.payloads import strategy_config
+    from src.core.config import UnknownAccountError
+
+    def strict_get_config(account_id=None, strategy_id=None):
+        if account_id:
+            raise UnknownAccountError(str(account_id), ["paper"])
+        return Config(symbols=["SPY"], account_id="paper")
+
+    monkeypatch.setattr(controls_module, "load_controls", lambda *a, **kw: _binding_controls("dca", "deleted"))
+    monkeypatch.setattr(strategy_config, "get_config", strict_get_config)
+
+    assert strategy_config.config_for_strategy_view("dca").account_id == "paper"
+
+
+def test_backtest_cache_key_separates_accounts(monkeypatch) -> None:
+    """Two DCA bindings on different accounts have different plans, so different curves.
+
+    Without the account in the basis they collided on one cache entry and whichever ran first
+    answered for both -- and editing one account's plan did not invalidate the other's.
+    """
+    from src.api.payloads import strategy_config
+    from src.api.payloads.backtest import _cache_key
+
+    monkeypatch.setattr(
+        strategy_config,
+        "get_config",
+        lambda account_id=None, strategy_id=None: Config(symbols=["SPY"], account_id=str(account_id or "")),
+    )
+
+    assert _cache_key("dca", "6m", "paper") != _cache_key("dca", "6m", "local_paper")
+    assert _cache_key("dca", "6m", "paper") == _cache_key("dca", "6m", "paper")
+    assert _cache_key("dca", "6m", "paper") != _cache_key("dca", "4m", "paper")
 
 
 def _dca_backtest_history(monkeypatch, strategy, plan, *, price=100.0, equity=100_000.0):

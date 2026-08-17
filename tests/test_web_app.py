@@ -292,16 +292,55 @@ def test_watchlist_drag_reorder_left_with_the_watchlist() -> None:
 def test_tune_tab_renders_the_right_editor_per_algorithm() -> None:
     app_js, _, _ = _assets()
 
-    # DCA's config is its budgets, so it gets the bubble board; everything else gets a form.
+    # DCA's budgets are its plan and get the bubble board, but they are not all of its config:
+    # Bursty DCA's regime gate, RSI and value-averaging knobs live in config/algorithms.yaml
+    # like every other algorithm's. DCA used to get the board *instead of* the parameter form,
+    # which left those with no editor at all. It now gets both; everything else gets the form.
     assert "function renderDcaTuner" in app_js
     assert "function renderConfigForm" in app_js
-    assert "if (isDca) renderDcaTuner(host, strategy);" in app_js
-    assert "else renderConfigForm(host, strategy);" in app_js
+    assert 'if (isDca) renderDcaTuner($("#dcaBoard"), strategy);' in app_js
+    assert 'renderConfigForm($("#tuneBody"), strategy);' in app_js
+    # The save button is no longer suppressed for DCA, because DCA now has a form to save.
+    assert 'isDca ? "" : `<div class="cardActions">' not in app_js
     # Typed widgets, not a raw JSON box.
     assert "function configFieldKind" in app_js
     assert "function collectConfigValues" in app_js
     # Saving tuning invalidates the cached backtest, which is keyed on that tuning.
     assert "delete state.backtests[strategyKey];" in app_js
+
+
+def test_the_board_and_the_views_resolve_the_same_account() -> None:
+    """A DCA plan is per account, so an editor and a view on different accounts never agree.
+
+    The board wrote the first DCA binding's plan while the signal view and the backtest were
+    computed for the default account, so an edit showed up in neither and looked like a save
+    that had not happened. Both sides now resolve the account from the strategy's binding, and
+    the frontend sends the one it resolved rather than letting the two derive it separately.
+    """
+    app_js, _, _ = _assets()
+
+    assert "function accountForStrategy" in app_js
+    assert "function dcaAccountForStrategy" in app_js
+    # The board loads the plan for the algorithm whose page is open, not a fixed binding.
+    assert "ensureDcaPlan(strategy.key);" in app_js
+    # Both read paths carry the account, so the server cannot resolve a different one.
+    assert "account_id=${encodeURIComponent(account)}" in app_js
+    assert "account_id: accountForStrategy(strategyKey)," in app_js
+
+
+def test_the_bubble_board_reports_whether_an_edit_was_saved() -> None:
+    """The board has no save button -- it writes on every gesture -- so silence is ambiguous.
+
+    A save that reached the server and one that failed looked identical, which is part of why
+    a plan being written to the wrong account went unnoticed.
+    """
+    app_js, app_css, _ = _assets()
+
+    assert "function planSaveStatusText" in app_js
+    assert "function setPlanSaveStatus" in app_js
+    assert 'setPlanSaveStatus("saving");' in app_js
+    assert 'id="planSaveStatus"' in app_js
+    assert ".saveStatus {" in app_css
 
 
 def test_secrets_never_travel_through_the_accounts_api() -> None:

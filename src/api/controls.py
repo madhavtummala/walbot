@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from copy import deepcopy
 from typing import Any
 
@@ -12,6 +13,8 @@ from src.core.config import (
     save_algorithm_bot_config,
     save_options_bot_config,
 )
+
+logger = logging.getLogger(__name__)
 
 #: Every binding cadence, and how many minutes it means. ``mcp`` maps to ``None`` because it
 #: names no cadence at all -- it is the absence of one, delegated to an agent.
@@ -230,6 +233,51 @@ def bindings_for_strategy(controls: dict[str, Any], strategy: str) -> list[dict[
     """Every binding running ``strategy``. More than one is legal -- ids are unique, strategies are not."""
     wanted = canonical_algorithm_id(str(strategy or ""))
     return [b for b in (controls.get("bindings") or []) if str(b.get("strategy")) == wanted]
+
+
+def account_for_strategy(strategy: str, controls: dict[str, Any] | None = None) -> str:
+    """The account a read-only view of ``strategy`` should be computed against.
+
+    Signal views and backtests are not origins -- they place nothing, so they run whatever they
+    are asked to and cannot refuse the way ``resolve_binding_for_origin`` does. They still have
+    to answer *for some account*, because some algorithms are configured per account: a DCA
+    plan is per account, so computing the view against the default account rendered one plan
+    while the dashboard's own editor wrote another, and neither view ever showed an edit.
+    Reading the binding is what makes the two agree.
+
+    An enabled binding wins over a switched-off one, since that is the deployment the view is
+    describing. ``""`` means no binding names this strategy, and the caller falls back to the
+    default account -- which is the right answer for an algorithm whose config is not per
+    account, and the only available one for a strategy that is not deployed anywhere.
+    """
+    controls = controls if controls is not None else load_controls()
+    candidates = bindings_for_strategy(controls, strategy)
+    if not candidates:
+        return ""
+    preferred = next((binding for binding in candidates if binding.get("enabled")), candidates[0])
+    return str(preferred.get("account_id") or "")
+
+
+def describe_deployed_schedule(strategy: str, schedule: Any, controls: dict[str, Any] | None = None) -> str:
+    """When ``strategy`` will actually run, as opposed to what its class declares.
+
+    The class owns the weekday set and the session window; the binding owns the cadence within
+    that window (``_binding_run_key`` buckets on ``frequency``, not on ``refresh_minutes``).
+    Describing the class alone therefore reported a cadence nothing was using -- "Weekdays at
+    08:30" for a binding firing every hour.
+    """
+    from src.core.interfaces import describe_schedule
+
+    controls = controls if controls is not None else load_controls()
+    candidates = bindings_for_strategy(controls, strategy)
+    if not candidates:
+        return f"{describe_schedule(schedule)} (not deployed)"
+    binding = next((b for b in candidates if b.get("enabled")), candidates[0])
+    minutes = frequency_minutes(binding.get("frequency"))
+    if minutes is None:
+        return "On demand, driven by an agent over MCP"
+    described = describe_schedule(schedule, refresh_minutes=minutes)
+    return described if binding.get("enabled") else f"{described} (switched off)"
 
 
 def resolve_binding_for_origin(

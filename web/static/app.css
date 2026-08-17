@@ -1356,6 +1356,12 @@ h2 {
   font-weight: 700;
 }
 
+/* The bubble board's only save feedback: it writes on every gesture and has no button. */
+.saveStatus {
+  color: var(--accent, inherit);
+  white-space: nowrap;
+}
+
 .cardBody {
   margin: 0;
   color: var(--muted);
@@ -1368,6 +1374,12 @@ h2 {
   display: flex;
   justify-content: flex-end;
   margin-top: 12px;
+}
+
+/* ``display: flex`` above outranks the ``hidden`` attribute's own ``display: none``, so an
+   algorithm with no tunable parameters would still be offered a Save button. */
+.cardActions[hidden] {
+  display: none;
 }
 
 .chipRow {
