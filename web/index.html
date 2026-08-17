@@ -33,6 +33,11 @@
   </div>
 
   <input id="symbolEntry" autocomplete="off" autocapitalize="characters" spellcheck="false" />
+  <!-- Typed budget for the selected bubble. Unlike #symbolEntry, whose text is transparent
+       because the SVG redraws the symbol as you type, this one shows its own value: the
+       amount is committed in one go rather than previewed. -->
+  <input id="amountEntry" inputmode="numeric" autocomplete="off" spellcheck="false"
+    aria-label="Monthly budget for the selected symbol" />
   <output id="toast" aria-live="polite"></output>
   <script src="/static/app.js?v=20260816-account-layout"></script>
 </body>

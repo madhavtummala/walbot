@@ -107,6 +107,9 @@ const state = {
   boardPointers: new Map(),
   boardPinch: null,
   draft: null,
+  //: The bubble whose budget is being typed, or null. Holds the symbol rather than the node,
+  //: because the board rebuilds its nodes on every render and the object would go stale.
+  amountEdit: null,
   animationId: null,
   backtests: {},
   backtestLoading: {},
@@ -656,11 +659,19 @@ function updateTouchPointer(event, node) {
   });
 }
 
-function resizeNodeToAmount(node, amount) {
-  node.amount = clamp(Math.round(amount / WHEEL_STEP) * WHEEL_STEP, 0, MAX_AMOUNT);
+//: Set a budget to exactly what was asked for, in whole dollars. Scrolling and pinching go
+//: through resizeNodeToAmount instead, which snaps to the WHEEL_STEP grid -- a gesture has no
+//: business expressing $310, but a typed number means precisely what it says, so rounding it
+//: to the nearest $25 would silently discard what the reader just asked for.
+function setNodeAmount(node, amount) {
+  node.amount = clamp(Math.round(amount), 0, MAX_AMOUNT);
   node.radius = itemRadius(node.amount);
   syncNodeToPlan(node);
   schedulePlanSave();
+}
+
+function resizeNodeToAmount(node, amount) {
+  setNodeAmount(node, clamp(Math.round(amount / WHEEL_STEP) * WHEEL_STEP, 0, MAX_AMOUNT));
 }
 
 function selectedDcaNode() {
@@ -813,6 +824,70 @@ function hideSymbolEntry(cancelDraft = true) {
     state.draft = null;
     renderBoard();
   }
+}
+
+// =========================================================================================
+// Typing a budget. Scrolling a bubble is quick but imprecise -- reaching $1,600 from $25 is
+// 63 notches, and the value can only ever land on a multiple of WHEEL_STEP. Selecting a
+// bubble and typing sets it outright.
+// =========================================================================================
+
+//: Places the input over ``node`` and opens it. ``seed`` is the first character when the edit
+//: was started by typing a digit, so that keystroke is not swallowed by the focus change; an
+//: edit started with Enter seeds the current amount instead and selects it, so typing
+//: replaces and the arrow keys extend.
+function showAmountEntry(node, seed = "") {
+  const board = $("#bubbleBoard");
+  if (!board || !node || !state.layout) return;
+  const entry = $("#amountEntry");
+  const rect = board.getBoundingClientRect();
+  state.amountEdit = { symbol: node.symbol };
+  entry.value = seed || String(Math.round(node.amount));
+  entry.style.left = `${window.scrollX + rect.left + (node.x / state.layout.width) * rect.width}px`;
+  entry.style.top = `${window.scrollY + rect.top + (node.y / state.layout.height) * rect.height}px`;
+  entry.className = "show";
+  window.setTimeout(() => {
+    entry.focus();
+    if (seed) entry.setSelectionRange(entry.value.length, entry.value.length);
+    else entry.select();
+  }, 0);
+}
+
+function hideAmountEntry() {
+  const entry = $("#amountEntry");
+  if (!entry) return;
+  entry.className = "";
+  state.amountEdit = null;
+}
+
+function commitAmountEntry() {
+  const entry = $("#amountEntry");
+  // Guarded rather than assumed: blur, Enter and a click elsewhere can all arrive for one
+  // edit, and only the first of them should be the one that writes.
+  if (!state.amountEdit || !entry?.classList.contains("show")) return;
+  const symbol = state.amountEdit.symbol;
+  const raw = entry.value.replace(/[$,\s]/g, "").trim();
+  hideAmountEntry();
+
+  const node = state.nodes.find((candidate) => candidate.symbol === symbol);
+  if (!node) return;
+  if (raw === "") {
+    renderBoard();
+    return;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    showToast(`${symbol}: ${entry.value.trim()} is not a budget`);
+    renderBoard();
+    return;
+  }
+  if (parsed > MAX_AMOUNT) {
+    // Clamped either way, but say so: silently keeping a smaller number than was typed is
+    // the same class of bug as the board writing a plan nobody was reading.
+    showToast(`${symbol} capped at ${money(MAX_AMOUNT)}/month`);
+  }
+  setNodeAmount(node, parsed);
+  renderBoard();
 }
 
 function commitSymbolEntry() {
@@ -1864,6 +1939,12 @@ function render(options = {}) {
   renderDeferred = false;
   if (route.page === "account") renderAccountPage(content, route.id);
   else renderAlgorithmPage(content, route.id, route.tab);
+  // Both entry inputs live outside #content, so a route change rebuilds the page around them
+  // and would leave one floating over a board that is no longer there.
+  if (!$("#bubbleBoard")) {
+    hideAmountEntry();
+    hideSymbolEntry();
+  }
   closeNavOnMobile();
 }
 
@@ -2144,7 +2225,7 @@ function renderDcaTuner(host, strategy) {
   if (hint) hint.textContent = `Dollars per month, per symbol · ${accountLabel(state.dca?.account_id)}`;
   host.innerHTML = `<svg class="bubbleBoard" id="bubbleBoard" role="img"
     aria-label="Interactive buy and sell budget bubbles"></svg>
-    <p class="cardHint">${escapeHtml(plan?.effect || "")} Scroll a bubble to change its budget, drag between buckets, double-click to add.
+    <p class="cardHint">${escapeHtml(plan?.effect || "")} Scroll a bubble to change its budget, or select one and type the amount. Drag between buckets, double-click to add.
       <span id="planSaveStatus" class="saveStatus">${escapeHtml(planSaveStatusText())}</span></p>`;
   renderDca();
 }
@@ -2613,9 +2694,34 @@ function wireEvents() {
   });
   $("#symbolEntry")?.addEventListener("blur", () => window.setTimeout(commitSymbolEntry, 80));
 
+  $("#amountEntry")?.addEventListener("keydown", (event) => {
+    // Kept off the window handler below, which ignores events from inputs: while this is open
+    // it owns the keyboard, so Escape must abandon rather than fall through to anything else.
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commitAmountEntry();
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      hideAmountEntry();
+    }
+  });
+  $("#amountEntry")?.addEventListener("blur", () => window.setTimeout(commitAmountEntry, 80));
+
   window.addEventListener("keydown", (event) => {
     const tag = event.target?.tagName?.toLowerCase();
     if (tag === "input" || tag === "textarea" || event.target?.isContentEditable) return;
+    // Type on a selected bubble to set its budget outright. A digit starts the edit and is
+    // carried into the field, because focusing an input mid-keydown does not deliver the
+    // keystroke that caused it; Enter opens the field on the current value instead.
+    if (state.selected && !state.draft && (event.key === "Enter" || /^[0-9]$/.test(event.key))) {
+      const node = selectedDcaNode();
+      if (node) {
+        event.preventDefault();
+        showAmountEntry(node, event.key === "Enter" ? "" : event.key);
+        return;
+      }
+    }
     if ((event.key === "Delete" || event.key === "Backspace") && state.selected) {
       const found = BUCKET_NAMES.flatMap((bucketName) =>
         bucketItems(bucketName).map((item) => ({ bucketName, item })),

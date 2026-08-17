@@ -63,6 +63,20 @@ setTimeout(() => {
     try { winListeners.hashchange && winListeners.hashchange(); console.log("  ok  ", hash); }
     catch (e) { failures++; console.log("  THROW", hash, "->", e.constructor.name + ": " + e.message); }
   }
+  // Keyboard paths on the DCA board. The stub never selects a bubble, so these exercise the
+  // guards rather than the edit itself -- enough to catch a dangling reference in the branch.
+  window.location.hash = "#/algo/dca/tune";
+  try { winListeners.hashchange && winListeners.hashchange(); } catch (e) { /* reported above */ }
+  for (const key of ["Enter", "5", "Escape", "Delete", "Backspace", "a"]) {
+    try {
+      winListeners.keydown && winListeners.keydown({ key, target: {}, preventDefault() {} });
+      console.log("  ok   keydown", key);
+    } catch (e) {
+      failures++;
+      console.log("  THROW keydown", key, "->", e.constructor.name + ": " + e.message);
+    }
+  }
+
   console.log(failures ? `\n${failures} failure(s)` : "\nno failures");
   process.exit(failures ? 1 : 0);
 }, 400);
