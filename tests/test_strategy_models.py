@@ -128,3 +128,27 @@ def test_a_minutes_key_wins_over_a_stale_bars_key() -> None:
         }
 
     assert DualMomentumConfig.from_runtime_config(_Runtime()).selection_horizon_macro_minutes == 2400
+
+
+def test_live_signals_are_ordered_by_score_not_by_its_magnitude() -> None:
+    """The dashboard list should read in the order the ranking was decided in.
+
+    The previous ordering grouped LONG/SHORT/FLAT and then sorted on ``-abs(score)``, which
+    seats the worst name in the universe next to the best: -3.0 sorted ahead of +1.0. For a
+    cross-sectional ranker the sign is the entire signal.
+    """
+    from src.algorithms.base import signal_view_from_decision
+    from src.core.interfaces import AlgorithmDecision
+
+    decision = AlgorithmDecision(
+        target_weights={"GOOD": 0.6},
+        signals={
+            "WORST": {"signal": 0, "score": -3.0},
+            "GOOD": {"signal": 1, "score": 1.0},
+            "MID": {"signal": 0, "score": 0.2},
+        },
+    )
+
+    view = signal_view_from_decision(decision)
+
+    assert [row["symbol"] for row in view.leaders] == ["GOOD", "MID", "WORST"]

@@ -2149,6 +2149,7 @@ function renderOverviewTab(body, strategy, deployment) {
 function renderSignalsTab(body, strategy) {
   const payload = state.signals[strategy.key];
   const loading = Boolean(state.signalLoading[strategy.key]);
+  // Already ordered strongest-first by ``signal_view_from_decision``.
   const leaders = payload?.leaders || [];
   body.innerHTML = `
     <section class="card">

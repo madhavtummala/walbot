@@ -200,6 +200,15 @@ class Sweep:
             logger.warning("No daily bars for %s; they are dropped from every universe", ", ".join(missing))
 
         start, end = self._bounds(period)
+        # An empty fetch is almost always a locked bar store rather than a missing window --
+        # another sweep, or the dashboard, holding the DuckDB file. Say so, because the
+        # downstream symptoms (every symbol "dropped", then an empty date axis) describe the
+        # data rather than the cause.
+        if not frames:
+            raise RuntimeError(
+                f"No daily bars at all for {period}. The bar store is usually locked by "
+                f"another process when this happens -- check for a running sweep or dashboard."
+            )
         frames = self._covering(frames, start, period)
         common = sorted(set.intersection(*(set(frame.index) for frame in frames.values())))
         in_period = [date for date in common if date >= start and (end is None or date <= end)]
@@ -209,10 +218,11 @@ class Sweep:
             # replays a completely different period under the requested period's label --
             # a 2023 request scored May-August 2026 and reported it as 2023.
             if ":" in period:
-                raise RuntimeError(
-                    f"No common trading dates inside {period}; the daily store covers "
-                    f"{common[0].date()} -> {common[-1].date()}"
+                covered = (
+                    f"the daily store covers {common[0].date()} -> {common[-1].date()}"
+                    if common else "the fetched frames share no dates at all"
                 )
+                raise RuntimeError(f"No common trading dates inside {period}; {covered}")
             in_period = common[-_period_row_count(period):]
         dates = in_period
         if len(dates) < 2:
