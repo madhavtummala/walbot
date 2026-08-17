@@ -9,12 +9,10 @@ Three reports, because a momentum book has three separable problems:
 **Contribution** -- which symbols and which months produced the return, and how much of the
 window was spent in the defensive sleeve rather than in the market.
 
-**Turnover by cause** -- the one the deployed configuration most needs. A daily turnover total
-says how much was traded; it does not distinguish opening a new theme (a change of view) from
-re-splitting an existing theme's budget between two ETFs (a sizing tweak that costs the same
-spread). ``theme_allocation`` recomputes the second every session with no confirmation at all,
-so it is the obvious suspect for a book turning over ~48% of itself per day, and it has never
-been measured separately.
+**Turnover by cause** -- a daily turnover total says how much was traded, not why. Opening a
+position is a change of view; resizing one already held is not, and costs the same spread.
+Separating them is what showed that resize alone was 36% of a book turning over ~48% of itself
+per session, which is what put the re-ranking on its own clock.
 
 **Cost sensitivity** -- the return net of a per-trade cost, swept, so "does the edge survive
 execution" is answered as a curve rather than at one assumed basis-point number.
@@ -43,22 +41,7 @@ logger = logging.getLogger(__name__)
 # =========================================================================================
 
 
-CAUSES = (
-    "theme_entry",
-    "theme_exit",
-    "intra_theme_rotation",
-    "resize",
-)
-
-
-def _theme_map(tuning: dict[str, Any]) -> dict[str, str]:
-    config = DualMomentumConfig(**{k: v for k, v in tuning.items()
-                                   if k in DualMomentumConfig.__dataclass_fields__})
-    return {symbol.upper(): theme for symbol, theme in (config.themes or {}).items()}
-
-
-def _themes_held(held: dict[str, float], themes: dict[str, str], defensive: set[str]) -> set[str]:
-    return {themes.get(symbol, symbol) for symbol in held if symbol not in defensive}
+CAUSES = ("entry", "exit", "resize")
 
 
 def turnover_by_cause(curve: pd.DataFrame, tuning: dict[str, Any]) -> dict[str, float]:
@@ -69,13 +52,12 @@ def turnover_by_cause(curve: pd.DataFrame, tuning: dict[str, Any]) -> dict[str, 
     them would put backtest bookkeeping inside live trading code. What a day's trades did to
     the book is recoverable from the book itself.
 
-    - ``theme_entry`` / ``theme_exit``: the set of *themes* held changed. This is the strategy
-      changing its mind, and it is the turnover the strategy exists to spend.
-    - ``intra_theme_rotation``: a name was opened or closed while its theme was held both days.
-      Swapping QQQM for XSD inside ``us_growth`` -- same view, same spread paid.
-    - ``resize``: a position that was held on both days changed size.
+    - ``entry`` / ``exit``: a name arrived or left. This is the strategy changing its mind, and
+      the turnover it exists to spend.
+    - ``resize``: a position held on both days changed size. No change of view, same spread.
+    - ``defensive``: movement in the cash-equivalent sleeve, which is the residual of every
+      other decision rather than a decision of its own, so it is counted apart.
     """
-    themes = _theme_map(tuning)
     defensive = {str(s).upper() for s in (tuning.get("defensive_universe") or [])}
     totals = dict.fromkeys(CAUSES, 0.0)
     totals["defensive"] = 0.0
@@ -85,30 +67,17 @@ def turnover_by_cause(curve: pd.DataFrame, tuning: dict[str, Any]) -> dict[str, 
         before = getattr(previous, "positions", {}) or {}
         after = getattr(row, "positions", {}) or {}
         traded = getattr(row, "trades", {}) or {}
-        if not traded:
-            continue
-        themes_before = _themes_held(before, themes, defensive)
-        themes_after = _themes_held(after, themes, defensive)
-
         for symbol, value in traded.items():
             value = abs(float(value))
             symbol = str(symbol).upper()
             if symbol in defensive:
-                # Moving in and out of bills is the residual of every other decision rather
-                # than a decision of its own, so it is counted apart rather than attributed.
                 totals["defensive"] += value
-                continue
-            theme = themes.get(symbol, symbol)
-            was_held = symbol in before
-            is_held = symbol in after
-            if was_held and is_held:
+            elif symbol in before and symbol in after:
                 totals["resize"] += value
-            elif theme in themes_before and theme in themes_after:
-                totals["intra_theme_rotation"] += value
-            elif is_held:
-                totals["theme_entry"] += value
+            elif symbol in after:
+                totals["entry"] += value
             else:
-                totals["theme_exit"] += value
+                totals["exit"] += value
     return totals
 
 

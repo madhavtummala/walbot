@@ -59,8 +59,8 @@ const STRATEGIES = [
     status: "Paper",
     horizon: "Intraday",
     risk: "Medium",
-    logic: "Requires each ETF to clear its own absolute-trend test before it is ranked, selects and rotates by theme rather than by ticker so a book of four is four different exposures, and scales weights toward a portfolio volatility target.",
-    signals: ["Absolute eligibility", "Slow rank", "Theme rotation", "Vol target"],
+    logic: "Requires each ETF to clear its own absolute-trend test before it is ranked, holds the top few, re-ranks every few sessions rather than every one, and needs a score margin to displace a sitting position. Weights scale toward a portfolio volatility target.",
+    signals: ["Absolute eligibility", "Slow rank", "Replacement margin", "Crash stop", "Vol target"],
   },
   {
     key: "spy_rotation",
@@ -1151,7 +1151,7 @@ function formatSignalDetail(strategyKey, row) {
       row.reason || "Signal pending",
       `Eligible ${row.eligible ? "yes" : "no"}`,
       row.rank ? `Rank ${row.rank}` : "Unranked",
-      `Vol ${percent(row.annual_volatility)} / scale ${num(row.vol_scale, 2)}`,
+      `Vol ${percent(row.annual_volatility)}`,
     ];
     if (row.close) details.push(`Close ${money(row.close, 2)}`);
     return details.join(" / ");

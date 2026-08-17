@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 from .config import STATE_KEY, DualMomentumConfig
-from .layers import crash_stop, hold_eligibility, park_residual, theme_allocation, theme_of, theme_ranks, volatility_scale
+from .layers import crash_stop, hold_eligibility, park_residual, score_to_weights
 from .proposal import allocation_mode, analyze_universe, build_signals
-from .stateful import track_eligibility, resolve_themes, _defensive_book, _in_cooldown, _record_exits, _run_facts, apply_turnover_filters, partial_adjustment, action_due, advance_run, record_action
+from .stateful import track_eligibility, resolve_positions, _defensive_book, _in_cooldown, _record_exits, _run_facts, apply_turnover_filters, partial_adjustment, action_due, advance_run, record_action
 
 
 
@@ -75,8 +75,6 @@ class DualMomentumAlgorithm(BaseAlgorithm):
                 outcome["scored"],
                 weights,
                 data,
-                outcome["volatility"],
-                outcome["covariance"],
                 outcome["defensive_book"],
                 strategy_config,
             ),
@@ -87,8 +85,6 @@ class DualMomentumAlgorithm(BaseAlgorithm):
                 **({"market_sentiment": context.market_sentiment}
                    if strategy_config.uses_sentiment else {}),
                 "universe_data": data,
-                "portfolio_volatility": outcome["volatility"]["portfolio_volatility"],
-                "vol_scale": outcome["volatility"]["scale"],
                 "eligible_count": len(outcome["ranked"]),
             },
         )
@@ -102,7 +98,7 @@ class DualMomentumAlgorithm(BaseAlgorithm):
         config: Any,
         as_of: datetime,
     ) -> dict[str, float]:
-        """Position-aware layer: hold/exit asymmetry, theme rotation, cooldown, risk stops.
+        """Position-aware layer: hold/exit asymmetry, replacement margin, cooldown, risk stops.
 
         Everything here needs either what is currently held or memory of previous runs, which
         is exactly what ``analyze`` is forbidden to touch.
@@ -164,138 +160,86 @@ class DualMomentumAlgorithm(BaseAlgorithm):
             logger.warning("Dual Momentum holding the defensive sleeve: %s", facts["data_detail"])
             return settle(book)
 
-        # Eligibility is tracked per *theme*, not per name: the book's slow decision is which
-        # exposures to hold, and a theme counts as qualifying on a day when any of its ETFs
-        # does. Which ETF inside it is a sizing question, settled every day by
-        # ``theme_allocation`` with no confirmation at all.
-        theme_rows: dict[str, dict[str, Any]] = {}
-        for symbol, row in rows.items():
-            if symbol in defensive:
-                continue
-            theme = theme_of(symbol, strategy_config)
-            prior = theme_rows.get(theme)
-            better = prior is None or (
-                int(row.get("eligible", 0)),
-                float(row.get("base_score", 0.0)),
-            ) > (int(prior.get("eligible", 0)), float(prior.get("base_score", 0.0)))
-            if better:
-                theme_rows[theme] = row
-        history = track_eligibility(state, theme_rows, strategy_config)
+        risk_rows = {symbol: row for symbol, row in rows.items() if symbol not in defensive}
+        history = track_eligibility(state, risk_rows, strategy_config)
         window = max(strategy_config.eligibility_window, 1)
-        theme_score = {t: float(r.get("base_score", 0.0)) for t, r in theme_rows.items()}
 
-        def eligible_days(theme: str) -> int:
-            return sum(history.get(theme, []))
+        def eligible_days(symbol: str) -> int:
+            return sum(history.get(symbol, []))
 
-        def watched_long_enough(theme: str) -> bool:
-            return len(history.get(theme, [])) >= window
+        def watched_long_enough(symbol: str) -> bool:
+            return len(history.get(symbol, [])) >= window
 
-        held_themes = {theme_of(symbol, strategy_config) for symbol in held - defensive}
+        # The crash stop answers to no clock. Everything else -- ranking, entering, replacing,
+        # and the considered exits -- happens on ``rerank_interval_days``, because they are all
+        # the same decision seen from different sides and the score they rest on has a twelve
+        # session horizon. Re-ranking every session asked it a question it cannot answer that
+        # fast, and the book paid the spread for the noise.
+        crashed = {
+            symbol for symbol in held - defensive
+            if not crash_stop(rows.get(symbol, {}), strategy_config)[0]
+        }
+        for symbol in crashed:
+            logger.warning(
+                "Dual Momentum crash stop on %s: %s", symbol,
+                crash_stop(rows.get(symbol, {}), strategy_config)[1],
+            )
 
-        # Two exit speeds. The band-based tests are a considered judgement and answer to
-        # ``exit_interval_days``; the crash stop answers to nothing, because a name can gap 30%
-        # over a week of throttled sessions while the algorithm waits its turn to look.
-        exiting = action_due(state, "exit", strategy_config.exit_interval_days)
+        if not action_due(state, "rerank", strategy_config.rerank_interval_days):
+            # Between re-rankings the book may only shrink, and only for a crash. Everything
+            # else stays exactly where it is, which is the whole point of the throttle.
+            survivors = (held - defensive) - crashed
+            weights = {symbol: float(current.get(symbol, 0.0)) for symbol in survivors}
+        else:
+            record_action(state, "rerank")
+            keep: set[str] = set()
+            for symbol in (held - defensive) - crashed:
+                row = rows.get(symbol, {})
+                # Two ways out, answering different questions. The count is the slow one: this
+                # name has stopped qualifying for long enough to mean something. The band, via
+                # hold_eligibility, is the fast one.
+                days = eligible_days(symbol)
+                # Only once the window is full: a cold state store has no history, and reading
+                # that as "ineligible" would sell everything on the first run.
+                if watched_long_enough(symbol) and days <= strategy_config.exit_max_eligible_days:
+                    logger.info(
+                        "Dual Momentum exiting %s: eligible on only %d of the last %d runs",
+                        symbol, days, window,
+                    )
+                    continue
+                stays, why = hold_eligibility(row, strategy_config)
+                if not stays:
+                    logger.info("Dual Momentum exiting %s: %s", symbol, why)
+                    continue
+                keep.add(symbol)
 
-        keep: set[str] = set()
-        for theme in held_themes:
-            row = theme_rows.get(theme, {})
-            crashed, why = crash_stop(row, strategy_config)
-            if not crashed:
-                logger.warning("Dual Momentum crash stop on theme %s: %s", theme, why)
-                continue
-            if not exiting:
-                keep.add(theme)
-                continue
-            # Two ways out, answering different questions. The count is the slow one: this
-            # theme has stopped qualifying for long enough to mean something. The band, via
-            # hold_eligibility, is the fast one -- including the single-session crash stop.
-            days = eligible_days(theme)
-            # Only once the window is full: a cold state store has no history, and reading
-            # that as "ineligible" would sell everything on the first run.
-            if watched_long_enough(theme) and days <= strategy_config.exit_max_eligible_days:
-                logger.info(
-                    "Dual Momentum exiting theme %s: eligible on only %d of the last %d runs",
-                    theme, days, window,
+            candidates = [
+                dict(row, symbol=symbol)
+                for symbol, row in sorted(
+                    risk_rows.items(), key=lambda item: -float(item[1].get("base_score", 0.0))
                 )
-                continue
-            stays, why = hold_eligibility(row, strategy_config)
-            if not stays:
-                logger.info("Dual Momentum exiting theme %s: %s", theme, why)
-                continue
-            keep.add(theme)
-        if exiting:
-            record_action(state, "exit")
+                if int(row.get("eligible", 0))
+                and (
+                    # Held names face eligibility alone. The quality floor, the settling
+                    # period and the cooldown are all *entry* conditions: a holding that
+                    # would not be bought today is not thereby worth selling, and applying
+                    # them symmetrically sells a name the moment it stops being a purchase.
+                    symbol in keep
+                    or (
+                        float(row.get("base_score", 0.0)) >= strategy_config.min_base_score
+                        and eligible_days(symbol) >= strategy_config.entry_min_eligible_days
+                        and not _in_cooldown(state, symbol, as_of, strategy_config)
+                    )
+                )
+            ]
+            for position, row in enumerate(candidates, start=1):
+                row["rank"] = position
+            selection = resolve_positions(keep, candidates, strategy_config)
+            chosen = [row for row in candidates if str(row["symbol"]) in selection]
+            weights = score_to_weights(chosen, strategy_config) if chosen else {}
 
-        # Exits are decided above and, at ``exit_interval_days: 0``, apply every run. Every
-        # other kind of action has its own clock, because they are not the same decision and do
-        # not deserve the same cadence:
-        #
-        #   rotation  -- entering or leaving a theme. A change of view, and the dearest.
-        #   entry     -- opening any new position, including a new name in a held theme.
-        #   intra     -- re-splitting weight between names already held. Pure sizing.
-        #
-        # Deliberately asymmetric. Risk is continuous and opportunity is not: a broken holding
-        # leaves today, a better one is bought when its clock next comes round.
-        rotating = action_due(state, "theme_rotation", strategy_config.theme_rotation_interval_days)
-        entering = action_due(state, "entry", strategy_config.entry_interval_days)
-
-        # A theme's own rank, not the ETF rank of its best member. Those are different
-        # questions: metals holding SLV and GLD at ETF ranks 1 and 2 pushed every other
-        # theme's best name down the ladder and out of entry range whatever its own standing.
-        ranks = theme_ranks(theme_score)
-        if rotating and entering:
-            entrant_themes = {
-                theme
-                for theme in theme_rows
-                if theme not in keep
-                and eligible_days(theme) >= strategy_config.entry_min_eligible_days
-                and ranks.get(theme, 0)
-                and ranks[theme] <= strategy_config.entry_rank_max
-                and float(theme_score.get(theme, 0.0)) >= strategy_config.min_base_score
-                and not _in_cooldown(state, theme, as_of, strategy_config)
-            }
-            selection = resolve_themes(keep, entrant_themes, theme_score, strategy_config)
-            if selection != keep:
-                record_action(state, "theme_rotation")
-                record_action(state, "entry")
-        else:
-            # Between rotations the book may only shrink. A theme that left is not backfilled
-            # until the next one, so the freed budget parks in the defensive sleeve.
-            selection = set(keep)
-
-        weights = theme_allocation(selection, rows, strategy_config, current)
-
-        # Sizing inside the themes already held is the cheapest decision to skip and the one
-        # taken most often: over 2026 it was 36% of turnover as resize plus 13% as intra-theme
-        # rotation, none of it a change of view. Holding those names exactly where they are
-        # leaves the whole difference untraded.
-        if not action_due(state, "intra_theme", strategy_config.intra_theme_interval_days):
-            frozen = {symbol: weight for symbol, weight in weights.items() if symbol not in held}
-            for symbol in weights:
-                if symbol in held:
-                    frozen[symbol] = float(current.get(symbol, 0.0))
-            weights = frozen
-        elif weights:
-            record_action(state, "intra_theme")
-
-        # A new name inside a theme already held is still an entry, and is held off with the
-        # rest of them rather than slipping through as "sizing".
-        if not entering:
-            weights = {
-                symbol: (weight if symbol in held or symbol in defensive else 0.0)
-                for symbol, weight in weights.items()
-            }
-
-        covariance = {symbol: dict(rows[symbol].get("covariance_row") or {}) for symbol in weights}
-        vol = volatility_scale(weights, covariance, strategy_config)
-        if vol["below_floor"]:
-            logger.info("Dual Momentum de-risking to defensive: ex-ante vol %.1f%%", 100 * vol["portfolio_volatility"])
-            weights = dict(book)
-        else:
-            weights = {symbol: weight * vol["scale"] for symbol, weight in weights.items()}
-            # Same rule as step 1: undeployed gross belongs in bills, not in cash.
-            weights = park_residual(weights, book, strategy_config)
+        # Same rule as step 1: undeployed gross belongs in bills, not in cash.
+        weights = park_residual(weights, book, strategy_config)
 
         if not any(weights.values()):
             # Nothing qualifies: sit in the defensive sleeve rather than in the least-bad name.

@@ -12,25 +12,21 @@ from src.algorithms.dual_momentum import (
     DualMomentumConfig,
     _in_cooldown,
     _record_exits,
-    resolve_themes,
+    resolve_positions,
     analyze_universe,
     apply_turnover_filters,
     partial_adjustment,
     action_due,
     advance_run,
     crash_stop,
-    theme_ranks,
     record_action,
-    covariance_matrix,
     defensive_weights,
     eligibility,
     hold_eligibility,
     universe_data_ok,
     park_residual,
     score_to_weights,
-    theme_allocation,
     track_eligibility,
-    volatility_scale,
     zscores,
 )
 from src.core.interfaces import AlgorithmContext, PortfolioSnapshot
@@ -267,25 +263,51 @@ def test_a_holding_survives_the_intent_round_trip_the_pipeline_actually_performs
 # =========================================================================================
 
 
-def test_a_challenger_must_win_by_the_replacement_margin() -> None:
-    rows = {
-        "HELD": {"base_score": 1.00},
-        "CLOSE": {"base_score": 1.20},
-        "CLEAR": {"base_score": 1.80},
-    }
-    config = DualMomentumConfig(max_positions=1, min_score_delta_to_replace=0.35)
+def _ranked(**scores: float) -> list[dict[str, object]]:
+    """Candidate rows in score order, ranked, as ``refine`` builds them."""
+    rows = [{"symbol": symbol, "base_score": score} for symbol, score in
+            sorted(scores.items(), key=lambda item: -item[1])]
+    for position, row in enumerate(rows, start=1):
+        row["rank"] = position
+    return rows
 
-    scores = {symbol: float(row["base_score"]) for symbol, row in rows.items()}
-    assert resolve_themes({"HELD"}, {"CLOSE"}, scores, config) == {"HELD"}
-    assert resolve_themes({"HELD"}, {"CLEAR"}, scores, config) == {"CLEAR"}
+
+def test_a_challenger_must_win_by_the_replacement_margin() -> None:
+    """Displacing an incumbent costs the spread twice, so it needs daylight, not a hair."""
+    config = DualMomentumConfig(max_positions=1, entry_rank_max=3, exit_rank_max=5,
+                                min_score_delta_to_replace=0.35)
+
+    close = _ranked(HELD=1.00, CLOSE=1.20)
+    assert resolve_positions({"HELD"}, close, config) == {"HELD"}
+
+    clear = _ranked(HELD=1.00, CLEAR=1.80)
+    assert resolve_positions({"HELD"}, clear, config) == {"CLEAR"}
 
 
 def test_free_slots_are_filled_before_anything_is_displaced() -> None:
-    rows = {"HELD": {"base_score": 1.0}, "NEW": {"base_score": 0.2}}
-    config = DualMomentumConfig(max_positions=2, min_score_delta_to_replace=0.35)
+    config = DualMomentumConfig(max_positions=2, entry_rank_max=3, exit_rank_max=5,
+                                min_score_delta_to_replace=0.35)
+    rows = _ranked(HELD=1.0, NEW=0.2)
 
-    scores = {symbol: float(row["base_score"]) for symbol, row in rows.items()}
-    assert resolve_themes({"HELD"}, {"NEW"}, scores, config) == {"HELD", "NEW"}
+    assert resolve_positions({"HELD"}, rows, config) == {"HELD", "NEW"}
+
+
+def test_an_incumbent_is_held_through_a_rank_it_could_not_have_entered_on() -> None:
+    """Enter from the top 2, hold through the top 5.
+
+    Ejecting on the entry rank meant a holding that drifted to 7th of 14 on scores separated
+    by 0.15 was sold, and the freed slot refilled from the top with no margin required at all.
+    """
+    config = DualMomentumConfig(max_positions=2, entry_rank_max=2, exit_rank_max=5,
+                                min_score_delta_to_replace=5.0)
+    rows = _ranked(A=1.0, B=0.9, C=0.8, HELD=0.7, E=0.6, F=0.5)
+
+    # HELD ranks 4th -- outside entry range, inside hold range, and the margin is unreachable.
+    assert "HELD" in resolve_positions({"HELD"}, rows, config)
+
+    # Drop it past exit_rank_max and it is gone.
+    far = _ranked(A=1.0, B=0.9, C=0.8, D=0.7, E=0.6, F=0.5, HELD=0.1)
+    assert "HELD" not in resolve_positions({"HELD"}, far, config)
 
 
 def test_a_name_that_just_exited_waits_out_its_cooldown() -> None:
@@ -317,7 +339,7 @@ def test_a_zero_tilt_sizes_on_score_alone() -> None:
     The score is already a cross-sectional comparison; dividing by volatility on top of it
     underweighted the leaders, which cost return *and* drawdown on full-coverage replay.
     """
-    config = DualMomentumConfig(min_base_score=0.0, name_weight_max=1.0, risk_on_gross_max=1.0,
+    config = DualMomentumConfig(min_base_score=0.0, risk_on_gross_max=1.0,
                                 volatility_tilt=0.0)
     rows = [
         {"symbol": "CALM", "base_score": 1.0, "annual_volatility": 0.10},
@@ -332,7 +354,7 @@ def test_a_zero_tilt_sizes_on_score_alone() -> None:
 
 def test_a_positive_tilt_leans_into_the_volatile_name() -> None:
     """The shipped default: same score, bigger position in the wilder name."""
-    config = DualMomentumConfig(min_base_score=0.0, name_weight_max=1.0, risk_on_gross_max=1.0,
+    config = DualMomentumConfig(min_base_score=0.0, risk_on_gross_max=1.0,
                                 volatility_tilt=1.0)
     rows = [
         {"symbol": "CALM", "base_score": 1.0, "annual_volatility": 0.10},
@@ -345,7 +367,7 @@ def test_a_positive_tilt_leans_into_the_volatile_name() -> None:
 
 
 def test_a_negative_tilt_restores_risk_parity() -> None:
-    config = DualMomentumConfig(min_base_score=0.0, name_weight_max=1.0, risk_on_gross_max=1.0,
+    config = DualMomentumConfig(min_base_score=0.0, risk_on_gross_max=1.0,
                                 volatility_tilt=-1.0)
     rows = [
         {"symbol": "CALM", "base_score": 1.0, "annual_volatility": 0.10},
@@ -358,101 +380,36 @@ def test_a_negative_tilt_restores_risk_parity() -> None:
     assert sum(weights.values()) == pytest.approx(1.0, rel=1e-6)
 
 
-def test_the_name_cap_binds_before_the_gross_cap() -> None:
-    config = DualMomentumConfig(min_base_score=0.0, name_weight_max=0.35, risk_on_gross_max=1.0)
-    rows = [{"symbol": "ONE", "base_score": 5.0, "annual_volatility": 0.10},
-            {"symbol": "TWO", "base_score": 0.1, "annual_volatility": 0.10}]
+def test_sizing_is_proportional_and_uncapped() -> None:
+    """No per-name cap and no portfolio volatility overlay: the split is the ranking.
+
+    Both existed and both are gone. A cap on top of a two- or three-name split does not
+    diversify anything, it forces the book toward equal weight and discards the ranking the
+    whole algorithm exists to produce. The ex-ante volatility overlay scaled the book down
+    whenever it got interesting -- over seven sessions in January 2026 it cut exposure to
+    ~0.7 and parked a third of the book in bills, which is a drag on a strategy whose job is
+    to be in the market when the market is working.
+    """
+    config = DualMomentumConfig(min_base_score=0.0, risk_on_gross_max=1.0, volatility_tilt=0.0)
+    rows = [
+        {"symbol": "BIG", "base_score": 3.0, "annual_volatility": 0.5},
+        {"symbol": "SMALL", "base_score": 1.0, "annual_volatility": 0.1},
+    ]
 
     weights = score_to_weights(rows, config)
 
-    assert weights["ONE"] == pytest.approx(0.35)
-    assert sum(weights.values()) < 1.0, "a thin field holds less rather than concentrating"
+    assert weights["BIG"] == pytest.approx(0.75), "three times the score, three times the weight"
+    assert weights["SMALL"] == pytest.approx(0.25)
+    assert sum(weights.values()) == pytest.approx(1.0), "fully deployed, whatever the volatility"
 
 
-def test_volatility_scaling_only_engages_above_the_trigger() -> None:
-    config = DualMomentumConfig(target_portfolio_vol=0.12, high_vol_trigger=1.5, vol_scale_floor=0.25)
-    covariance = {"AAA": {"AAA": 0.02}}   # ~14% annualised, inside 1.5x target
+def test_a_single_qualifying_name_takes_the_whole_book() -> None:
+    """The direct consequence of removing the cap, stated so it cannot surprise anyone later."""
+    config = DualMomentumConfig(min_base_score=0.0, risk_on_gross_max=1.0, volatility_tilt=0.0)
 
-    quiet = volatility_scale({"AAA": 1.0}, covariance, config)
+    weights = score_to_weights([{"symbol": "ONLY", "base_score": 1.0, "annual_volatility": 0.6}], config)
 
-    assert quiet["engaged"] is False
-    assert quiet["scale"] == 1.0
-
-
-def test_volatility_scaling_pulls_a_hot_portfolio_back_toward_target() -> None:
-    config = DualMomentumConfig(target_portfolio_vol=0.12, high_vol_trigger=1.5, vol_scale_floor=0.25)
-    covariance = {"AAA": {"AAA": 0.09}}   # 30% annualised: above the trigger, above the floor
-
-    hot = volatility_scale({"AAA": 1.0}, covariance, config)
-
-    assert hot["engaged"] is True
-    assert hot["scale"] == pytest.approx(0.12 / 0.30, rel=1e-3)
-    assert hot["below_floor"] is False
-
-
-def test_the_shipped_target_does_not_tax_a_normal_book_of_these_etfs() -> None:
-    """The default is a crash brake, not a governor.
-
-    The spec's 12% target against a 23-58% volatility universe would have held the book at
-    28-55% invested permanently. A realistic three-name book has to come through unscaled,
-    or the strategy spends its life in cash while momentum is working.
-    """
-    config = DualMomentumConfig()   # shipped defaults
-    # QQQM + AIQ + GTEK at equal weight, correlation 0.8: about 32% ex-ante volatility.
-    vols = {"QQQM": 0.235, "AIQ": 0.334, "GTEK": 0.468}
-    covariance = {
-        left: {right: vols[left] * vols[right] * (1.0 if left == right else 0.8) for right in vols}
-        for left in vols
-    }
-    weights = {symbol: 1 / 3 for symbol in vols}
-
-    outcome = volatility_scale(weights, covariance, config)
-
-    assert 0.30 < outcome["portfolio_volatility"] < 0.35
-    assert outcome["engaged"] is False
-    assert outcome["scale"] == 1.0
-
-
-def test_the_target_still_engages_when_volatility_actually_explodes() -> None:
-    config = DualMomentumConfig()
-    covariance = {"AAA": {"AAA": 0.36}}   # 60% annualised
-
-    outcome = volatility_scale({"AAA": 1.0}, covariance, config)
-
-    assert outcome["engaged"] is True
-    assert outcome["scale"] == pytest.approx(0.30 / 0.60, rel=1e-3)
-
-
-def test_a_portfolio_too_volatile_even_at_the_floor_goes_defensive() -> None:
-    config = DualMomentumConfig(target_portfolio_vol=0.12, high_vol_trigger=1.5, vol_scale_floor=0.25)
-    covariance = {"AAA": {"AAA": 4.0}}    # 200% annualised
-
-    extreme = volatility_scale({"AAA": 1.0}, covariance, config)
-
-    assert extreme["below_floor"] is True
-
-
-def test_portfolio_volatility_uses_covariance_not_just_variances() -> None:
-    """Two correlated names are riskier together than the diagonal alone would say."""
-    config = DualMomentumConfig(target_portfolio_vol=0.10, high_vol_trigger=1.0)
-    weights = {"AAA": 0.5, "BBB": 0.5}
-    independent = {"AAA": {"AAA": 0.04, "BBB": 0.0}, "BBB": {"AAA": 0.0, "BBB": 0.04}}
-    correlated = {"AAA": {"AAA": 0.04, "BBB": 0.04}, "BBB": {"AAA": 0.04, "BBB": 0.04}}
-
-    assert (
-        volatility_scale(weights, correlated, config)["portfolio_volatility"]
-        > volatility_scale(weights, independent, config)["portfolio_volatility"]
-    )
-
-
-def test_covariance_is_annualised_from_daily_returns() -> None:
-    config = DualMomentumConfig(vol_estimation_days=30)
-    bars = {"AAA": daily_bars(100, 130), "BBB": daily_bars(100, 90)}
-
-    covariance = covariance_matrix(bars, ["AAA", "BBB"], config)
-
-    assert covariance["AAA"]["AAA"] >= 0
-    assert covariance["AAA"]["BBB"] == pytest.approx(covariance["BBB"]["AAA"])
+    assert weights["ONLY"] == pytest.approx(1.0)
 
 
 def test_trivial_trades_are_left_alone() -> None:
@@ -649,8 +606,7 @@ def test_every_signal_row_carries_the_audit_trail() -> None:
 
     for key in ("base_score", "rank", "eligible", "eligibility_reason",
                 "annual_volatility", "target_weight", "defensive_weight",
-                "data_ok", "data_detail", "universe_coverage", "vol_scale",
-                "portfolio_volatility", "reason"):
+                "data_ok", "data_detail", "universe_coverage", "reason"):
         assert key in row, key
 
 
@@ -702,28 +658,9 @@ def test_partial_adjustment_moves_a_fraction_of_the_way_but_exits_in_full() -> N
     assert partial_adjustment({"AAA": 0.40}, {"AAA": 0.20}, DualMomentumConfig())["AAA"] == 0.40
 
 
-def test_the_per_name_cap_is_re_spread_rather_than_dropped() -> None:
-    """Capping one name used to lose its overflow, leaving the book under-invested."""
-    config = DualMomentumConfig(risk_on_gross_max=0.96, name_weight_max=0.5,
-                                min_base_score=0.0, volatility_tilt=0.0)
-
-    # One name: the cap binds and 46% cannot be deployed inside the per-name limit.
-    one = score_to_weights([{"symbol": "AAA", "base_score": 1.0, "annual_volatility": 0.2}], config)
-    assert one["AAA"] == pytest.approx(0.5)
-
-    # Two names, wildly different scores: the stronger caps at 50% and its excess goes to the
-    # other rather than evaporating, so the pair deploys the full 96%.
-    two = score_to_weights([
-        {"symbol": "AAA", "base_score": 10.0, "annual_volatility": 0.2},
-        {"symbol": "BBB", "base_score": 1.0, "annual_volatility": 0.2},
-    ], config)
-    assert two["AAA"] == pytest.approx(0.5)
-    assert sum(two.values()) == pytest.approx(0.96), "the overflow is re-spread, not dropped"
-
-
 def test_undeployed_gross_is_parked_in_bills_not_left_as_cash() -> None:
     """A funded account holds bills, not idle cash, for whatever the risk sleeve cannot use."""
-    config = DualMomentumConfig(risk_on_gross_max=0.96, name_weight_max=0.5)
+    config = DualMomentumConfig(risk_on_gross_max=0.96)
 
     parked = park_residual({"AAA": 0.5}, {"BIL": 0.96}, config)
 
@@ -791,43 +728,6 @@ def test_a_holding_that_crashes_in_one_session_is_sold_at_once() -> None:
     # Still inside the limit: everything else about the name is fine, so it is kept.
     dipped = {**healthy, "nano_return": -0.08}
     assert hold_eligibility(dipped, config)[0] is True
-
-
-def test_a_sibling_must_beat_the_sitting_name_before_it_takes_its_slot() -> None:
-    """``intra_theme_delta_to_replace`` was documented everywhere and read by nothing.
-
-    Which ETFs fill a theme's slots was decided on today's scores alone, so two near-tied
-    siblings swapped places on any session that reordered them by a hair -- 13.9% of all
-    turnover over 2023. Holding a slot must not also earn a bigger position, so the margin
-    applies to selection only and the split stays proportional to raw score.
-    """
-    config = DualMomentumConfig(max_positions_per_theme=1, min_base_score=0.0,
-                                volatility_tilt=0.0, risk_on_gross_max=1.0,
-                                name_weight_max=1.0, intra_theme_delta_to_replace=0.5,
-                                themes={"AAA": "growth", "BBB": "growth"})
-    rows = {
-        "AAA": {"symbol": "AAA", "eligible": 1, "base_score": 1.0, "annual_volatility": 0.2},
-        "BBB": {"symbol": "BBB", "eligible": 1, "base_score": 1.3, "annual_volatility": 0.2},
-    }
-
-    # Nothing held: the higher score simply wins.
-    fresh = theme_allocation({"growth"}, rows, config, {})
-    assert fresh.get("BBB", 0.0) > 0 and fresh.get("AAA", 0.0) == 0
-
-    # AAA sitting: BBB leads by 0.3, short of the 0.5 margin, so AAA keeps the slot.
-    defended = theme_allocation({"growth"}, rows, config, {"AAA": 0.4})
-    assert defended.get("AAA", 0.0) > 0, "a 0.3 lead must not displace the incumbent"
-    assert defended.get("BBB", 0.0) == 0
-
-    # Widen the lead past the margin and the swap goes through.
-    rows["BBB"]["base_score"] = 1.8
-    displaced = theme_allocation({"growth"}, rows, config, {"AAA": 0.4})
-    assert displaced.get("BBB", 0.0) > 0 and displaced.get("AAA", 0.0) == 0
-
-    # At zero the knob is off, which is the behaviour every earlier measurement was taken under.
-    off = DualMomentumConfig(**{**config.__dict__, "intra_theme_delta_to_replace": 0.0})
-    rows["BBB"]["base_score"] = 1.3
-    assert theme_allocation({"growth"}, rows, off, {"AAA": 0.4}).get("BBB", 0.0) > 0
 
 
 def test_the_no_trade_band_cannot_push_the_book_over_its_gross_budget() -> None:
@@ -929,15 +829,3 @@ def test_the_crash_stop_answers_to_no_clock() -> None:
     assert crash_stop({"nano_return": -0.05}, config)[0] is True
     # 0 turns it off entirely.
     assert crash_stop({"nano_return": -0.99}, DualMomentumConfig(max_daily_drop=0.0))[0] is True
-
-
-def test_theme_rank_is_not_the_etf_rank_of_its_best_member() -> None:
-    """Entry was gated on the ETF rank of a theme's best name, which is a different question.
-
-    Metals holding SLV and GLD at ETF ranks 1 and 2 pushes every other theme's best name down
-    the ladder, so with entry_rank_max=3 only the ETF ranked 3rd could bring its theme in --
-    whatever that theme's own standing was.
-    """
-    ranks = theme_ranks({"metals": 2.9, "energy": 1.3, "us_growth": 0.8, "intl": 0.2})
-
-    assert ranks == {"metals": 1, "energy": 2, "us_growth": 3, "intl": 4}

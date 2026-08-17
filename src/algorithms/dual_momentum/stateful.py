@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from .config import EPSILON, DualMomentumConfig
-from .layers import theme_of
 
 
 
@@ -28,9 +27,8 @@ def _run_facts(signals: dict[str, dict[str, Any]]) -> dict[str, Any]:
         return {
             "data_ok": bool(row.get("data_ok")),
             "data_detail": str(row.get("data_detail", "")),
-            "vol_scale": float(row.get("vol_scale", 1.0) or 1.0),
         }
-    return {"data_ok": False, "data_detail": "no signals", "vol_scale": 1.0}
+    return {"data_ok": False, "data_detail": "no signals"}
 
 
 def _defensive_book(rows: dict[str, dict[str, Any]]) -> dict[str, float]:
@@ -229,48 +227,67 @@ def track_eligibility(
     return updated
 
 
-def resolve_themes(
+def resolve_positions(
     held: set[str],
-    entrants: set[str],
-    theme_score: dict[str, float],
+    ranked: list[dict[str, Any]],
     config: DualMomentumConfig,
 ) -> set[str]:
-    """Which themes the book holds: keep what is held, fill free slots, then displace.
+    """Which ETFs the book holds: keep what still ranks, fill free slots, then displace.
 
-    Selection operates on themes rather than names because a theme is the unit the strategy
-    actually has a view about. Swapping QQQM for XSD inside ``us_growth`` is handled by
-    ``theme_allocation`` at full speed; getting in or out of ``us_growth`` at all is this
-    function's decision, and it is deliberately reluctant.
+    Two kinds of hesitance, doing different jobs.
+
+    *Rank* is the cheap one. A name enters only from inside ``entry_rank_max`` but is kept
+    while it stays inside ``exit_rank_max``, so an incumbent that slips a place or two is not
+    sold for it. Ejecting on the entry rank instead meant a holding that drifted to 7th of 14
+    on scores separated by 0.15 was sold and the freed slot refilled from the top with no
+    margin required at all.
+
+    *Score* is the one that costs something to cross. Displacing an incumbent -- as opposed to
+    filling an empty slot -- needs ``min_score_delta_to_replace`` of daylight, so a challenger
+    that is ahead by a rounding error waits.
+
+    Replaces the theme-level version of this. Themes were an attempt to stop the cross-section
+    treating near-substitutes as independent choices, but a universe of sector and thematic
+    ETFs is already one instrument per exposure, and the clustering mostly restated the
+    universe with more machinery.
     """
     slots = max(config.max_positions, 0)
     delta = max(config.min_score_delta_to_replace, 0.0)
+    score = {str(row["symbol"]): float(row.get("base_score", 0.0)) for row in ranked}
+    rank = {str(row["symbol"]): int(row.get("rank") or 0) for row in ranked}
 
-    def score(theme: str) -> float:
-        return float(theme_score.get(theme, 0.0))
+    # Incumbents that still rank well enough to hold, best first.
+    selection = {
+        symbol for symbol in held
+        if rank.get(symbol) and rank[symbol] <= max(config.exit_rank_max, 0)
+    }
+    contenders = [
+        str(row["symbol"]) for row in ranked
+        if str(row["symbol"]) not in selection
+        and int(row.get("rank") or 0)
+        and int(row["rank"]) <= max(config.entry_rank_max, 0)
+    ]
 
-    selection = set(held)
-    contenders = sorted(entrants - selection, key=score, reverse=True)
-
-    for theme in contenders:
+    for symbol in contenders:
         if len(selection) >= slots:
             break
-        selection.add(theme)
+        selection.add(symbol)
 
-    for theme in contenders:
-        if theme in selection or not selection:
+    for symbol in contenders:
+        if symbol in selection or not selection:
             continue
-        weakest = min(selection, key=score)
-        if score(theme) <= score(weakest) + delta:
+        weakest = min(selection, key=lambda name: score.get(name, 0.0))
+        if score.get(symbol, 0.0) <= score.get(weakest, 0.0) + delta:
             continue
         logger.info(
-            "Dual Momentum rotating theme %s (%.2f) out for %s (%.2f)",
-            weakest, score(weakest), theme, score(theme),
+            "Dual Momentum replacing %s (%.2f) with %s (%.2f)",
+            weakest, score.get(weakest, 0.0), symbol, score.get(symbol, 0.0),
         )
         selection.discard(weakest)
-        selection.add(theme)
+        selection.add(symbol)
 
     if len(selection) > slots:
-        selection = set(sorted(selection, key=score, reverse=True)[:slots])
+        selection = set(sorted(selection, key=lambda name: -score.get(name, 0.0))[:slots])
     return selection
 
 

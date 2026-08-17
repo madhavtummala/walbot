@@ -7,7 +7,7 @@ what lets the backtester drive the same call the live runner does.
 from __future__ import annotations
 
 from .config import DualMomentumConfig
-from .layers import covariance_matrix, defensive_weights, eligibility, limit_per_theme, park_residual, score_to_weights, sentiment_adjusted, universe_data_ok, volatility_scale
+from .layers import defensive_weights, eligibility, park_residual, score_to_weights, sentiment_adjusted, universe_data_ok
 from .scoring import base_scores, compute_features
 
 
@@ -67,14 +67,12 @@ def build_signals(
     scored: dict[str, dict[str, Any]],
     weights: dict[str, float],
     data: dict[str, Any],
-    vol: dict[str, Any],
-    covariance: dict[str, dict[str, float]],
     defensive_book: dict[str, float],
     config: DualMomentumConfig,
 ) -> dict[str, dict[str, Any]]:
     """Per-symbol rows: the dashboard's view, step 2's input, and the audit record.
 
-    Run-level facts (data sufficiency, volatility scale) are denormalised onto every row because
+    Run-level facts (data sufficiency) are denormalised onto every row because
     ``refine`` receives only these signals -- decision metadata does not travel with them. The
     timestamp is not among them any more: ``refine`` takes it as an argument.
     """
@@ -101,9 +99,6 @@ def build_signals(
             "macro_z": float(z.get("macro", 0.0)),
             "annual_volatility": float(row.get("annual_volatility", 0.0)),
             "realized_volatility": float(row.get("annual_volatility", 0.0)),
-            "covariance_row": {
-                str(other): float(value) for other, value in (covariance.get(symbol) or {}).items()
-            },
             "target_weight": weight,
             # What this symbol would be worth in the defensive book, so step 2 can build one
             # without re-reading market data.
@@ -118,9 +113,6 @@ def build_signals(
             "data_ok": 1 if data.get("data_ok") else 0,
             "data_detail": str(data.get("detail", "")),
             "universe_coverage": float(data.get("coverage", 0.0)),
-            "vol_scale": float(vol.get("scale", 1.0)),
-            "portfolio_volatility": float(vol.get("portfolio_volatility", 0.0)),
-            "vol_below_floor": 1 if vol.get("below_floor") else 0,
         }
     return signals
 
@@ -169,11 +161,8 @@ def analyze_universe(context: AlgorithmContext, config: DualMomentumConfig) -> d
         if int(row.get("rank") or 0) <= config.entry_rank_max
         and float(row.get("base_score", 0.0)) >= config.min_base_score
     ]
-    # The theme cap is applied before the position cap, so a book of four is four *different*
-    # exposures rather than the top four names of one correlated block.
-    entries = limit_per_theme(qualified, config)[: max(config.max_positions, 0)]
+    entries = qualified[: max(config.max_positions, 0)]
 
-    covariance = covariance_matrix(context.bars_by_symbol, config.symbols, config)
     # Always computed, whatever this step proposes: step 2 can decide to go defensive for
     # reasons only it can see -- a holding that broke its exit band, a theme that stopped
     # qualifying -- and it cannot derive a defensive book from a risk-on proposal.
@@ -182,19 +171,10 @@ def analyze_universe(context: AlgorithmContext, config: DualMomentumConfig) -> d
     if data.get("data_ok") and entries:
         weights = score_to_weights(entries, config)
         weights = sentiment_adjusted(weights, context.sentiment_scores, config)
-        vol = volatility_scale(weights, covariance, config)
-        if vol["below_floor"]:
-            weights = dict(defensive_book)
-            vol = {**vol, "scale": 1.0}
-        else:
-            weights = {symbol: weight * vol["scale"] for symbol, weight in weights.items()}
-            # Anything the per-name cap or the volatility overlay left undeployed goes to
-            # bills rather than sitting as cash. Applied after the scale so de-risking moves
-            # money into the sleeve rather than out of the market entirely.
-            weights = park_residual(weights, defensive_book, config)
+        # Anything left undeployed goes to bills rather than sitting as cash.
+        weights = park_residual(weights, defensive_book, config)
     else:
         weights = dict(defensive_book)
-        vol = volatility_scale(weights, covariance, config)
 
     full_weights = {symbol: float(weights.get(symbol, 0.0)) for symbol in config.symbols}
     return {
@@ -203,8 +183,6 @@ def analyze_universe(context: AlgorithmContext, config: DualMomentumConfig) -> d
         "data": data,
         "ranked": ranked,
         "entries": entries,
-        "covariance": covariance,
-        "volatility": vol,
         "defensive_book": defensive_book,
         "weights": full_weights,
     }

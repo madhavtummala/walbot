@@ -430,8 +430,6 @@ def dual_axes() -> list[tuple[str, dict[str, Any]]]:
     variants.append(_axis(base, "risk_adjusted_score=True", risk_adjusted_score=True))
     for floor in (0.25, 0.5):
         variants.append(_axis(base, f"min_base_score={floor}", min_base_score=floor))
-    for cap in (0.25, 0.35):
-        variants.append(_axis(base, f"name_weight_max={cap}", name_weight_max=cap))
     for delta in (0.1, 0.6):
         variants.append(_axis(base, f"delta_to_replace={delta}", min_score_delta_to_replace=delta))
     # The deployed config turns over ~46% of the book every session, which no return survives
@@ -617,14 +615,12 @@ def dual_wide_churn() -> list[tuple[str, dict[str, Any]]]:
     variants = [("wide/baseline", dict(base))]
 
     for days in (1, 3, 7):
-        variants.append(_axis(base, f"wide/rotation={days}d", theme_rotation_interval_days=days))
-    for cap in (0.20, 0.25, 0.35):
-        variants.append(_axis(base, f"wide/name_weight_max={cap}", name_weight_max=cap))
+        variants.append(_axis(base, f"wide/rerank={days}d", rerank_interval_days=days))
     for floor in (0.25, 0.5, 0.75):
         variants.append(_axis(base, f"wide/min_base_score={floor}", min_base_score=floor))
     # The plausible combination: re-rank weekly, trade only on real drift, hold more names so
     # each one matters less.
-    variants.append(_axis(base, "wide/low_churn_combo", theme_rotation_interval_days=7,
+    variants.append(_axis(base, "wide/low_churn_combo", rerank_interval_days=7,
                           rebalance_weight_threshold=0.10, max_positions=8,
                           entry_rank_max=8, exit_rank_max=10))
     return variants
@@ -691,17 +687,13 @@ def dual_2023() -> list[tuple[str, dict[str, Any]]]:
     variants.append(_axis(base, "risk_adjusted_score=True", risk_adjusted_score=True))
 
     # --- how hard it presses the winners ---------------------------------------------------
-    # Deployed is -1.0, full risk parity, which in 2023 sizes *down* exactly the high-volatility
-    # growth names that produced the year's return. This is the axis with the clearest prior.
+    # Full risk parity sizes *down* exactly the high-volatility names the cross-section
+    # selects for. This is the axis with the clearest prior.
     for tilt in (-0.5, 0.0, 0.5, 1.0):
         variants.append(_axis(base, f"volatility_tilt={tilt}", volatility_tilt=tilt))
     for positions in (2, 3, 5, 6):
         variants.append(_axis(base, f"max_positions={positions}", max_positions=positions,
                               entry_rank_max=positions, exit_rank_max=positions + 8))
-    for cap in (0.35, 0.65, 1.0):
-        variants.append(_axis(base, f"name_weight_max={cap}", name_weight_max=cap))
-    for cap in (1, 3):
-        variants.append(_axis(base, f"per_theme={cap}", max_positions_per_theme=cap))
 
     # --- what it pays ----------------------------------------------------------------------
     # 119x turnover is ~48% of the book every session; at 5bps that is 6pp of the 19.5%.
@@ -712,75 +704,51 @@ def dual_2023() -> list[tuple[str, dict[str, Any]]]:
                               rebalance_weight_threshold=threshold))
     for delta in (0.0, 0.75, 1.25):
         variants.append(_axis(base, f"delta_to_replace={delta}", min_score_delta_to_replace=delta))
-    for delta in (0.0, 1.0, 2.0):
-        variants.append(_axis(base, f"intra_theme_delta={delta}", intra_theme_delta_to_replace=delta))
 
     return [variant for variant in variants if variant[0] == "baseline" or variant[1] != base]
 
 
 def dual_confirm() -> list[tuple[str, dict[str, Any]]]:
-    """The axes that won 2023, asked again over three disjoint calendar years.
+    """The deployed configuration over three disjoint calendar years.
 
-    Built by hand rather than by ``finalists`` because that stage combines *every* winning
-    axis at once, and here they demonstrably do not compose: the full combination scored
-    +13.1% over 2023 against a +19.5% baseline and a +23.8% best single axis. Each pair below
-    is a hypothesis about which two knobs are doing separate work.
-
-    Three calendar years is the first genuinely independent evidence this repo can offer.
     ``_period_start`` anchors relative windows to today, so 6M/12M/24M are strictly nested and
-    "survives all three" means confirmed once; 2023, 2024 and 2025 share no days at all. They
-    are still only three windows, and 2024 is the one that matters most -- the deployed
-    configuration earns +1.1% gross and loses money after costs in it.
+    "survives all three" means confirmed once; 2023, 2024 and 2025 share no days at all.
     """
     base = _dual_baseline()
     return [
-        ("baseline", dict(base)),
-        _axis(base, "name_weight_max=0.35", name_weight_max=0.35),
-        _axis(base, "volatility_tilt=0.5", volatility_tilt=0.5),
-        _axis(base, "cap+tilt", name_weight_max=0.35, volatility_tilt=0.5),
-        _axis(base, "max_positions=2", max_positions=2, entry_rank_max=2, exit_rank_max=10),
-        _axis(base, "cap+positions", name_weight_max=0.35, max_positions=2,
-              entry_rank_max=2, exit_rank_max=10),
-        _axis(base, "cap+tilt+positions", name_weight_max=0.35, volatility_tilt=0.5,
-              max_positions=2, entry_rank_max=2, exit_rank_max=10),
-        _axis(base, "delta_to_replace=1.25", min_score_delta_to_replace=1.25),
+        ("deployed", dict(base)),
+        _axis(base, "volatility_tilt=0.0", volatility_tilt=0.0),
+        _axis(base, "rerank=0d", rerank_interval_days=0),
+        _axis(base, "positions=3", max_positions=3, entry_rank_max=3, exit_rank_max=6),
     ]
 
 
 def dual_sticky() -> list[tuple[str, dict[str, Any]]]:
-    """What each cadence and each cap is worth, one axis at a time.
+    """What the re-rank cadence and the selection hesitance are worth, one axis at a time.
 
     ``orders`` and ``turnover_x_stake`` matter as much as return here: the point is the
     cheapest book that keeps the return, not the best return at any turnover.
 
-    The cadence axes are counted in trading days. Read them with suspicion -- a single fixed
-    interval is one arbitrary sample of *which* sessions the decision lands on, and the first
-    sweep of these came out badly non-monotone (3 days far worse than either 1 or 7, and a
-    14-day variant with a -17% 2024). Prefer an axis with a shape over a single winner.
+    Read the cadence axis with suspicion. A single fixed interval is one arbitrary sample of
+    *which* sessions the decision lands on, and the first sweep of these came out badly
+    non-monotone -- 3 days far worse than either 1 or 7, and a 14-day variant with a -17% 2024.
+    Prefer an axis with a shape over a single winner.
     """
     base = _dual_baseline()
     variants = [("deployed", dict(base))]
-    # Where the book was two rounds ago: four themes, every decision every session, capped.
-    variants.append(_axis(base, "before/4themes-daily", max_positions=4, entry_rank_max=4,
-                          name_weight_max=0.5, theme_rotation_interval_days=0,
-                          entry_interval_days=0, intra_theme_interval_days=0, exit_interval_days=0))
-    variants.append(_axis(base, "prev/7-5-5-cap0.65", theme_rotation_interval_days=7,
-                          entry_interval_days=5, intra_theme_interval_days=5,
-                          exit_interval_days=0, name_weight_max=0.65))
-    for days in (0, 3, 5, 10):
-        variants.append(_axis(base, f"rotation={days}d", theme_rotation_interval_days=days,
-                              entry_interval_days=days))
-    for days in (0, 3, 5, 10):
-        variants.append(_axis(base, f"intra={days}d", intra_theme_interval_days=days))
-    for days in (0, 3, 10):
-        variants.append(_axis(base, f"exit={days}d", exit_interval_days=days))
-    for cap in (0.5, 0.65, 0.8):
-        variants.append(_axis(base, f"theme_cap={cap}", name_weight_max=cap))
-    for positions in (1, 3):
-        variants.append(_axis(base, f"themes={positions}", max_positions=positions,
-                              entry_rank_max=positions + 1))
-    for rank in (2, 4):
+    for days in (0, 1, 3, 5, 10):
+        variants.append(_axis(base, f"rerank={days}d", rerank_interval_days=days))
+    for positions in (1, 3, 4):
+        variants.append(_axis(base, f"positions={positions}", max_positions=positions,
+                              entry_rank_max=positions, exit_rank_max=positions + 3))
+    for rank in (3, 4):
         variants.append(_axis(base, f"entry_rank={rank}", entry_rank_max=rank))
+    for rank in (3, 8, 12):
+        variants.append(_axis(base, f"exit_rank={rank}", exit_rank_max=rank))
+    for delta in (0.0, 0.15, 0.75, 1.5):
+        variants.append(_axis(base, f"delta_to_replace={delta}", min_score_delta_to_replace=delta))
+    for tilt in (-1.0, 0.0, 1.0):
+        variants.append(_axis(base, f"volatility_tilt={tilt}", volatility_tilt=tilt))
     return [variant for variant in variants if variant[0] == "deployed" or variant[1] != base]
 
 
