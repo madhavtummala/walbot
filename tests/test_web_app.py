@@ -369,6 +369,33 @@ def test_a_budget_can_be_typed_as_well_as_scrolled() -> None:
     assert "#amountEntry {" in app_css
 
 
+def test_typing_a_budget_shows_it_in_the_bubble_not_in_a_box_over_it() -> None:
+    """Same shape as naming a new bubble: the input is invisible but for its caret, and the
+    bubble draws what is being typed. A visible box would show the same number twice, and
+    would cover the bubble it belongs to.
+    """
+    app_js, app_css, _ = _assets()
+
+    entry_css = app_css[app_css.index("#amountEntry {"):app_css.index("#amountEntry.show {")]
+    assert "color: transparent;" in entry_css
+    assert "background: transparent;" in entry_css
+    assert "border: 0;" in entry_css
+    assert "caret-color: transparent;" in entry_css
+    # Only the caret becomes visible, and it sits on the amount label rather than the centre.
+    assert "caret-color: var(--ink);" in app_css[app_css.index("#amountEntry.show {"):]
+    assert "const AMOUNT_LABEL_DY = 14;" in app_js
+    assert "(node.y + AMOUNT_LABEL_DY) * scaleY" in app_js
+    # Each keystroke goes through the same write-through path scrolling uses, so the label,
+    # the radius and the bucket total all follow the typing.
+    assert "function previewAmountEntry" in app_js
+    assert '$("#amountEntry")?.addEventListener("input", previewAmountEntry);' in app_js
+    preview = app_js[app_js.index("function previewAmountEntry"):app_js.index("function hideAmountEntry")]
+    assert "setNodeAmount(node, Number(digits || 0));" in preview
+    # Because the preview is already in the plan, Escape has to be an edit of its own.
+    assert "function cancelAmountEntry" in app_js
+    assert "setNodeAmount(node, edit.originalAmount);" in app_js
+
+
 def test_the_bubble_board_reports_whether_an_edit_was_saved() -> None:
     """The board has no save button -- it writes on every gesture -- so silence is ambiguous.
 

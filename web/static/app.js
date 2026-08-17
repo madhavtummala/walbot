@@ -3,6 +3,9 @@ const BUCKET_NAMES = ["buy", "sell"];
 const MAX_AMOUNT = 2000;
 const DCA_ALGORITHM_KEYS = ["dca", "bursty_dca"];
 const WHEEL_STEP = 25;
+//: Vertical offset of a bubble's amount label from its centre. Shared so the typing caret
+//: lands on the number it is editing rather than near it.
+const AMOUNT_LABEL_DY = 14;
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 let BACKTEST_PERIOD = "4m";
 let BACKTEST_LABEL = "4M";
@@ -527,7 +530,7 @@ function renderAsset(svg, node, extraClass) {
   });
   group.appendChild(svgEl("circle", { r: node.radius, fill: bucketColor(node.bucketName) }));
   group.appendChild(textEl({ class: "symbol-label", y: -5 }, node.symbol));
-  group.appendChild(textEl({ class: "amount-label", y: 14 }, `$${Math.round(node.amount)}`));
+  group.appendChild(textEl({ class: "amount-label", y: AMOUNT_LABEL_DY }, `$${Math.round(node.amount)}`));
   group.addEventListener("pointerdown", (event) => startAssetPointer(event, node));
   group.addEventListener("wheel", (event) => resizeNode(event, node), { passive: false });
   group.addEventListener("dblclick", (event) => {
@@ -864,25 +867,47 @@ function hideSymbolEntry(cancelDraft = true) {
 // bubble and typing sets it outright.
 // =========================================================================================
 
-//: Places the input over ``node`` and opens it. ``seed`` is the first character when the edit
-//: was started by typing a digit, so that keystroke is not swallowed by the focus change; an
-//: edit started with Enter seeds the current amount instead and selects it, so typing
-//: replaces and the arrow keys extend.
+//: Places the caret over ``node``'s amount label and opens the edit. The input itself is
+//: invisible: the number being typed is drawn by the bubble, the same way a new bubble draws
+//: the symbol being typed into #symbolEntry.
+//:
+//: ``seed`` is the first character when the edit was started by typing a digit, because
+//: focusing an input during the keydown that caused it does not deliver that keystroke. An
+//: edit started with Enter seeds the current amount and selects it, so typing replaces.
 function showAmountEntry(node, seed = "") {
   const board = $("#bubbleBoard");
   if (!board || !node || !state.layout) return;
   const entry = $("#amountEntry");
   const rect = board.getBoundingClientRect();
-  state.amountEdit = { symbol: node.symbol };
+  const scaleX = rect.width / state.layout.width;
+  const scaleY = rect.height / state.layout.height;
+  state.amountEdit = { symbol: node.symbol, originalAmount: node.amount };
   entry.value = seed || String(Math.round(node.amount));
-  entry.style.left = `${window.scrollX + rect.left + (node.x / state.layout.width) * rect.width}px`;
-  entry.style.top = `${window.scrollY + rect.top + (node.y / state.layout.height) * rect.height}px`;
+  entry.style.left = `${window.scrollX + rect.left + node.x * scaleX}px`;
+  // AMOUNT_LABEL_DY down from the bubble's centre, so the caret sits on the number it edits.
+  entry.style.top = `${window.scrollY + rect.top + (node.y + AMOUNT_LABEL_DY) * scaleY}px`;
   entry.className = "show";
   window.setTimeout(() => {
     entry.focus();
     if (seed) entry.setSelectionRange(entry.value.length, entry.value.length);
     else entry.select();
   }, 0);
+  previewAmountEntry();
+}
+
+//: Write each keystroke straight through to the plan, exactly as scrolling does. The bubble
+//: label, its radius and the bucket total then all follow the typing, and there is no second
+//: copy of the number anywhere to disagree with it. The save is debounced, so this costs one
+//: request once the typing stops rather than one per character.
+function previewAmountEntry() {
+  if (!state.amountEdit) return;
+  const entry = $("#amountEntry");
+  const digits = entry.value.replace(/[^0-9]/g, "").slice(0, 7);
+  if (entry.value !== digits) entry.value = digits;
+  const node = state.nodes.find((candidate) => candidate.symbol === state.amountEdit.symbol);
+  if (!node) return;
+  setNodeAmount(node, Number(digits || 0));
+  updateBoardElements();
 }
 
 function hideAmountEntry() {
@@ -892,33 +917,35 @@ function hideAmountEntry() {
   state.amountEdit = null;
 }
 
+//: Escape puts the budget back where it was. The preview has already been written to the
+//: plan, so abandoning has to be an edit of its own rather than simply closing the field.
+function cancelAmountEntry() {
+  const edit = state.amountEdit;
+  hideAmountEntry();
+  if (!edit) return;
+  const node = state.nodes.find((candidate) => candidate.symbol === edit.symbol);
+  if (node) setNodeAmount(node, edit.originalAmount);
+  renderBoard();
+}
+
 function commitAmountEntry() {
   const entry = $("#amountEntry");
   // Guarded rather than assumed: blur, Enter and a click elsewhere can all arrive for one
-  // edit, and only the first of them should be the one that writes.
+  // edit, and only the first of them should be the one that closes it.
   if (!state.amountEdit || !entry?.classList.contains("show")) return;
-  const symbol = state.amountEdit.symbol;
-  const raw = entry.value.replace(/[$,\s]/g, "").trim();
+  const edit = state.amountEdit;
+  const digits = entry.value.replace(/[^0-9]/g, "");
   hideAmountEntry();
 
-  const node = state.nodes.find((candidate) => candidate.symbol === symbol);
+  const node = state.nodes.find((candidate) => candidate.symbol === edit.symbol);
   if (!node) return;
-  if (raw === "") {
-    renderBoard();
-    return;
+  if (digits === "") {
+    // Cleared and confirmed reads as "never mind", not as a budget of zero -- type 0 for that.
+    setNodeAmount(node, edit.originalAmount);
+  } else if (Number(digits) > MAX_AMOUNT) {
+    // Already clamped on screen; say why, so a smaller number than was typed is not a mystery.
+    showToast(`${edit.symbol} capped at ${money(MAX_AMOUNT)}/month`);
   }
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    showToast(`${symbol}: ${entry.value.trim()} is not a budget`);
-    renderBoard();
-    return;
-  }
-  if (parsed > MAX_AMOUNT) {
-    // Clamped either way, but say so: silently keeping a smaller number than was typed is
-    // the same class of bug as the board writing a plan nobody was reading.
-    showToast(`${symbol} capped at ${money(MAX_AMOUNT)}/month`);
-  }
-  setNodeAmount(node, parsed);
   renderBoard();
 }
 
@@ -2723,9 +2750,10 @@ function wireEvents() {
     }
     if (event.key === "Escape") {
       event.preventDefault();
-      hideAmountEntry();
+      cancelAmountEntry();
     }
   });
+  $("#amountEntry")?.addEventListener("input", previewAmountEntry);
   $("#amountEntry")?.addEventListener("blur", () => window.setTimeout(commitAmountEntry, 80));
 
   window.addEventListener("keydown", (event) => {
