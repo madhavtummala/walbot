@@ -40,7 +40,13 @@ def signal_view_from_decision(decision: AlgorithmDecision, latest_prices: Dict[s
             }
         )
         leaders.append(row)
-    leaders.sort(key=lambda item: (item["signal"] != "LONG", item["signal"] == "FLAT", -abs(float(item.get("score") or 0.0))))
+    # Strongest first, so the list reads in the same order the ranking was decided in.
+    #
+    # This used to group LONG/SHORT/FLAT first and then sort on ``-abs(score)``, which put the
+    # *worst* name in the universe alongside the best: a score of -3.0 sorted ahead of +1.0.
+    # For a cross-sectional ranker the sign is the whole point, and the held names come out on
+    # top anyway because they are the ones that ranked.
+    leaders.sort(key=lambda item: -float(item.get("score") or 0.0))
     return SignalView(leaders=leaders, summary=_summary_from(decision, leaders))
 
 
