@@ -7,7 +7,7 @@ what lets the backtester drive the same call the live runner does.
 from __future__ import annotations
 
 from .config import DualMomentumConfig
-from .layers import covariance_matrix, defensive_weights, eligibility, limit_per_theme, market_regime, park_residual, score_to_weights, sentiment_adjusted, timing, volatility_scale
+from .layers import covariance_matrix, defensive_weights, eligibility, limit_per_theme, park_residual, score_to_weights, sentiment_adjusted, universe_data_ok, volatility_scale
 from .scoring import base_scores, compute_features
 
 
@@ -40,19 +40,19 @@ def rank_candidates(
     return eligible
 
 
-def _selection_reason(row: dict[str, Any], weight: float, regime: dict[str, Any], config: DualMomentumConfig) -> str:
+def _selection_reason(row: dict[str, Any], weight: float, data: dict[str, Any], config: DualMomentumConfig) -> str:
     """One line saying why this symbol is or is not held, for the dashboard and the audit."""
     symbol = str(row.get("symbol", ""))
     if weight > 0:
         if symbol in {name.upper() for name in config.defensive_universe}:
             return "Defensive sleeve"
-        return f"Rank {int(row.get('rank') or 0)} - {row.get('timing_reason') or 'held'}"
+        return f"Rank {int(row.get('rank') or 0)} - held"
     if symbol == config.benchmark and symbol not in config.risk_on_universe:
         return "Benchmark only"
     if symbol in {name.upper() for name in config.defensive_universe}:
-        return "Defensive sleeve idle" if regime.get("risk_on") else "Not the strongest defensive"
-    if not regime.get("risk_on"):
-        return f"Risk-off: {regime.get('detail', '')}"
+        return "Defensive sleeve idle" if data.get("data_ok") else "Not the strongest defensive"
+    if not data.get("data_ok"):
+        return f"Data gap: {data.get('detail', '')}"
     if not row.get("eligible"):
         return str(row.get("eligibility_reason") or "Not eligible")
     if float(row.get("base_score", 0.0)) < config.min_base_score:
@@ -60,15 +60,13 @@ def _selection_reason(row: dict[str, Any], weight: float, regime: dict[str, Any]
     rank = int(row.get("rank") or 0)
     if rank and rank > config.entry_rank_max:
         return f"Rank {rank}, outside entry rank {config.entry_rank_max}"
-    if not row.get("timing"):
-        return str(row.get("timing_reason") or "Waiting for entry timing")
     return "No slot"
 
 
 def build_signals(
     scored: dict[str, dict[str, Any]],
     weights: dict[str, float],
-    regime: dict[str, Any],
+    data: dict[str, Any],
     vol: dict[str, Any],
     covariance: dict[str, dict[str, float]],
     defensive_book: dict[str, float],
@@ -76,7 +74,7 @@ def build_signals(
 ) -> dict[str, dict[str, Any]]:
     """Per-symbol rows: the dashboard's view, step 2's input, and the audit record.
 
-    Run-level facts (regime, volatility scale) are denormalised onto every row because
+    Run-level facts (data sufficiency, volatility scale) are denormalised onto every row because
     ``refine`` receives only these signals -- decision metadata does not travel with them. The
     timestamp is not among them any more: ``refine`` takes it as an argument.
     """
@@ -92,9 +90,6 @@ def build_signals(
             "rank": int(row.get("rank") or 0),
             "eligible": 1 if row.get("eligible") else 0,
             "eligibility_reason": str(row.get("eligibility_reason") or ""),
-            "timing": 1 if row.get("timing") else 0,
-            "timing_reason": str(row.get("timing_reason") or ""),
-            "momentum_change": float(row.get("momentum_change", 0.0)),
             "nano_return": float(row.get("nano_return", 0.0)),
             "micro_return": float(row.get("micro_return", 0.0)),
             "meso_return": float(row.get("meso_return", 0.0)),
@@ -118,11 +113,11 @@ def build_signals(
             # Consumed by the dashboard row subtitle; without it every row renders "Inactive".
             "trend_ok": 1 if row.get("above_moving_average") else 0,
             "ma_distance": float(row.get("ma_distance", 0.0)),
-            "reason": _selection_reason(row, weight, regime, config),
+            "reason": _selection_reason(row, weight, data, config),
             # -- run-level, repeated per row so refine can read them ---------------------
-            "regime_risk_on": 1 if regime.get("risk_on") else 0,
-            "regime_detail": str(regime.get("detail", "")),
-            "regime_breadth": float(regime.get("breadth", 0.0)),
+            "data_ok": 1 if data.get("data_ok") else 0,
+            "data_detail": str(data.get("detail", "")),
+            "universe_coverage": float(data.get("coverage", 0.0)),
             "vol_scale": float(vol.get("scale", 1.0)),
             "portfolio_volatility": float(vol.get("portfolio_volatility", 0.0)),
             "vol_below_floor": 1 if vol.get("below_floor") else 0,
@@ -130,19 +125,17 @@ def build_signals(
     return signals
 
 
-def allocation_mode(weights: dict[str, float], regime: dict[str, Any], config: DualMomentumConfig) -> str:
+def allocation_mode(weights: dict[str, float], config: DualMomentumConfig) -> str:
     """The one-word summary the dashboard prints for this run."""
     defensive = {name.upper() for name in config.defensive_universe}
     held = {symbol for symbol, weight in weights.items() if weight > 0}
     if not held:
         return "Cash"
-    if held <= defensive:
-        return "Defensive"
-    return "Risk-on" if regime.get("risk_on") else "Risk-on (unconfirmed)"
+    return "Defensive" if held <= defensive else "Risk-on"
 
 
 def analyze_universe(context: AlgorithmContext, config: DualMomentumConfig) -> dict[str, Any]:
-    """The whole read-only pipeline: features, regime, eligibility, ranking, timing, weights.
+    """The whole read-only pipeline: features, scores, eligibility, ranking, weights.
 
     Returned as a dict rather than assembled inline so tests and the dashboard can inspect
     each layer's output without going through ``AlgorithmDecision``.
@@ -161,16 +154,13 @@ def analyze_universe(context: AlgorithmContext, config: DualMomentumConfig) -> d
         ok, reason = eligibility(row, config)
         row["eligible"] = ok
         row["eligibility_reason"] = reason
-        timing_ok, timing_reason = timing(row, config)
-        row["timing"] = timing_ok
-        row["timing_reason"] = timing_reason
         if config.sentiment_weight:
             clip = max(config.sentiment_clip, 0.0)
             tilt = max(-clip, min(clip, row["sentiment_score"])) * config.sentiment_weight
             row["base_score"] = float(row["base_score"]) + tilt
             row["score_components"]["sentiment"] = tilt
 
-    regime = market_regime(scored, config)
+    data = universe_data_ok(scored, config)
     ranked = rank_candidates(scored, config)
 
     qualified = [
@@ -178,19 +168,18 @@ def analyze_universe(context: AlgorithmContext, config: DualMomentumConfig) -> d
         for row in ranked
         if int(row.get("rank") or 0) <= config.entry_rank_max
         and float(row.get("base_score", 0.0)) >= config.min_base_score
-        and row.get("timing")
     ]
     # The theme cap is applied before the position cap, so a book of four is four *different*
     # exposures rather than the top four names of one correlated block.
     entries = limit_per_theme(qualified, config)[: max(config.max_positions, 0)]
 
     covariance = covariance_matrix(context.bars_by_symbol, config.symbols, config)
-    # Always computed, whatever the regime says: step 2 can decide to go defensive for
-    # reasons only it can see (a pending regime confirmation, the drawdown breaker), and it
-    # cannot derive a defensive book from a risk-on proposal.
+    # Always computed, whatever this step proposes: step 2 can decide to go defensive for
+    # reasons only it can see -- a holding that broke its exit band, a theme that stopped
+    # qualifying -- and it cannot derive a defensive book from a risk-on proposal.
     defensive_book = defensive_weights(scored, config)
 
-    if regime.get("risk_on") and entries:
+    if data.get("data_ok") and entries:
         weights = score_to_weights(entries, config)
         weights = sentiment_adjusted(weights, context.sentiment_scores, config)
         vol = volatility_scale(weights, covariance, config)
@@ -211,7 +200,7 @@ def analyze_universe(context: AlgorithmContext, config: DualMomentumConfig) -> d
     return {
         "features": features,
         "scored": scored,
-        "regime": regime,
+        "data": data,
         "ranked": ranked,
         "entries": entries,
         "covariance": covariance,

@@ -37,8 +37,30 @@ class DualMomentumConfig:
     defensive_universe: list[str] = field(default_factory=lambda: ["BIL", "IEF", "AGG", "GLD"])
     benchmark: str = field(default="QQQM", metadata={"coerce": "symbol"})
 
-    # -- cadence --------------------------------------------------------------------------
-    signal_refresh_minutes: int = 60
+    # -- decision cadence -------------------------------------------------------------------
+    #: How often each *kind* of action may be taken, in days. The algorithm runs every
+    #: session; that is the rate at which it looks, not the rate at which it should act, and
+    #: collapsing the two is what made a medium-term signal trade like a fast one.
+    #:
+    #: The asymmetry is the whole point. Risk is continuous and opportunity is not: a holding
+    #: that breaks down leaves today, while a better one is bought when the relevant clock next
+    #: comes round. Measured over 2026 the theme set changed on 50% of sessions and theme
+    #: entries and exits were 44% of all turnover, against a score whose slowest horizon is
+    #: twelve sessions.
+    #:
+    #: 0 means "every run", which is the behaviour all four had before they existed.
+
+    #: Entering or leaving a *theme* -- a change of view, and the most expensive kind.
+    theme_rotation_interval_days: int = 0
+    #: Opening any new position, including a new name inside a theme already held.
+    entry_interval_days: int = 0
+    #: Re-splitting weight between the names inside a theme that is already held, and
+    #: re-sizing to the volatility target. Pure sizing: no change of view, same spread paid.
+    intra_theme_interval_days: int = 0
+    #: Closing a holding that failed eligibility or the crash stop. Keep at 0: an exit that
+    #: waits for a clock is a stop-loss that does not stop anything.
+    exit_interval_days: int = 0
+
     risk_refresh_minutes: int = 15
 
     # -- selection score ------------------------------------------------------------------
@@ -80,28 +102,20 @@ class DualMomentumConfig:
     #: smoothing was silently switched off wherever the cache had no intraday bars.
     score_ema_minutes: int = 1170
 
-    # -- market regime gate ---------------------------------------------------------------
-    #: Breadth alone: how much of the risk-on universe is itself in an uptrend.
+    # -- data sufficiency -----------------------------------------------------------------
+    #: How much of the risk-on universe must have usable history before the algorithm will
+    #: trade at all. Below this it holds the defensive sleeve and reports a data gap.
     #:
-    #: There used to be two more legs here, both about ``benchmark``: is QQQM above its
-    #: 100-day average, and is its 60-day return positive. They are gone. Dual momentum's
-    #: absolute-momentum leg is ``eligibility`` -- every name must clear *its own* 100-day
-    #: average and *its own* 60/20-day return floors -- and ``analyze_universe`` already
-    #: falls back to the defensive sleeve when nothing qualifies. A benchmark test on top of
-    #: that could only ever subtract: it vetoed names that had passed every test the strategy
-    #: asks of them, because one unrelated ETF was weak. In March 2026 that is exactly what
-    #: happened -- QQQM -5.0% vetoed USO +55.3%, which was the book's own top-ranked name.
+    #: All that is left of the breadth regime gate. That gate asked whether enough of the
+    #: universe was in an uptrend, which is the question ``eligibility`` already asks of each
+    #: name individually -- and it answered it worse, by vetoing names that had passed every
+    #: test the strategy makes of them because other, unrelated names were weak. In March 2026
+    #: that meant QQQM at -5.0% vetoing USO at +55.3%, the book's own top-ranked name. It ran
+    #: at ``breadth_min: 0.0`` long enough to confirm it only ever subtracted.
     #:
-    #: Breadth survives because it is a statement about the opportunity set rather than about
-    #: one ticker, and it is the knob for "how strong must the risk-on options be".
-    breadth_ma_days: int = 100
-    breadth_min: float = 0.50
-    #: How much of the risk-on universe must have usable history before breadth means
-    #: anything. Below this the gate reports a data gap and stays risk-off, which is what the
-    #: benchmark's ``enough_history`` check used to do for the whole universe.
+    #: This survives because it is not a market view: a thin cache reads as "nothing is above
+    #: its average", which is a bear market that never happened.
     min_universe_coverage: float = 0.50
-    regime_confirm_bars: int = 2
-    regime_exit_confirm_bars: int = 2
 
     # -- per-ETF absolute eligibility -----------------------------------------------------
     etf_ma_days: int = 100
@@ -172,26 +186,6 @@ class DualMomentumConfig:
     min_score_delta_to_replace: float = 0.35
     cooldown_after_exit: int = 4
 
-    # -- entry timing ---------------------------------------------------------------------
-    #: Whether an otherwise-qualified name must also pass :func:`timing` before it is opened.
-    #: See that function: both entry paths detect a spike rather than a trend, so the gate
-    #: blocks entries during exactly the sustained advances the strategy exists to ride.
-    #: Kept as a knob rather than deleted because "enter on acceleration" is a real idea; the
-    #: implementation of it here is what does not work.
-    require_entry_timing: bool = True
-    #: Three sessions, for the same reason as ``score_ema_minutes``.
-    momentum_change_ema_minutes: int = 1170
-    #: Trailing window the momentum-change denominator is measured over, in days. One horizon
-    #: is far too short to take a standard deviation of on daily bars -- ``nano`` is a single
-    #: return -- so both terms are normalised by one volatility over this window and scaled by
-    #: the square root of their own horizon instead.
-    momentum_change_vol_days: int = 20
-    momentum_change_enter: float = 0.0
-    pullback_macro_z_min: float = 0.0
-    pullback_meso_z_min: float = 0.50
-    pullback_nano_z_max: float = -0.75
-    pullback_micro_return_min: float = 0.0
-
     # -- sentiment (phased in last; both weights default to off) --------------------------
     sentiment_weight: float = 0.0
     sentiment_size_scale: float = 0.0
@@ -253,7 +247,7 @@ class DualMomentumConfig:
     def symbols(self) -> list[str]:
         """Everything the algorithm needs priced, benchmark included.
 
-        ``benchmark`` no longer gates anything -- see the regime section -- but it is still
+        ``benchmark`` gates nothing -- the regime layer that used it is gone -- but it is still
         carried here so the dashboard can chart it, and it is normally in the risk-on
         universe anyway.
         """
@@ -293,16 +287,12 @@ class DualMomentumConfig:
         # The selection horizons are served from these bars now, so they have to be counted
         # here: they used to be answered from a separate intraday window that no longer
         # exists. The smoothing tail rides on top, since the score is EMA'd across samples.
-        smoothing_days = math.ceil(
-            max(self.score_ema_minutes, self.momentum_change_ema_minutes) / TRADING_MINUTES_PER_DAY
-        )
+        smoothing_days = math.ceil(self.score_ema_minutes / TRADING_MINUTES_PER_DAY)
         return (
             max(
-                self.breadth_ma_days,
                 self.etf_ma_days,
                 self.etf_abs_return_days,
                 self.vol_estimation_days,
-                self.momentum_change_vol_days,
                 self.selection_horizon_days + smoothing_days,
             )
             + 5

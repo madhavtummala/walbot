@@ -6,7 +6,7 @@ from __future__ import annotations
 from .config import STATE_KEY, DualMomentumConfig
 from .layers import hold_eligibility, park_residual, theme_allocation, theme_of, volatility_scale
 from .proposal import allocation_mode, analyze_universe, build_signals
-from .stateful import track_eligibility, resolve_themes, _defensive_book, _in_cooldown, _record_exits, _run_facts, apply_turnover_filters, confirm_regime, partial_adjustment
+from .stateful import track_eligibility, resolve_themes, _defensive_book, _in_cooldown, _record_exits, _run_facts, apply_turnover_filters, partial_adjustment, action_due, record_action
 
 
 
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class DualMomentumAlgorithm(BaseAlgorithm):
-    """Dual momentum with a regime gate, split timing, and a volatility target."""
+    """Dual momentum: cross-sectional rank, per-name absolute momentum, theme-level rotation."""
 
     algorithm_id = "dual_momentum"
 
@@ -68,25 +68,25 @@ class DualMomentumAlgorithm(BaseAlgorithm):
         strategy_config = DualMomentumConfig.from_runtime_config(context.config)
         outcome = analyze_universe(context, strategy_config)
         weights = outcome["weights"]
-        regime = outcome["regime"]
+        data = outcome["data"]
         return AlgorithmDecision(
             target_weights=weights,
             signals=build_signals(
                 outcome["scored"],
                 weights,
-                regime,
+                data,
                 outcome["volatility"],
                 outcome["covariance"],
                 outcome["defensive_book"],
                 strategy_config,
             ),
             metadata={
-                "allocation_mode": allocation_mode(weights, regime, strategy_config),
+                "allocation_mode": allocation_mode(weights, strategy_config),
                 # Reported only when it is actually an input, so the dashboard does not show a
                 # sentiment reading for a run that never asked for one.
                 **({"market_sentiment": context.market_sentiment}
                    if strategy_config.uses_sentiment else {}),
-                "regime": regime,
+                "universe_data": data,
                 "portfolio_volatility": outcome["volatility"]["portfolio_volatility"],
                 "vol_scale": outcome["volatility"]["scale"],
                 "eligible_count": len(outcome["ranked"]),
@@ -102,7 +102,7 @@ class DualMomentumAlgorithm(BaseAlgorithm):
         config: Any,
         as_of: datetime,
     ) -> dict[str, float]:
-        """Position-aware layer: regime hysteresis, hold/exit asymmetry, cooldown, risk stops.
+        """Position-aware layer: hold/exit asymmetry, theme rotation, cooldown, risk stops.
 
         Everything here needs either what is currently held or memory of previous runs, which
         is exactly what ``analyze`` is forbidden to touch.
@@ -123,9 +123,6 @@ class DualMomentumAlgorithm(BaseAlgorithm):
         current = snapshot.weights(latest_prices)
         held = {symbol for symbol, weight in current.items() if weight > 0}
         defensive = {name.upper() for name in strategy_config.defensive_universe}
-
-        state.update(confirm_regime(state, facts["regime_risk_on"], strategy_config))
-        risk_on = bool(state["regime_risk_on"])
 
         rows = {symbol: dict(row, symbol=symbol) for symbol, row in signals.items()}
         book = _defensive_book(rows)
@@ -161,9 +158,9 @@ class DualMomentumAlgorithm(BaseAlgorithm):
             save_state(state_key, state)
             return result
 
-        if not risk_on:
-            # The raw gate may read risk-on while the confirmation is still pending; the
-            # risk-on proposal must not be acted on until it is confirmed.
+        if not facts["data_ok"]:
+            # Not a bearish reading -- an unusable one. See ``universe_data_ok``.
+            logger.warning("Dual Momentum holding the defensive sleeve: %s", facts["data_detail"])
             return settle(book)
 
         # Eligibility is tracked per *theme*, not per name: the book's slow decision is which
@@ -194,8 +191,12 @@ class DualMomentumAlgorithm(BaseAlgorithm):
 
         held_themes = {theme_of(symbol, strategy_config) for symbol in held - defensive}
 
-        keep: set[str] = set()
-        for theme in held_themes:
+        # Exits get their own clock too, defaulting to every run. An exit that waits is a
+        # stop-loss that does not stop anything, so this is the one interval meant to stay 0.
+        exiting = action_due(state, "exit", as_of, strategy_config.exit_interval_days)
+
+        keep: set[str] = set(held_themes) if not exiting else set()
+        for theme in held_themes if exiting else ():
             row = theme_rows.get(theme, {})
             # Two ways out, answering different questions. The count is the slow one: this
             # theme has stopped qualifying for long enough to mean something. The band, via
@@ -214,23 +215,64 @@ class DualMomentumAlgorithm(BaseAlgorithm):
                 logger.info("Dual Momentum exiting theme %s: %s", theme, why)
                 continue
             keep.add(theme)
+        if exiting and keep != held_themes:
+            record_action(state, "exit", stamp)
 
-        entrant_themes = {
-            theme
-            for theme, row in theme_rows.items()
-            if theme not in keep
-            and eligible_days(theme) >= strategy_config.entry_min_eligible_days
-            and int(row.get("rank") or 0)
-            and int(row["rank"]) <= strategy_config.entry_rank_max
-            and float(row.get("base_score", 0.0)) >= strategy_config.min_base_score
-            and int(row.get("timing", 1))
-            and not _in_cooldown(state, theme, as_of, strategy_config)
-        }
-        selection = resolve_themes(keep, entrant_themes, theme_score, strategy_config)
-        state["last_selection_at"] = stamp
+        # Exits are decided above and, at ``exit_interval_days: 0``, apply every run. Every
+        # other kind of action has its own clock, because they are not the same decision and do
+        # not deserve the same cadence:
+        #
+        #   rotation  -- entering or leaving a theme. A change of view, and the dearest.
+        #   entry     -- opening any new position, including a new name in a held theme.
+        #   intra     -- re-splitting weight between names already held. Pure sizing.
+        #
+        # Deliberately asymmetric. Risk is continuous and opportunity is not: a broken holding
+        # leaves today, a better one is bought when its clock next comes round.
+        rotating = action_due(state, "theme_rotation", as_of, strategy_config.theme_rotation_interval_days)
+        entering = action_due(state, "entry", as_of, strategy_config.entry_interval_days)
 
-        # Budget per theme, split inside it by today's scores -- no confirmation, every day.
+        if rotating and entering:
+            entrant_themes = {
+                theme
+                for theme, row in theme_rows.items()
+                if theme not in keep
+                and eligible_days(theme) >= strategy_config.entry_min_eligible_days
+                and int(row.get("rank") or 0)
+                and int(row["rank"]) <= strategy_config.entry_rank_max
+                and float(row.get("base_score", 0.0)) >= strategy_config.min_base_score
+                and not _in_cooldown(state, theme, as_of, strategy_config)
+            }
+            selection = resolve_themes(keep, entrant_themes, theme_score, strategy_config)
+            if selection != keep:
+                record_action(state, "theme_rotation", stamp)
+                record_action(state, "entry", stamp)
+        else:
+            # Between rotations the book may only shrink. A theme that left is not backfilled
+            # until the next one, so the freed budget parks in the defensive sleeve.
+            selection = set(keep)
+
         weights = theme_allocation(selection, rows, strategy_config, current)
+
+        # Sizing inside the themes already held is the cheapest decision to skip and the one
+        # taken most often: over 2026 it was 36% of turnover as resize plus 13% as intra-theme
+        # rotation, none of it a change of view. Holding those names exactly where they are
+        # leaves the whole difference untraded.
+        if not action_due(state, "intra_theme", as_of, strategy_config.intra_theme_interval_days):
+            frozen = {symbol: weight for symbol, weight in weights.items() if symbol not in held}
+            for symbol in weights:
+                if symbol in held:
+                    frozen[symbol] = float(current.get(symbol, 0.0))
+            weights = frozen
+        elif weights:
+            record_action(state, "intra_theme", stamp)
+
+        # A new name inside a theme already held is still an entry, and is held off with the
+        # rest of them rather than slipping through as "sizing".
+        if not entering:
+            weights = {
+                symbol: (weight if symbol in held or symbol in defensive else 0.0)
+                for symbol, weight in weights.items()
+            }
 
         covariance = {symbol: dict(rows[symbol].get("covariance_row") or {}) for symbol in weights}
         vol = volatility_scale(weights, covariance, strategy_config)

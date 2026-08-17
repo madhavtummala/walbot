@@ -1,9 +1,9 @@
-"""Step 2: the decisions that need memory -- regime confirmation, cooldowns, eligibility runs.
+"""Step 2: the decisions that need memory -- cooldowns, eligibility runs, theme rotation.
 """
 
 from __future__ import annotations
 
-from .config import DualMomentumConfig
+from .config import EPSILON, DualMomentumConfig
 from .layers import theme_of
 
 
@@ -26,11 +26,11 @@ def _run_facts(signals: dict[str, dict[str, Any]]) -> dict[str, Any]:
     """
     for row in signals.values():
         return {
-            "regime_risk_on": bool(row.get("regime_risk_on")),
-            "regime_detail": str(row.get("regime_detail", "")),
+            "data_ok": bool(row.get("data_ok")),
+            "data_detail": str(row.get("data_detail", "")),
             "vol_scale": float(row.get("vol_scale", 1.0) or 1.0),
         }
-    return {"regime_risk_on": False, "regime_detail": "no signals", "vol_scale": 1.0}
+    return {"data_ok": False, "data_detail": "no signals", "vol_scale": 1.0}
 
 
 def _defensive_book(rows: dict[str, dict[str, Any]]) -> dict[str, float]:
@@ -40,28 +40,6 @@ def _defensive_book(rows: dict[str, dict[str, Any]]) -> dict[str, float]:
         for symbol, row in rows.items()
         if float(row.get("defensive_weight", 0.0) or 0.0) > 0
     }
-
-
-def confirm_regime(state: dict[str, Any], raw_risk_on: bool, config: DualMomentumConfig) -> dict[str, Any]:
-    """Turn the raw gate into a state, requiring consecutive agreement in both directions.
-
-    Without this the book flips on a single reading that straddles the threshold, and pays
-    the spread twice for the privilege.
-    """
-    confirmed = bool(state.get("regime_risk_on", False))
-    agree = int(state.get("regime_agree", 0) or 0)
-    disagree = int(state.get("regime_disagree", 0) or 0)
-
-    if raw_risk_on:
-        agree, disagree = agree + 1, 0
-        if not confirmed and agree >= max(config.regime_confirm_bars, 1):
-            confirmed = True
-    else:
-        disagree, agree = disagree + 1, 0
-        if confirmed and disagree >= max(config.regime_exit_confirm_bars, 1):
-            confirmed = False
-
-    return {"regime_risk_on": confirmed, "regime_agree": agree, "regime_disagree": disagree}
 
 
 def apply_turnover_filters(
@@ -94,7 +72,65 @@ def apply_turnover_filters(
             filtered[symbol] = held
             continue
         filtered[symbol] = weight
-    return filtered
+    return _fit_to_budget(filtered, target, current, equity, config)
+
+
+def _fit_to_budget(
+    filtered: dict[str, float],
+    target: dict[str, float],
+    current: dict[str, float],
+    equity: float,
+    config: DualMomentumConfig,
+) -> dict[str, float]:
+    """Give back whatever holding a name at its current weight borrowed from the budget.
+
+    The band suppresses moves in both directions, but only the *trims* were funding anything.
+    Holding two incumbents above target because their trims were too small to trade, while
+    letting a new entry through at full size because its move was large enough, produces a
+    target vector that no longer sums to the gross the algorithm budgeted for.
+
+    Measured on 2026-01-08: ``refine`` proposed exactly 100.0%; the band held IEMG at 12.2%
+    against a 6.6% target and XSD at 36.0% against 29.1%, passed XBI's 12.1% entry untouched,
+    and handed planning a 106.9% book. That is unfundable by construction on an account
+    already 98% invested, so ``fund_planned_orders`` pro-rata shrank the buys and warned --
+    16 of 24 sessions that January, and on one of them the entry was dropped outright.
+
+    The repair shrinks the *increases* rather than forcing the trims through: a suppressed
+    trim stays suppressed, and the entry simply arrives smaller, filling in over later runs as
+    the incumbents drift far enough to trade.
+
+    Only the notional floor is re-applied to a shrunken leg, not
+    ``rebalance_weight_threshold``. The band exists to suppress *drift* -- small adjustments to
+    a position the algorithm already holds -- and an opening is not drift. Re-applying it here
+    killed the entry outright whenever the freed budget came to less than the band, which on
+    the 2026-01-08 book meant a 12.1% entry shrinking to 5.2% and then being dropped: the
+    opposite of the intent, since the whole repair exists so that entries still happen.
+    """
+    budget = sum(weight for weight in target.values() if weight > 0)
+    excess = sum(weight for weight in filtered.values() if weight > 0) - budget
+    if excess <= EPSILON:
+        return filtered
+
+    increases = {
+        symbol: weight - float(current.get(symbol, 0.0))
+        for symbol, weight in filtered.items()
+        if weight - float(current.get(symbol, 0.0)) > EPSILON
+    }
+    total = sum(increases.values())
+    if total <= EPSILON:
+        # Nothing is being added, so the overshoot is entirely incumbents held above target.
+        # Forcing those trims through is the one thing the band exists to prevent.
+        return filtered
+
+    keep = max(1.0 - excess / total, 0.0)
+    minimum_notional = max(config.minimum_trade_notional, config.minimum_trade_nav_fraction * max(equity, 0.0))
+    repaired = dict(filtered)
+    for symbol, increase in increases.items():
+        held = float(current.get(symbol, 0.0))
+        shrunk = held + increase * keep
+        move = shrunk - held
+        repaired[symbol] = held if move * max(equity, 0.0) < minimum_notional else shrunk
+    return repaired
 
 
 def partial_adjustment(
@@ -120,6 +156,44 @@ def partial_adjustment(
         held = float(current.get(symbol, 0.0))
         adjusted[symbol] = weight if weight <= 0 else held + step * (weight - held)
     return adjusted
+
+
+def action_due(
+    state: dict[str, Any],
+    action: str,
+    as_of: datetime,
+    interval_days: int,
+) -> bool:
+    """Whether ``action`` may be taken now, given its own interval in days.
+
+    One clock per *kind* of decision rather than one clock for the whole algorithm. The run
+    cadence and the decision cadence had collapsed into each other: the algorithm runs once a
+    session, so it re-ranked, re-sized and rotated themes once a session, against a score whose
+    slowest horizon is twelve sessions.
+
+    ``signal_refresh_minutes`` used to be the single knob for this and was read by nothing at
+    all -- declared in the config, described in the dashboard's explainer as "how often
+    membership may change", and never compared against the ``last_selection_at`` the algorithm
+    faithfully wrote on every run. It is replaced by these, because "how often may membership
+    change" turned out to be four different questions with four different right answers.
+
+    Measured against the timestamp ``analyze`` reasoned about rather than the wall clock, so a
+    replay throttles exactly as the live runner would. ``state`` is mutated by
+    :func:`record_action`, not here, so a caller that decides not to act does not restart the
+    clock.
+    """
+    days = max(interval_days, 0)
+    if days <= 0:
+        return True
+    last = _parse_time(str(state.get(f"last_{action}_at", "")))
+    if last is None:
+        return True
+    return _minutes_between(as_of, last) >= days * 1440
+
+
+def record_action(state: dict[str, Any], action: str, as_of: str) -> None:
+    """Start ``action``'s clock. Called only when the action was actually available."""
+    state[f"last_{action}_at"] = as_of
 
 
 def track_eligibility(

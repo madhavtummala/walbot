@@ -16,16 +16,16 @@ from src.algorithms.dual_momentum import (
     analyze_universe,
     apply_turnover_filters,
     partial_adjustment,
-    confirm_regime,
+    action_due,
+    record_action,
     covariance_matrix,
     defensive_weights,
     eligibility,
     hold_eligibility,
-    market_regime,
+    universe_data_ok,
     park_residual,
     score_to_weights,
     theme_allocation,
-    timing,
     track_eligibility,
     volatility_scale,
     zscores,
@@ -77,12 +77,17 @@ def context_for(config: Runtime, daily: dict, intraday: dict, timestamp: datetim
 
 
 # =========================================================================================
-# The regime gate: the whole reason this exists as a fork
+# Absolute momentum, and the data check that is all that remains of the regime layer
 # =========================================================================================
 
 
-def test_risk_off_holds_the_defensive_sleeve_rather_than_the_least_bad_etf() -> None:
-    """Cross-sectional ranking alone always owns something. That is what the gate fixes."""
+def test_a_falling_universe_holds_the_defensive_sleeve_rather_than_the_least_bad_etf() -> None:
+    """Cross-sectional ranking alone always owns something. Absolute momentum is what fixes it.
+
+    This used to be the regime gate's job. With that gate removed, per-name ``eligibility`` is
+    the only thing standing between a falling market and a fully invested book -- so this test
+    matters more than it did, not less.
+    """
     config = Runtime(risk_on_universe=["AAA", "BBB"], defensive_universe=["BIL"], benchmark="AAA")
     strategy = DualMomentumConfig.from_runtime_config(config)
     falling = {
@@ -94,14 +99,18 @@ def test_risk_off_holds_the_defensive_sleeve_rather_than_the_least_bad_etf() -> 
 
     outcome = analyze_universe(context_for(config, falling, intraday), strategy)
 
-    assert outcome["regime"]["risk_on"] is False
     assert outcome["weights"]["BIL"] > 0
     assert outcome["weights"]["AAA"] == 0
     assert outcome["weights"]["BBB"] == 0
+    assert not outcome["entries"], "nothing should have qualified"
 
 
 def test_a_thin_universe_is_reported_as_a_data_gap_not_a_bear_market() -> None:
-    """A short cache would otherwise read as "below its 100-day average", which is a lie."""
+    """A short cache would otherwise read as "below its 100-day average", which is a lie.
+
+    The one piece of the regime layer that survives, and the reason it survives: this is a
+    statement about the data, not about the market.
+    """
     config = Runtime(risk_on_universe=["AAA", "BBB", "CCC", "DDD"], defensive_universe=["BIL"])
     strategy = DualMomentumConfig.from_runtime_config(config)
     scored = {
@@ -111,80 +120,34 @@ def test_a_thin_universe_is_reported_as_a_data_gap_not_a_bear_market() -> None:
         "DDD": {"symbol": "DDD", "above_moving_average": False, "enough_history": False, "daily_bars": 0},
     }
 
-    regime = market_regime(scored, strategy)
+    data = universe_data_ok(scored, strategy)
 
-    assert regime["risk_on"] is False
-    assert regime["data_ok"] is False
-    assert "1 of 4 risk-on names" in regime["detail"]
-    assert "average" not in regime["detail"]
-    # The one name that *can* be judged is in an uptrend, so this is not a breadth reading.
-    assert regime["breadth"] == 1.0
+    assert data["data_ok"] is False
+    assert data["coverage"] == 0.25
+    assert "1 of 4 risk-on names" in data["detail"]
+    assert "average" not in data["detail"], "a data gap must not be reported as a trend reading"
 
 
-def test_a_weak_benchmark_no_longer_vetoes_a_universe_that_is_working() -> None:
-    """The March 2026 case: QQQM below its average while the rest of the book is fine.
+def test_the_data_check_has_no_opinion_about_trends() -> None:
+    """What removing the breadth gate means concretely.
 
-    The benchmark legs of this gate are gone precisely so that one unrelated ETF cannot
-    override the per-name absolute-momentum test that ``eligibility`` already applies.
+    Three of four names below their own average used to force the whole book defensive. Now it
+    is not the portfolio layer's business at all -- ``eligibility`` will decline those three
+    individually, and the fourth is still allowed to be held.
     """
-    config = Runtime(risk_on_universe=["QQQM", "USO", "XOP", "GLD"], benchmark="QQQM", breadth_min=0.5)
+    config = Runtime(risk_on_universe=["AAA", "BBB", "CCC", "DDD"], benchmark="AAA")
     strategy = DualMomentumConfig.from_runtime_config(config)
     scored = {
-        "QQQM": {"symbol": "QQQM", "above_moving_average": False, "enough_history": True, "abs_return": -0.05},
-        "USO": {"symbol": "USO", "above_moving_average": True, "enough_history": True, "abs_return": 0.55},
-        "XOP": {"symbol": "XOP", "above_moving_average": True, "enough_history": True, "abs_return": 0.18},
-        "GLD": {"symbol": "GLD", "above_moving_average": True, "enough_history": True, "abs_return": 0.09},
-    }
-
-    regime = market_regime(scored, strategy)
-
-    assert regime["breadth"] == 0.75
-    assert regime["risk_on"] is True, "a weak benchmark is not a reason to hold nothing"
-
-
-def test_breadth_blocks_a_narrow_rally() -> None:
-    config = Runtime(risk_on_universe=["AAA", "BBB", "CCC", "DDD"], benchmark="AAA", breadth_min=0.5)
-    strategy = DualMomentumConfig.from_runtime_config(config)
-    scored = {
-        "AAA": {"symbol": "AAA", "above_moving_average": True, "enough_history": True, "abs_return": 0.2},
+        "AAA": {"symbol": "AAA", "above_moving_average": True, "enough_history": True},
         "BBB": {"symbol": "BBB", "above_moving_average": False, "enough_history": True},
         "CCC": {"symbol": "CCC", "above_moving_average": False, "enough_history": True},
         "DDD": {"symbol": "DDD", "above_moving_average": False, "enough_history": True},
     }
 
-    regime = market_regime(scored, strategy)
+    data = universe_data_ok(scored, strategy)
 
-    assert regime["data_ok"] is True
-    assert regime["breadth"] == 0.25
-    assert regime["risk_on"] is False
-    assert "breadth" in regime["detail"]
-
-
-def test_regime_hysteresis_needs_agreement_in_both_directions() -> None:
-    config = DualMomentumConfig(regime_confirm_bars=2, regime_exit_confirm_bars=2)
-    state: dict = {}
-
-    state.update(confirm_regime(state, True, config))
-    assert state["regime_risk_on"] is False, "one good reading is not a regime"
-    state.update(confirm_regime(state, True, config))
-    assert state["regime_risk_on"] is True
-
-    state.update(confirm_regime(state, False, config))
-    assert state["regime_risk_on"] is True, "one bad reading does not end it either"
-    state.update(confirm_regime(state, False, config))
-    assert state["regime_risk_on"] is False
-
-
-def test_a_broken_streak_restarts_the_count() -> None:
-    config = DualMomentumConfig(regime_confirm_bars=3)
-    state: dict = {}
-    state.update(confirm_regime(state, True, config))
-    state.update(confirm_regime(state, True, config))
-    state.update(confirm_regime(state, False, config))
-    state.update(confirm_regime(state, True, config))
-    state.update(confirm_regime(state, True, config))
-
-    assert state["regime_risk_on"] is False
+    assert data["data_ok"] is True, "every name is judgeable, so there is nothing to refuse"
+    assert data["coverage"] == 1.0
 
 
 # =========================================================================================
@@ -239,57 +202,29 @@ def test_an_ineligible_name_is_never_ranked_so_a_thin_field_means_holding_less()
 # =========================================================================================
 
 
-def test_the_pullback_setup_cannot_promote_a_name_that_fails_the_score_floor() -> None:
-    """The reason it moved out of the score: as a bonus, a deep dip could outvote the trend."""
-    weak = {
-        "symbol": "WEAK",
-        "momentum_change": -5.0,
-        "micro_return": 0.01,
-        "z": {"macro": 0.1, "meso": 0.9, "nano": -2.0},
-        "base_score": -1.0,
-    }
-    config = DualMomentumConfig(min_base_score=0.25)
+def test_an_entry_must_clear_the_score_floor_but_a_holding_need_not() -> None:
+    """Entry and exit are deliberately asymmetric, and always have been.
 
-    ok, reason = timing(weak, config)
-
-    assert ok is True and reason == "Pullback in uptrend"
-    # Timing says "now", the score still says "not this one".
-    assert weak["base_score"] < config.min_base_score
-
-
-def test_timing_opens_on_acceleration_or_on_a_pullback_and_otherwise_waits() -> None:
-    config = DualMomentumConfig()
-    accelerating = {"momentum_change": 0.5, "z": {}, "micro_return": 0.0}
-    quiet = {"momentum_change": -0.1, "z": {"macro": 0.0, "meso": 0.0, "nano": 0.0}, "micro_return": 0.0}
-
-    assert timing(accelerating, config) == (True, "Momentum accelerating")
-    assert timing(quiet, config)[0] is False
-
-
-def test_an_entry_needs_timing_but_a_holding_does_not() -> None:
-    """Timing decides when to enter, never whether to stay."""
+    The asymmetry used to be demonstrated through the entry-timing gate. That gate is gone, so
+    the floor stands in for it here -- the property under test is the same one: ``analyze``
+    proposing nothing for a name does not mean step 2 should sell it.
+    """
     config = Runtime(risk_on_universe=["AAA"], defensive_universe=["BIL"], benchmark="AAA",
-                     regime_confirm_bars=1, min_base_score=-99)
-    strategy = DualMomentumConfig.from_runtime_config(config)
+                     min_base_score=99)
     daily = {"AAA": daily_bars(80, 130), "BIL": daily_bars(100, 101)}
-    # Flat intraday: no acceleration, no pullback, so the timing flag is false.
     intraday = {"AAA": intraday_bars(130, 130), "BIL": intraday_bars(101, 101)}
     context = context_for(config, daily, intraday)
     algorithm = DualMomentumAlgorithm(config)
 
     decision = algorithm.analyze(context)
-    assert decision.signals["AAA"]["timing"] == 0
-    assert decision.target_weights["AAA"] == 0, "no timing, no new entry"
+    assert decision.target_weights["AAA"] == 0, "below the floor, no new entry"
 
     with ephemeral_state():
         holder = PortfolioSnapshot(positions={"AAA": 10}, equity=10_000.0)
-        # Two runs: the first confirms the regime, the second acts on it.
-        algorithm.refine_weights(dict(decision.target_weights), decision.signals, holder,
-                                 context.latest_prices, config, context.timestamp)
         kept = algorithm.refine_weights(dict(decision.target_weights), decision.signals, holder,
                                         context.latest_prices, config, context.timestamp)
 
-    assert kept["AAA"] > 0, "an eligible, ranked holding is kept even with the timing flag false"
+    assert kept["AAA"] > 0, "an eligible holding is kept even when it would not be bought today"
 
 
 def test_a_holding_survives_the_intent_round_trip_the_pipeline_actually_performs() -> None:
@@ -303,14 +238,13 @@ def test_a_holding_survives_the_intent_round_trip_the_pipeline_actually_performs
     The test above cannot catch that: it hands over the complete vector, zeros included.
     """
     config = Runtime(risk_on_universe=["AAA"], defensive_universe=["BIL"], benchmark="AAA",
-                     regime_confirm_bars=1, min_base_score=-99)
+                     min_base_score=99)
     daily = {"AAA": daily_bars(80, 130), "BIL": daily_bars(100, 101)}
     intraday = {"AAA": intraday_bars(130, 130), "BIL": intraday_bars(101, 101)}
     context = context_for(config, daily, intraday)
     algorithm = DualMomentumAlgorithm(config)
     decision = algorithm.analyze(context)
-    assert decision.signals["AAA"]["timing"] == 0
-    assert decision.target_weights["AAA"] == 0, "no timing, no new entry"
+    assert decision.target_weights["AAA"] == 0, "below the floor, no new entry"
 
     # Exactly what the pipeline passes on: weight intents, zero-valued ones removed.
     proposed = [i for i in decision.resolved_intents() if i.kind != "weight" or i.value]
@@ -318,9 +252,8 @@ def test_a_holding_survives_the_intent_round_trip_the_pipeline_actually_performs
 
     with ephemeral_state():
         holder = PortfolioSnapshot(positions={"AAA": 10}, equity=10_000.0)
-        for _ in range(2):  # the first run confirms the regime, the second acts on it
-            final = algorithm.refine(proposed, decision.signals, holder,
-                                     context.latest_prices, config, context.timestamp)
+        final = algorithm.refine(proposed, decision.signals, holder,
+                                 context.latest_prices, config, context.timestamp)
 
     weights = {intent.symbol: intent.value for intent in final if intent.kind == "weight"}
     assert weights.get("AAA", 0) > 0, "a kept holding must survive a proposal that omits it"
@@ -711,9 +644,9 @@ def test_every_signal_row_carries_the_audit_trail() -> None:
 
     row = algorithm.analyze(context_for(config, daily, intraday)).signals["AAA"]
 
-    for key in ("base_score", "rank", "eligible", "eligibility_reason", "timing", "timing_reason",
-                "momentum_change", "annual_volatility", "target_weight", "defensive_weight",
-                "regime_risk_on", "regime_detail", "regime_breadth", "vol_scale",
+    for key in ("base_score", "rank", "eligible", "eligibility_reason",
+                "annual_volatility", "target_weight", "defensive_weight",
+                "data_ok", "data_detail", "universe_coverage", "vol_scale",
                 "portfolio_volatility", "reason"):
         assert key in row, key
 
@@ -892,3 +825,87 @@ def test_a_sibling_must_beat_the_sitting_name_before_it_takes_its_slot() -> None
     off = DualMomentumConfig(**{**config.__dict__, "intra_theme_delta_to_replace": 0.0})
     rows["BBB"]["base_score"] = 1.3
     assert theme_allocation({"growth"}, rows, off, {"AAA": 0.4}).get("BBB", 0.0) > 0
+
+
+def test_the_no_trade_band_cannot_push_the_book_over_its_gross_budget() -> None:
+    """The 2026-01-08 case: a 100% proposal reached planning as a 106.9% one.
+
+    The band suppresses moves in both directions, but only the trims were funding anything.
+    Holding two incumbents above target because their trims were too small to trade, while
+    passing a new entry through at full size, produced a plan that could not be paid for --
+    16 of 24 sessions that January, and on one of them the entry was dropped outright.
+    """
+    config = DualMomentumConfig(rebalance_weight_threshold=0.08, minimum_trade_notional=0.0,
+                                minimum_trade_nav_fraction=0.0)
+    target = {"IEMG": 0.066, "SLV": 0.475, "XSD": 0.291, "XBI": 0.121, "EWJ": 0.022, "GLD": 0.025}
+    current = {"IEMG": 0.122, "SLV": 0.466, "XSD": 0.360}
+
+    filtered = apply_turnover_filters(target, current, 10_000.0, config)
+
+    # The suppressed trims stay suppressed -- that is what the band is for.
+    assert filtered["IEMG"] == pytest.approx(0.122)
+    assert filtered["XSD"] == pytest.approx(0.360)
+    # The entry is what gives way, and it arrives smaller rather than at full size.
+    assert 0 < filtered["XBI"] < 0.121
+    assert sum(filtered.values()) == pytest.approx(sum(target.values()), abs=1e-6)
+
+
+def test_a_shrunken_entry_survives_the_band_but_not_the_notional_floor() -> None:
+    """The band is about drift, so it must not kill an opening that was merely resized.
+
+    Re-applying ``rebalance_weight_threshold`` to the shrunken leg dropped the entry outright
+    whenever the freed budget was smaller than the band -- the opposite of the intent. The
+    dollar floor still applies, because a $12 order costs the same spread as a real one.
+    """
+    config = DualMomentumConfig(rebalance_weight_threshold=0.08, minimum_trade_notional=100.0,
+                                minimum_trade_nav_fraction=0.0)
+    target = {"HELD": 0.90, "NEW": 0.10}
+    current = {"HELD": 0.95}
+
+    # $10,000 book: the entry shrinks to 5% = $500, well over the floor, so it happens.
+    big = apply_turnover_filters(target, current, 10_000.0, config)
+    assert big["HELD"] == pytest.approx(0.95), "the 5% trim was under the band"
+    assert big["NEW"] == pytest.approx(0.05), "shrunk to fit, not dropped"
+    assert sum(big.values()) == pytest.approx(1.0)
+
+    # $1,000 book: the same 5% is $50, under the floor, so it is not worth submitting.
+    small = apply_turnover_filters(target, current, 1_000.0, config)
+    assert small["NEW"] == 0.0
+
+
+def test_each_kind_of_action_keeps_its_own_clock() -> None:
+    """One clock per decision, because they are not the same decision.
+
+    ``signal_refresh_minutes`` was the single knob for this and was read by nothing at all --
+    declared in the config, described in the dashboard's explainer as "how often membership
+    may change", and never compared against the ``last_selection_at`` written on every run.
+    It turned out to be four questions: rotate a theme, open a position, re-split weight
+    inside a theme already held, and close a broken one.
+    """
+    monday = datetime(2026, 6, 1, 14, 30, tzinfo=timezone.utc)
+
+    # A cold state store has never acted, so every clock is due.
+    assert action_due({}, "theme_rotation", monday, 7) is True
+
+    state: dict = {}
+    record_action(state, "theme_rotation", monday.isoformat())
+    assert action_due(state, "theme_rotation", monday + timedelta(days=6), 7) is False
+    assert action_due(state, "theme_rotation", monday + timedelta(days=7), 7) is True
+
+    # The clocks are independent: rotating does not start the intra-theme one.
+    assert action_due(state, "intra_theme", monday + timedelta(days=1), 5) is True
+
+    # Zero means every run, which is what exits are meant to stay at.
+    assert action_due(state, "exit", monday + timedelta(minutes=1), 0) is True
+
+
+def test_a_caller_that_does_not_act_does_not_restart_the_clock() -> None:
+    """Otherwise a throttled decision that changed nothing would push the next one a week out."""
+    monday = datetime(2026, 6, 1, 14, 30, tzinfo=timezone.utc)
+    state: dict = {}
+
+    assert action_due(state, "entry", monday, 5) is True
+    # ``action_due`` is a question, not a commitment -- only ``record_action`` starts the clock.
+    assert action_due(state, "entry", monday, 5) is True
+    record_action(state, "entry", monday.isoformat())
+    assert action_due(state, "entry", monday + timedelta(days=1), 5) is False

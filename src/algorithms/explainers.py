@@ -257,11 +257,26 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "defensive sleeve for the rest of the session."
         ),
         "parameters": {
-            "risk_on_universe": {"what": "The ETFs it may hold when the regime is risk-on.", "effect": "Scores are cross-sectional, so adding or removing a name changes every other name's z-score and the breadth reading."},
-            "defensive_universe": {"what": "Where the book sits when risk-on is not permitted.", "effect": "Short-duration choices (BIL) make risk-off flat; TLT or GLD make it an active macro bet."},
-            "benchmark": {"what": "Charted alongside the book as a reference line.", "effect": "None on selection. It used to gate the whole portfolio -- see breadth_min, which replaced it."},
-            "signal_refresh_minutes": {"what": "How often membership may change.", "effect": "Longer cuts turnover and lets winners run; shorter reacts to leadership changes sooner."},
-            "risk_refresh_minutes": {"what": "How often timing and risk are re-evaluated. Also the unit for cooldown_after_exit.", "effect": "The algorithm runs once a session now, so anything below 390 makes cooldown_after_exit expire before the next run and do nothing."},
+            "risk_on_universe": {"what": "The ETFs it may hold.", "effect": "Scores are cross-sectional, so adding or removing a name changes every other name's z-score."},
+            "defensive_universe": {"what": "Where the book sits when nothing qualifies, and where undeployed gross is parked.", "effect": "Short-duration choices (BIL) make risk-off flat; TLT or GLD make it an active macro bet."},
+            "benchmark": {"what": "Charted alongside the book as a reference line.", "effect": "None on selection at all. It used to gate the whole portfolio; that gate is gone."},
+            "theme_rotation_interval_days": {
+                "what": "Days between chances to enter or leave a theme. 0 means every run.",
+                "effect": "The most expensive decision the algorithm makes and the one worth slowing most. Over 2026 the theme set changed on half of all sessions and theme entries and exits were 44% of turnover.",
+            },
+            "entry_interval_days": {
+                "what": "Days between chances to open any new position, including a new name inside a theme already held.",
+                "effect": "Separate from the rotation clock so a new name cannot slip in as 'sizing' between rotations.",
+            },
+            "intra_theme_interval_days": {
+                "what": "Days between re-splits of weight among names already held, and re-sizes to the volatility target.",
+                "effect": "The cheapest turnover to skip and the most frequent: 36% of 2026 turnover was resize and 13% intra-theme rotation, none of it a change of view.",
+            },
+            "exit_interval_days": {
+                "what": "Days between chances to close a holding that failed eligibility or the crash stop.",
+                "effect": "Meant to stay 0. An exit that waits for a clock is a stop-loss that does not stop anything.",
+            },
+            "risk_refresh_minutes": {"what": "The unit cooldown_after_exit is counted in.", "effect": "The algorithm runs once a session, so anything below 390 makes cooldown_after_exit expire before the next run and do nothing."},
             "intraday_bar_minutes": {
                 "what": "Unused. This algorithm reads daily bars only.",
                 "effect": "None. Every horizon below is measured in minutes the market is open (390 per session) against daily bars.",
@@ -277,11 +292,7 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "robust_zscore": {"what": "Use median/MAD z-scores instead of mean/standard deviation.", "effect": "On, one event-driven ETF spike stops distorting everyone else's score. Off is the classic z-score."},
             "risk_adjusted_score": {"what": "Rank on return divided by the symbol's own volatility, not raw return.", "effect": "On, a 58%-vol theme and a 14%-vol index compete on trend quality. Off, the ranking rewards amplitude and the wildest riser almost always wins."},
             "score_ema_minutes": {"what": "Minutes of smoothing applied to the composite score. 1170 is three sessions.", "effect": "More smoothing means fewer rank flips on noise, and a slower response to a real change. Below one session it rounds to no smoothing at all."},
-            "breadth_ma_days": {"what": "Trend window used for each name in the breadth count.", "effect": "Usually matched to etf_ma_days so the gate and the eligibility test agree on what a trend is."},
-            "breadth_min": {"what": "Share of the risk-on universe that must be above its own average. The whole regime gate.", "effect": "The one control on how strong the opportunity set must be before risk is taken. Higher demands a broad advance and sits defensive through narrow rallies; at 0 the per-name eligibility test is the only filter left."},
-            "min_universe_coverage": {"what": "Share of the risk-on universe that must have enough history for breadth to be trusted.", "effect": "Below it the gate reports a data gap and stays defensive, rather than reading a thin cache as a bear market."},
-            "regime_confirm_bars": {"what": "Consecutive passing algorithm runs before risk-on is allowed. Counted in runs, not bars.", "effect": "Higher avoids entering on one borderline reading, at the cost of entering later. One run is risk_refresh_minutes."},
-            "regime_exit_confirm_bars": {"what": "Consecutive failing runs before leaving risk-on. Counted in runs, not bars.", "effect": "Higher rides out single-run scares; lower exits faster and pays the spread more often."},
+            "min_universe_coverage": {"what": "Share of the risk-on universe that must have enough history before it will trade at all.", "effect": "Below it the algorithm reports a data gap and holds the defensive sleeve, rather than reading a thin cache as a bear market."},
             "etf_ma_days": {"what": "Each ETF's own absolute-trend window.", "effect": "The core dual-momentum filter: nothing below its own trend can be held at any rank."},
             "etf_abs_return_days": {"what": "Medium-term absolute-momentum lookback per ETF.", "effect": "Longer demands a more established advance before a name is eligible."},
             "etf_min_abs_return": {"what": "Minimum return over that lookback.", "effect": "Zero means 'must have gone up'. Raising it demands a margin over flat."},
@@ -321,25 +332,6 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "exit_rank_max": {"what": "Rank at which an incumbent is finally dropped.", "effect": "Wider than entry_rank_max gives a holding room to wobble without being sold."},
             "min_score_delta_to_replace": {"what": "Score advantage a challenger needs to displace a holding.", "effect": "The anti-churn knob. At 0 it swaps on any improvement and trades constantly."},
             "cooldown_after_exit": {"what": "Algorithm runs a name must wait before re-entry. Counted in runs, not bars.", "effect": "Stops a name being sold and re-bought around a threshold. Multiplied by risk_refresh_minutes."},
-            "require_entry_timing": {
-                "what": "Whether a qualified name must also pass the entry-timing test before it is opened.",
-                "effect": (
-                    "Both timing paths detect a spike rather than a trend: "
-                    "momentum_change subtracts the 3-session return from the 1-session return after dividing "
-                    "each by the square root of its length, which is negative in any steady advance, and the "
-                    "pullback path needs a dip a grind-up rally never gives. In November 2023 it blocked all "
-                    "13 eligible names for eight sessions while the S&P rose 7.98%. Switching it off is not "
-                    "a free win though: over 2023 as a whole that lost 8pp and raised turnover, because the "
-                    "same gate also blocks a lot of bad entries."
-                ),
-            },
-            "momentum_change_ema_minutes": {"what": "Minutes of smoothing on the fast momentum-change signal. 1170 is three sessions.", "effect": "More smoothing means fewer false entry triggers and slightly later entries. Only read when require_entry_timing is on."},
-            "momentum_change_vol_days": {"what": "Trailing window the momentum-change denominator is measured over.", "effect": "Both terms are divided by this one volatility, so it sets the scale but not the sign. Only read when require_entry_timing is on."},
-            "momentum_change_enter": {"what": "Minimum smoothed momentum change to enter.", "effect": "Above zero demands visible acceleration; below zero lets it enter into softness."},
-            "pullback_macro_z_min": {"what": "Macro leadership required for a pullback entry.", "effect": "Higher restricts dip-buying to names that are clear long-horizon leaders."},
-            "pullback_meso_z_min": {"what": "Medium-horizon leadership required for a pullback entry.", "effect": "This is what keeps 'buy the dip' from meaning 'buy the loser'."},
-            "pullback_nano_z_max": {"what": "How far the fast horizon must have dipped.", "effect": "More negative demands a deeper pullback, so the setup fires less often."},
-            "pullback_micro_return_min": {"what": "Short-horizon return that must still hold up.", "effect": "Confirms the dip is a pause, not the start of a decline."},
             "sentiment_weight": {"what": "Coefficient on clipped sentiment inside the score.", "effect": "Start at 0. Non-zero lets news move the ranking, which is exactly what the price gates are there to prevent."},
             "sentiment_size_scale": {"what": "Coefficient on sentiment as a position-size modifier.", "effect": "0.05 with a clip of 2 gives at most a 10% size change. It can never create a position price logic rejected."},
             "sentiment_clip": {"what": "Cap on the normalised sentiment input.", "effect": "Bounds how much a single loud news cycle can move either sentiment term."},
@@ -352,6 +344,16 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "vol_scale_floor": {"what": "Smallest scale factor before switching to defensive.", "effect": "Below this, holding a shrunken risk position is worse than holding none."},
             "high_vol_trigger": {"what": "Multiple of target volatility at which scaling engages.", "effect": "Above 1.0 it stops re-sizing a portfolio already inside its budget, which saves turnover."},
             "rebalance_weight_threshold": {"what": "Smallest weight change worth trading.", "effect": "Higher tolerates more drift from target in exchange for less churn."},
+            "rebalance_step": {
+                "what": "How far to move toward the new target each run: (1-step) x current + step x target.",
+                "effect": (
+                    "A different brake from rebalance_weight_threshold, which only filters small "
+                    "drift. This damps a target that swings hard every session, so a one-day spike "
+                    "costs a fraction of a round trip and reverts for free. Exits are exempt. "
+                    "1.0 jumps straight to target; 0.25-0.5 roughly halves turnover, and over 2023 "
+                    "cost more return than it saved."
+                ),
+            },
             "minimum_trade_notional": {"what": "Floor on the dollar size of any single order.", "effect": "Stops trivial orders whose costs exceed their benefit."},
             "minimum_trade_nav_fraction": {"what": "The same floor as a fraction of equity.", "effect": "The larger of the two applies, so the minimum scales with the account."},
             "defensive_max_positions": {"what": "How many defensive names to hold in risk-off.", "effect": "One is a pure cash-equivalent stance; two splits between, say, bills and gold."},
