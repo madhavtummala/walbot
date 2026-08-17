@@ -227,33 +227,47 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
     "dual_momentum": {
         "summary": (
             "Relative momentum picks the leaders, absolute momentum decides whether anything "
-            "risk-on may be held at all. A benchmark trend and breadth gate sets the regime, "
-            "each ETF must clear its own absolute-trend test to be ranked, and a separate fast "
-            "signal decides when to enter. Weights are score-over-volatility, scaled toward a "
-            "portfolio volatility target."
+            "may be held at all. Every ETF is scored against the others, must clear its own "
+            "trend and return floors to be ranked, and the top few are held. Sizing is "
+            "proportional to score. There is no regime gate, no entry-timing signal, no "
+            "portfolio volatility overlay and no per-name cap: all four existed, all four were "
+            "measured, and all four were removed for subtracting or for restating what the "
+            "ranking already said."
         ),
         "formula": [
-            "regime = benchmark above its MA and its 60-day return positive and breadth >= breadth_min",
-            "         confirmed over regime_confirm_bars runs before risk-on is allowed",
             "eligible(i) = price above MA(etf_ma_days) and R60 > etf_min_abs_return",
             "              and R20 > etf_min_fast_return",
             "score(i) = w_nano.z(nano) + w_micro.z(micro) + w_meso.z(meso) + w_macro.z(macro)",
             "z(.) is a robust cross-sectional z-score (median/MAD), smoothed over score_ema_minutes",
-            "timing(i) = EMA(nano/sigma_nano - meso/sigma_meso) > momentum_change_enter",
-            "            or the pullback setup (macro and meso leading while nano dips)",
-            "enter if eligible and rank <= entry_rank_max and score >= min_base_score and timing",
-            "hold while eligible and rank <= exit_rank_max, even if timing is false",
+            "",
+            "every rerank_interval_days -- rank the eligible names and re-select:",
+            "  enter if ranked <= entry_rank_max, score >= min_base_score, eligible on",
+            "    >= entry_min_eligible_days of the last eligibility_window runs, and out of cooldown",
+            "  hold while ranked <= exit_rank_max; a held name faces eligibility alone, not the",
+            "    quality floor, the settling period or the cooldown",
+            "  exit when eligible on <= exit_max_eligible_days runs, or it breaks the exit band",
+            "    (the entry floors widened by exit_threshold_slack)",
+            "  a challenger needs min_score_delta_to_replace over the weakest incumbent to",
+            "    displace it; a free slot is filled without any margin",
+            "",
+            "every session, whatever that clock says:",
+            "  sell any holding down max_daily_drop in a single session",
+            "",
             "w(i) = max(score - min_base_score, 0) x sigma(i)^volatility_tilt, normalised to",
-            "  risk_on_gross_max. No per-name cap and no portfolio volatility overlay.",
+            "  risk_on_gross_max. No per-name cap, so one qualifying name can take the book.",
+            "whatever is left undeployed, and anything held when nothing qualifies, sits in",
+            "  the defensive universe rather than in cash",
         ],
         "behavior": (
-            "Runs every 15 minutes for timing and risk, but only re-ranks every "
-            "signal_refresh_minutes, so membership changes slowly while stops and scaling stay "
-            "fast. In risk-off it holds the defensive universe rather than the least-bad risk-on "
-            "ETF. Fewer qualifying names means holding less, never a lower bar. A challenger must "
-            "beat an incumbent by min_score_delta_to_replace, an exited name waits out "
-            "cooldown_after_exit, and breaching the intraday drawdown limit parks the book in the "
-            "defensive sleeve for the rest of the session."
+            "Runs once per session on daily bars, but only re-ranks every rerank_interval_days: "
+            "the rate at which it looks and the rate at which it acts are separate, and the "
+            "score's slowest horizon is twelve sessions, so asking it for a new answer daily "
+            "mostly buys noise. The exception is the crash stop, which runs every session. "
+            "It holds the defensive sleeve rather than the least-bad risk-on ETF, and fewer "
+            "qualifying names means holding less, never a lower bar. Entry and exit are "
+            "deliberately asymmetric: a name that would not be bought today is not thereby "
+            "worth selling. The only portfolio-level guard left is a data check -- too thin a "
+            "bar cache is an unusable reading, not a bearish one."
         ),
         "parameters": {
             "risk_on_universe": {"what": "The ETFs it may hold.", "effect": "Scores are cross-sectional, so adding or removing a name changes every other name's z-score."},
