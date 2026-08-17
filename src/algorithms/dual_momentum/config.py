@@ -38,9 +38,10 @@ class DualMomentumConfig:
     benchmark: str = field(default="QQQM", metadata={"coerce": "symbol"})
 
     # -- decision cadence -------------------------------------------------------------------
-    #: How often each *kind* of action may be taken, in days. The algorithm runs every
-    #: session; that is the rate at which it looks, not the rate at which it should act, and
-    #: collapsing the two is what made a medium-term signal trade like a fast one.
+    #: How often each *kind* of action may be taken, in *trading* days -- counted in runs,
+    #: since the algorithm runs once a session. The algorithm runs every session; that is the
+    #: rate at which it looks, not the rate at which it should act, and collapsing the two is
+    #: what made a medium-term signal trade like a fast one.
     #:
     #: The asymmetry is the whole point. Risk is continuous and opportunity is not: a holding
     #: that breaks down leaves today, while a better one is bought when the relevant clock next
@@ -57,8 +58,10 @@ class DualMomentumConfig:
     #: Re-splitting weight between the names inside a theme that is already held, and
     #: re-sizing to the volatility target. Pure sizing: no change of view, same spread paid.
     intra_theme_interval_days: int = 0
-    #: Closing a holding that failed eligibility or the crash stop. Keep at 0: an exit that
-    #: waits for a clock is a stop-loss that does not stop anything.
+    #: Closing a holding whose *considered* exit tests failed -- the eligibility count and the
+    #: widened bands. ``max_daily_drop`` is deliberately not on this clock: :func:`crash_stop`
+    #: runs every session whatever this says, because a name can gap 30% across a week of
+    #: throttled sessions while the algorithm waits its turn to look.
     exit_interval_days: int = 0
 
     risk_refresh_minutes: int = 15
@@ -193,6 +196,10 @@ class DualMomentumConfig:
     sentiment_lookback_minutes: int = 120
 
     # -- sizing and risk ------------------------------------------------------------------
+    #: Cap on one *theme's* share of the book in the live path, and on one *name* in the
+    #: proposal path. At 1.0 there is no cap and theme budgets are purely proportional to
+    #: score -- which is the point of holding only two themes: a cap on top of a two-name
+    #: split just forces them toward equal weight and throws the ranking away.
     name_weight_max: float = 0.35
     risk_on_gross_max: float = 1.0
     #: How much volatility should move a position's size, as an exponent: weight is

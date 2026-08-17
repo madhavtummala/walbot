@@ -158,42 +158,43 @@ def partial_adjustment(
     return adjusted
 
 
-def action_due(
-    state: dict[str, Any],
-    action: str,
-    as_of: datetime,
-    interval_days: int,
-) -> bool:
-    """Whether ``action`` may be taken now, given its own interval in days.
+def advance_run(state: dict[str, Any]) -> int:
+    """Count this run. Called once per ``refine``, before any clock is consulted."""
+    state["run_index"] = int(state.get("run_index", 0) or 0) + 1
+    return int(state["run_index"])
+
+
+def action_due(state: dict[str, Any], action: str, interval_days: int) -> bool:
+    """Whether ``action`` may be taken now, given its own interval in *trading* days.
+
+    Counted in runs rather than elapsed time, because the algorithm runs once per session and
+    sessions are what the interval is supposed to mean. Wall-clock days do not survive a
+    weekend: a three-calendar-day interval set on a Friday is satisfied by Monday, so it
+    throttles Tuesday-to-Thursday decisions and waves through every Friday-to-Monday one. It
+    also makes a replay's throttling exact rather than dependent on which holidays fell inside
+    the window.
 
     One clock per *kind* of decision rather than one clock for the whole algorithm. The run
     cadence and the decision cadence had collapsed into each other: the algorithm runs once a
     session, so it re-ranked, re-sized and rotated themes once a session, against a score whose
-    slowest horizon is twelve sessions.
+    slowest horizon is twelve sessions. ``signal_refresh_minutes`` used to be the single knob
+    for this and was read by nothing at all.
 
-    ``signal_refresh_minutes`` used to be the single knob for this and was read by nothing at
-    all -- declared in the config, described in the dashboard's explainer as "how often
-    membership may change", and never compared against the ``last_selection_at`` the algorithm
-    faithfully wrote on every run. It is replaced by these, because "how often may membership
-    change" turned out to be four different questions with four different right answers.
-
-    Measured against the timestamp ``analyze`` reasoned about rather than the wall clock, so a
-    replay throttles exactly as the live runner would. ``state`` is mutated by
-    :func:`record_action`, not here, so a caller that decides not to act does not restart the
-    clock.
+    ``state`` is mutated by :func:`record_action`, not here, so a caller that asks and then
+    decides not to act does not restart the clock.
     """
-    days = max(interval_days, 0)
-    if days <= 0:
+    interval = max(interval_days, 0)
+    if interval <= 0:
         return True
-    last = _parse_time(str(state.get(f"last_{action}_at", "")))
+    last = state.get(f"last_{action}_run")
     if last is None:
         return True
-    return _minutes_between(as_of, last) >= days * 1440
+    return int(state.get("run_index", 0) or 0) - int(last) >= interval
 
 
-def record_action(state: dict[str, Any], action: str, as_of: str) -> None:
-    """Start ``action``'s clock. Called only when the action was actually available."""
-    state[f"last_{action}_at"] = as_of
+def record_action(state: dict[str, Any], action: str) -> None:
+    """Start ``action``'s clock at this run. Only when the action was actually taken."""
+    state[f"last_{action}_run"] = int(state.get("run_index", 0) or 0)
 
 
 def track_eligibility(
