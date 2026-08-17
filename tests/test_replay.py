@@ -195,9 +195,13 @@ def test_every_registered_algorithm_declares_what_the_replay_needs() -> None:
     """The replay satisfies ``requirements()``; an algorithm that fetches its own data inside
     ``analyze`` instead cannot be replayed and would need a hand-written backtest branch.
     """
+    # A DCA plan is ordinary algorithm config, so an algorithm with none declares no symbols
+    # -- correctly, since it would buy nothing. Give them one so this tests what it means to.
+    plan = {"plan": {"buy": {"items": [{"symbol": "SPY", "amount": 100.0}]}, "sell": {"items": []}}}
+    config = Config(algorithm_configs={"dca": plan, "bursty_dca": plan})
     for algorithm_id in sorted(ALGORITHM_IDS):
         algorithm = get_algorithm_class(algorithm_id)
-        requirements = algorithm.from_config(Config()).requirements(Config(), {})
+        requirements = algorithm.from_config(config).requirements(config, {})
         assert isinstance(requirements, AlgorithmRequirements)
         assert requirements.price_symbols, f"{algorithm_id} declares no symbols"
         assert algorithm.schedule.weekdays, f"{algorithm_id} has no schedule"

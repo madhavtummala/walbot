@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.api.web_app import controls_payload, dca_payload, status_payload, universe_payload
+from src.api.web_app import controls_payload, status_payload, universe_payload
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -21,15 +21,6 @@ def test_universe_payload_returns_configured_rows() -> None:
 
     assert payload["count"] > 0
     assert {"symbol", "name", "bucket", "tradable", "enabled"} <= set(payload["rows"][0])
-
-
-def test_dca_payload_returns_plan_and_preview_shape() -> None:
-    payload = dca_payload()
-
-    assert "plan" in payload
-    assert "available" in payload
-    assert "preview" in payload
-    assert {"max_item_amount", "buy", "sell"} <= set(payload["plan"])
 
 
 def test_controls_payload_returns_switches() -> None:
@@ -309,21 +300,55 @@ def test_tune_tab_renders_the_right_editor_per_algorithm() -> None:
     assert "delete state.backtests[strategyKey];" in app_js
 
 
-def test_the_board_and_the_views_resolve_the_same_account() -> None:
-    """A DCA plan is per account, so an editor and a view on different accounts never agree.
+def test_the_board_edits_the_algorithms_own_plan() -> None:
+    """DCA is a normal algorithm with a custom editor, nothing more.
 
-    The board wrote the first DCA binding's plan while the signal view and the backtest were
-    computed for the default account, so an edit showed up in neither and looked like a save
-    that had not happened. Both sides now resolve the account from the strategy's binding, and
-    the frontend sends the one it resolved rather than letting the two derive it separately.
+    The plan used to be a per-account section of its own, which had two consequences: ``dca``
+    and ``bursty_dca`` shared one budget because the key had no room for the algorithm, and
+    the board could be editing one account's plan while the views rendered another's. It is
+    ordinary tuning now, so the page you are on decides what you are editing.
     """
     app_js, _, _ = _assets()
 
+    assert "function planStrategyKey" in app_js
+    assert "function currentPlan" in app_js
+    assert "state.planStrategy = strategy.key;" in app_js
+    # No DCA-shaped read or write path survives.
+    assert "/api/dca" not in app_js
+    assert "state.dca" not in app_js
+    # The plan saves through the same endpoint as every other knob.
+    save = app_js[app_js.index("async function savePlan"):app_js.index("function shadeColor")]
+    assert '"/api/algorithm-config"' in save
+    # It has its own editor, so it is not also rendered as a raw JSON field -- and the form's
+    # save merges over the loaded config so leaving it out cannot delete it.
+    assert "function isPlanField" in app_js
+    assert "const merged = { ...(state.algorithmConfigs[strategyKey]?.config || {}), ...values };" in app_js
+
+
+def test_one_algorithms_bubbles_are_never_written_into_anothers_plan() -> None:
+    """``renderDca`` syncs the nodes into the plan before it rebuilds them from it.
+
+    With one plan per account that was harmless, because the board only ever showed one. Now
+    that each algorithm has its own, navigating from Bursty DCA to DCA synced the bubbles
+    still on screen -- Bursty's budgets -- into DCA's freshly loaded plan, and the next save
+    would have persisted them. The nodes record which plan built them so the sync can refuse.
+    """
+    app_js, _, _ = _assets()
+
+    assert "state.nodesStrategy = planStrategyKey();" in app_js
+    sync = app_js[app_js.index("function syncNodesToPlan"):app_js.index("function renderBoard")]
+    assert "if (state.nodesStrategy !== planStrategyKey()) return;" in sync
+    # And the board starts clean rather than animating the previous algorithm's bubbles.
+    tuner = app_js[app_js.index("function renderDcaTuner"):app_js.index("function renderConfigForm")]
+    assert "state.nodes = [];" in tuner
+
+
+def test_signals_and_backtests_still_name_the_account_they_ran_for() -> None:
+    """Accrual state stays per (algorithm, account), and the broker is per account, so a view
+    still has to say which deployment it describes even though the plan no longer varies."""
+    app_js, _, _ = _assets()
+
     assert "function accountForStrategy" in app_js
-    assert "function dcaAccountForStrategy" in app_js
-    # The board loads the plan for the algorithm whose page is open, not a fixed binding.
-    assert "ensureDcaPlan(strategy.key);" in app_js
-    # Both read paths carry the account, so the server cannot resolve a different one.
     assert "account_id=${encodeURIComponent(account)}" in app_js
     assert "account_id: accountForStrategy(strategyKey)," in app_js
 

@@ -15,7 +15,6 @@ from src.algorithms.registry import canonical_algorithm_id
 from src.api.api_payloads import (
     backtest_payload,
     controls_payload,
-    dca_payload,
     status_payload,
     strategy_signals_payload,
     universe_payload,
@@ -189,15 +188,18 @@ tradable_universe:
     assert payload["eligible_count"] == 5
 
 
-def test_dca_payload_returns_plan_and_preview_shape() -> None:
-    payload = dca_payload()
+def test_a_plan_carries_only_what_to_buy_and_how_much() -> None:
+    """Cadence lives on the algorithm class and the on/off switch is the binding's, so a plan
+    carrying either would be a second source of truth that nothing reads."""
+    from src.algorithms.dca import sanitize_dca_plan
 
-    assert "plan" in payload
-    assert "available" in payload
-    assert "preview" in payload
-    assert {"max_item_amount", "buy", "sell"} <= set(payload["plan"])
-    # Cadence and the on/off switch are not the plan's to carry any more.
-    assert not {"enabled", "frequency", "schedule_pattern"} & set(payload["plan"])
+    plan = sanitize_dca_plan(
+        {"enabled": True, "frequency": "1hr", "schedule_pattern": "0 9 * * 1-5",
+         "buy": {"items": [{"symbol": "SPY", "amount": 40}]}, "sell": {"items": []}},
+        [{"symbol": "SPY", "enabled": True}],
+    )
+
+    assert set(plan) == {"buy", "sell"}
 
 
 def test_controls_payload_returns_persisted_choices() -> None:
@@ -281,9 +283,6 @@ def test_non_refresh_backtest_does_not_compute_without_cached_rows(monkeypatch) 
         raise AssertionError("non-refresh request should not compute a backtest")
 
     _patch_payloads(monkeypatch, "universe_payload", lambda: {"rows": []})
-    _patch_payloads(monkeypatch, "load_dca_plan",
-        lambda rows, **kwargs: {"buy": {"items": []}, "sell": {"items": []}},
-    )
     _patch_payloads(monkeypatch, "_load_backtest_cache", lambda: {"version": 4, "items": {}})
     _patch_payloads(monkeypatch, "_compute_backtest", fail_compute)
 
@@ -308,9 +307,6 @@ def test_refresh_backtest_computes_with_market_data_refresh(monkeypatch) -> None
         }
 
     _patch_payloads(monkeypatch, "universe_payload", lambda: {"rows": []})
-    _patch_payloads(monkeypatch, "load_dca_plan",
-        lambda rows, **kwargs: {"buy": {"items": []}, "sell": {"items": []}},
-    )
     _patch_payloads(monkeypatch, "_load_backtest_cache", lambda: {"version": 4, "items": {}})
     _patch_payloads(monkeypatch, "_save_backtest_cache", lambda cache: None)
     _patch_payloads(monkeypatch, "_compute_backtest", fake_compute)
@@ -526,9 +522,7 @@ def test_dca_view_states_the_cadence_its_binding_will_actually_use(monkeypatch) 
         "sell": {"items": []},
     }
     _patch_payloads(monkeypatch, "universe_payload", lambda: {"rows": [{"symbol": "SPY"}]})
-    _patch_payloads(monkeypatch, "load_dca_plan", lambda rows, **kwargs: plan)
     monkeypatch.setattr(dca_bot.DCAAlgorithm, "plan", lambda self, config: plan)
-    monkeypatch.setattr(dca, "unknown_plan_symbols", lambda *a, **kw: [])
     monkeypatch.setattr(dca_bot, "unknown_plan_symbols", lambda *a, **kw: [])
     monkeypatch.setattr(market_context, "create_data_client", lambda config: object())
     monkeypatch.setattr(market_context, "load_latest_prices", lambda symbols, config, client: {"SPY": 500.0})

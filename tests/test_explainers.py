@@ -24,6 +24,7 @@ def _config_fields(algorithm_id: str) -> set[str]:
     """
     from dataclasses import fields
 
+    from src.algorithms.dca import DCA_ALGORITHMS, PLAN_KEY
     from src.algorithms.dca.bursty import BurstyConfig
     from src.algorithms.dual_momentum import DualMomentumConfig
     from src.algorithms.fast_momentum import DefensiveMomentumConfig
@@ -36,7 +37,12 @@ def _config_fields(algorithm_id: str) -> set[str]:
         "spy_rotation": InvestSpyConfig,
     }
     cls = dataclasses.get(algorithm_id)
-    return {field.name for field in fields(cls)} if cls else set()
+    known = {field.name for field in fields(cls)} if cls else set()
+    if algorithm_id in DCA_ALGORITHMS:
+        # DCA's budgets are a knob the algorithm reads straight out of its config section
+        # rather than through a dataclass, so a dataclass-only view calls the plan stale.
+        known.add(PLAN_KEY)
+    return known
 
 
 @pytest.mark.parametrize("algorithm_id", ALGORITHMS)
@@ -82,6 +88,9 @@ _PROSE_ALLOWANCES = {
     "cash_buffer", "min_trade_dollars", "rebalance_threshold",
     # derived terms in formulas
     "pullback_bonus", "micro_return", "monthly_budget", "held_value", "elapsed_months",
+    # accrual's own intermediate terms: elapsed time, and the smallest trade that can reach
+    # the market. Both are computed, never configured.
+    "hours_since_last_buy", "min_executable",
 }
 
 

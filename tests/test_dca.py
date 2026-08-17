@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.algorithms.dca import allocation_preview, load_dca_plan, sanitize_dca_plan, save_dca_plan
+from src.algorithms.dca import allocation_preview, raw_plan_from_config, sanitize_dca_plan, unknown_plan_symbols
 
 
 UNIVERSE = [
@@ -47,16 +47,17 @@ def test_allocation_preview_uses_exact_item_amounts() -> None:
 
 
 def test_sanitize_dca_plan_clamps_item_amount_to_max() -> None:
+    from src.algorithms.dca import DCA_MAX_ITEM_AMOUNT
+
     plan = sanitize_dca_plan(
         {
-            "max_item_amount": 50,
-            "buy": {"items": [{"symbol": "SPY", "amount": 140}]},
+            "buy": {"items": [{"symbol": "SPY", "amount": DCA_MAX_ITEM_AMOUNT * 3}]},
             "sell": {"items": []},
         },
         UNIVERSE,
     )
 
-    assert plan["buy"]["items"][0]["amount"] == 50
+    assert plan["buy"]["items"][0]["amount"] == DCA_MAX_ITEM_AMOUNT
 
 
 def test_sanitize_dca_plan_drops_dashboard_layout_fields() -> None:
@@ -90,105 +91,69 @@ def test_sanitize_dca_plan_drops_scheduling_and_enablement_keys() -> None:
         UNIVERSE,
     )
 
-    assert set(plan) == {"max_item_amount", "buy", "sell"}
+    assert set(plan) == {"buy", "sell"}
 
 
-def test_save_and_load_dca_plan_uses_yaml_section(tmp_path) -> None:
-    config_path = tmp_path / "dca_bot.yaml"
+def test_a_plan_is_ordinary_algorithm_config_keyed_by_algorithm() -> None:
+    """DCA is a normal algorithm with a custom editor, so its plan is normal tuning.
 
-    saved = save_dca_plan(
-        {
-            "buy": {"items": [{"symbol": "SPY", "amount": 40}]},
-            "sell": {"items": []},
-        },
-        UNIVERSE,
-        path=str(config_path),
-    )
+    It used to live in a ``dca_bot`` section keyed by account, which had no room for the
+    algorithm -- so ``dca`` and ``bursty_dca`` were forced to share one budget however
+    differently they behave. Reading it from ``algorithms.<id>.plan`` separates them.
+    """
 
-    loaded = load_dca_plan(UNIVERSE, path=str(config_path))
+    class _Config:
+        algorithm_configs = {
+            "dca": {"plan": {"buy": {"items": [{"symbol": "SPY", "amount": 60.0}]}, "sell": {"items": []}}},
+            "bursty_dca": {"plan": {"buy": {"items": [{"symbol": "QQQ", "amount": 25.0}]}, "sell": {"items": []}}},
+        }
 
-    assert loaded == saved
-    assert "dca_plan:" in config_path.read_text(encoding="utf-8")
+    config = _Config()
+    steady = sanitize_dca_plan(raw_plan_from_config(config, "dca"), UNIVERSE)
+    bursty = sanitize_dca_plan(raw_plan_from_config(config, "bursty_dca"), UNIVERSE)
 
-
-def test_save_and_load_dca_plan_uses_dca_bot_file(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "dca_bot.yaml"
-    monkeypatch.setenv("TRADING_DCA_BOT_FILE", str(config_path))
-
-    saved = save_dca_plan(
-        {
-            "buy": {"items": [{"symbol": "SPY", "amount": 40}]},
-            "sell": {"items": []},
-        },
-        UNIVERSE,
-    )
-
-    loaded = load_dca_plan(UNIVERSE)
-    saved_yaml = config_path.read_text(encoding="utf-8")
-
-    assert loaded == saved
-    assert "dca_bot:" in saved_yaml
-    assert "dca_plan:" in saved_yaml
+    assert [(i["symbol"], i["amount"]) for i in steady["buy"]["items"]] == [("SPY", 60.0)]
+    assert [(i["symbol"], i["amount"]) for i in bursty["buy"]["items"]] == [("QQQ", 25.0)]
 
 
-def test_plans_are_per_account_with_the_legacy_plan_as_template(tmp_path) -> None:
-    """The monthly budgets are DCA's config, and config cannot be shared across accounts."""
-    from src.algorithms.dca import load_dca_plan, save_dca_plan
+def test_an_unconfigured_plan_buys_nothing_rather_than_a_built_in_basket() -> None:
+    """The board renders whatever is in the config section, so a fallback here would have the
+    algorithm quietly trading a basket the dashboard showed as empty. DEFAULT_DCA_PLAN seeds a
+    new config; it is not a standing order."""
 
-    path = tmp_path / "dca_bot.yaml"
-    path.write_text(
-        """
-dca_bot:
-  dca_plan:
-    max_item_amount: 500.0
-    buy:
-      amount: 100.0
-      items:
-        - symbol: SPY
-          amount: 60.0
-    sell:
-      amount: 0.0
-      items: []
-""",
-        encoding="utf-8",
-    )
-    universe = [{"symbol": "SPY", "enabled": True}, {"symbol": "QQQ", "enabled": True}]
+    class _Config:
+        algorithm_configs = {"dca": {"rsi_lookback": 2}}
 
-    # Every account starts from the pre-account plan, so an existing config keeps working.
-    for account in ("", "paper", "live"):
-        loaded = load_dca_plan(universe, path=str(path), account_id=account)
-        assert [(i["symbol"], i["amount"]) for i in loaded["buy"]["items"]] == [("SPY", 60.0)]
-
-    save_dca_plan(
-        {"max_item_amount": 500.0, "buy": {"amount": 25.0, "items": [{"symbol": "QQQ", "amount": 25.0}]},
-         "sell": {"amount": 0.0, "items": []}},
-        universe,
-        path=str(path),
-        account_id="paper",
-    )
-
-    paper = load_dca_plan(universe, path=str(path), account_id="paper")
-    live = load_dca_plan(universe, path=str(path), account_id="live")
-    assert [(i["symbol"], i["amount"]) for i in paper["buy"]["items"]] == [("QQQ", 25.0)]
-    # Untouched accounts still read the template rather than inheriting paper's edit.
-    assert [(i["symbol"], i["amount"]) for i in live["buy"]["items"]] == [("SPY", 60.0)]
+    assert raw_plan_from_config(_Config(), "dca") == {}
+    assert raw_plan_from_config(_Config(), "never_configured") == {}
+    assert sanitize_dca_plan(raw_plan_from_config(_Config(), "dca"), UNIVERSE)["buy"]["items"] == []
 
 
-def test_dca_algorithm_reads_the_plan_for_the_account_it_trades(monkeypatch) -> None:
+def test_unknown_plan_symbols_surfaces_what_sanitising_drops() -> None:
+    """A typo is otherwise invisible: the row never appears and the money is never spent."""
+    raw = {"buy": {"items": [{"symbol": "SPY", "amount": 10}, {"symbol": "NOPE", "amount": 10}]},
+           "sell": {"items": []}}
+
+    assert unknown_plan_symbols(raw, UNIVERSE) == ["NOPE"]
+    assert [i["symbol"] for i in sanitize_dca_plan(raw, UNIVERSE)["buy"]["items"]] == ["SPY"]
+
+
+def test_dca_algorithm_reads_its_own_section(monkeypatch) -> None:
     from src.algorithms.dca import bot as dca_bot
+    from src.algorithms.dca.bursty import BurstyDCAAlgorithm
 
-    seen = {}
-
-    def fake_load(rows, path=None, account_id=""):
-        seen["account_id"] = account_id
-        return {"buy": {"items": []}, "sell": {"items": []}}
-
-    monkeypatch.setattr(dca_bot, "load_dca_plan", fake_load)
-    monkeypatch.setattr("src.api.api_payloads.universe_payload", lambda: {"rows": []})
+    monkeypatch.setattr(
+        "src.api.api_payloads.universe_payload",
+        lambda: {"rows": [{"symbol": "SPY", "enabled": True}, {"symbol": "QQQ", "enabled": True}]},
+    )
 
     class _Config:
         account_id = "live"
+        algorithm_configs = {
+            "dca": {"plan": {"buy": {"items": [{"symbol": "SPY", "amount": 60.0}]}, "sell": {"items": []}}},
+            "bursty_dca": {"plan": {"buy": {"items": [{"symbol": "QQQ", "amount": 25.0}]}, "sell": {"items": []}}},
+        }
 
     config = _Config()
-    dca_bot.DCAAlgorithm(config).plan(config)
-    assert seen["account_id"] == "live"
+    assert [i["symbol"] for i in dca_bot.DCAAlgorithm(config).plan(config)["buy"]["items"]] == ["SPY"]
+    assert [i["symbol"] for i in BurstyDCAAlgorithm(config).plan(config)["buy"]["items"]] == ["QQQ"]

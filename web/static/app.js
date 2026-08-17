@@ -78,7 +78,6 @@ const STRATEGIES = [
 const DEFAULT_ALGORITHM_KEY = "dca";
 
 //: Strategies driven by the DCA plan, so a plan edit invalidates their cached views.
-const DCA_STRATEGY_KEYS = ["dca", "bursty_dca"];
 
 const state = {
   status: null,
@@ -90,10 +89,10 @@ const state = {
   },
   accounts: { rows: [] },
   bot: null,
-  dca: null,
-  //: Account whose plan is currently being fetched, so a re-render mid-flight does not start
-  //: a second request for the same one.
-  dcaPlanLoading: "",
+  //: Which algorithm's plan the bubble board is editing, set when the board renders.
+  planStrategy: "",
+  //: Which algorithm ``state.nodes`` were built from, so they cannot be synced into another.
+  nodesStrategy: "",
   //: "", "saving" or the time of the last successful plan save. The board has no save button
   //: -- it writes on every gesture -- so this is the only feedback that an edit landed.
   planSaveStatus: "",
@@ -223,16 +222,40 @@ function bucketStrokeColor(bucketName) {
   return shadeColor(bucketColor(bucketName), isDcaEnabled() ? -48 : -34);
 }
 
+//: Which algorithm's plan the board is editing. DCA is a normal algorithm with a custom
+//: editor, so its plan is ordinary tuning living at algorithms.<id>.plan -- which is why
+//: ``dca`` and ``bursty_dca`` now have separate budgets rather than sharing one.
+function planStrategyKey() {
+  return state.planStrategy || DEFAULT_ALGORITHM_KEY;
+}
+
+//: The plan object inside the loaded config, created empty if this algorithm has none yet.
+//: Returns null until the config has arrived, which is what the board's guards test.
+function currentPlan() {
+  const config = state.algorithmConfigs[planStrategyKey()]?.config;
+  if (!config) return null;
+  if (!config.plan || typeof config.plan !== "object") config.plan = {};
+  BUCKET_NAMES.forEach((bucketName) => {
+    if (!config.plan[bucketName] || typeof config.plan[bucketName] !== "object") {
+      config.plan[bucketName] = { amount: 0, items: [] };
+    }
+    if (!Array.isArray(config.plan[bucketName].items)) config.plan[bucketName].items = [];
+  });
+  return config.plan;
+}
+
 function bucketItems(bucketName) {
-  return state.dca?.plan?.[bucketName]?.items || [];
+  return currentPlan()?.[bucketName]?.items || [];
 }
 
 function setBucketItems(bucketName, items) {
-  state.dca.plan[bucketName].items = items.map((item) => ({
+  const plan = currentPlan();
+  if (!plan) return;
+  plan[bucketName].items = items.map((item) => ({
     symbol: item.symbol,
     amount: clamp(Number(item.amount || 0), 0, MAX_AMOUNT),
   }));
-  state.dca.plan[bucketName].amount = state.dca.plan[bucketName].items.reduce(
+  plan[bucketName].amount = plan[bucketName].items.reduce(
     (total, item) => total + Number(item.amount || 0),
     0,
   );
@@ -392,6 +415,9 @@ function smoothClosedPath(points) {
 function buildNodes() {
   const previous = new Map(state.nodes.map((node) => [`${node.bucketName}:${node.symbol}`, node]));
   state.nodes = [];
+  // Nodes belong to the plan they were built from. Recorded so nothing can write one
+  // algorithm's bubbles into another's plan -- see syncNodesToPlan.
+  state.nodesStrategy = planStrategyKey();
   BUCKET_NAMES.forEach((bucketName) => {
     const bucket = state.layout.buckets[bucketName];
     const items = bucketItems(bucketName);
@@ -429,12 +455,18 @@ function syncNodeToPlan(node) {
 }
 
 function syncNodesToPlan() {
+  // Nodes are the board's working copy of one algorithm's plan. Writing them into a
+  // different algorithm's plan overwrites it with budgets the reader never typed there --
+  // which is what happened on every navigation between two DCA pages, because renderDca
+  // syncs before it rebuilds. The nodes are rebuilt from the new plan a moment later, so
+  // there is nothing here worth carrying across.
+  if (state.nodesStrategy !== planStrategyKey()) return;
   state.nodes.forEach(syncNodeToPlan);
   BUCKET_NAMES.forEach((bucketName) => setBucketItems(bucketName, bucketItems(bucketName)));
 }
 
 function renderBoard() {
-  if (!state.dca?.plan || !$("#bubbleBoard")) return;
+  if (!currentPlan() || !$("#bubbleBoard")) return;
   window.cancelAnimationFrame(state.animationId);
   document.body.classList.toggle("dca-off", !isDcaEnabled());
   calculateLayout();
@@ -921,11 +953,11 @@ function commitSymbolEntry() {
   }
 
   const amount = 25;
-  state.dca.plan[draft.bucketName].items.push({
+  currentPlan()[draft.bucketName].items.push({
     symbol: row.symbol,
     amount,
   });
-  setBucketItems(draft.bucketName, state.dca.plan[draft.bucketName].items);
+  setBucketItems(draft.bucketName, currentPlan()[draft.bucketName].items);
   renderDca();
   schedulePlanSave();
   showToast(`${row.symbol} added`);
@@ -947,16 +979,16 @@ function moveAsset(node) {
   const found = fromItems.find(({ item }) => item.symbol === node.symbol);
   if (!found) return;
   BUCKET_NAMES.forEach((bucketName) => {
-    state.dca.plan[bucketName].items = bucketItems(bucketName).filter((item) => item.symbol !== node.symbol);
+    currentPlan()[bucketName].items = bucketItems(bucketName).filter((item) => item.symbol !== node.symbol);
   });
   found.item.amount = node.amount;
-  state.dca.plan[node.bucketName].items.push(found.item);
+  currentPlan()[node.bucketName].items.push(found.item);
   BUCKET_NAMES.forEach((bucketName) => setBucketItems(bucketName, bucketItems(bucketName)));
   schedulePlanSave();
 }
 
 function renderDca() {
-  if (!state.dca?.plan) return;
+  if (!currentPlan()) return;
   syncNodesToPlan();
   renderBoard();
 }
@@ -996,34 +1028,6 @@ function accountForStrategy(strategyKey) {
 
 function primaryDcaBindingId() {
   return bindings().find((binding) => DCA_ALGORITHM_KEYS.includes(binding.strategy))?.id || "";
-}
-
-//: The account whose plan the bubble board should show. A DCA page uses its own binding's
-//: account; anything else falls back to the first DCA binding, which is all the board can
-//: mean when it is not being rendered for a DCA algorithm.
-function dcaAccountForStrategy(strategyKey) {
-  if (DCA_ALGORITHM_KEYS.includes(strategyKey)) {
-    const account = accountForStrategy(strategyKey);
-    if (account) return account;
-  }
-  return bindingById(primaryDcaBindingId())?.account_id || "";
-}
-
-async function ensureDcaPlan(strategyKey) {
-  const wanted = dcaAccountForStrategy(strategyKey);
-  if (state.dca && (state.dca.account_id || "") === wanted) return;
-  if (state.dcaPlanLoading === wanted) return;
-  state.dcaPlanLoading = wanted;
-  try {
-    const payload = await api(`/api/dca?account_id=${encodeURIComponent(wanted)}`, { timeoutMs: 5000 });
-    state.dca = payload;
-    state.dca.plan.max_item_amount = MAX_AMOUNT;
-    render();
-  } catch (error) {
-    showToast(`Could not load the ${accountLabel(wanted)} plan: ${error.message}`);
-  } finally {
-    state.dcaPlanLoading = "";
-  }
 }
 
 function bindingById(bindingId) {
@@ -1217,13 +1221,10 @@ async function applyUniverseProposal() {
     state.universeProposal = null;
     state.signals = {};
     state.backtests = {};
-    const dcaPayload = await api(
-      `/api/dca?account_id=${encodeURIComponent(state.dca?.account_id || dcaAccountForStrategy(currentRoute().id))}`,
-      { timeoutMs: 5000 },
-    );
-    state.dca = dcaPayload;
-    state.dca.plan.max_item_amount = MAX_AMOUNT;
-    renderDca();
+    // A plan is sanitised against the universe when it is read, so every cached config may
+    // now describe a different set of tradable symbols.
+    state.algorithmConfigs = {};
+    ensureAlgorithmConfig(currentRoute().id);
     render();
     // The universe change invalidates every algorithm's view, so reload the one on screen.
     loadSignals(currentRoute().id);
@@ -1656,25 +1657,22 @@ function schedulePlanSave() {
 }
 
 async function savePlan(quiet = true) {
-  if (!state.dca?.plan) return;
+  const strategyKey = planStrategyKey();
+  const entry = state.algorithmConfigs[strategyKey];
+  if (!entry?.config || !currentPlan()) return;
   syncNodesToPlan();
   try {
-    const [dcaPayload, controlsPayload] = await Promise.all([
-      api("/api/dca", {
-        method: "POST",
-        body: JSON.stringify({ plan: state.dca.plan, account_id: state.dca?.account_id || "" }),
-        timeoutMs: 5000,
-      }),
-      api("/api/controls", { method: "POST", body: JSON.stringify({ controls: state.controls }), timeoutMs: 5000 }),
-    ]);
-    state.dca = dcaPayload;
-    state.controls = controlsPayload.controls;
-    // The plan is an input to both DCA strategies, so their cached views are now stale.
-    // This used to clear "none", which was where the DCA view lived before it was selectable.
-    DCA_STRATEGY_KEYS.forEach((key) => {
-      delete state.backtests[key];
-      delete state.signals[key];
+    // The plan is part of this algorithm's config, so it saves through the same endpoint as
+    // every other knob -- there is no DCA-shaped write path any more.
+    const payload = await api("/api/algorithm-config", {
+      method: "POST",
+      body: JSON.stringify({ strategy: strategyKey, config: entry.config }),
+      timeoutMs: 5000,
     });
+    state.algorithmConfigs[strategyKey] = payload;
+    // Only this algorithm's views are stale: the plans are no longer shared.
+    delete state.backtests[strategyKey];
+    delete state.signals[strategyKey];
     renderDca();
     setPlanSaveStatus(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
     if (!quiet) showToast("Saved");
@@ -2217,12 +2215,22 @@ function renderTuneTab(body, strategy) {
 
 function renderDcaTuner(host, strategy) {
   const hint = $("#tuneHint");
-  const plan = state.algorithmConfigs[strategy.key]?.explainer?.parameters?.__plan__;
-  // The board edits the plan of the account *this* algorithm is deployed on. It used to edit
-  // the first DCA binding's account whichever page you were on, so the plan you changed was
-  // not necessarily the plan that would trade -- or the one the signal view rendered.
-  ensureDcaPlan(strategy.key);
-  if (hint) hint.textContent = `Dollars per month, per symbol · ${accountLabel(state.dca?.account_id)}`;
+  const entry = state.algorithmConfigs[strategy.key];
+  const plan = entry?.explainer?.parameters?.plan;
+  // The board edits this algorithm's own plan, so which page you are on decides what you are
+  // editing. It used to edit the first DCA binding's account whichever page you were on.
+  if (state.planStrategy !== strategy.key) {
+    // A different algorithm's board: drop the old bubbles rather than animating them into
+    // place as though they were this plan's.
+    state.nodes = [];
+    state.selected = null;
+  }
+  state.planStrategy = strategy.key;
+  if (!entry) {
+    host.innerHTML = `<p class="emptyState">Loading budgets.</p>`;
+    return;
+  }
+  if (hint) hint.textContent = `Dollars per month, per symbol · algorithms.${entry.config_key || strategy.key}.plan`;
   host.innerHTML = `<svg class="bubbleBoard" id="bubbleBoard" role="img"
     aria-label="Interactive buy and sell budget bubbles"></svg>
     <p class="cardHint">${escapeHtml(plan?.effect || "")} Scroll a bubble to change its budget, or select one and type the amount. Drag between buckets, double-click to add.
@@ -2239,7 +2247,10 @@ function renderConfigForm(host, strategy) {
     return;
   }
   if (hint) hint.textContent = `config/algorithms.yaml · ${entry.config_key || strategy.key}`;
-  const fields = Object.entries(entry.config || {});
+  // The plan has its own editor on this page, so it is not also offered as a raw JSON box.
+  // saveCurrentConfig merges over the loaded config rather than replacing it, so leaving it
+  // out of the form does not drop it on save.
+  const fields = Object.entries(entry.config || {}).filter(([key]) => !isPlanField(strategy.key, key));
   const docs = entry.explainer?.parameters || {};
   host.innerHTML = fields.length
     ? `<div class="configForm">${fields.map(([key, value]) => renderConfigField(key, value, docs[key])).join("")}</div>`
@@ -2478,6 +2489,12 @@ async function loadAccounts() {
   }
 }
 
+//: The plan is config, but it has the bubble board rather than a form field. Everything that
+//: walks the config form has to know to leave it alone.
+function isPlanField(strategyKey, key) {
+  return key === "plan" && DCA_ALGORITHM_KEYS.includes(strategyKey);
+}
+
 async function saveCurrentConfig(strategyKey) {
   const host = $("#tuneBody");
   if (!host) return;
@@ -2489,9 +2506,12 @@ async function saveCurrentConfig(strategyKey) {
     return;
   }
   try {
+    // Merged over the loaded config, not sent in its place: the server replaces the whole
+    // section, so posting only the rendered fields would delete the plan the board edits.
+    const merged = { ...(state.algorithmConfigs[strategyKey]?.config || {}), ...values };
     state.algorithmConfigs[strategyKey] = await api("/api/algorithm-config", {
       method: "POST",
-      body: JSON.stringify({ strategy: strategyKey, config: values }),
+      body: JSON.stringify({ strategy: strategyKey, config: merged }),
       timeoutMs: 8000,
     });
     // Tuning feeds the backtest cache key, so the cached curve no longer describes this config.
@@ -2763,12 +2783,6 @@ async function init() {
     state.controls = controlsPayload.controls || state.controls;
     state.bot = controlsPayload.bot || statusPayload.bot || null;
     await loadAccounts();
-    // Plans are per account, so the plan to load is only knowable once controls are in. The
-    // page being opened decides which one -- ``renderDcaTuner`` re-resolves on every render,
-    // so navigating to another DCA algorithm swaps the plan rather than showing a stale one.
-    const dcaAccount = dcaAccountForStrategy(currentRoute().id);
-    state.dca = await api(`/api/dca?account_id=${encodeURIComponent(dcaAccount)}`, { timeoutMs: 5000 });
-    state.dca.plan.max_item_amount = MAX_AMOUNT;
   } catch (error) {
     showToast(`Could not load dashboard: ${error.message}`);
   }
