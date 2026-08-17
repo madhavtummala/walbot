@@ -119,10 +119,12 @@ class DualMomentumConfig:
     #: A holding that falls this much in a single session is sold outright, ahead of
     #: every other exit rule. 0 turns it off.
     #:
-    #: Distinct from ``intraday_drawdown_limit``, which is a portfolio-level session
-    #: breaker and is inert at a once-a-day cadence -- it rebases its session high on
-    #: every run, so the drawdown it measures is always exactly zero. This one is per
-    #: name and reads the close-to-close return, so it works at the cadence we run at.
+    #: This is the algorithm's only stop. There used to be a portfolio-level session
+    #: breaker beside it, ``intraday_drawdown_limit``, which could not fire: it rebases
+    #: its session high on every run, so at ``DAILY_AT_OPEN`` the drawdown it measured
+    #: was always exactly zero. A knob that reads as protection and provides none is
+    #: worse than no knob, so it is gone. ``session_drawdown_breached`` remains in
+    #: ``algorithms/risk.py`` for Fast Momentum, which genuinely runs intraday.
     max_daily_drop: float = 0.10
     # -- eligibility persistence ----------------------------------------------------------
     #: Eligibility is a stateless per-day test, so a name sitting near any of its floors
@@ -223,8 +225,22 @@ class DualMomentumConfig:
     vol_estimation_days: int = 20
     vol_scale_floor: float = 0.25
     high_vol_trigger: float = 1.3
-    intraday_drawdown_limit: float = -0.015
     rebalance_weight_threshold: float = 0.03
+    #: How far to move toward the new target on each run, as a fraction: the book becomes
+    #: ``(1 - lambda) * current + lambda * target``. 1.0 jumps straight there, which is what
+    #: this did before the knob existed.
+    #:
+    #: A no-trade band and a partial adjustment brake different things, which is why both are
+    #: here. The band is a *filter* -- once a move clears it, the position goes all the way to
+    #: target -- so it suppresses small drift but does nothing about a target that swings hard
+    #: every session. The partial move is a *regulariser*: it lets the book track a genuine
+    #: trend within a few runs while a one-session target spike moves it only a fraction of the
+    #: way, and reverts for free when the spike does.
+    #:
+    #: Exits are exempt: a name the strategy has decided to drop is dropped, not decayed to
+    #: zero over a week, which would leave a broken holding on the book for as long as the
+    #: theme it belonged to took to fade.
+    rebalance_step: float = 1.0
     minimum_trade_notional: float = 100.0
     minimum_trade_nav_fraction: float = 0.005
     defensive_max_positions: int = 2

@@ -288,7 +288,7 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "etf_fast_return_days": {"what": "Short lookback used to catch deterioration.", "effect": "Stops a name staying eligible on a stale long-horizon score while it collapses."},
             "max_daily_drop": {
                 "what": "A holding falling this much in one session is sold immediately.",
-                "effect": "Works at a daily cadence, unlike intraday_drawdown_limit, which rebases its session high on every run and so never fires. Lower stops out on ordinary volatility; 0 turns it off.",
+                "effect": "The only stop this algorithm has, and it works at a daily cadence. Lower stops out on ordinary volatility; 0 turns it off.",
             },
             "eligibility_window": {"what": "How many runs the eligibility count looks back over.", "effect": "Longer makes membership slower to change in both directions."},
             "entry_min_eligible_days": {"what": "Runs in that window a name must have been eligible for before it can be opened.", "effect": "Higher demands a settled signal and enters later; at 1 entry is stateless again."},
@@ -351,7 +351,6 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "vol_estimation_days": {"what": "Daily window for volatility and covariance.", "effect": "Shorter reacts to volatility spikes faster and re-sizes more often."},
             "vol_scale_floor": {"what": "Smallest scale factor before switching to defensive.", "effect": "Below this, holding a shrunken risk position is worse than holding none."},
             "high_vol_trigger": {"what": "Multiple of target volatility at which scaling engages.", "effect": "Above 1.0 it stops re-sizing a portfolio already inside its budget, which saves turnover."},
-            "intraday_drawdown_limit": {"what": "Session loss that parks the book in the defensive sleeve.", "effect": "Tighter stops the day sooner and locks in the loss; it stays tripped until the next session."},
             "rebalance_weight_threshold": {"what": "Smallest weight change worth trading.", "effect": "Higher tolerates more drift from target in exchange for less churn."},
             "minimum_trade_notional": {"what": "Floor on the dollar size of any single order.", "effect": "Stops trivial orders whose costs exceed their benefit."},
             "minimum_trade_nav_fraction": {"what": "The same floor as a fraction of equity.", "effect": "The larger of the two applies, so the minimum scales with the account."},

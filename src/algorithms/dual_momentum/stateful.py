@@ -1,4 +1,4 @@
-"""Step 2: the decisions that need memory -- regime confirmation, cooldowns, drawdown breaker.
+"""Step 2: the decisions that need memory -- regime confirmation, cooldowns, eligibility runs.
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ from datetime import datetime
 from typing import Any
 
 from ...common.timeutils import minutes_between as _minutes_between, parse_iso_utc as _parse_time
-from ..risk import session_drawdown_breached
 
 logger = logging.getLogger(__name__)
 
@@ -65,16 +64,6 @@ def confirm_regime(state: dict[str, Any], raw_risk_on: bool, config: DualMomentu
     return {"regime_risk_on": confirmed, "regime_agree": agree, "regime_disagree": disagree}
 
 
-def intraday_drawdown_breached(
-    state: dict[str, Any],
-    equity: float,
-    config: DualMomentumConfig,
-    as_of: datetime,
-) -> bool:
-    """This algorithm's binding of the shared session breaker -- see ``algorithms/risk.py``."""
-    return session_drawdown_breached(state, equity, config.intraday_drawdown_limit, as_of)
-
-
 def apply_turnover_filters(
     target: dict[str, float],
     current: dict[str, float],
@@ -106,6 +95,31 @@ def apply_turnover_filters(
             continue
         filtered[symbol] = weight
     return filtered
+
+
+def partial_adjustment(
+    target: dict[str, float],
+    current: dict[str, float],
+    config: DualMomentumConfig,
+) -> dict[str, float]:
+    """Move ``config.rebalance_step`` of the way from ``current`` to ``target``.
+
+    See ``rebalance_step``. Applied before :func:`apply_turnover_filters`, so a step small
+    enough to leave the move under the no-trade band results in no trade at all rather than in
+    a token one -- the two brakes compose instead of fighting.
+
+    A target of zero is honoured in full. Decaying an exit would keep a name the strategy has
+    already rejected on the book for several more runs, which is the one kind of turnover
+    saving that is not worth having.
+    """
+    step = max(min(config.rebalance_step, 1.0), 0.0)
+    if step >= 1.0:
+        return dict(target)
+    adjusted: dict[str, float] = {}
+    for symbol, weight in target.items():
+        held = float(current.get(symbol, 0.0))
+        adjusted[symbol] = weight if weight <= 0 else held + step * (weight - held)
+    return adjusted
 
 
 def track_eligibility(

@@ -298,9 +298,13 @@ def _open_in_cash_equivalent(
         logger.warning("No %s price on the first trade date; the book opens in cash instead", symbol)
         return
     cash = float(book.state.get("cash", 0.0))
+    # The balance has to cover the spread as well as the shares. Sizing off the clean close
+    # asks for exactly the cash on hand and then cannot pay to cross, so the order is refused
+    # and the book opens in cash -- silently, and only when costs are switched on.
+    payable = price * (1.0 + book.cost_bps / 10_000.0)
     # Truncated, never rounded: rounding a whole balance up asks for a fraction of a cent more
     # than the account holds, and the book refuses the order rather than overdraw.
-    quantity = round_shares(cash / price, supports_fractional_shares=fractional)
+    quantity = round_shares(cash / payable, supports_fractional_shares=fractional)
     if quantity <= 0:
         return
     book.submit_order(
@@ -322,6 +326,7 @@ def replay(
     dividends: dict[str, list[CashDividend]] | None = None,
     history: "HistoryCache | None" = None,
     open_in: str = "",
+    cost_bps: float = 0.0,
 ) -> tuple[pd.DataFrame, Coverage]:
     """Step ``algorithm`` through ``trade_dates``, trading at each date's close.
 
@@ -335,6 +340,12 @@ def replay(
     ``history`` lets a caller replaying the same symbols over the same dates many times -- a
     parameter sweep -- read the bar store once for all of them instead of once per run. It is
     a pure cache of what the store holds, so sharing it cannot make two runs differ.
+
+    ``cost_bps`` is the half-spread plus slippage charged on every fill, in basis points --
+    a buy pays above the close, a sell receives below it. Zero by default, which is what this
+    replay has always assumed; it is an argument rather than a constant because for a book
+    turning over 100x its stake a year the number is worth more than the gross return, and
+    "does the edge survive execution" should be asked as a curve rather than assumed.
 
     ``open_in`` names a symbol to park the opening balance in -- ``"SGOV"`` for an account
     whose idle cash really sits in T-bills. Its bars must be in ``daily_history``, or the book
@@ -367,6 +378,7 @@ def replay(
     # so the class, the fills and the accounting are shared while the balances are not.
     with ephemeral_state():
         book = PaperBrokerage(config)
+        book.cost_bps = max(float(cost_bps or 0.0), 0.0)
         book.state.update({"cash": float(starting_equity), "positions": {}, "prices": {}})
 
         for index, trade_date in enumerate(trade_dates):
@@ -407,6 +419,7 @@ def replay(
             equity = float(account["equity"])
             order_count = 0
             turnover = 0.0
+            trades: dict[str, float] = {}
 
             # index 0 has no prior bar to form a signal from, so it only seeds the clock.
             if index > 0 and should_run(trade_date):
@@ -458,8 +471,15 @@ def replay(
                 for order in filled:
                     value = abs(float(order.get("quantity", 0.0)) * float(order.get("latest_price", 0.0)))
                     turnover += value
-                    if str(order.get("action", "")).lower() == "buy":
+                    buying = str(order.get("action", "")).lower() == "buy"
+                    if buying:
                         contributed += value
+                    # Signed, per symbol. The daily total says how much was traded; only the
+                    # per-name breakdown says *why* -- an entry, an exit and a resize are three
+                    # different decisions, and they are indistinguishable once summed.
+                    symbol = str(order.get("symbol", "") or "")
+                    if symbol:
+                        trades[symbol] = trades.get(symbol, 0.0) + (value if buying else -value)
 
                 book.mark_prices(closes)
                 account = book.get_account_state()
@@ -480,6 +500,8 @@ def replay(
                     "dividend_income": dividend_income,
                     "dividends_paid": paid_today,
                     "turnover": turnover,
+                    # Signed traded notional per symbol, for turnover attribution. See above.
+                    "trades": trades,
                     "order_count": order_count,
                     "allocation_mode": allocation_mode,
                 }
