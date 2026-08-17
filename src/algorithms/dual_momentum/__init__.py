@@ -43,9 +43,9 @@ from .stateful import (  # noqa: F401
     _record_exits,
     resolve_themes,
     apply_turnover_filters,
+    partial_adjustment,
     track_eligibility,
     confirm_regime,
-    intraday_drawdown_breached,
 )
 from .algorithm import (  # noqa: F401
     DualMomentumAlgorithm,
@@ -58,6 +58,7 @@ __all__ = [
     "allocation_mode",
     "analyze_universe",
     "apply_turnover_filters",
+    "partial_adjustment",
     "track_eligibility",
     "base_scores",
     "build_signals",
@@ -67,7 +68,6 @@ __all__ = [
     "defensive_weights",
     "eligibility",
     "hold_eligibility",
-    "intraday_drawdown_breached",
     "market_regime",
     "park_residual",
     "theme_of",

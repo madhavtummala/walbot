@@ -411,3 +411,34 @@ def test_a_parked_book_still_funds_an_incremental_buy() -> None:
     assert any(order["symbol"] == "AAA" and order["status"] == "submitted" for order in fills)
     # The sleeve was sold down to pay for them.
     assert history["positions"].iloc[-1].get("SGOV", 0) < history["positions"].iloc[0]["SGOV"]
+
+
+def test_cost_bps_is_charged_on_every_fill_and_defaults_to_free() -> None:
+    """Churn has to cost something, or the sweep ranks the configuration that trades most.
+
+    The half-spread is charged inside the fill rather than deducted afterwards, so it compounds
+    and can make an order unaffordable -- which is the behaviour a post-hoc drag column cannot
+    reproduce. It defaults to zero because a paper *account* is a rehearsal of a live one, and
+    only a backtest should be paying imaginary spreads.
+    """
+    def equity_at(cost_bps: float) -> float:
+        algorithm = _Recorder(weight=0.0, mode=MODE_INCREMENTAL)
+        history, _ = replay(
+            algorithm,
+            Config(cash_equivalents=["SGOV"]),
+            daily_history=_two_symbol_history(),
+            trade_dates=list(DATES),
+            should_run=lambda date: True,
+            starting_equity=10_000.0,
+            dividends={},
+            open_in="SGOV",
+            cost_bps=cost_bps,
+        )
+        return float(history["equity"].iloc[-1])
+
+    free = equity_at(0.0)
+    charged = equity_at(50.0)
+    assert charged < free, "crossing the spread must cost the book money"
+    # One round of buying into the sleeve at 50bps, on a book that then sits still.
+    assert free - charged == pytest.approx(10_000.0 * 0.005, rel=0.2)
+    assert equity_at(0.0) == free, "the default stays free"

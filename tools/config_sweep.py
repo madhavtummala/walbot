@@ -7,10 +7,15 @@ implementation of dual momentum; this one has no strategy logic in it at all.
 
 Two things to keep in mind when reading the output.
 
-**No transaction costs.** The replay fills at the close with no commission, spread or slippage,
-even though ``config.transaction_cost_bps`` exists. A configuration that churns is therefore
-flattered. Every row reports turnover and a post-hoc cost drag at 1 and 5 basis points so the
-churn can be priced back in; ``net_return_5bps`` is the number to rank on if you care.
+**No transaction costs, unless you ask for them.** By default the replay fills at the close
+with no commission, spread or slippage, so a configuration that churns is flattered. Every row
+reports turnover and a post-hoc cost drag at 1 and 5 basis points so the churn can be priced
+back in; ``net_return_5bps`` is the number to rank on if you care.
+
+``--cost-bps`` instead charges a half-spread inside the fills, which is the more faithful model
+-- it compounds, and it can make a trade unaffordable rather than merely expensive. The two are
+alternatives, not layers: with ``--cost-bps`` set, the ``net_return_*`` columns are charging for
+the same churn a second time.
 
 **One window is not evidence.** A ranking over a single period is a statement about that
 period. Run the finalists over more than one window and prefer what survives all of them.
@@ -107,8 +112,11 @@ class Sweep:
     """Holds the market data every run shares, so the cost of a sweep is the scoring alone."""
 
     def __init__(self, periods: list[str], starting_equity: float | None = None,
-                 open_in: str = "") -> None:
+                 open_in: str = "", cost_bps: float = 0.0) -> None:
         self.base = get_config()
+        #: Charged inside the fills. Zero by default so the post-hoc ``net_return_*`` columns
+        #: stay the only cost model in play; set it and those columns double-count.
+        self.cost_bps = float(cost_bps or 0.0)
         self.providers = _configured_history_providers(self.base)
         #: Park the opening balance here rather than holding it as cash. See ``replay``.
         self.open_in = open_in.upper()
@@ -138,6 +146,39 @@ class Sweep:
             return pd.Timestamp(start, tz="UTC"), pd.Timestamp(end, tz="UTC")
         return _period_start(period), None
 
+    #: Calendar days of bars a symbol needs *before* the window opens, so the 100-day averages
+    #: and 60-day returns are computed from real history rather than from the window's own first
+    #: few days. Generous: the deepest feature is ~105 sessions, and weekends are not sessions.
+    WARMUP_DAYS = 200
+
+    @classmethod
+    def _covering(
+        cls,
+        frames: dict[str, pd.DataFrame],
+        start: pd.Timestamp,
+        period: str,
+    ) -> dict[str, pd.DataFrame]:
+        """Drop symbols that did not exist early enough to be scored over this window.
+
+        The date axis is the intersection across the whole candidate set, so a single late
+        arrival truncates *every* window to its own inception: IBIT listed 2024-01-11 and by
+        itself made 2023 unreachable, even though every other name reaches back to 2022-03.
+
+        Dropping is the honest resolution rather than a convenience. A 2023 replay that held
+        IBIT would be holding a fund that did not yet trade, so the name genuinely is not a
+        candidate in that window -- and excluding it keeps one shared axis, which is what makes
+        two variants comparable.
+        """
+        cutoff = start - pd.Timedelta(days=cls.WARMUP_DAYS)
+        kept = {symbol: frame for symbol, frame in frames.items() if frame.index[0] <= cutoff}
+        dropped = sorted(set(frames) - set(kept))
+        if dropped:
+            logger.warning(
+                "%s: dropping %s -- no bars by %s, so they cannot be scored over this window",
+                period, ", ".join(dropped), cutoff.date(),
+            )
+        return kept or frames
+
     def _load_period(self, period: str) -> None:
         """Daily bars for every candidate symbol, and one date axis shared by every variant.
 
@@ -159,9 +200,21 @@ class Sweep:
             logger.warning("No daily bars for %s; they are dropped from every universe", ", ".join(missing))
 
         start, end = self._bounds(period)
+        frames = self._covering(frames, start, period)
         common = sorted(set.intersection(*(set(frame.index) for frame in frames.values())))
         in_period = [date for date in common if date >= start and (end is None or date <= end)]
-        dates = in_period if len(in_period) >= 2 else common[-_period_row_count(period):]
+        if len(in_period) < 2:
+            # Only a relative window may fall back to "the last N rows". An explicit
+            # ``START:END`` that finds no bars is a data gap, and falling back silently
+            # replays a completely different period under the requested period's label --
+            # a 2023 request scored May-August 2026 and reported it as 2023.
+            if ":" in period:
+                raise RuntimeError(
+                    f"No common trading dates inside {period}; the daily store covers "
+                    f"{common[0].date()} -> {common[-1].date()}"
+                )
+            in_period = common[-_period_row_count(period):]
+        dates = in_period
         if len(dates) < 2:
             raise RuntimeError(f"No common trading dates for {period}")
 
@@ -209,11 +262,28 @@ class Sweep:
             history_providers=self.providers,
             history=self._history_for(period, symbols, requirements.history_lookback_minutes),
             open_in=self.open_in,
+            cost_bps=self.cost_bps,
         )
         self.last_curve = (curve, coverage)
         defensive = {str(s).upper() for s in (tuning.get("defensive_universe") or [])}
         return Run(algorithm_id, label, period, tuning,
                    _measure(curve, coverage, self.starting_equity, time.time() - started, defensive))
+
+
+def _fetch_depth_period(period: str) -> str:
+    """How deep the fetch has to reach, expressed as the ``Nm`` string the fetch understands.
+
+    ``_fetch_backtest_history`` sizes its buffer with ``_period_row_count``, which only parses
+    relative windows -- an explicit ``2023-01-01:2023-12-31`` fell through to the 4-month
+    default, so the store was filled with recent bars and the window found nothing in it.
+    Depth is measured from *today* rather than from the window's own length, because the fetch
+    always counts backwards from now: reaching a 2023 window means paying for everything since.
+    """
+    if ":" not in period:
+        return period
+    start = pd.Timestamp(period.partition(":")[0], tz="UTC")
+    months = max(int((pd.Timestamp.now(tz="UTC") - start).days / 30.44) + 2, 2)
+    return f"{months}m"
 
 
 def _fetch_backtest_history_for(symbols: list[str], period: str, config) -> dict[str, pd.DataFrame]:
@@ -228,7 +298,7 @@ def _fetch_backtest_history_for(symbols: list[str], period: str, config) -> dict
         symbols=list(symbols),
         algorithm_configs={"fast_momentum": {"risk_on_universe": list(symbols), "defensive_universe": []}},
     )
-    return _fetch_backtest_history("fast_momentum", period, forced)
+    return _fetch_backtest_history("fast_momentum", _fetch_depth_period(period), forced)
 
 
 def _exposure(curve: pd.DataFrame, defensive: set[str]) -> dict[str, Any]:
@@ -565,8 +635,97 @@ def dual_wide_churn() -> list[tuple[str, dict[str, Any]]]:
     return variants
 
 
+#: One session, in market minutes -- the unit every selection horizon is quoted in.
+SESSION = 390
+
+
+def _ladder(nano: int, micro: int, meso: int, macro: int, weights: tuple[float, ...]) -> dict[str, Any]:
+    """A selection-horizon ladder, written in sessions rather than in minutes.
+
+    The deployed ladder is 1/2/3/12 sessions weighted 0.10/0.20/0.35/0.35, which puts 65% of
+    the score on three sessions or less. Whether that is momentum or noise is the open question
+    the config's own comments flag, and it is the reason these exist.
+
+    Horizons are capped around 126 sessions on purpose: the daily store starts 2022-03-28, so a
+    window opening in January 2023 has roughly 190 sessions of warm-up behind it and a 252-day
+    lookback would be answered from a partial window rather than refused.
+    """
+    return {
+        "selection_horizon_nano_minutes": nano * SESSION,
+        "selection_horizon_micro_minutes": micro * SESSION,
+        "selection_horizon_meso_minutes": meso * SESSION,
+        "selection_horizon_macro_minutes": macro * SESSION,
+        "w_nano": weights[0], "w_micro": weights[1], "w_meso": weights[2], "w_macro": weights[3],
+    }
+
+
+LADDERS = {
+    # Deployed: everything inside a fortnight.
+    "fast": _ladder(1, 2, 3, 12, (0.10, 0.20, 0.35, 0.35)),
+    # A month at the short end, a quarter at the long.
+    "month": _ladder(5, 10, 21, 63, (0.10, 0.20, 0.35, 0.35)),
+    # The classic cross-sectional shape, as close to 63/126/252 as the store reaches.
+    "quarter": _ladder(10, 21, 63, 126, (0.10, 0.20, 0.35, 0.35)),
+    # Same horizons, weight pushed onto the slow end rather than split evenly.
+    "quarter_slow": _ladder(10, 21, 63, 126, (0.05, 0.15, 0.35, 0.45)),
+    # No fast leg at all: the medium-term signal on its own.
+    "medium_only": _ladder(21, 42, 63, 126, (0.15, 0.25, 0.30, 0.30)),
+}
+
+
+def dual_2023() -> list[tuple[str, dict[str, Any]]]:
+    """The knobs most likely to move a 2023 result, one axis at a time from deployed.
+
+    2023 is a single window and a distinctive one -- a mega-cap-led recovery with small caps
+    flat until November -- so treat a win here as a hypothesis, not a result. Every finalist
+    belongs in ``--period`` alongside at least one other window before it goes anywhere near
+    the deployed file.
+
+    The baseline is +19.5% gross / +13.6% net at 5bps against SPY's +24.8%, on 119x turnover:
+    it loses to the benchmark *before* costs, so the axes here are grouped by which of the two
+    problems they address -- what the strategy selects, and what it pays to hold it.
+    """
+    base = _dual_baseline()
+    variants = [("baseline", dict(base))]
+
+    # --- what it selects ------------------------------------------------------------------
+    for name, ladder in LADDERS.items():
+        if all(base.get(key) == value for key, value in ladder.items()):
+            continue
+        variants.append(_axis(base, f"ladder={name}", **ladder))
+    variants.append(_axis(base, "risk_adjusted_score=True", risk_adjusted_score=True))
+
+    # --- how hard it presses the winners ---------------------------------------------------
+    # Deployed is -1.0, full risk parity, which in 2023 sizes *down* exactly the high-volatility
+    # growth names that produced the year's return. This is the axis with the clearest prior.
+    for tilt in (-0.5, 0.0, 0.5, 1.0):
+        variants.append(_axis(base, f"volatility_tilt={tilt}", volatility_tilt=tilt))
+    for positions in (2, 3, 5, 6):
+        variants.append(_axis(base, f"max_positions={positions}", max_positions=positions,
+                              entry_rank_max=positions, exit_rank_max=positions + 8))
+    for cap in (0.35, 0.65, 1.0):
+        variants.append(_axis(base, f"name_weight_max={cap}", name_weight_max=cap))
+    for cap in (1, 3):
+        variants.append(_axis(base, f"per_theme={cap}", max_positions_per_theme=cap))
+
+    # --- what it pays ----------------------------------------------------------------------
+    # 119x turnover is ~48% of the book every session; at 5bps that is 6pp of the 19.5%.
+    for step in (0.25, 0.5, 0.75):
+        variants.append(_axis(base, f"rebalance_step={step}", rebalance_step=step))
+    for threshold in (0.12, 0.20):
+        variants.append(_axis(base, f"rebalance_threshold={threshold}",
+                              rebalance_weight_threshold=threshold))
+    for delta in (0.0, 0.75, 1.25):
+        variants.append(_axis(base, f"delta_to_replace={delta}", min_score_delta_to_replace=delta))
+    for delta in (0.0, 1.0, 2.0):
+        variants.append(_axis(base, f"intra_theme_delta={delta}", intra_theme_delta_to_replace=delta))
+
+    return [variant for variant in variants if variant[0] == "baseline" or variant[1] != base]
+
+
 GRIDS: dict[str, dict[str, Callable[[], list[tuple[str, dict[str, Any]]]]]] = {
-    "dual_momentum": {"axes": dual_axes, "wide": dual_wide, "wide_churn": dual_wide_churn},
+    "dual_momentum": {"axes": dual_axes, "wide": dual_wide, "wide_churn": dual_wide_churn,
+                      "y2023": dual_2023},
     "fast_momentum": {"axes": fast_axes},
     "bursty_dca": {"axes": bursty_axes},
     "spy_rotation": {"axes": spy_axes},
@@ -673,9 +832,12 @@ def main(argv: list[str] | None = None) -> int:
                         choices=["dual_momentum", "fast_momentum", "bursty_dca", "dca", "spy_rotation", "both"])
     parser.add_argument("--starting-equity", type=float, default=None,
                         help="override the backtest stake; a DCA plan needs one that funds it")
+    parser.add_argument("--cost-bps", type=float, default=0.0,
+                        help="half-spread charged inside the fills; the net_return_* columns "
+                             "are a separate post-hoc model, so do not use both at once")
     parser.add_argument("--open-in", default="",
                         help="park the opening balance in this symbol (e.g. SGOV) instead of cash")
-    parser.add_argument("--stage", default="axes", choices=["axes", "wide", "wide_churn", "finalists"])
+    parser.add_argument("--stage", default="axes", choices=["axes", "wide", "wide_churn", "y2023", "finalists"])
     parser.add_argument("--from", dest="axes_results", default="data/config_sweep_12m.csv",
                         help="finalists stage: the axes run to recombine")
     parser.add_argument("--period", default="12m", help="comma-separated, e.g. 12m,6m")
@@ -690,7 +852,8 @@ def main(argv: list[str] | None = None) -> int:
     periods = [item.strip() for item in args.period.split(",") if item.strip()]
     algorithms = ["dual_momentum", "fast_momentum"] if args.algorithm == "both" else [args.algorithm]
 
-    sweep = Sweep(periods, starting_equity=args.starting_equity, open_in=args.open_in)
+    sweep = Sweep(periods, starting_equity=args.starting_equity, open_in=args.open_in,
+                  cost_bps=args.cost_bps)
     runs: list[Run] = []
     for algorithm_id in algorithms:
         if args.stage == "finalists":

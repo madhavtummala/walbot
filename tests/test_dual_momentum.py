@@ -15,12 +15,12 @@ from src.algorithms.dual_momentum import (
     resolve_themes,
     analyze_universe,
     apply_turnover_filters,
+    partial_adjustment,
     confirm_regime,
     covariance_matrix,
     defensive_weights,
     eligibility,
     hold_eligibility,
-    intraday_drawdown_breached,
     market_regime,
     park_residual,
     score_to_weights,
@@ -613,40 +613,44 @@ def test_the_defensive_sleeve_is_itself_ranked() -> None:
 # =========================================================================================
 
 
-def test_the_drawdown_breaker_latches_for_the_session_and_resets_the_next_one() -> None:
-    config = DualMomentumConfig(intraday_drawdown_limit=-0.015)
+def test_a_session_breaker_cannot_fire_at_this_algorithms_cadence() -> None:
+    """Why ``intraday_drawdown_limit`` was removed rather than merely switched off.
+
+    The shared breaker measures the drop from the equity it first saw *this session*. Dual
+    Momentum runs ``DAILY_AT_OPEN``, so every run opens a new session and rebases that
+    reference to the current equity -- the drawdown it computes is identically zero however
+    far the book has fallen since yesterday. A knob that reads as crash protection and
+    provides none is worse than no knob.
+
+    Kept as a test because the trap is in the interaction, not in either piece: the function
+    is correct, and Fast Momentum, which runs intraday, still relies on it.
+    """
+    from src.algorithms.risk import session_drawdown_breached
+
     state: dict = {}
+    monday = datetime(2026, 6, 5, 15, tzinfo=timezone.utc)
+    tuesday = datetime(2026, 6, 8, 15, tzinfo=timezone.utc)
 
-    session = datetime(2026, 6, 5, 15, tzinfo=timezone.utc)
-    next_session = datetime(2026, 6, 6, 15, tzinfo=timezone.utc)
+    assert session_drawdown_breached(state, 10_000.0, -0.015, monday) is False
+    # Down 20% overnight, and the next daily run still reads a drawdown of exactly zero.
+    assert session_drawdown_breached(state, 8_000.0, -0.015, tuesday) is False
+    assert state["session_drawdown"] == 0.0
 
-    assert intraday_drawdown_breached(state, 10_000.0, config, session) is False
-    assert intraday_drawdown_breached(state, 9_800.0, config, session) is True
-    # Recovering within the same session does not un-trip it.
-    assert intraday_drawdown_breached(state, 10_050.0, config, session) is True
-    # A new session starts clean, which is what makes a backtest meaningful.
-    assert intraday_drawdown_breached(state, 10_050.0, config, next_session) is False
+    # Called twice inside one session -- Fast Momentum's cadence -- it works as intended.
+    assert session_drawdown_breached(state, 7_800.0, -0.015, tuesday) is True
 
 
-def test_the_breaker_parks_the_book_in_the_defensive_sleeve() -> None:
-    config = Runtime(risk_on_universe=["AAA"], defensive_universe=["BIL"], benchmark="AAA",
-                     regime_confirm_bars=1, intraday_drawdown_limit=-0.01, min_base_score=-99)
-    algorithm = DualMomentumAlgorithm(config)
-    daily = {"AAA": daily_bars(80, 130), "BIL": daily_bars(100, 101)}
-    intraday = {"AAA": intraday_bars(100, 130), "BIL": intraday_bars(100, 101)}
-    context = context_for(config, daily, intraday)
-    decision = algorithm.analyze(context)
+def test_a_single_session_collapse_still_sells_the_holding() -> None:
+    """``max_daily_drop`` is the stop that survives, and it reads close-to-close returns."""
+    config = DualMomentumConfig(max_daily_drop=0.10)
+    held = {"symbol": "AAA", "eligible": 1, "above_moving_average": True,
+            "ma_distance": 0.20, "abs_return": 0.30, "fast_return": -0.12,
+            "enough_history": True, "nano_return": -0.15}
 
-    with ephemeral_state():
-        healthy = PortfolioSnapshot(positions={}, equity=10_000.0)
-        algorithm.refine_weights(dict(decision.target_weights), decision.signals, healthy,
-                                 context.latest_prices, config, context.timestamp)
-        crashed = PortfolioSnapshot(positions={}, equity=9_000.0)
-        final = algorithm.refine_weights(dict(decision.target_weights), decision.signals, crashed,
-                                         context.latest_prices, config, context.timestamp)
+    stays, why = hold_eligibility(held, config)
 
-    assert final["BIL"] > 0
-    assert final["AAA"] == 0
+    assert stays is False
+    assert "15" in why or "drop" in why.lower()
 
 
 # =========================================================================================
@@ -734,6 +738,31 @@ def test_a_close_is_not_blocked_by_the_rebalance_threshold() -> None:
     # The absolute notional floor still applies, so this cannot spray dust orders.
     tiny = apply_turnover_filters({"AAA": 0.0}, {"AAA": 0.005}, 10_000.0, config)
     assert tiny["AAA"] == 0.005, "below the notional floor it is still left alone"
+
+
+def test_partial_adjustment_moves_a_fraction_of_the_way_but_exits_in_full() -> None:
+    """``rebalance_step`` regularises turnover without stranding a rejected holding.
+
+    The no-trade band and the partial step brake different things: the band filters small
+    drift, the step damps a target that swings hard every session. An exit is exempt from
+    both, or a name the strategy has dropped decays off the book over a week.
+    """
+    config = DualMomentumConfig(rebalance_step=0.5)
+
+    stepped = partial_adjustment({"AAA": 0.40, "BBB": 0.10}, {"AAA": 0.20, "BBB": 0.30}, config)
+    assert stepped["AAA"] == pytest.approx(0.30), "half way up from 0.20 toward 0.40"
+    assert stepped["BBB"] == pytest.approx(0.20), "half way down from 0.30 toward 0.10"
+
+    # An entry from nothing also arrives gradually -- that is the point of the knob.
+    entry = partial_adjustment({"AAA": 0.40}, {}, config)
+    assert entry["AAA"] == pytest.approx(0.20)
+
+    # But a target of zero is honoured immediately.
+    exit_now = partial_adjustment({"AAA": 0.0}, {"AAA": 0.30}, config)
+    assert exit_now["AAA"] == 0.0, "an exit is never decayed"
+
+    # The default is a full jump, so the knob is inert until it is turned on.
+    assert partial_adjustment({"AAA": 0.40}, {"AAA": 0.20}, DualMomentumConfig())["AAA"] == 0.40
 
 
 def test_the_per_name_cap_is_re_spread_rather_than_dropped() -> None:

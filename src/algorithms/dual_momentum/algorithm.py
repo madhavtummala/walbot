@@ -6,7 +6,7 @@ from __future__ import annotations
 from .config import STATE_KEY, DualMomentumConfig
 from .layers import hold_eligibility, park_residual, theme_allocation, theme_of, volatility_scale
 from .proposal import allocation_mode, analyze_universe, build_signals
-from .stateful import track_eligibility, resolve_themes, _defensive_book, _in_cooldown, _record_exits, _run_facts, apply_turnover_filters, confirm_regime, intraday_drawdown_breached
+from .stateful import track_eligibility, resolve_themes, _defensive_book, _in_cooldown, _record_exits, _run_facts, apply_turnover_filters, confirm_regime, partial_adjustment
 
 
 
@@ -146,8 +146,13 @@ class DualMomentumAlgorithm(BaseAlgorithm):
             source of turnover.
             """
             symbols = set(target_weights) | set(current) | set(weights)
-            result = apply_turnover_filters(
+            stepped = partial_adjustment(
                 {symbol: float(weights.get(symbol, 0.0)) for symbol in symbols},
+                current,
+                strategy_config,
+            )
+            result = apply_turnover_filters(
+                stepped,
                 current,
                 float(snapshot.equity or 0.0),
                 strategy_config,
@@ -155,13 +160,6 @@ class DualMomentumAlgorithm(BaseAlgorithm):
             _record_exits(state, held, {s for s, weight in result.items() if weight > 0}, stamp)
             save_state(state_key, state)
             return result
-
-        if intraday_drawdown_breached(state, float(snapshot.equity or 0.0), strategy_config, as_of):
-            logger.warning(
-                "Dual Momentum drawdown breaker active (%.2f%%); holding the defensive sleeve only",
-                100 * float(state.get("session_drawdown", 0.0)),
-            )
-            return settle(book)
 
         if not risk_on:
             # The raw gate may read risk-on while the confirmation is still pending; the

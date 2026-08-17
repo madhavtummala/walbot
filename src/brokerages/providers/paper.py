@@ -33,6 +33,13 @@ class PaperBrokerage(BaseBrokerage):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         starting_cash = float(getattr(config, "paper_starting_cash", DEFAULT_STARTING_CASH) or DEFAULT_STARTING_CASH)
+        #: Half-spread plus slippage, charged on every fill: a buy pays above the mark and a
+        #: sell receives below it. Zero here, and set by the caller -- ``replay`` takes it as an
+        #: argument -- rather than read from ``config.transaction_cost_bps``, because a paper
+        #: account is a rehearsal of a live one and quietly moving its fills would change what
+        #: an existing book reports. A backtest, which needs to price churn to mean anything,
+        #: asks for it explicitly.
+        self.cost_bps = 0.0
         self.state_key = _state_key(str(getattr(config, "account_id", "") or ""))
         # Books are per account, so two local accounts are two separate portfolios rather
         # than one shared pile that neither of them explains.
@@ -149,8 +156,12 @@ class PaperBrokerage(BaseBrokerage):
             raise ValueError(f"Paper brokerage needs a price for {request.symbol} to fill an order")
 
         signed = request.quantity if request.action == "buy" else -request.quantity
+        # Cross the spread in the direction that costs money. Applied to the fill rather than
+        # deducted as a fee so it shows up in the cost basis and the equity curve the same way
+        # it does live, instead of as a separate line nothing reads.
+        fill_price = price * (1.0 + (self.cost_bps / 10_000.0) * (1.0 if signed > 0 else -1.0))
         cash = float(self.state.get("cash", 0.0))
-        if signed > 0 and signed * price > cash + 1e-9:
+        if signed > 0 and signed * fill_price > cash + 1e-9:
             # A real broker refuses an order it cannot fund, and ``submit_planned_orders``
             # already models that -- it catches the refusal, records the leg as rejected and
             # carries on with the rest of the batch. Without this the book simply went
@@ -158,7 +169,7 @@ class PaperBrokerage(BaseBrokerage):
             # live paper run could spend money the account did not have.
             raise ValueError(
                 f"Insufficient buying power for {request.symbol}: "
-                f"{signed * price:.2f} required, {cash:.2f} available"
+                f"{signed * fill_price:.2f} required, {cash:.2f} available"
             )
         positions = dict(self.state.get("positions", {}))
         held = positions.get(request.symbol, 0.0)
@@ -166,13 +177,15 @@ class PaperBrokerage(BaseBrokerage):
         if abs(positions[request.symbol]) < 1e-9:
             positions.pop(request.symbol, None)
 
-        self._update_basis(request.symbol, held=held, signed=signed, price=price)
+        self._update_basis(request.symbol, held=held, signed=signed, price=fill_price)
         self.state["positions"] = positions
-        self.state["cash"] = cash - signed * price
+        self.state["cash"] = cash - signed * fill_price
+        # The *mark* is the clean price, not what this order paid: marking the book at its own
+        # fill price would let a round trip look flat while the spread was being paid twice.
         self.state.setdefault("prices", {})[request.symbol] = price
         self._save()
 
-        logger.info("Paper fill: %s %s qty=%s @ %.2f", request.action, request.symbol, request.quantity, price)
+        logger.info("Paper fill: %s %s qty=%s @ %.4f", request.action, request.symbol, request.quantity, fill_price)
         return {
             "order_id": f"paper-{uuid4().hex[:8]}",
             "client_order_id": request.client_order_id or "",
