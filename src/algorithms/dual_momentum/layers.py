@@ -359,6 +359,7 @@ def theme_allocation(
     themes: set[str],
     rows: dict[str, dict[str, Any]],
     config: DualMomentumConfig,
+    current: dict[str, float] | None = None,
 ) -> dict[str, float]:
     """Budget each selected theme, then split it across that theme's eligible members.
 
@@ -371,9 +372,28 @@ def theme_allocation(
     A theme is scored by its best eligible member, and the split inside it is proportional to
     each member's score excess -- so a theme whose second name is nearly as strong holds both,
     and one carried by a single name concentrates there.
+
+    "Fast" was previously "free": which members filled a theme's slots was decided on today's
+    scores with no reference at all to what was already held, so two near-tied siblings could
+    trade places on any session that reordered them by a hair. Measured over 2023 that path was
+    13.9% of all turnover. ``current`` and ``intra_theme_delta_to_replace`` put a bar on it --
+    a sitting name keeps its slot unless a sibling beats it by that margin. The knob was
+    documented in the config and in the dashboard's explainers but read by nothing, so this is
+    the rule that was already described rather than a new one.
     """
+    held = {str(symbol).upper() for symbol, weight in (current or {}).items() if weight > 0}
+    incumbency = max(config.intra_theme_delta_to_replace, 0.0)
+
     def excess(row: dict[str, Any]) -> float:
         return max(float(row.get("base_score", 0.0)) - config.min_base_score, 0.0)
+
+    def standing(row: dict[str, Any]) -> float:
+        """Score for the purpose of *keeping a slot*, not for sizing one.
+
+        The margin is added to the incumbent rather than subtracted from the challenger so a
+        name near the quality floor cannot be pushed below zero and stop counting entirely.
+        """
+        return excess(row) + (incumbency if str(row.get("symbol", "")).upper() in held else 0.0)
 
     def tilt(row: dict[str, Any]) -> float:
         volatility = float(row.get("annual_volatility", 0.0))
@@ -390,9 +410,13 @@ def theme_allocation(
 
     per_theme = max(config.max_positions_per_theme, 0)
     for theme, rowset in members.items():
-        rowset.sort(key=excess, reverse=True)
-        if per_theme:
-            members[theme] = rowset[:per_theme]
+        # Slots go by ``standing`` -- score plus the incumbent's margin -- while the split
+        # across whoever wins them stays proportional to raw score, so holding a slot does not
+        # also earn a bigger position.
+        rowset.sort(key=standing, reverse=True)
+        kept = rowset[:per_theme] if per_theme else list(rowset)
+        kept.sort(key=excess, reverse=True)
+        members[theme] = kept
 
     # Theme budgets, from the strongest member of each, water-filled so a capped theme's
     # overflow reaches the others instead of becoming cash.

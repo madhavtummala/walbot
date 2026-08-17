@@ -24,6 +24,7 @@ from src.algorithms.dual_momentum import (
     market_regime,
     park_residual,
     score_to_weights,
+    theme_allocation,
     timing,
     track_eligibility,
     volatility_scale,
@@ -854,3 +855,40 @@ def test_a_holding_that_crashes_in_one_session_is_sold_at_once() -> None:
     # Still inside the limit: everything else about the name is fine, so it is kept.
     dipped = {**healthy, "nano_return": -0.08}
     assert hold_eligibility(dipped, config)[0] is True
+
+
+def test_a_sibling_must_beat_the_sitting_name_before_it_takes_its_slot() -> None:
+    """``intra_theme_delta_to_replace`` was documented everywhere and read by nothing.
+
+    Which ETFs fill a theme's slots was decided on today's scores alone, so two near-tied
+    siblings swapped places on any session that reordered them by a hair -- 13.9% of all
+    turnover over 2023. Holding a slot must not also earn a bigger position, so the margin
+    applies to selection only and the split stays proportional to raw score.
+    """
+    config = DualMomentumConfig(max_positions_per_theme=1, min_base_score=0.0,
+                                volatility_tilt=0.0, risk_on_gross_max=1.0,
+                                name_weight_max=1.0, intra_theme_delta_to_replace=0.5,
+                                themes={"AAA": "growth", "BBB": "growth"})
+    rows = {
+        "AAA": {"symbol": "AAA", "eligible": 1, "base_score": 1.0, "annual_volatility": 0.2},
+        "BBB": {"symbol": "BBB", "eligible": 1, "base_score": 1.3, "annual_volatility": 0.2},
+    }
+
+    # Nothing held: the higher score simply wins.
+    fresh = theme_allocation({"growth"}, rows, config, {})
+    assert fresh.get("BBB", 0.0) > 0 and fresh.get("AAA", 0.0) == 0
+
+    # AAA sitting: BBB leads by 0.3, short of the 0.5 margin, so AAA keeps the slot.
+    defended = theme_allocation({"growth"}, rows, config, {"AAA": 0.4})
+    assert defended.get("AAA", 0.0) > 0, "a 0.3 lead must not displace the incumbent"
+    assert defended.get("BBB", 0.0) == 0
+
+    # Widen the lead past the margin and the swap goes through.
+    rows["BBB"]["base_score"] = 1.8
+    displaced = theme_allocation({"growth"}, rows, config, {"AAA": 0.4})
+    assert displaced.get("BBB", 0.0) > 0 and displaced.get("AAA", 0.0) == 0
+
+    # At zero the knob is off, which is the behaviour every earlier measurement was taken under.
+    off = DualMomentumConfig(**{**config.__dict__, "intra_theme_delta_to_replace": 0.0})
+    rows["BBB"]["base_score"] = 1.3
+    assert theme_allocation({"growth"}, rows, off, {"AAA": 0.4}).get("BBB", 0.0) > 0
