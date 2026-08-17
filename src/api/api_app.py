@@ -20,7 +20,6 @@ from src.api.api_payloads import (
     backtest_payload,
     complete_schwab_auth_payload,
     controls_payload,
-    dca_payload,
     recommend_universe_payload,
     refresh_social_payload,
     save_controls_payload,
@@ -28,7 +27,6 @@ from src.api.api_payloads import (
     save_account_payload,
     save_algorithm_config_payload,
     save_watchlist_payload,
-    save_dca_payload,
     schwab_auth_payload,
     positions_payload,
     social_payload,
@@ -112,16 +110,6 @@ def recommend_universe(body: dict[str, Any] = Body(default_factory=dict)) -> dic
 @app.post("/api/universe/apply")
 def apply_universe(body: dict[str, Any]) -> dict[str, Any]:
     return apply_universe_payload(body)
-
-
-@app.get("/api/dca")
-def dca(account_id: str = Query(default="", max_length=80)) -> dict[str, Any]:
-    return dca_payload(account_id=account_id)
-
-
-@app.post("/api/dca")
-def save_dca(body: dict[str, Any]) -> dict[str, Any]:
-    return save_dca_payload(body)
 
 
 @app.get("/api/controls")

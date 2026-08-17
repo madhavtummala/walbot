@@ -515,3 +515,52 @@ say "Ready (sized to value path)", and the drop is logged rather than silent.
 - Signals and backtests are cached per strategy in the frontend, not per (strategy, account).
   Two bindings of one strategy on different accounts would share those cached views. The server
   keys correctly; only the browser-side cache is coarse.
+
+---
+
+## Follow-up: the plan is ordinary algorithm config
+
+DCA is a normal algorithm that happens to have a custom editor on the Tune screen, and nothing
+more. Its plan had been categorised well beyond that: a `dca_bot` section of its own, keyed by
+account (`dca_plans`) with a shared template (`dca_plan`) behind it, reached through a dedicated
+`/api/dca` endpoint and a `dca_payload` module, and held in the dashboard as `state.dca`.
+
+That key had no room for the algorithm, which forced the two variants to share one budget --
+`dca` and `bursty_dca` showed and traded identical bubbles however differently they behave. It
+also bought a per-account dimension no other algorithm has, which is what let the editor and the
+views disagree about whose plan they were looking at in the first place.
+
+The plan now lives at `algorithms.<id>.plan`, read and written through `/api/algorithm-config`
+like every other algorithm's knobs. `dca` and `bursty_dca` have independent budgets. Deleted:
+`DCA_PLAN_SECTION`, `DCA_PLANS_SECTION`, `load_dca_plan`, `save_dca_plan`, `_raw_plan_from_config`,
+`src/api/payloads/dca.py`, both `/api/dca` endpoints, `state.dca` and `dcaAccountForStrategy`.
+`raw_plan_from_config` replaces them and is the only reader.
+
+The price, chosen deliberately: two accounts running `dca` now share a plan. That is the same
+price every other algorithm already pays for its tuning, and no deployment here was using the
+per-account dimension. Existing `dca_plans` entries were not migrated -- the section was dropped
+and both algorithms seeded from `DEFAULT_DCA_PLAN`.
+
+**An unconfigured plan now buys nothing.** `raw_plan_from_config` and `sanitize_dca_plan` used to
+fall back to `DEFAULT_DCA_PLAN`, which meant an algorithm with no plan -- or one whose bubbles had
+all been cleared -- would have quietly traded SPY, QQQ, GLD and TLT while the board showed an
+empty page. The default is a seed for a new config, not a standing order.
+
+**The account still matters to a view, just not to the plan.** Accrual state is keyed
+`dca_accrual:{algorithm}:{account}` and the brokerage is per account, so `account_for_strategy`
+and the account threading from the previous pass stay exactly as they were.
+
+### Found by testing it in a browser rather than by reading it
+
+`renderDca` syncs the nodes into the plan *before* rebuilding them from it. With one plan per
+account that was harmless, because the board only ever showed one. With a plan per algorithm,
+navigating from Bursty DCA to DCA synced the bubbles still on screen -- Bursty's budgets -- into
+DCA's freshly loaded plan, and the next save would have written them to disk. Symptom: the DCA
+board showed a budget only ever typed on the Bursty page, while the API had served the correct
+one. `state.nodesStrategy` records which plan built the nodes and `syncNodesToPlan` refuses to
+write them anywhere else.
+
+Two smaller ones from the same session: the plan appeared as a raw JSON box in the parameter
+form beside its own bubble board, and `saveCurrentConfig` posted only the rendered fields --
+so saving any tuned knob would have deleted the plan. The form filters the plan out and the
+save merges over the loaded config rather than replacing it.

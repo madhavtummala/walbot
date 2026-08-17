@@ -35,7 +35,7 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "accruing, which is why small budgets on expensive shares buy infrequently."
         ),
         "parameters": {
-            "__plan__": {
+            "plan": {
                 "what": "The monthly dollar budget for each symbol, set on the bubble board.",
                 "effect": (
                     "Higher budget accrues faster, so it trades more often and in larger size. "
@@ -67,6 +67,14 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "is the strategy, not a failure."
         ),
         "parameters": {
+            "plan": {
+                "what": "The monthly dollar budget for each symbol, set on the bubble board.",
+                "effect": (
+                    "Its own plan, separate from DCA's: the two accrue the same way but deploy "
+                    "on different terms, so they are tuned independently. Higher budget accrues "
+                    "faster, so a qualifying dip buys more."
+                ),
+            },
             "regime_ma_days": {
                 "what": "Length of the moving average that defines 'uptrend'. Price must be above it to buy.",
                 "effect": (

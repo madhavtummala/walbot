@@ -25,7 +25,7 @@ from ...core.interfaces import (
     describe_schedule,
 )
 from ..base import BaseAlgorithm
-from . import BUCKETS, load_dca_plan, unknown_plan_symbols
+from . import BUCKETS, raw_plan_from_config, sanitize_dca_plan, unknown_plan_symbols
 from .accrual import (
     SymbolState,
     accrue,
@@ -103,8 +103,12 @@ class DCAAlgorithm(BaseAlgorithm):
     def plan(self, config: Any) -> dict[str, Any]:
         from ...api.api_payloads import universe_payload
 
-        # The plan is this account's config, so it must be read for the account being traded.
-        return load_dca_plan(universe_payload()["rows"], account_id=str(getattr(config, "account_id", "") or ""))
+        # Ordinary algorithm config, read from this algorithm's own section. ``dca`` and
+        # ``bursty_dca`` therefore have separate plans, which the old per-account key could
+        # not express -- it had no room for the algorithm, so the two shared one budget.
+        return sanitize_dca_plan(
+            raw_plan_from_config(config, self.algorithm_id), universe_payload()["rows"]
+        )
 
     def requirements(self, config: Any, current_positions: dict[str, int]) -> AlgorithmRequirements:
         return AlgorithmRequirements(price_symbols=sorted(plan_budgets(self.plan(config))))
@@ -233,7 +237,11 @@ class DCAAlgorithm(BaseAlgorithm):
             {"label": "Symbols", "value": str(len(leaders))},
         ]
         # A typo in a bucket is otherwise dropped by sanitisation and shows up as nothing at all.
-        unknown = unknown_plan_symbols()
+        from ...api.api_payloads import universe_payload
+
+        unknown = unknown_plan_symbols(
+            raw_plan_from_config(config, self.algorithm_id), universe_payload()["rows"]
+        )
         if unknown:
             summary.append({"label": "Not tradable", "value": ", ".join(unknown)})
         return SignalView(leaders=leaders, summary=summary)
