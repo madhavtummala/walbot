@@ -728,29 +728,30 @@ body.dca-off .asset.live circle {
 
 /* Typed budget entry, centred on the selected bubble. Visible, unlike #symbolEntry: there is
    no live SVG preview behind it, so the input itself has to show what you are typing. */
+/* Typed budget entry. Invisible but for its caret, exactly like #symbolEntry: the value
+   being typed is drawn by the bubble's own amount label, so a second box floating over the
+   board would be showing the reader the same number twice. Sits over that label rather than
+   the bubble's centre. */
 #amountEntry {
   position: absolute;
   z-index: 20;
-  width: 76px;
-  height: 26px;
-  padding: 0 6px;
-  border: 2px solid var(--ink);
-  border-radius: 6px;
-  color: var(--ink);
-  background: #fff;
+  width: 52px;
+  height: 18px;
+  border: 0;
+  padding: 0;
+  color: transparent;
+  background: transparent;
+  box-shadow: none;
   font:
-    900 15px/1 Inter,
+    900 12px/1 Inter,
     ui-sans-serif,
     system-ui;
   text-align: center;
-  /* Genuinely hidden, not merely transparent: unlike #symbolEntry -- whose invisible box is
-     the caret sitting over the SVG label -- this one has nothing to stand in for, and an
-     opacity-0 input still takes focus and is still announced. */
   visibility: hidden;
   opacity: 0;
   pointer-events: none;
   transform: translate(-50%, -50%);
-  caret-color: var(--ink);
+  caret-color: transparent;
   outline: none;
 }
 
@@ -758,6 +759,7 @@ body.dca-off .asset.live circle {
   visibility: visible;
   opacity: 1;
   pointer-events: auto;
+  caret-color: var(--ink);
 }
 
 label {
