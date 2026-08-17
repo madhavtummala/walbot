@@ -181,15 +181,45 @@ Two limits on the window itself:
   by daily bars standing in for intraday ones.
 - Genuinely out-of-sample validation is therefore capped at about **8.5 months**, not 24.
 
-### Next step, and why not the obvious one
+> **Superseded for Dual Momentum.** That 8.5-month cap was a statement about the *intraday*
+> cache, and Dual Momentum no longer reads intraday bars at all -- `required_history_minutes`
+> is 0 and every feature comes from daily bars. The daily store reaches back to **2022-03-28**,
+> so disjoint calendar-year windows are now available to it. Fast Momentum still reads intraday
+> history, so the cap continues to apply there.
 
-The finalists stage recombines the winning axes with one-axis-removed ablations, so a combined
-result resting entirely on one change says so rather than looking like a synergy.
+### Multi-year windows
 
-It must *not* be validated on 6M/12M/24M. `_period_start` anchors every window to "now minus N
-months", so those three end on the same day and are strictly nested -- 6M is inside 12M is
-inside 24M. A configuration "surviving all three" has been confirmed once on overlapping data,
-with the most recent months counted three times. The honest alternative is a disjoint
-walk-forward split inside the intraday-covered period: choose on roughly 2025-12 to 2026-04,
-test on 2026-04 to 2026-08. Both halves are short, so it is weak evidence -- which is worth
-saying plainly rather than dressing three nested windows up as three confirmations.
+`--period` takes explicit `START:END` dates as well as relative `Nm` windows, and those are the
+only way to get independent evidence: `_period_start` anchors every relative window to "now
+minus N months", so 6M/12M/24M end on the same day and are strictly nested -- 6M is inside 12M
+is inside 24M. A configuration "surviving all three" has been confirmed once on overlapping
+data, with the most recent months counted three times.
+
+```bash
+python -m tools.config_sweep --algorithm dual_momentum --stage confirm \
+  --period 2023-01-01:2023-12-31,2024-01-01:2024-12-31,2025-01-01:2025-12-31
+```
+
+Two things make this work that did not before:
+
+- The fetch sizes its buffer from the window's own start rather than from `_period_row_count`,
+  which only parses relative windows and used to fall through to a 4-month default. A 2023
+  request previously replayed the most recent four months and reported it *as* 2023.
+- The shared date axis drops symbols that did not exist over the window instead of truncating
+  the window for everyone. IBIT listed 2024-01-11 and by itself put every window inside the
+  post-IBIT era; a 2023 replay holding it would have been holding a fund that did not trade.
+
+A `START:END` window that finds no bars now raises rather than silently substituting another
+period.
+
+### Costs
+
+`--cost-bps` charges a half-spread inside the fills -- a buy pays above the close, a sell
+receives below it -- so it compounds and can make an order unaffordable rather than merely
+expensive. It is an alternative to the post-hoc `net_return_*` columns, not a layer on top:
+with both, the same churn is charged twice. Default is 0, which is what every result above was
+measured under.
+
+For a book turning over 100x its stake a year this number matters more than the gross return.
+`tools/attribution.py` prints the whole cost curve for one configuration, which is the honest
+form of the question -- Dual Momentum's deployed 2023 run breaks even at roughly **17bps**.

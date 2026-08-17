@@ -723,9 +723,38 @@ def dual_2023() -> list[tuple[str, dict[str, Any]]]:
     return [variant for variant in variants if variant[0] == "baseline" or variant[1] != base]
 
 
+def dual_confirm() -> list[tuple[str, dict[str, Any]]]:
+    """The axes that won 2023, asked again over three disjoint calendar years.
+
+    Built by hand rather than by ``finalists`` because that stage combines *every* winning
+    axis at once, and here they demonstrably do not compose: the full combination scored
+    +13.1% over 2023 against a +19.5% baseline and a +23.8% best single axis. Each pair below
+    is a hypothesis about which two knobs are doing separate work.
+
+    Three calendar years is the first genuinely independent evidence this repo can offer.
+    ``_period_start`` anchors relative windows to today, so 6M/12M/24M are strictly nested and
+    "survives all three" means confirmed once; 2023, 2024 and 2025 share no days at all. They
+    are still only three windows, and 2024 is the one that matters most -- the deployed
+    configuration earns +1.1% gross and loses money after costs in it.
+    """
+    base = _dual_baseline()
+    return [
+        ("baseline", dict(base)),
+        _axis(base, "name_weight_max=0.35", name_weight_max=0.35),
+        _axis(base, "volatility_tilt=0.5", volatility_tilt=0.5),
+        _axis(base, "cap+tilt", name_weight_max=0.35, volatility_tilt=0.5),
+        _axis(base, "max_positions=2", max_positions=2, entry_rank_max=2, exit_rank_max=10),
+        _axis(base, "cap+positions", name_weight_max=0.35, max_positions=2,
+              entry_rank_max=2, exit_rank_max=10),
+        _axis(base, "cap+tilt+positions", name_weight_max=0.35, volatility_tilt=0.5,
+              max_positions=2, entry_rank_max=2, exit_rank_max=10),
+        _axis(base, "delta_to_replace=1.25", min_score_delta_to_replace=1.25),
+    ]
+
+
 GRIDS: dict[str, dict[str, Callable[[], list[tuple[str, dict[str, Any]]]]]] = {
     "dual_momentum": {"axes": dual_axes, "wide": dual_wide, "wide_churn": dual_wide_churn,
-                      "y2023": dual_2023},
+                      "y2023": dual_2023, "confirm": dual_confirm},
     "fast_momentum": {"axes": fast_axes},
     "bursty_dca": {"axes": bursty_axes},
     "spy_rotation": {"axes": spy_axes},
@@ -837,7 +866,7 @@ def main(argv: list[str] | None = None) -> int:
                              "are a separate post-hoc model, so do not use both at once")
     parser.add_argument("--open-in", default="",
                         help="park the opening balance in this symbol (e.g. SGOV) instead of cash")
-    parser.add_argument("--stage", default="axes", choices=["axes", "wide", "wide_churn", "y2023", "finalists"])
+    parser.add_argument("--stage", default="axes", choices=["axes", "wide", "wide_churn", "y2023", "confirm", "finalists"])
     parser.add_argument("--from", dest="axes_results", default="data/config_sweep_12m.csv",
                         help="finalists stage: the axes run to recombine")
     parser.add_argument("--period", default="12m", help="comma-separated, e.g. 12m,6m")
