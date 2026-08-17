@@ -17,6 +17,9 @@ from src.algorithms.dual_momentum import (
     apply_turnover_filters,
     partial_adjustment,
     action_due,
+    advance_run,
+    crash_stop,
+    theme_ranks,
     record_action,
     covariance_matrix,
     defensive_weights,
@@ -874,38 +877,67 @@ def test_a_shrunken_entry_survives_the_band_but_not_the_notional_floor() -> None
 
 
 def test_each_kind_of_action_keeps_its_own_clock() -> None:
-    """One clock per decision, because they are not the same decision.
+    """One clock per decision, counted in runs so "3 days" means three sessions.
 
-    ``signal_refresh_minutes`` was the single knob for this and was read by nothing at all --
-    declared in the config, described in the dashboard's explainer as "how often membership
-    may change", and never compared against the ``last_selection_at`` written on every run.
-    It turned out to be four questions: rotate a theme, open a position, re-split weight
-    inside a theme already held, and close a broken one.
+    Wall-clock days do not survive a weekend: a three-calendar-day interval set on a Friday is
+    satisfied by Monday, so it throttles Tuesday-to-Thursday decisions and waves every
+    Friday-to-Monday one straight through.
     """
-    monday = datetime(2026, 6, 1, 14, 30, tzinfo=timezone.utc)
+    state: dict = {}
 
     # A cold state store has never acted, so every clock is due.
-    assert action_due({}, "theme_rotation", monday, 7) is True
+    assert action_due(state, "theme_rotation", 3) is True
 
-    state: dict = {}
-    record_action(state, "theme_rotation", monday.isoformat())
-    assert action_due(state, "theme_rotation", monday + timedelta(days=6), 7) is False
-    assert action_due(state, "theme_rotation", monday + timedelta(days=7), 7) is True
+    advance_run(state)
+    record_action(state, "theme_rotation")
+    advance_run(state)
+    assert action_due(state, "theme_rotation", 3) is False, "one session later"
+    advance_run(state)
+    assert action_due(state, "theme_rotation", 3) is False, "two sessions later"
+    advance_run(state)
+    assert action_due(state, "theme_rotation", 3) is True, "three sessions later"
 
     # The clocks are independent: rotating does not start the intra-theme one.
-    assert action_due(state, "intra_theme", monday + timedelta(days=1), 5) is True
+    assert action_due(state, "intra_theme", 3) is True
 
-    # Zero means every run, which is what exits are meant to stay at.
-    assert action_due(state, "exit", monday + timedelta(minutes=1), 0) is True
+    # Zero means every run.
+    assert action_due(state, "exit", 0) is True
 
 
 def test_a_caller_that_does_not_act_does_not_restart_the_clock() -> None:
-    """Otherwise a throttled decision that changed nothing would push the next one a week out."""
-    monday = datetime(2026, 6, 1, 14, 30, tzinfo=timezone.utc)
+    """Otherwise a throttled decision that changed nothing would push the next one out."""
     state: dict = {}
+    advance_run(state)
 
-    assert action_due(state, "entry", monday, 5) is True
+    assert action_due(state, "entry", 3) is True
     # ``action_due`` is a question, not a commitment -- only ``record_action`` starts the clock.
-    assert action_due(state, "entry", monday, 5) is True
-    record_action(state, "entry", monday.isoformat())
-    assert action_due(state, "entry", monday + timedelta(days=1), 5) is False
+    assert action_due(state, "entry", 3) is True
+    record_action(state, "entry")
+    advance_run(state)
+    assert action_due(state, "entry", 3) is False
+
+
+def test_the_crash_stop_answers_to_no_clock() -> None:
+    """``max_daily_drop`` must fire on the session it happens, whatever exit_interval_days says.
+
+    Otherwise a name can gap 30% across a week of throttled sessions while the algorithm waits
+    its turn to look at it.
+    """
+    config = DualMomentumConfig(max_daily_drop=0.10)
+
+    assert crash_stop({"nano_return": -0.15}, config)[0] is False
+    assert crash_stop({"nano_return": -0.05}, config)[0] is True
+    # 0 turns it off entirely.
+    assert crash_stop({"nano_return": -0.99}, DualMomentumConfig(max_daily_drop=0.0))[0] is True
+
+
+def test_theme_rank_is_not_the_etf_rank_of_its_best_member() -> None:
+    """Entry was gated on the ETF rank of a theme's best name, which is a different question.
+
+    Metals holding SLV and GLD at ETF ranks 1 and 2 pushes every other theme's best name down
+    the ladder, so with entry_rank_max=3 only the ETF ranked 3rd could bring its theme in --
+    whatever that theme's own standing was.
+    """
+    ranks = theme_ranks({"metals": 2.9, "energy": 1.3, "us_growth": 0.8, "intl": 0.2})
+
+    assert ranks == {"metals": 1, "energy": 2, "us_growth": 3, "intl": 4}

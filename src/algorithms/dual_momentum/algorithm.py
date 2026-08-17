@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 from .config import STATE_KEY, DualMomentumConfig
-from .layers import hold_eligibility, park_residual, theme_allocation, theme_of, volatility_scale
+from .layers import crash_stop, hold_eligibility, park_residual, theme_allocation, theme_of, theme_ranks, volatility_scale
 from .proposal import allocation_mode, analyze_universe, build_signals
-from .stateful import track_eligibility, resolve_themes, _defensive_book, _in_cooldown, _record_exits, _run_facts, apply_turnover_filters, partial_adjustment, action_due, record_action
+from .stateful import track_eligibility, resolve_themes, _defensive_book, _in_cooldown, _record_exits, _run_facts, apply_turnover_filters, partial_adjustment, action_due, advance_run, record_action
 
 
 
@@ -114,6 +114,7 @@ class DualMomentumAlgorithm(BaseAlgorithm):
         if not isinstance(state, dict):
             state = {}
 
+        advance_run(state)
         facts = _run_facts(signals)
         # ``as_of`` is the only clock this layer reads, and it arrives as an argument rather
         # than from a lookup: every elapsed-time decision below -- the re-entry cooldown, the
@@ -191,13 +192,21 @@ class DualMomentumAlgorithm(BaseAlgorithm):
 
         held_themes = {theme_of(symbol, strategy_config) for symbol in held - defensive}
 
-        # Exits get their own clock too, defaulting to every run. An exit that waits is a
-        # stop-loss that does not stop anything, so this is the one interval meant to stay 0.
-        exiting = action_due(state, "exit", as_of, strategy_config.exit_interval_days)
+        # Two exit speeds. The band-based tests are a considered judgement and answer to
+        # ``exit_interval_days``; the crash stop answers to nothing, because a name can gap 30%
+        # over a week of throttled sessions while the algorithm waits its turn to look.
+        exiting = action_due(state, "exit", strategy_config.exit_interval_days)
 
-        keep: set[str] = set(held_themes) if not exiting else set()
-        for theme in held_themes if exiting else ():
+        keep: set[str] = set()
+        for theme in held_themes:
             row = theme_rows.get(theme, {})
+            crashed, why = crash_stop(row, strategy_config)
+            if not crashed:
+                logger.warning("Dual Momentum crash stop on theme %s: %s", theme, why)
+                continue
+            if not exiting:
+                keep.add(theme)
+                continue
             # Two ways out, answering different questions. The count is the slow one: this
             # theme has stopped qualifying for long enough to mean something. The band, via
             # hold_eligibility, is the fast one -- including the single-session crash stop.
@@ -215,8 +224,8 @@ class DualMomentumAlgorithm(BaseAlgorithm):
                 logger.info("Dual Momentum exiting theme %s: %s", theme, why)
                 continue
             keep.add(theme)
-        if exiting and keep != held_themes:
-            record_action(state, "exit", stamp)
+        if exiting:
+            record_action(state, "exit")
 
         # Exits are decided above and, at ``exit_interval_days: 0``, apply every run. Every
         # other kind of action has its own clock, because they are not the same decision and do
@@ -228,24 +237,28 @@ class DualMomentumAlgorithm(BaseAlgorithm):
         #
         # Deliberately asymmetric. Risk is continuous and opportunity is not: a broken holding
         # leaves today, a better one is bought when its clock next comes round.
-        rotating = action_due(state, "theme_rotation", as_of, strategy_config.theme_rotation_interval_days)
-        entering = action_due(state, "entry", as_of, strategy_config.entry_interval_days)
+        rotating = action_due(state, "theme_rotation", strategy_config.theme_rotation_interval_days)
+        entering = action_due(state, "entry", strategy_config.entry_interval_days)
 
+        # A theme's own rank, not the ETF rank of its best member. Those are different
+        # questions: metals holding SLV and GLD at ETF ranks 1 and 2 pushed every other
+        # theme's best name down the ladder and out of entry range whatever its own standing.
+        ranks = theme_ranks(theme_score)
         if rotating and entering:
             entrant_themes = {
                 theme
-                for theme, row in theme_rows.items()
+                for theme in theme_rows
                 if theme not in keep
                 and eligible_days(theme) >= strategy_config.entry_min_eligible_days
-                and int(row.get("rank") or 0)
-                and int(row["rank"]) <= strategy_config.entry_rank_max
-                and float(row.get("base_score", 0.0)) >= strategy_config.min_base_score
+                and ranks.get(theme, 0)
+                and ranks[theme] <= strategy_config.entry_rank_max
+                and float(theme_score.get(theme, 0.0)) >= strategy_config.min_base_score
                 and not _in_cooldown(state, theme, as_of, strategy_config)
             }
             selection = resolve_themes(keep, entrant_themes, theme_score, strategy_config)
             if selection != keep:
-                record_action(state, "theme_rotation", stamp)
-                record_action(state, "entry", stamp)
+                record_action(state, "theme_rotation")
+                record_action(state, "entry")
         else:
             # Between rotations the book may only shrink. A theme that left is not backfilled
             # until the next one, so the freed budget parks in the defensive sleeve.
@@ -257,14 +270,14 @@ class DualMomentumAlgorithm(BaseAlgorithm):
         # taken most often: over 2026 it was 36% of turnover as resize plus 13% as intra-theme
         # rotation, none of it a change of view. Holding those names exactly where they are
         # leaves the whole difference untraded.
-        if not action_due(state, "intra_theme", as_of, strategy_config.intra_theme_interval_days):
+        if not action_due(state, "intra_theme", strategy_config.intra_theme_interval_days):
             frozen = {symbol: weight for symbol, weight in weights.items() if symbol not in held}
             for symbol in weights:
                 if symbol in held:
                     frozen[symbol] = float(current.get(symbol, 0.0))
             weights = frozen
         elif weights:
-            record_action(state, "intra_theme", stamp)
+            record_action(state, "intra_theme")
 
         # A new name inside a theme already held is still an entry, and is held off with the
         # rest of them rather than slipping through as "sizing".

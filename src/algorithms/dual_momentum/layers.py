@@ -82,6 +82,35 @@ def eligibility(row: dict[str, Any], config: DualMomentumConfig) -> tuple[bool, 
     return True, ""
 
 
+def crash_stop(row: dict[str, Any], config: DualMomentumConfig) -> tuple[bool, str]:
+    """The one exit that answers to no clock: a single session down ``max_daily_drop``.
+
+    Separated from :func:`hold_eligibility` because the two exits are on different cadences.
+    The band-based tests below are a considered judgement and can wait for
+    ``exit_interval_days``; this one cannot, or a name can gap 30% over a week of throttled
+    sessions while the algorithm politely waits its turn to look.
+    """
+    drop = max(config.max_daily_drop, 0.0)
+    session_return = float(row.get("nano_return", 0.0))
+    if drop and session_return <= -drop:
+        return False, f"Fell {abs(session_return):.0%} in one session"
+    return True, ""
+
+
+def theme_ranks(theme_score: dict[str, float]) -> dict[str, int]:
+    """Themes ordered by score, best first. 1 is the strongest theme.
+
+    A theme's own rank, which the algorithm did not previously have. Entry was gated on
+    ``entry_rank_max`` against the *ETF* rank of a theme's best member, which asks a different
+    question entirely: with fifteen ETFs across eight themes, "top 3 ETF" and "top 3 theme"
+    diverge as soon as one theme owns several of the leaders -- metals holding both SLV and
+    GLD at ranks 1 and 2 pushed every other theme's best name down the ETF ladder and out of
+    entry range, whatever its own standing.
+    """
+    ordered = sorted(theme_score, key=lambda theme: -float(theme_score.get(theme, 0.0)))
+    return {theme: position for position, theme in enumerate(ordered, start=1)}
+
+
 def hold_eligibility(row: dict[str, Any], config: DualMomentumConfig) -> tuple[bool, str]:
     """Whether a name already held may stay, on floors widened by ``exit_threshold_slack``.
 
@@ -93,10 +122,9 @@ def hold_eligibility(row: dict[str, Any], config: DualMomentumConfig) -> tuple[b
         return False, "History no longer sufficient"
     # The crash stop comes first: a name that has just fallen this far is not a candidate for
     # any of the slower, band-based judgements below.
-    drop = max(config.max_daily_drop, 0.0)
-    session_return = float(row.get("nano_return", 0.0))
-    if drop and session_return <= -drop:
-        return False, f"Fell {abs(session_return):.0%} in one session"
+    ok, why = crash_stop(row, config)
+    if not ok:
+        return False, why
     slack = max(config.exit_threshold_slack, 0.0)
     if float(row.get("ma_distance", 0.0)) < -slack:
         return False, f"More than {slack:.0%} below its {config.etf_ma_days}-day average"
