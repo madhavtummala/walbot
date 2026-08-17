@@ -140,8 +140,13 @@ def social(limit: int = Query(default=250, ge=1, le=5000)) -> dict[str, Any]:
 
 
 @app.get("/api/strategy-signals")
-def strategy_signals(strategy: str = Query(default=DEFAULT_STRATEGY_ID, max_length=80)) -> dict[str, Any]:
-    return strategy_signals_payload(strategy=strategy)
+def strategy_signals(
+    strategy: str = Query(default=DEFAULT_STRATEGY_ID, max_length=80),
+    account_id: str = Query(default="", max_length=80),
+) -> dict[str, Any]:
+    # ``account_id`` is optional: omitted, the strategy's binding decides. The dashboard sends
+    # it so the view it renders is the one whose plan its own editor is writing.
+    return strategy_signals_payload(strategy=strategy, account_id=account_id)
 
 
 @app.post("/api/refresh-social")

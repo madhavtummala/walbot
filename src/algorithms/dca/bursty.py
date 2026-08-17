@@ -191,7 +191,29 @@ class BurstyDCAAlgorithm(DCAAlgorithm):
     ) -> dict[str, Any]:
         settings = BurstyConfig.from_runtime_config(context.config)
         buying = plan_budgets(plan).get(symbol, 0.0) >= 0
-        return evaluate_trigger(context.bars_by_symbol.get(symbol), buying, settings, months_behind)
+        result = evaluate_trigger(context.bars_by_symbol.get(symbol), buying, settings, months_behind)
+        # Carried so ``reason`` can tell the dashboard that step 2 still gets a say. See there.
+        result.setdefault("detail", {})["value_averaged"] = settings.value_averaging
+        return result
+
+    def reason(
+        self,
+        state: SymbolState,
+        floor_dollars: float,
+        trigger: dict[str, Any],
+        ready: bool,
+    ) -> str:
+        """Never promise a trade that value averaging can still veto.
+
+        The signal view is built from ``analyze``, which is step 1; the value-averaging sizing
+        below happens in ``refine``, which is step 2 and is the first point that can see the
+        position. A symbol already at or above its value path is dropped there, so a bare
+        "Ready" was telling the reader a trade was coming that would never be placed.
+        """
+        text = super().reason(state, floor_dollars, trigger, ready)
+        if text == "Ready" and trigger.get("detail", {}).get("value_averaged"):
+            return "Ready (sized to value path)"
+        return text
 
     def refine(
         self,
@@ -236,6 +258,16 @@ class BurstyDCAAlgorithm(DCAAlgorithm):
             buying = intent.value >= 0
             desired = gap if buying else -gap
             if desired <= 0:
+                # Not an error: the position is already at or past where the value path says it
+                # should be. Logged because it is otherwise invisible -- step 1 reported the
+                # symbol as ready and no order appears, with nothing in between to explain it.
+                logger.info(
+                    "%s: value path satisfied, no trade. path=$%.2f held=$%.2f months=%.2f",
+                    intent.symbol,
+                    path_value,
+                    held_value,
+                    elapsed_months,
+                )
                 continue
 
             # Guard 1: clamp a single trade against the monthly budget.

@@ -387,11 +387,14 @@ def schedule_minutes(value: str, default: int = 0) -> int:
     return parsed if 0 <= parsed <= (23 * 60) + 59 else default
 
 
-def describe_schedule(schedule: Schedule) -> str:
+def describe_schedule(schedule: Schedule, refresh_minutes: int | None = None) -> str:
     """Render a schedule for the dashboard, e.g. ``"Mondays at 08:30"``.
 
-    The dashboard has no cadence control any more, so this string is the only place a reader
-    can find out when the selected algorithm will next act.
+    ``refresh_minutes`` overrides the class's own cadence. A deployed binding carries a
+    ``frequency`` and the runtime buckets on *that*, taking only the weekday set and the
+    session window from the class -- so describing the class alone told a reader "Weekdays at
+    08:30" for a binding that was in fact firing hourly. Callers that know the deployment pass
+    its cadence; callers describing the algorithm in the abstract pass nothing.
     """
     days = tuple(sorted(set(schedule.weekdays)))
     if not days:
@@ -403,10 +406,11 @@ def describe_schedule(schedule: Schedule) -> str:
     else:
         day_text = ", ".join(_WEEKDAY_NAMES[day][:3] for day in days)
 
+    cadence = schedule.refresh_minutes if refresh_minutes is None else max(int(refresh_minutes), 1)
     session_minutes = schedule_minutes(schedule.end_time) - schedule_minutes(schedule.start_time)
-    if schedule.refresh_minutes >= max(session_minutes, 1):
+    if cadence >= max(session_minutes, 1):
         return f"{day_text} at {schedule.start_time}"
-    return f"{day_text}, every {schedule.refresh_minutes}m from {schedule.start_time} to {schedule.end_time}"
+    return f"{day_text}, every {cadence}m from {schedule.start_time} to {schedule.end_time}"
 
 
 class AlgorithmPlugin(ABC):

@@ -252,6 +252,12 @@ class DCAAlgorithm(BaseAlgorithm):
         trigger: dict[str, Any],
         ready: bool,
     ) -> str:
+        if state.accrued < 0:
+            # ``settle`` subtracts the filled notional with no floor, so a trade sized above
+            # what had accrued -- which is what Bursty DCA's value averaging does when it is
+            # catching up to the path -- leaves a debt. That is the mechanism that keeps the
+            # long-run spend rate honest, but rendered raw it read as "Accruing ($-450 of $1)".
+            return f"Ahead of plan (repaying ${abs(state.accrued):.0f})"
         if not ready:
             return f"Accruing (${state.accrued:.0f} of ${floor_dollars:.0f})"
         if not trigger["fires"]:
