@@ -7,7 +7,7 @@ what lets the backtester drive the same call the live runner does.
 from __future__ import annotations
 
 from .config import DualMomentumConfig
-from .layers import covariance_matrix, defensive_weights, eligibility, market_regime, score_to_weights, sentiment_adjusted, timing, volatility_scale
+from .layers import covariance_matrix, defensive_weights, eligibility, limit_per_theme, market_regime, park_residual, score_to_weights, sentiment_adjusted, timing, volatility_scale
 from .scoring import base_scores, compute_features
 
 
@@ -117,6 +117,7 @@ def build_signals(
             "close": float(row.get("close", 0.0)),
             # Consumed by the dashboard row subtitle; without it every row renders "Inactive".
             "trend_ok": 1 if row.get("above_moving_average") else 0,
+            "ma_distance": float(row.get("ma_distance", 0.0)),
             "reason": _selection_reason(row, weight, regime, config),
             # -- run-level, repeated per row so refine can read them ---------------------
             "regime_risk_on": 1 if regime.get("risk_on") else 0,
@@ -149,7 +150,6 @@ def analyze_universe(context: AlgorithmContext, config: DualMomentumConfig) -> d
     features = {
         symbol: compute_features(
             symbol,
-            context.history_bars_by_symbol.get(symbol, pd.DataFrame()),
             context.bars_by_symbol.get(symbol, pd.DataFrame()),
             config,
         )
@@ -173,13 +173,16 @@ def analyze_universe(context: AlgorithmContext, config: DualMomentumConfig) -> d
     regime = market_regime(scored, config)
     ranked = rank_candidates(scored, config)
 
-    entries = [
+    qualified = [
         row
         for row in ranked
         if int(row.get("rank") or 0) <= config.entry_rank_max
         and float(row.get("base_score", 0.0)) >= config.min_base_score
         and row.get("timing")
-    ][: max(config.max_positions, 0)]
+    ]
+    # The theme cap is applied before the position cap, so a book of four is four *different*
+    # exposures rather than the top four names of one correlated block.
+    entries = limit_per_theme(qualified, config)[: max(config.max_positions, 0)]
 
     covariance = covariance_matrix(context.bars_by_symbol, config.symbols, config)
     # Always computed, whatever the regime says: step 2 can decide to go defensive for
@@ -196,6 +199,10 @@ def analyze_universe(context: AlgorithmContext, config: DualMomentumConfig) -> d
             vol = {**vol, "scale": 1.0}
         else:
             weights = {symbol: weight * vol["scale"] for symbol, weight in weights.items()}
+            # Anything the per-name cap or the volatility overlay left undeployed goes to
+            # bills rather than sitting as cash. Applied after the scale so de-risking moves
+            # money into the sleeve rather than out of the market entirely.
+            weights = park_residual(weights, defensive_book, config)
     else:
         weights = dict(defensive_book)
         vol = volatility_scale(weights, covariance, config)

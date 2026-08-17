@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from .config import DualMomentumConfig
+from .layers import theme_of
 
 
 
@@ -80,13 +81,24 @@ def apply_turnover_filters(
     equity: float,
     config: DualMomentumConfig,
 ) -> dict[str, float]:
-    """Drop trades too small to be worth their costs, keeping the current weight instead."""
+    """Drop trades too small to be worth their costs, keeping the current weight instead.
+
+    A full exit is never "too small". The thresholds here exist to suppress small
+    *adjustments* to a position the algorithm still wants; applied to a close they instead
+    trap it, because a holding below ``rebalance_weight_threshold`` can never move far enough
+    to clear the bar and is therefore held forever. That is how an 8-position book came to
+    carry a mean of 12 names, 5 of them frozen below the threshold and holding a fifth of the
+    equity, with ``max_positions`` exceeded on half of all days.
+    """
     minimum_notional = max(config.minimum_trade_notional, config.minimum_trade_nav_fraction * max(equity, 0.0))
     filtered: dict[str, float] = {}
     for symbol, weight in target.items():
         held = float(current.get(symbol, 0.0))
         move = abs(weight - held)
-        if move < max(config.rebalance_weight_threshold, 0.0):
+        # Leaving the book entirely: only the absolute notional floor applies, so a position
+        # the algorithm has decided to exit is actually exited.
+        closing = weight <= 0 < held
+        if not closing and move < max(config.rebalance_weight_threshold, 0.0):
             filtered[symbol] = held
             continue
         if move * max(equity, 0.0) < minimum_notional:
@@ -96,39 +108,80 @@ def apply_turnover_filters(
     return filtered
 
 
-def _resolve_replacements(
-    incumbents: set[str],
-    entrants: set[str],
+def track_eligibility(
+    state: dict[str, Any],
     rows: dict[str, dict[str, Any]],
     config: DualMomentumConfig,
-) -> set[str]:
-    """Fill free slots first, then let a challenger displace the weakest incumbent.
+) -> dict[str, list[int]]:
+    """Record today's eligibility per symbol and return each one's recent window.
 
-    The challenger has to win by ``min_score_delta_to_replace``; a hair's-breadth improvement
-    is noise, and trading on it costs the spread every time.
+    Eligibility is otherwise a stateless per-day test, which makes every floor a coin-flip
+    boundary for anything sitting near it. Counting instead asks "has this been qualifying?",
+    so an entry needs a run of agreement and an exit needs a run of disagreement.
+
+    Returns the series rather than the count so callers can tell a name that has failed the
+    test from one that has simply not been watched long enough yet. That distinction matters:
+    a cold state store would otherwise read every holding as ineligible and liquidate the book
+    on the first run after a restart.
+
+    ``state`` is mutated in place; persisting it is the caller's business.
     """
-    def score(symbol: str) -> float:
-        return float(rows.get(symbol, {}).get("base_score", 0.0))
+    window = max(config.eligibility_window, 1)
+    history = state.get("eligible_history")
+    if not isinstance(history, dict):
+        history = {}
+    updated: dict[str, list[int]] = {}
+    for symbol, row in rows.items():
+        past = history.get(symbol) or []
+        if not isinstance(past, list):
+            past = []
+        updated[symbol] = [*past, 1 if int(row.get("eligible", 0)) else 0][-window:]
+    state["eligible_history"] = updated
+    return updated
 
-    selection = set(incumbents)
-    free = max(config.max_positions, 0) - len(selection)
-    ordered = sorted(entrants, key=score, reverse=True)
 
-    for symbol in ordered[: max(free, 0)]:
-        selection.add(symbol)
+def resolve_themes(
+    held: set[str],
+    entrants: set[str],
+    theme_score: dict[str, float],
+    config: DualMomentumConfig,
+) -> set[str]:
+    """Which themes the book holds: keep what is held, fill free slots, then displace.
 
-    for symbol in ordered[max(free, 0):]:
-        if not selection:
+    Selection operates on themes rather than names because a theme is the unit the strategy
+    actually has a view about. Swapping QQQM for XSD inside ``us_growth`` is handled by
+    ``theme_allocation`` at full speed; getting in or out of ``us_growth`` at all is this
+    function's decision, and it is deliberately reluctant.
+    """
+    slots = max(config.max_positions, 0)
+    delta = max(config.min_score_delta_to_replace, 0.0)
+
+    def score(theme: str) -> float:
+        return float(theme_score.get(theme, 0.0))
+
+    selection = set(held)
+    contenders = sorted(entrants - selection, key=score, reverse=True)
+
+    for theme in contenders:
+        if len(selection) >= slots:
             break
+        selection.add(theme)
+
+    for theme in contenders:
+        if theme in selection or not selection:
+            continue
         weakest = min(selection, key=score)
-        if score(symbol) <= score(weakest) + max(config.min_score_delta_to_replace, 0.0):
+        if score(theme) <= score(weakest) + delta:
             continue
         logger.info(
-            "Dual Momentum replacing %s (%.2f) with %s (%.2f)",
-            weakest, score(weakest), symbol, score(symbol),
+            "Dual Momentum rotating theme %s (%.2f) out for %s (%.2f)",
+            weakest, score(weakest), theme, score(theme),
         )
         selection.discard(weakest)
-        selection.add(symbol)
+        selection.add(theme)
+
+    if len(selection) > slots:
+        selection = set(sorted(selection, key=score, reverse=True)[:slots])
     return selection
 
 

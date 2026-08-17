@@ -175,6 +175,18 @@ def account_sizing_fallbacks(config: Any) -> dict[str, Any]:
     }
 
 
+def as_symbol_map(value: Any, default: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Read a symbol -> label mapping, upper-casing the keys.
+
+    Without this a ``dict`` field falls through to :func:`as_text` and arrives as the string
+    repr of itself, which reads as "the setting does nothing" rather than as a mistake -- the
+    exact failure the type-driven dispatch below exists to prevent.
+    """
+    if not isinstance(value, Mapping):
+        return dict(default or {})
+    return {str(key).strip().upper(): str(label).strip() for key, label in value.items() if str(key).strip()}
+
+
 def _coercer_for(field: dataclasses.Field) -> Any:
     """How one dataclass field reads a raw config value, decided by its declared type.
 
@@ -189,6 +201,8 @@ def _coercer_for(field: dataclasses.Field) -> Any:
         return parse_symbols
 
     annotation = field.type if isinstance(field.type, str) else getattr(field.type, "__name__", "")
+    if "dict" in annotation:
+        return as_symbol_map
     if "list" in annotation:
         return parse_symbols
     if "bool" in annotation:

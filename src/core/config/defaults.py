@@ -39,7 +39,13 @@ PRICE_MOMENTUM_WEIGHT = 0.55
 SOCIAL_MOMENTUM_WEIGHT = 0.30
 VOLUME_MOMENTUM_WEIGHT = 0.15
 TARGET_ANNUAL_VOL = 0.18
+#: Cash held back from the buying power an order batch is allowed to spend. An account-level
+#: floor rather than a haircut on target weights: how much of the book a strategy wants
+#: deployed is the strategy's decision, expressed through its own gross-exposure cap.
 CASH_BUFFER = 0.02
+#: Holdings that are cash in all but name. A rebalance short of buying power may sell these to
+#: fund its buys, so parking idle cash in T-bills no longer blocks the next batch.
+CASH_EQUIVALENTS = ["SGOV", "BIL"]
 MIN_TRADE_DOLLARS = 50.0
 REBALANCE_THRESHOLD = 0.02
 TRANSACTION_COST_BPS = 1.0

@@ -32,6 +32,7 @@ from typing import Any, Callable, Iterable
 
 import pandas as pd
 
+from src.algorithms.ids import LEGACY_ALGORITHM_IDS
 from src.algorithms.registry import get_algorithm_class
 from src.api.payloads.backtest import (
     _backtest_starting_equity,
@@ -79,6 +80,11 @@ DEFENSIVE_SETS = {
     "sgov_tlt_gld": ["SGOV", "TLT", "GLD"],
 }
 
+#: SPY rotation's sleeves, which are not momentum candidates and so appear in no universe
+#: above. Loaded anyway: a sleeve the date axis does not price is a state the strategy can
+#: never be measured in, and it would read as the state simply never occurring.
+SPY_ROTATION_SYMBOLS = ["SPY", "XYLD", "GPIX", "SH", "VXX", "BIL", "SGOV"]
+
 
 # =========================================================================================
 # Running one configuration
@@ -100,9 +106,12 @@ class Run:
 class Sweep:
     """Holds the market data every run shares, so the cost of a sweep is the scoring alone."""
 
-    def __init__(self, periods: list[str], starting_equity: float | None = None) -> None:
+    def __init__(self, periods: list[str], starting_equity: float | None = None,
+                 open_in: str = "") -> None:
         self.base = get_config()
         self.providers = _configured_history_providers(self.base)
+        #: Park the opening balance here rather than holding it as cash. See ``replay``.
+        self.open_in = open_in.upper()
         # Overridable because a DCA plan has an absolute dollar size: the deployed plan wants
         # $2,675/month, which exhausts the default $10,000 stake in under four months. Every
         # variant then measures "ran out of cash", not its trigger.
@@ -137,7 +146,8 @@ class Sweep:
         show up as skill.
         """
         symbols = sorted({symbol for names in UNIVERSES.values() for symbol in names}
-                         | {symbol for names in DEFENSIVE_SETS.values() for symbol in names})
+                         | {symbol for names in DEFENSIVE_SETS.values() for symbol in names}
+                         | set(SPY_ROTATION_SYMBOLS))
         # Reuse the backtest tab's own fetch, so the bars are the ones it would have used --
         # but that fetch takes its symbol list from the algorithm's *requirements*, so the
         # candidate set has to be handed over as an algorithm universe rather than as
@@ -179,6 +189,11 @@ class Sweep:
         requirements = algorithm.requirements(config, {})
 
         symbols = [s for s in requirements.price_symbols if s in self._daily[period]]
+        # The opening sleeve has to be priced every day even when the algorithm never asks for
+        # it -- DCA has no opinion about SGOV, but the book is holding it and would otherwise
+        # be marked as though the position did not exist.
+        if self.open_in and self.open_in in self._daily[period] and self.open_in not in symbols:
+            symbols.append(self.open_in)
         daily = {symbol: self._daily[period][symbol] for symbol in symbols}
         if not daily:
             raise RuntimeError(f"{label}: none of its symbols have daily bars")
@@ -193,6 +208,7 @@ class Sweep:
             starting_equity=self.starting_equity,
             history_providers=self.providers,
             history=self._history_for(period, symbols, requirements.history_lookback_minutes),
+            open_in=self.open_in,
         )
         self.last_curve = (curve, coverage)
         defensive = {str(s).upper() for s in (tuning.get("defensive_universe") or [])}
@@ -303,8 +319,14 @@ def deployed_tuning(algorithm_id: str) -> dict[str, Any]:
     Read rather than restated. A hand-copied baseline is a baseline for a configuration nobody
     is running, and every comparison against it inherits the mistake -- the first draft of this
     file quietly disagreed with the deployed file on six keys.
+
+    Every id the algorithm has had, in the same order the algorithm itself reads them. Asking
+    for only the current one silently returned ``{}`` for SPY Rotation, whose tuning is still
+    filed under ``invest_spy`` -- so its whole sweep ran against code defaults while reporting
+    them as the deployed baseline.
     """
-    return dict(tuning_section(get_config(strategy_id=algorithm_id), algorithm_id))
+    ids = [algorithm_id, *LEGACY_ALGORITHM_IDS.get(algorithm_id, [])]
+    return dict(tuning_section(get_config(strategy_id=algorithm_id), *ids))
 
 
 def _dual_baseline() -> dict[str, Any]:
@@ -447,7 +469,64 @@ def bursty_axes() -> list[tuple[str, dict[str, Any]]]:
     variants.append(_axis(base, "value_averaging=False", value_averaging=False))
     for multiple in (1.0, 6.0):
         variants.append(_axis(base, f"max_trade_multiple={multiple:.0f}", max_trade_multiple=multiple))
-    return variants
+    # A variant that equals the deployed baseline is not an axis, it is a restatement, and it
+    # reads as a tie rather than as the same run twice. ``rsi_threshold=5`` is exactly that
+    # today, and any of these can become one when the deployed config moves.
+    return [variant for variant in variants if variant[0] == "baseline" or variant[1] != base]
+
+
+def spy_axes() -> list[tuple[str, dict[str, Any]]]:
+    """SPY rotation's state machine: where the boundaries sit, and what each state holds.
+
+    The axes are grouped by the question they answer, because this strategy's return is
+    decided by two separable things -- *how often* it is in each state, and *what it holds*
+    once it is there. A knob that only moves the second cannot fix a state it never enters.
+    """
+    base = deployed_tuning("spy_rotation")
+    variants = [("baseline", dict(base))]
+
+    # --- Where the GROWING boundary sits. The deployed 2% over 60 days is a low bar for
+    # "growing", so this is the axis most likely to control time spent fully in SPY.
+    for threshold in (-0.02, 0.0, 0.05):
+        variants.append(_axis(base, f"growth_macro={threshold}", growth_macro_return=threshold))
+    for threshold in (-0.01, 0.01):
+        variants.append(_axis(base, f"growth_meso={threshold}", growth_meso_return=threshold))
+
+    # --- Where FALLING and CRISIS begin. Leaving equities early is only free if the exit is
+    # right; these say how twitchy the two downside states are.
+    for threshold in (-0.02, 0.02):
+        variants.append(_axis(base, f"falling_macro={threshold}", falling_macro_return=threshold))
+    for threshold in (-0.02, -0.005):
+        variants.append(_axis(base, f"falling_meso={threshold}", falling_meso_return=threshold))
+    for threshold in (-0.10, -0.02):
+        variants.append(_axis(base, f"crisis_macro={threshold}", crisis_macro_return=threshold))
+    for threshold in (-0.04, -0.01):
+        variants.append(_axis(base, f"crisis_meso={threshold}", crisis_meso_return=threshold))
+
+    # --- What each non-SPY state actually holds.
+    for exposure in (0.0, 0.25, 0.75, 1.0):
+        variants.append(_axis(base, f"flat_income={exposure}", flat_equity_income_exposure=exposure))
+    for exposure in (0.0, 0.30, 0.50):
+        variants.append(_axis(base, f"crisis_hedge={exposure}", max_crisis_hedge_exposure=exposure,
+                              max_crisis_hedge_weight=exposure))
+    variants.append(_axis(base, "hedge=SH_only", crisis_hedge_universe=["SH"]))
+    variants.append(_axis(base, "defensive=SGOV", defensive_universe=["SGOV"]))
+    variants.append(_axis(base, "income=XYLD_only", equity_income_universe=["XYLD"]))
+    variants.append(_axis(base, "income=GPIX_only", equity_income_universe=["GPIX"]))
+
+    # --- PULLBACK is currently indistinguishable from GROWING: both hold 100% SPY. Moving the
+    # boundary is the only way to tell whether the state is doing anything at all.
+    for threshold in (-0.02, 0.0):
+        variants.append(_axis(base, f"pullback_micro={threshold}", pullback_micro_return=threshold))
+
+    # --- Sentiment is neutral under replay (``ReplayContextSource`` serves no scores), so the
+    # sentiment thresholds cannot move a backtest and are deliberately not swept.
+    for cap in (0.5, 0.95):
+        variants.append(_axis(base, f"max_gross={cap}", max_gross_exposure=cap))
+    for threshold in (0.0, 0.03):
+        variants.append(_axis(base, f"rebalance_threshold={threshold}", rebalance_threshold=threshold))
+
+    return [variant for variant in variants if variant[0] == "baseline" or variant[1] != base]
 
 
 def dca_axes() -> list[tuple[str, dict[str, Any]]]:
@@ -490,6 +569,7 @@ GRIDS: dict[str, dict[str, Callable[[], list[tuple[str, dict[str, Any]]]]]] = {
     "dual_momentum": {"axes": dual_axes, "wide": dual_wide, "wide_churn": dual_wide_churn},
     "fast_momentum": {"axes": fast_axes},
     "bursty_dca": {"axes": bursty_axes},
+    "spy_rotation": {"axes": spy_axes},
     "dca": {"axes": dca_axes},
 }
 
@@ -590,9 +670,11 @@ def write_results(runs: list[Run], path: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--algorithm", default="both",
-                        choices=["dual_momentum", "fast_momentum", "bursty_dca", "dca", "both"])
+                        choices=["dual_momentum", "fast_momentum", "bursty_dca", "dca", "spy_rotation", "both"])
     parser.add_argument("--starting-equity", type=float, default=None,
                         help="override the backtest stake; a DCA plan needs one that funds it")
+    parser.add_argument("--open-in", default="",
+                        help="park the opening balance in this symbol (e.g. SGOV) instead of cash")
     parser.add_argument("--stage", default="axes", choices=["axes", "wide", "wide_churn", "finalists"])
     parser.add_argument("--from", dest="axes_results", default="data/config_sweep_12m.csv",
                         help="finalists stage: the axes run to recombine")
@@ -608,7 +690,7 @@ def main(argv: list[str] | None = None) -> int:
     periods = [item.strip() for item in args.period.split(",") if item.strip()]
     algorithms = ["dual_momentum", "fast_momentum"] if args.algorithm == "both" else [args.algorithm]
 
-    sweep = Sweep(periods, starting_equity=args.starting_equity)
+    sweep = Sweep(periods, starting_equity=args.starting_equity, open_in=args.open_in)
     runs: list[Run] = []
     for algorithm_id in algorithms:
         if args.stage == "finalists":

@@ -74,6 +74,21 @@ class SchwabBrokerage(BaseBrokerage):
                 positions[symbol] = quantity
         return positions
 
+    def get_marks(self, symbols) -> Dict[str, float]:
+        """Schwab prices each position on the account payload, so no quote call is needed."""
+        wanted = {str(symbol).upper() for symbol in symbols}
+        account = self._account_payload(fields="positions")
+        marks: Dict[str, float] = {}
+        for row in account.get("positions", []) or []:
+            symbol = str((row.get("instrument") or {}).get("symbol", "")).upper()
+            if symbol not in wanted:
+                continue
+            quantity = float(row.get("longQuantity", 0.0) or 0.0) - float(row.get("shortQuantity", 0.0) or 0.0)
+            market_value = float(row.get("marketValue", 0.0) or 0.0)
+            if quantity and market_value:
+                marks[symbol] = market_value / quantity
+        return marks
+
     def get_dividend_activity(self, start=None, end=None) -> List[Dict[str, Any]]:
         """Cash distributions credited to this account, from ``/accounts/{hash}/transactions``.
 

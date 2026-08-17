@@ -236,6 +236,17 @@ def bar_interval_minutes(bars: Any, default: int = REFERENCE_INTERVAL_MINUTES) -
     return max(int(round(minutes)), 1) if minutes > 0 else default
 
 
+def market_minutes_per_bar(bars: Any, default: int = REFERENCE_INTERVAL_MINUTES) -> int:
+    """How much *market* time one bar advances the clock by.
+
+    The same number :func:`_market_minutes_axis` steps with, which is not always
+    :func:`bar_interval_minutes`: a daily bar claims 1440 minutes but only a session's worth
+    of them are tradable, so the axis counts it as 390. Sampling a path with the raw interval
+    against that axis walks 3.7 sessions per "bar" and silently mis-spaces every point.
+    """
+    return min(bar_interval_minutes(bars, default), TRADING_MINUTES_PER_DAY)
+
+
 def _market_minutes_axis(work: pd.DataFrame) -> pd.Series:
     """Elapsed *market* minutes at each bar, measured from the frame's first observation.
 
@@ -328,7 +339,9 @@ def return_path(bars: Any, horizon_minutes: int, *, span_minutes: int) -> list[f
     data that exists instead of toward flat.
     """
     work, axis = _prepared(bars)
-    step = bar_interval_minutes(work)
+    # Market minutes, not the raw interval: the offsets below are measured against ``axis``,
+    # which counts a daily bar as one session rather than as 1440 minutes.
+    step = market_minutes_per_bar(work)
     points = max(int(round(max(span_minutes, step) / step)), 1)
     if work.empty or horizon_minutes <= 0:
         return [0.0] * points

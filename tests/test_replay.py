@@ -310,3 +310,104 @@ def test_the_replay_reads_the_bar_store_once_per_symbol_not_once_per_date(monkey
     # provider order is still walked, and still in order.
     assert reads == [("AAA", "yfinance"), ("AAA", None)], reads
     assert len(reads) < dates_stepped, "reads still scale with the length of the window"
+
+
+# --------------------------------------------------------------------------------------
+# Opening the book in a cash-equivalent sleeve rather than in raw cash.
+# --------------------------------------------------------------------------------------
+
+
+def _two_symbol_history(price: float = 100.0) -> dict[str, pd.DataFrame]:
+    frame = pd.DataFrame(
+        {"timestamp": DATES, "open": price, "high": price, "low": price,
+         "close": price, "adjusted_close": price, "volume": 1_000}
+    ).set_index("timestamp")
+    return {"AAA": frame, "SGOV": frame.copy()}
+
+
+def test_open_in_parks_the_opening_balance_instead_of_holding_cash() -> None:
+    """A funded account's idle balance sits in T-bills, not at 0%.
+
+    Opening in cash understates the income and never exercises the liquidation a real
+    rebalance performs to get at the money.
+    """
+    algorithm = _Recorder(weight=0.0, mode=MODE_INCREMENTAL)
+    history, _ = replay(
+        algorithm,
+        Config(cash_equivalents=["SGOV"]),
+        daily_history=_two_symbol_history(),
+        trade_dates=list(DATES),
+        should_run=lambda date: True,
+        starting_equity=10_000.0,
+        dividends={},
+        open_in="SGOV",
+    )
+
+    # The whole stake is in the sleeve from the first date, not a day late.
+    assert history["positions"].iloc[0].get("SGOV") == pytest.approx(10_000.0, abs=100.0)
+    assert history["cash"].iloc[0] < 100.0
+    assert history["equity"].iloc[0] == pytest.approx(10_000.0, abs=100.0)
+
+
+def test_open_in_never_overdraws_the_opening_balance() -> None:
+    """Rounding a whole balance up asks for more than the account holds, and is refused."""
+    algorithm = _Recorder(weight=0.0, mode=MODE_INCREMENTAL)
+    history, _ = replay(
+        algorithm,
+        Config(cash_equivalents=["SGOV"]),
+        daily_history=_two_symbol_history(price=100.56),
+        trade_dates=list(DATES),
+        should_run=lambda date: True,
+        starting_equity=60_000.0,
+        dividends={},
+        open_in="SGOV",
+    )
+
+    assert (history["cash"] >= -0.01).all()
+    assert history["positions"].iloc[0].get("SGOV", 0) > 0
+
+
+def test_open_in_falls_back_to_cash_when_the_sleeve_has_no_price() -> None:
+    algorithm = _Recorder(weight=0.0, mode=MODE_INCREMENTAL)
+    history, _ = replay(
+        algorithm,
+        Config(cash_equivalents=["SGOV"]),
+        daily_history=_history(),  # no SGOV bars at all
+        trade_dates=list(DATES),
+        should_run=lambda date: True,
+        starting_equity=10_000.0,
+        dividends={},
+        open_in="SGOV",
+    )
+
+    assert history["cash"].iloc[0] == pytest.approx(10_000.0)
+
+
+def test_a_parked_book_still_funds_an_incremental_buy() -> None:
+    """The DCA shape: nothing but buys, and every dollar is in the sleeve.
+
+    Without cash-aware funding this is the batch the broker refuses outright.
+    """
+    class _Buyer(_Recorder):
+        def analyze(self, context) -> AlgorithmDecision:
+            self.contexts.append(context)
+            return AlgorithmDecision(
+                intents=[Intent("AAA", "notional", 500.0)], mode=MODE_INCREMENTAL
+            )
+
+    algorithm = _Buyer()
+    history, _ = replay(
+        algorithm,
+        Config(cash_equivalents=["SGOV"]),
+        daily_history=_two_symbol_history(),
+        trade_dates=list(DATES),
+        should_run=lambda date: True,
+        starting_equity=10_000.0,
+        dividends={},
+        open_in="SGOV",
+    )
+
+    fills = [order for batch in algorithm.settled for order in batch]
+    assert any(order["symbol"] == "AAA" and order["status"] == "submitted" for order in fills)
+    # The sleeve was sold down to pay for them.
+    assert history["positions"].iloc[-1].get("SGOV", 0) < history["positions"].iloc[0]["SGOV"]

@@ -103,7 +103,6 @@ class AlgorithmDecision:
     target_weights: Dict[str, float] = field(default_factory=dict)
     signals: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
-    cash_buffer: float = 0.0
     min_trade_dollars: float = 0.0
     rebalance_threshold: float = 0.0
     #: Left empty by weight-based algorithms, which populate ``target_weights`` instead.
@@ -127,6 +126,11 @@ class PortfolioSnapshot:
 
     positions: Dict[str, float] = field(default_factory=dict)
     equity: float = 0.0
+    #: Settled cash, and what the broker will actually let this account spend right now. The
+    #: two differ wherever margin does, which is why order funding reads ``buying_power`` and
+    #: never infers it from equity: sizing a portfolio and paying for it are different sums.
+    cash: float = 0.0
+    buying_power: float = 0.0
 
     def weights(self, latest_prices: Dict[str, float]) -> Dict[str, float]:
         """Current holdings expressed as portfolio weights, skipping unpriced symbols."""
@@ -261,6 +265,53 @@ class Brokerage(ABC):
     def is_market_open(self) -> bool:
         """Return whether the market is currently open for trading."""
         return bool(self.get_account_state().get("is_market_open", False))
+
+    def get_buying_power(self) -> float:
+        """What this account may spend right now, per the broker's own accounting.
+
+        Read rather than derived. Settlement rules, margin, and pending orders all move this
+        number, and the broker is the only party that knows the answer -- reconstructing it
+        from equity and a settlement model can only drift away from what the broker will
+        actually accept.
+        """
+        return float(self.get_account_state().get("buying_power", 0.0) or 0.0)
+
+    def get_marks(self, symbols: List[str]) -> Dict[str, float]:
+        """Last known price per symbol, from the broker's own position marks.
+
+        Needed because order funding has to value holdings the running algorithm may never
+        price: DCA buys VTI and has no reason to ever look up SGOV, but SGOV is exactly what
+        would fund the buy. Defaults to empty, which leaves those holdings unusable for
+        funding rather than mispriced.
+        """
+        return {}
+
+    def cash_equivalent_symbols(self) -> List[str]:
+        """Symbols this account treats as cash. See ``BaseBrokerage`` for the config-backed one."""
+        return []
+
+    def get_cash_equivalents(self) -> Dict[str, Dict[str, float]]:
+        """Held cash-equivalent positions with marks, as ``{symbol: {shares, price, value}}``.
+
+        What order funding may liquidate when buying power alone cannot cover a batch.
+        Unpriced holdings are dropped rather than valued at zero, so a missing mark shows up
+        as "could not be funded" instead of quietly shrinking the batch.
+        """
+        symbols = [str(symbol).upper() for symbol in self.cash_equivalent_symbols()]
+        if not symbols:
+            return {}
+        positions = self.get_positions()
+        held = {symbol: float(positions.get(symbol, 0.0) or 0.0) for symbol in symbols}
+        held = {symbol: shares for symbol, shares in held.items() if shares > 0}
+        if not held:
+            return {}
+        marks = self.get_marks(sorted(held))
+        return {
+            symbol: {"shares": shares, "price": float(marks[symbol]), "value": shares * float(marks[symbol])}
+            # Ordered by the config, so "prefer BIL over SGOV" is expressible by listing it first.
+            for symbol, shares in ((s, held[s]) for s in symbols if s in held)
+            if float(marks.get(symbol, 0.0) or 0.0) > 0
+        }
 
     def get_dividend_activity(
         self, start: Optional[date] = None, end: Optional[date] = None
@@ -425,11 +476,13 @@ class AlgorithmPlugin(ABC):
     def sizing(self, config: Any) -> Dict[str, float]:
         """Order-sizing knobs for step 2, defaulting to the account config.
 
-        An algorithm that already bakes cash into its weights (via a gross-exposure cap) must
-        override ``cash_buffer`` to 0, or the buffer is applied twice and it under-invests.
+        Deliberately no cash buffer. How much of the book to deploy is a strategy decision,
+        already stated by whatever gross-exposure cap the algorithm applies to its own weights;
+        holding cash back to *fund* a batch is an account decision, applied once against
+        buying power in ``pipeline.place_orders``. Fusing the two is what made every
+        exposure-capped algorithm override this to zero to avoid under-investing twice.
         """
         return {
-            "cash_buffer": float(getattr(config, "cash_buffer", 0.0) or 0.0),
             "min_trade_dollars": float(getattr(config, "min_trade_dollars", 0.0) or 0.0),
             "rebalance_threshold": float(getattr(config, "rebalance_threshold", 0.0) or 0.0),
         }

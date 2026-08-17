@@ -112,6 +112,18 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
                     "spend three months of budget. Set to 1.0 to never exceed the plan rate."
                 ),
             },
+            "backlog_relax_months": {
+                "what": (
+                    "Months of undeployed budget at which the two oversold tests stop being picky. "
+                    "The regime gate is deliberately not relaxed."
+                ),
+                "effect": (
+                    "Waiting for a dip is the strategy; waiting forever is not. At 0 the trigger never "
+                    "gives up, so a market that only rises leaves the budget accruing and the eventual "
+                    "entry happens higher than every price it declined. Lower to fire sooner once "
+                    "behind; 1.0 clears the backlog within a month of falling behind."
+                ),
+            },
             "value_averaging": {
                 "what": "When on, trade size targets a value path rather than a fixed contribution.",
                 "effect": (
@@ -200,10 +212,8 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "high_volatility_weight_scale": {"what": "How much weights are scaled when that volatility limit trips.", "effect": "0.5 halves every position; 1.0 disables the response."},
             "intraday_drawdown_limit": {"what": "Session drawdown that flips it defensive for the rest of the day.", "effect": "Closer to zero stops it out sooner and more often."},
             "intraday_bar_minutes": {
-                "what": "Preferred bar resolution for the history feed, in minutes.",
-                "effect": (
-                    "Fidelity only -- every lookback below is stated in minutes the market is open (390 per session), so a finer grid resolves them more precisely and a coarser one still answers them. 0 uses the configured default (5m). Providers snap down to the nearest grid they serve."
-                ),
+                "what": "Unused. This algorithm reads daily bars only.",
+                "effect": "None. Every horizon below is measured in minutes the market is open (390 per session) against daily bars.",
             },
             "nano_momentum_lookback_minutes": {"what": "Minutes in the shortest momentum window.", "effect": "Shorter means a noisier, faster signal."},
             "micro_momentum_lookback_minutes": {"what": "Minutes in the intraday momentum window. 1170 is three trading sessions.", "effect": "Longer smooths the primary signal."},
@@ -249,44 +259,82 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
         "parameters": {
             "risk_on_universe": {"what": "The ETFs it may hold when the regime is risk-on.", "effect": "Scores are cross-sectional, so adding or removing a name changes every other name's z-score and the breadth reading."},
             "defensive_universe": {"what": "Where the book sits when risk-on is not permitted.", "effect": "Short-duration choices (BIL) make risk-off flat; TLT or GLD make it an active macro bet."},
-            "benchmark": {"what": "The index proxy whose trend defines the market regime.", "effect": "QQQM gates a growth basket tightly; SPY is broader and flips less often."},
+            "benchmark": {"what": "Charted alongside the book as a reference line.", "effect": "None on selection. It used to gate the whole portfolio -- see breadth_min, which replaced it."},
             "signal_refresh_minutes": {"what": "How often membership may change.", "effect": "Longer cuts turnover and lets winners run; shorter reacts to leadership changes sooner."},
-            "risk_refresh_minutes": {"what": "How often timing and risk are re-evaluated.", "effect": "Also the unit for cooldown_after_exit. Shorter reacts faster but re-checks cost more."},
+            "risk_refresh_minutes": {"what": "How often timing and risk are re-evaluated. Also the unit for cooldown_after_exit.", "effect": "The algorithm runs once a session now, so anything below 390 makes cooldown_after_exit expire before the next run and do nothing."},
             "intraday_bar_minutes": {
-                "what": "Preferred bar resolution for the history feed, in minutes.",
-                "effect": (
-                    "Fidelity only -- every lookback below is stated in minutes the market is open (390 per session), so a finer grid resolves them more precisely and a coarser one still answers them. 0 uses the configured default (5m). Providers snap down to the nearest grid they serve."
-                ),
+                "what": "Unused. This algorithm reads daily bars only.",
+                "effect": "None. Every horizon below is measured in minutes the market is open (390 per session) against daily bars.",
             },
-            "selection_horizon_nano_minutes": {"what": "Fastest return horizon, in minutes. 60 is about a quarter-session.", "effect": "Small values make the ranking twitchy; this horizon carries the least score weight by design."},
-            "selection_horizon_micro_minutes": {"what": "Short return horizon, in minutes. 240 is about half a session.", "effect": "Bridges the fast and trend horizons."},
-            "selection_horizon_meso_minutes": {"what": "Medium return horizon, in minutes. 1200 is roughly three sessions.", "effect": "Half the selection weight sits here and in macro; this is what 'leadership' means."},
-            "selection_horizon_macro_minutes": {"what": "Slowest return horizon, in minutes. 4800 is roughly twelve sessions, further back than a fresh intraday cache reaches -- daily bars fill the far end.", "effect": "Longer favours established trends and cuts turnover, at the cost of reacting late."},
+            "selection_horizon_nano_minutes": {"what": "Fastest return horizon, in minutes. 390 is one session.", "effect": "One session is the floor on daily bars; this horizon carries the least score weight by design."},
+            "selection_horizon_micro_minutes": {"what": "Short return horizon, in minutes. 780 is two sessions.", "effect": "Bridges the fast and trend horizons."},
+            "selection_horizon_meso_minutes": {"what": "Medium return horizon, in minutes. 1170 is three sessions.", "effect": "Half the selection weight sits here and in macro; this is what 'leadership' means."},
+            "selection_horizon_macro_minutes": {"what": "Slowest return horizon, in minutes. 4680 is twelve sessions.", "effect": "Longer favours established trends and cuts turnover, at the cost of reacting late."},
             "w_nano": {"what": "Score weight on the fastest horizon.", "effect": "Raising it makes selection chase intraday moves, which is what the fork was meant to stop."},
             "w_micro": {"what": "Score weight on the short horizon.", "effect": "Moderate influence; useful for breaking ties between similar trends."},
             "w_meso": {"what": "Score weight on the medium horizon.", "effect": "Raising it favours persistent leadership over recent strength."},
             "w_macro": {"what": "Score weight on the slowest horizon.", "effect": "Raising it makes the book slower and stickier."},
             "robust_zscore": {"what": "Use median/MAD z-scores instead of mean/standard deviation.", "effect": "On, one event-driven ETF spike stops distorting everyone else's score. Off is the classic z-score."},
             "risk_adjusted_score": {"what": "Rank on return divided by the symbol's own volatility, not raw return.", "effect": "On, a 58%-vol theme and a 14%-vol index compete on trend quality. Off, the ranking rewards amplitude and the wildest riser almost always wins."},
-            "score_ema_minutes": {"what": "Minutes of smoothing applied to the composite score.", "effect": "More smoothing means fewer rank flips on noise, and a slower response to a real change. Stated in minutes so the memory is the same span on any feed."},
-            "benchmark_ma_days": {"what": "Trend window for the benchmark regime test.", "effect": "Longer keeps it risk-on through corrections; shorter exits earlier and re-enters more often."},
-            "benchmark_return_days": {"what": "Absolute-momentum window for the benchmark.", "effect": "The 'is the market itself going up' test. Shorter reacts faster and whipsaws more."},
-            "breadth_ma_days": {"what": "Trend window used for each name in the breadth count.", "effect": "Usually matched to benchmark_ma_days so the two gates agree on what a trend is."},
-            "breadth_min": {"what": "Share of the risk-on universe that must be above its average.", "effect": "Higher demands a broad advance, so it sits defensive during narrow rallies."},
+            "score_ema_minutes": {"what": "Minutes of smoothing applied to the composite score. 1170 is three sessions.", "effect": "More smoothing means fewer rank flips on noise, and a slower response to a real change. Below one session it rounds to no smoothing at all."},
+            "breadth_ma_days": {"what": "Trend window used for each name in the breadth count.", "effect": "Usually matched to etf_ma_days so the gate and the eligibility test agree on what a trend is."},
+            "breadth_min": {"what": "Share of the risk-on universe that must be above its own average. The whole regime gate.", "effect": "The one control on how strong the opportunity set must be before risk is taken. Higher demands a broad advance and sits defensive through narrow rallies; at 0 the per-name eligibility test is the only filter left."},
+            "min_universe_coverage": {"what": "Share of the risk-on universe that must have enough history for breadth to be trusted.", "effect": "Below it the gate reports a data gap and stays defensive, rather than reading a thin cache as a bear market."},
             "regime_confirm_bars": {"what": "Consecutive passing algorithm runs before risk-on is allowed. Counted in runs, not bars.", "effect": "Higher avoids entering on one borderline reading, at the cost of entering later. One run is risk_refresh_minutes."},
             "regime_exit_confirm_bars": {"what": "Consecutive failing runs before leaving risk-on. Counted in runs, not bars.", "effect": "Higher rides out single-run scares; lower exits faster and pays the spread more often."},
             "etf_ma_days": {"what": "Each ETF's own absolute-trend window.", "effect": "The core dual-momentum filter: nothing below its own trend can be held at any rank."},
             "etf_abs_return_days": {"what": "Medium-term absolute-momentum lookback per ETF.", "effect": "Longer demands a more established advance before a name is eligible."},
             "etf_min_abs_return": {"what": "Minimum return over that lookback.", "effect": "Zero means 'must have gone up'. Raising it demands a margin over flat."},
             "etf_fast_return_days": {"what": "Short lookback used to catch deterioration.", "effect": "Stops a name staying eligible on a stale long-horizon score while it collapses."},
+            "max_daily_drop": {
+                "what": "A holding falling this much in one session is sold immediately.",
+                "effect": "Works at a daily cadence, unlike intraday_drawdown_limit, which rebases its session high on every run and so never fires. Lower stops out on ordinary volatility; 0 turns it off.",
+            },
+            "eligibility_window": {"what": "How many runs the eligibility count looks back over.", "effect": "Longer makes membership slower to change in both directions."},
+            "entry_min_eligible_days": {"what": "Runs in that window a name must have been eligible for before it can be opened.", "effect": "Higher demands a settled signal and enters later; at 1 entry is stateless again."},
+            "exit_max_eligible_days": {"what": "A holding is sold once it has been eligible on this many runs or fewer.", "effect": "Lower holds through longer patches of ineligibility. The gap between this and entry_min_eligible_days is the band where a holding is left alone."},
+            "exit_threshold_slack": {
+                "what": "Slack added to every eligibility floor before a *held* name is sold.",
+                "effect": "0 means entry and exit share a threshold, so anything sitting near it round-trips on noise. Higher holds through deeper dips and exits later.",
+            },
             "etf_min_fast_return": {"what": "Floor on that short return.", "effect": "Less negative ejects weakening names sooner and increases turnover."},
             "max_positions": {"what": "How many risk-on names it holds at once.", "effect": "Fewer concentrates in the leader; more diversifies but dilutes the signal."},
+            "max_positions_per_theme": {
+                "what": "How many holdings may come from one theme. 0 is off.",
+                "effect": (
+                    "The cross-sectional score treats the universe as N independent choices, and it "
+                    "is not: eight of the deployed names correlate 0.79+ with SPY on daily returns, "
+                    "and SPY/IWM/RSP/QUAL/VTV cluster at 0.80 all-pairs. At 1 a four-position book is "
+                    "four different exposures; at 0 it can be one bet sliced four ways."
+                ),
+            },
+            "themes": {
+                "what": "Symbol to theme label. Symbols left out are each their own theme.",
+                "effect": "Only read when max_positions_per_theme is set. Grouping too coarsely starves the book of candidates; too finely and the cap stops binding.",
+            },
+            "intra_theme_delta_to_replace": {
+                "what": "Score margin a sibling in the same theme needs before the book swaps between them.",
+                "effect": "Higher keeps one name standing for a theme; lower lets the book rotate between near-identical ETFs. Distinct from min_score_delta_to_replace, which governs displacing the theme itself.",
+            },
             "min_base_score": {"what": "Score quality floor, in cross-sectional z units.", "effect": "Raise to hold fewer names more often; the shortfall stays in the defensive sleeve, not in a weaker name."},
             "entry_rank_max": {"what": "Worst rank that may be newly entered.", "effect": "Tighter than exit_rank_max on purpose: it is harder to get in than to stay in."},
             "exit_rank_max": {"what": "Rank at which an incumbent is finally dropped.", "effect": "Wider than entry_rank_max gives a holding room to wobble without being sold."},
             "min_score_delta_to_replace": {"what": "Score advantage a challenger needs to displace a holding.", "effect": "The anti-churn knob. At 0 it swaps on any improvement and trades constantly."},
             "cooldown_after_exit": {"what": "Algorithm runs a name must wait before re-entry. Counted in runs, not bars.", "effect": "Stops a name being sold and re-bought around a threshold. Multiplied by risk_refresh_minutes."},
-            "momentum_change_ema_minutes": {"what": "Minutes of smoothing on the fast momentum-change signal.", "effect": "More smoothing means fewer false entry triggers and slightly later entries."},
+            "require_entry_timing": {
+                "what": "Whether a qualified name must also pass the entry-timing test before it is opened.",
+                "effect": (
+                    "Both timing paths detect a spike rather than a trend: "
+                    "momentum_change subtracts the 3-session return from the 1-session return after dividing "
+                    "each by the square root of its length, which is negative in any steady advance, and the "
+                    "pullback path needs a dip a grind-up rally never gives. In November 2023 it blocked all "
+                    "13 eligible names for eight sessions while the S&P rose 7.98%. Switching it off is not "
+                    "a free win though: over 2023 as a whole that lost 8pp and raised turnover, because the "
+                    "same gate also blocks a lot of bad entries."
+                ),
+            },
+            "momentum_change_ema_minutes": {"what": "Minutes of smoothing on the fast momentum-change signal. 1170 is three sessions.", "effect": "More smoothing means fewer false entry triggers and slightly later entries. Only read when require_entry_timing is on."},
+            "momentum_change_vol_days": {"what": "Trailing window the momentum-change denominator is measured over.", "effect": "Both terms are divided by this one volatility, so it sets the scale but not the sign. Only read when require_entry_timing is on."},
             "momentum_change_enter": {"what": "Minimum smoothed momentum change to enter.", "effect": "Above zero demands visible acceleration; below zero lets it enter into softness."},
             "pullback_macro_z_min": {"what": "Macro leadership required for a pullback entry.", "effect": "Higher restricts dip-buying to names that are clear long-horizon leaders."},
             "pullback_meso_z_min": {"what": "Medium-horizon leadership required for a pullback entry.", "effect": "This is what keeps 'buy the dip' from meaning 'buy the loser'."},
@@ -339,6 +387,44 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "max_defensive_positions": {"what": "How many defensive names it may hold at once.", "effect": "More spreads the defensive sleeve; fewer concentrates it."},
             "max_crisis_hedge_positions": {"what": "How many hedge instruments it may hold.", "effect": "Usually 1; raising it splits the hedge across products."},
             "growth_macro_return": {"what": "Macro return above which SPY counts as growing.", "effect": "Higher demands a stronger market before taking the growth stance, so it sits in income or cash more."},
+            "growth_meso_return": {
+                "what": "Meso return at or above which SPY still counts as growing, alongside the macro test.",
+                "effect": (
+                    "The single largest control on turnover. FALLING triggers at meso <= -0.01, so "
+                    "setting this to 0 leaves a 1pp dead band that dumps the book into FLAT on any "
+                    "slightly-down session; closing the band roughly halves turnover. Raise it to "
+                    "demand a stronger session before holding SPY, at the cost of more churn."
+                ),
+            },
+            "max_falling_hedge_exposure": {
+                "what": "Share of the book allowed into the crisis-hedge sleeve while FALLING, not only in CRISIS.",
+                "effect": (
+                    "0 sits every decline out in bills. Raising it buys SH/VXX on ordinary weakness, "
+                    "which measured worse in every window tested including the 2022 bear market -- "
+                    "an inverse ETF resets daily and VXX rolls futures, so neither survives being "
+                    "held for the few sessions this state usually lasts."
+                ),
+            },
+            "max_falling_hedge_weight": {"what": "Per-name cap inside the FALLING hedge sleeve.", "effect": "0 falls back to the exposure cap, letting one hedge fill the whole sleeve."},
+            "state_confirm_bars": {
+                "what": "Consecutive readings a new SPY state needs before the book acts on it.",
+                "effect": (
+                    "The state test has no memory of its own, so at 1 a reading that straddles a "
+                    "threshold rotates the entire book and pays the spread both ways. Raising it "
+                    "holds the current book until the new state repeats, which delays every switch "
+                    "-- including the right ones. It cannot cut turnover below the cost of the "
+                    "rotations that do happen, since each is a full swap of the book."
+                ),
+            },
+            "income_requires_trend": {
+                "what": "Whether the equity-income sleeve must pass the macro trend test to be bought.",
+                "effect": (
+                    "Off looks right in principle -- a covered-call fund's price is flat by design and "
+                    "its return arrives as distributions -- but measured worse in every window: it "
+                    "collects more income and gives back more than that in price decay and churn."
+                ),
+            },
+            "min_income_meso_return": {"what": "Raw meso-return floor on the income sleeve.", "effect": "Null removes the floor entirely; 0 requires the last session to have been flat or up."},
             "max_gross_exposure": {"what": "Cap on total invested fraction of equity.", "effect": "Below 1.0 it always holds cash regardless of state."},
             "max_single_position_weight": {"what": "Cap on any one position.", "effect": "At 1.0 a single-name sleeve is allowed to be the whole portfolio."},
             "intraday_bar_minutes": {

@@ -82,11 +82,17 @@ def test_algorithms_state_horizons_in_minutes_not_bars() -> None:
     for config_cls in (DualMomentumConfig, DefensiveMomentumConfig, InvestSpyConfig):
         # 0 means "whatever the feed prefers" -- the grid is the data layer's business now.
         assert config_cls().intraday_bar_minutes == 0, config_cls.__name__
+
+    # Still stated in minutes, but dual momentum reads daily bars only, so it asks for no
+    # intraday window at all rather than one it would not look at.
+    assert DualMomentumConfig().required_history_minutes == 0
+    for config_cls in (DefensiveMomentumConfig, InvestSpyConfig):
         assert config_cls().required_history_minutes > 0, config_cls.__name__
 
-    # The horizons carried over at their 15-minute wall-clock equivalents.
+    # The horizons carried over at their 15-minute wall-clock equivalents, except dual
+    # momentum's, which are now whole sessions: 4680 is twelve of them.
     assert DefensiveMomentumConfig().micro_momentum_lookback_minutes == 78 * 15
-    assert DualMomentumConfig().selection_horizon_macro_minutes == 320 * 15
+    assert DualMomentumConfig().selection_horizon_macro_minutes == 12 * 390
     assert InvestSpyConfig().meso_momentum_lookback_minutes == 26 * 15
 
 

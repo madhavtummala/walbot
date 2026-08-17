@@ -110,13 +110,13 @@ class DCAAlgorithm(BaseAlgorithm):
         return AlgorithmRequirements(price_symbols=sorted(plan_budgets(self.plan(config))))
 
     def sizing(self, config: Any) -> dict[str, float]:
-        """No cash buffer and no drift thresholds.
+        """No drift thresholds.
 
         ``rebalance_threshold`` is a target-drift concept: applied here it would wrongly
         suppress a small DCA buy that is exactly what the plan asked for. Accrual already
         enforces a per-trade floor through ``min_executable``.
         """
-        return {"cash_buffer": 0.0, "min_trade_dollars": 0.0, "rebalance_threshold": 0.0}
+        return {"min_trade_dollars": 0.0, "rebalance_threshold": 0.0}
 
     # ----------------------------------------------------------------------------------
     # Step 1

@@ -244,6 +244,20 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
         Only accepts bindings this agent drives -- switched on, with ``frequency: "mcp"``. Call
         list_bindings to see which those are, and name ``binding_id`` when one algorithm is
         bound to more than one account.
+
+        Orders are fitted to the account's available funds before submission, so ``status``
+        distinguishes three different things and only one of them is worth reacting to:
+
+        - ``submitted`` -- every leg went out at the size asked for.
+        - ``submitted_reduced`` -- the batch was deliberately trimmed to what the account can
+          pay for. This is a success. Do NOT resubmit: the legs in ``funding.reduced`` were
+          shrunk on purpose, and re-sending them asks for money that is not there.
+        - ``unfunded`` / ``partial`` / ``rejected`` -- something did not reach the market.
+          ``unfunded`` lists legs no amount of shrinking could fund, ``rejected`` lists legs
+          the broker itself refused; each row carries the reason.
+
+        ``funding`` explains how the batch was paid for -- buying power, the reserve held
+        back, sale proceeds, and any cash-equivalent holdings liquidated to cover a shortfall.
         """
         result = _result_from_payload(algorithm_result)
         # Resolved from configuration, never from the payload: ``algorithm_result`` is whatever

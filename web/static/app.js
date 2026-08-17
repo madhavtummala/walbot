@@ -114,8 +114,6 @@ const state = {
   renderedBindingKey: "",
   algorithmConfigs: {},
   algorithmConfigLoading: {},
-  watchlist: null,
-  watchDrag: null,
   positions: {},
   positionsLoading: {},
   activity: {},
@@ -1636,7 +1634,6 @@ function renderSidebar() {
   }
 
   renderAccountNav();
-  renderWatchlist();
   renderNavFooter();
 }
 
@@ -1677,108 +1674,6 @@ function renderAccountNav() {
   }).join("");
   // The sidebar is the only place an idle account's P/L shows, so it pulls its own numbers.
   rows.filter((account) => account.credentials_ready).forEach((account) => ensurePositions(account.id));
-}
-
-function renderWatchlist() {
-  const host = $("#watchlist");
-  if (!host) return;
-  const rows = state.watchlist?.rows || [];
-  if (!rows.length) {
-    host.innerHTML = `<li><span class="navEmpty">No tickers yet</span></li>`;
-    return;
-  }
-  host.innerHTML = rows.map((row) => `
-    <li>
-      <div class="watchRow" draggable="true" data-watch="${escapeHtml(row.symbol)}">
-        <span class="watchGrip" aria-hidden="true">⠿</span>
-        <span class="watchSymbol">${escapeHtml(row.symbol)}</span>
-        <span class="watchPrice">${row.price === null || row.price === undefined ? "--" : escapeHtml(money(row.price, 2))}</span>
-        <span class="watchChange ${(row.change || 0) >= 0 ? "gain" : "loss"}">${row.change === null || row.change === undefined ? "" : escapeHtml(percent(row.change))}</span>
-        <button class="watchRemove" type="button" data-remove-watch aria-label="Remove ${escapeHtml(row.symbol)}">&times;</button>
-      </div>
-    </li>`).join("");
-}
-
-function reorderWatchlist(fromSymbol, toSymbol) {
-  const current = [...(state.watchlist?.symbols || [])];
-  const from = current.indexOf(fromSymbol);
-  const to = current.indexOf(toSymbol);
-  if (from < 0 || to < 0 || from === to) return;
-  current.splice(to, 0, current.splice(from, 1)[0]);
-  // Paint the new order immediately; the save reconciles it.
-  state.watchlist = { ...state.watchlist, symbols: current, rows: current.map((symbol) =>
-    (state.watchlist.rows || []).find((row) => row.symbol === symbol) || { symbol, price: null, change: null }) };
-  renderWatchlist();
-  saveWatchlist(current);
-}
-
-function wireWatchlistDrag() {
-  const host = $("#watchlist");
-  if (!host) return;
-  host.addEventListener("dragstart", (event) => {
-    const row = event.target.closest("[data-watch]");
-    if (!row) return;
-    state.watchDrag = row.dataset.watch;
-    row.classList.add("is-dragging");
-    event.dataTransfer.effectAllowed = "move";
-    // Firefox refuses to start a drag without data on the transfer.
-    event.dataTransfer.setData("text/plain", row.dataset.watch);
-  });
-  host.addEventListener("dragover", (event) => {
-    if (!state.watchDrag) return;
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "move";
-  });
-  host.addEventListener("drop", (event) => {
-    const row = event.target.closest("[data-watch]");
-    if (!row || !state.watchDrag) return;
-    event.preventDefault();
-    reorderWatchlist(state.watchDrag, row.dataset.watch);
-    state.watchDrag = null;
-  });
-  host.addEventListener("dragend", () => {
-    state.watchDrag = null;
-    host.querySelectorAll(".is-dragging").forEach((node) => node.classList.remove("is-dragging"));
-  });
-}
-
-async function loadWatchlist() {
-  try {
-    state.watchlist = await api("/api/watchlist", { timeoutMs: 12000 });
-  } catch (error) {
-    state.watchlist = { rows: [] };
-  }
-  renderWatchlist();
-}
-
-function normalizeWatchlistSymbol(symbol) {
-  return String(symbol ?? "").trim().toUpperCase().slice(0, 10);
-}
-
-async function saveWatchlist(symbols) {
-  const normalized = [...new Set((Array.isArray(symbols) ? symbols : []).map(normalizeWatchlistSymbol).filter(Boolean))];
-  try {
-    state.watchlist = await api("/api/watchlist", {
-      method: "POST",
-      body: JSON.stringify({ symbols: normalized }),
-      timeoutMs: 12000,
-    });
-  } catch (error) {
-    showToast(error.message);
-  }
-  renderWatchlist();
-}
-
-function addWatchTicker() {
-  const symbol = window.prompt("Ticker to watch");
-  if (!symbol) return;
-  const current = state.watchlist?.symbols || [];
-  saveWatchlist([...current, symbol]);
-}
-
-function removeWatchTicker(symbol) {
-  const current = state.watchlist?.symbols || [];
-  saveWatchlist(current.filter((entry) => entry !== symbol));
 }
 
 function renderNavFooter() {
@@ -2005,27 +1900,29 @@ function renderAccountPage(content, accountId) {
       ${deployed.length ? `<div class="chipRow">${deployed.map((binding) => `
         <a class="chip is-link" href="#/algo/${escapeHtml(binding.strategy)}/${DEFAULT_TAB}">${escapeHtml(strategyByKey(binding.strategy).name)}</a>`).join("")}</div>` : ""}
     </section>
-    <div class="cardGrid">
-      <section class="card">
-        <div class="cardHead">
-          <h2>Positions</h2>
-          <span class="cardHint">${positions?.rows?.length ? `${positions.rows.length} open` : ""}</span>
-        </div>
-        ${accountPositionsTable(positions)}
-      </section>
+    <div class="accountLayout">
+      <div class="accountStack">
+        <section class="card">
+          <div class="cardHead">
+            <h2>Positions</h2>
+            <span class="cardHint">${positions?.rows?.length ? `${positions.rows.length} open` : ""}</span>
+          </div>
+          ${accountPositionsTable(positions)}
+        </section>
+        <section class="card">
+          <div class="cardHead">
+            <h2>Dividends received</h2>
+            <span class="cardHint">${positions?.dividend_rows?.length ? `${positions.dividend_rows.length} shown` : ""}</span>
+          </div>
+          ${accountDividendsTable(positions)}
+        </section>
+      </div>
       <section class="card">
         <div class="cardHead">
           <h2>Recent orders</h2>
           <span class="cardHint">${activity?.rows?.length ? `${activity.rows.length} shown` : ""}</span>
         </div>
         ${accountOrdersTable(activity)}
-      </section>
-      <section class="card">
-        <div class="cardHead">
-          <h2>Dividends received</h2>
-          <span class="cardHint">${positions?.dividend_rows?.length ? `${positions.dividend_rows.length} shown` : ""}</span>
-        </div>
-        ${accountDividendsTable(positions)}
       </section>
     </div>
     </div>`;
@@ -2552,12 +2449,6 @@ function wireEvents() {
     const open = sidebar?.classList.toggle("is-open");
     $("#navToggle")?.setAttribute("aria-expanded", String(Boolean(open)));
   });
-  $("#addWatchButton")?.addEventListener("click", addWatchTicker);
-  wireWatchlistDrag();
-  $("#watchlist")?.addEventListener("click", (event) => {
-    const row = event.target.closest("[data-watch]");
-    if (row && event.target.closest("[data-remove-watch]")) removeWatchTicker(row.dataset.watch);
-  });
 
   // Delegated: page bodies are replaced wholesale on every render.
   $("#content")?.addEventListener("click", (event) => {
@@ -2661,7 +2552,6 @@ function wireEvents() {
 async function init() {
   wireEvents();
   loadSchwabAuth();
-  loadWatchlist();
   render();
   try {
     const [statusPayload, universePayload, controlsPayload] = await Promise.all([
