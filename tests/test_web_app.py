@@ -328,6 +328,22 @@ def test_the_board_and_the_views_resolve_the_same_account() -> None:
     assert "account_id: accountForStrategy(strategyKey)," in app_js
 
 
+def test_a_budget_can_be_typed_as_well_as_scrolled() -> None:
+    """Scrolling is quick but imprecise: it only ever lands on a multiple of WHEEL_STEP, and
+    reaching $1,600 from $25 is 63 notches. Selecting a bubble and typing sets it outright."""
+    app_js, app_css, index_html = _assets()
+
+    assert 'id="amountEntry"' in index_html
+    assert "function showAmountEntry" in app_js
+    assert "function commitAmountEntry" in app_js
+    # A digit starts the edit and is carried in, because focusing an input mid-keydown does
+    # not deliver the keystroke that caused it.
+    assert 'event.key === "Enter" || /^[0-9]$/.test(event.key)' in app_js
+    # A typed number means what it says, so it is not snapped to the scroll grid.
+    assert "function setNodeAmount" in app_js
+    assert "#amountEntry {" in app_css
+
+
 def test_the_bubble_board_reports_whether_an_edit_was_saved() -> None:
     """The board has no save button -- it writes on every gesture -- so silence is ambiguous.
 
