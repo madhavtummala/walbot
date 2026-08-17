@@ -230,7 +230,7 @@ class DualMomentumAlgorithm(BaseAlgorithm):
         state["last_selection_at"] = stamp
 
         # Budget per theme, split inside it by today's scores -- no confirmation, every day.
-        weights = theme_allocation(selection, rows, strategy_config)
+        weights = theme_allocation(selection, rows, strategy_config, current)
 
         covariance = {symbol: dict(rows[symbol].get("covariance_row") or {}) for symbol in weights}
         vol = volatility_scale(weights, covariance, strategy_config)
