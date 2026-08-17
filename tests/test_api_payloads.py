@@ -498,25 +498,13 @@ def test_none_strategy_resolves_to_dca(monkeypatch) -> None:
     assert canonical_algorithm_id("none") == "dca"
 
 
-def test_dca_view_states_the_cadence_its_binding_will_actually_use(monkeypatch) -> None:
-    """The schedule row has to describe the deployment, not the algorithm class.
+def test_dca_view_states_its_planned_total(monkeypatch) -> None:
+    """What the plan commits to per month, not what happens to be deployable this minute.
 
-    The class declares the weekday set and the session window, but the runtime buckets on the
-    *binding's* ``frequency`` -- so reading ``self.schedule`` alone reported "Mondays at 08:30"
-    for a binding that was in fact firing every hour, and the view is the only place a reader
-    can find out when the algorithm next acts.
+    There is no Schedule row: cadence is set per binding on the dashboard and every algorithm
+    runs inside the trading session regardless, so restating it beside the signals only
+    repeated the deployment the reader had just configured.
     """
-    from src.api import controls as controls_module
-
-    monkeypatch.setattr(
-        controls_module,
-        "load_controls",
-        lambda *a, **kw: {
-            "bindings": [
-                {"id": "b1", "strategy": "dca", "account_id": "", "enabled": True, "frequency": "1hr"}
-            ]
-        },
-    )
     plan = {
         "buy": {"items": [{"symbol": "SPY", "amount": 250.0}]},
         "sell": {"items": []},
@@ -532,13 +520,8 @@ def test_dca_view_states_the_cadence_its_binding_will_actually_use(monkeypatch) 
     rows = {row["symbol"]: row for row in payload["leaders"]}
     assert rows["SPY"]["reason"].startswith("Accruing")
     assert payload["summary"][0] == {"label": "Mode", "value": "DCA"}
-    # Mondays from the class, every 60m from the binding -- neither source alone is the truth.
-    assert payload["summary"][1] == {
-        "label": "Schedule",
-        "value": "Mondays, every 60m from 08:30 to 15:00",
-    }
-    # The configured monthly total, not what happens to be deployable this minute.
-    assert payload["summary"][2] == {"label": "Planned", "value": "$250/month"}
+    assert payload["summary"][1] == {"label": "Planned", "value": "$250/month"}
+    assert "Schedule" not in {row["label"] for row in payload["summary"]}
 
 
 def _binding_controls(strategy: str, account_id: str) -> dict:

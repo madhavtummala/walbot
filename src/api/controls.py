@@ -258,28 +258,6 @@ def account_for_strategy(strategy: str, controls: dict[str, Any] | None = None) 
     return str(preferred.get("account_id") or "")
 
 
-def describe_deployed_schedule(strategy: str, schedule: Any, controls: dict[str, Any] | None = None) -> str:
-    """When ``strategy`` will actually run, as opposed to what its class declares.
-
-    The class owns the weekday set and the session window; the binding owns the cadence within
-    that window (``_binding_run_key`` buckets on ``frequency``, not on ``refresh_minutes``).
-    Describing the class alone therefore reported a cadence nothing was using -- "Weekdays at
-    08:30" for a binding firing every hour.
-    """
-    from src.core.interfaces import describe_schedule
-
-    controls = controls if controls is not None else load_controls()
-    candidates = bindings_for_strategy(controls, strategy)
-    if not candidates:
-        return f"{describe_schedule(schedule)} (not deployed)"
-    binding = next((b for b in candidates if b.get("enabled")), candidates[0])
-    minutes = frequency_minutes(binding.get("frequency"))
-    if minutes is None:
-        return "On demand, driven by an agent over MCP"
-    described = describe_schedule(schedule, refresh_minutes=minutes)
-    return described if binding.get("enabled") else f"{described} (switched off)"
-
-
 def resolve_binding_for_origin(
     origin: str,
     *,

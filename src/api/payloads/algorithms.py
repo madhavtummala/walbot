@@ -11,8 +11,6 @@ from typing import Any
 
 import pandas as pd
 
-from src.api.controls import describe_deployed_schedule
-
 from .strategy_config import config_for_strategy_view
 
 from ...core.config import (
@@ -107,25 +105,6 @@ def strategy_signals_payload(strategy: str = DEFAULT_STRATEGY_ID, account_id: st
         "account_id": getattr(config, "account_id", ""),
         "wired": view.wired,
         "updated_at": pd.Timestamp.now(tz="UTC").isoformat(),
-        "summary": _with_deployed_schedule(view.summary, strategy, algorithm),
+        "summary": view.summary,
         "leaders": view.leaders,
     }
-
-
-def _with_deployed_schedule(
-    summary: list[dict[str, str]], strategy: str, algorithm: Any
-) -> list[dict[str, str]]:
-    """Correct the summary's ``Schedule`` row to the cadence the runtime will really use.
-
-    An algorithm builds its own summary from ``self.schedule``, which is all it can see -- it
-    has no business reading the binding table. The deployment is knowable here, though, and a
-    schedule row that names a cadence nothing is using is worse than no row at all.
-    """
-    described = describe_deployed_schedule(strategy, algorithm.schedule)
-    rows = [dict(row) for row in summary or []]
-    for row in rows:
-        if str(row.get("label")) == "Schedule":
-            row["value"] = described
-            return rows
-    rows.append({"label": "Schedule", "value": described})
-    return rows

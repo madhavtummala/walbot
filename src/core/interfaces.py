@@ -387,14 +387,13 @@ def schedule_minutes(value: str, default: int = 0) -> int:
     return parsed if 0 <= parsed <= (23 * 60) + 59 else default
 
 
-def describe_schedule(schedule: Schedule, refresh_minutes: int | None = None) -> str:
+def describe_schedule(schedule: Schedule) -> str:
     """Render a schedule for the dashboard, e.g. ``"Mondays at 08:30"``.
 
-    ``refresh_minutes`` overrides the class's own cadence. A deployed binding carries a
-    ``frequency`` and the runtime buckets on *that*, taking only the weekday set and the
-    session window from the class -- so describing the class alone told a reader "Weekdays at
-    08:30" for a binding that was in fact firing hourly. Callers that know the deployment pass
-    its cadence; callers describing the algorithm in the abstract pass nothing.
+    Deliberately not shown in the live signal view: cadence is set per binding on the
+    dashboard and every algorithm runs inside the trading session regardless, so a Schedule
+    row beside the signals restated the deployment the reader had just configured -- and, when
+    it read the class instead of the binding, restated it wrongly.
     """
     days = tuple(sorted(set(schedule.weekdays)))
     if not days:
@@ -406,7 +405,7 @@ def describe_schedule(schedule: Schedule, refresh_minutes: int | None = None) ->
     else:
         day_text = ", ".join(_WEEKDAY_NAMES[day][:3] for day in days)
 
-    cadence = schedule.refresh_minutes if refresh_minutes is None else max(int(refresh_minutes), 1)
+    cadence = schedule.refresh_minutes
     session_minutes = schedule_minutes(schedule.end_time) - schedule_minutes(schedule.start_time)
     if cadence >= max(session_minutes, 1):
         return f"{day_text} at {schedule.start_time}"
