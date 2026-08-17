@@ -18,7 +18,6 @@ from ...data.bars import (
     closes_of as _closes,
     ema,
     market_minutes_per_bar,
-    realized_volatility,
     return_over_periods as _return_over,
     return_path,
 )
@@ -68,27 +67,6 @@ def compute_features(
         for name, minutes in horizons.items()
     }
 
-    # Volatility-normalised momentum change: fast momentum relative to its own noise, minus
-    # the same for the medium horizon. Positive means the near term is accelerating away
-    # from the trend, which is what "enter now" should mean.
-    #
-    # One volatility for both terms, over ``momentum_change_vol_days``, rather than one per
-    # horizon: on daily bars ``nano`` spans a single return and has no standard deviation at
-    # all, so the old per-horizon estimate returned 0.0 and the division blew up. Each term is
-    # instead scaled by the square root of its own horizon, which is what makes a one-session
-    # and a three-session return comparable under a random walk.
-    vol = realized_volatility(daily_bars, config.momentum_change_vol_days * TRADING_MINUTES_PER_DAY)
-    nano_sessions = max(config.selection_horizon_nano_minutes / TRADING_MINUTES_PER_DAY, 1.0)
-    meso_sessions = max(config.selection_horizon_meso_minutes / TRADING_MINUTES_PER_DAY, 1.0)
-    change_span = max(config.momentum_change_ema_minutes, step)
-    nano_path = return_path(daily_bars, config.selection_horizon_nano_minutes, span_minutes=change_span)
-    meso_path = return_path(daily_bars, config.selection_horizon_meso_minutes, span_minutes=change_span)
-    change_series = [
-        (nano / ((vol * math.sqrt(nano_sessions)) + EPSILON))
-        - (meso / ((vol * math.sqrt(meso_sessions)) + EPSILON))
-        for nano, meso in zip(nano_path, meso_path)
-    ]
-
     ma_window = max(config.etf_ma_days, 1)
     # A short history would silently turn "the 100-day average" into the average of whatever
     # happened to be cached, and a name below that shorter average looks like a market fact
@@ -107,7 +85,6 @@ def compute_features(
         "macro_return": return_series["macro"][-1],
         "return_series": return_series,
         "step_minutes": step,
-        "momentum_change": ema(change_series, change_span, step),
         "moving_average": moving_average,
         "above_moving_average": bool(enough_history and last_daily > moving_average > 0),
         # Signed distance from the trend line, so a *held* name can be given a wider
@@ -234,4 +211,4 @@ def base_scores(
 
 
 # =========================================================================================
-# Layer 1: market regime
+# Cross-sectional scoring

@@ -59,8 +59,8 @@ const STRATEGIES = [
     status: "Paper",
     horizon: "Intraday",
     risk: "Medium",
-    logic: "Gates risk-on exposure on a benchmark trend and breadth regime, requires each ETF to clear its own absolute-trend test before it is ranked, times entries with a separate fast signal, and scales weights toward a portfolio volatility target.",
-    signals: ["Regime gate", "Breadth", "Absolute eligibility", "Slow rank", "Entry timing", "Vol target"],
+    logic: "Requires each ETF to clear its own absolute-trend test before it is ranked, selects and rotates by theme rather than by ticker so a book of four is four different exposures, and scales weights toward a portfolio volatility target.",
+    signals: ["Absolute eligibility", "Slow rank", "Theme rotation", "Vol target"],
   },
   {
     key: "spy_rotation",
@@ -1149,10 +1149,8 @@ function formatSignalDetail(strategyKey, row) {
   if (strategyKey === "dual_momentum") {
     const details = [
       row.reason || "Signal pending",
-      `Regime ${row.regime_risk_on ? "risk-on" : "risk-off"} (breadth ${percent(row.regime_breadth)})`,
       `Eligible ${row.eligible ? "yes" : "no"}`,
       row.rank ? `Rank ${row.rank}` : "Unranked",
-      `Timing ${row.timing ? "go" : "wait"} (${signedNum(row.momentum_change, 2)})`,
       `Vol ${percent(row.annual_volatility)} / scale ${num(row.vol_scale, 2)}`,
     ];
     if (row.close) details.push(`Close ${money(row.close, 2)}`);

@@ -430,8 +430,6 @@ def dual_axes() -> list[tuple[str, dict[str, Any]]]:
     variants.append(_axis(base, "risk_adjusted_score=True", risk_adjusted_score=True))
     for floor in (0.25, 0.5):
         variants.append(_axis(base, f"min_base_score={floor}", min_base_score=floor))
-    for breadth in (0.4, 0.6):
-        variants.append(_axis(base, f"breadth_min={breadth}", breadth_min=breadth))
     for cap in (0.25, 0.35):
         variants.append(_axis(base, f"name_weight_max={cap}", name_weight_max=cap))
     for delta in (0.1, 0.6):
@@ -612,24 +610,21 @@ def dual_wide_churn() -> list[tuple[str, dict[str, Any]]]:
     ``wide`` stage covers the two weight-level brakes; these are the ones that act on
     *membership* instead, plus the two that shrink the eligible set.
 
-    ``signal_refresh_minutes`` is the interesting one. It throttles how often membership may
-    change at all, and at its deployed 60 it cannot bind in a daily replay: consecutive dates
-    are 1440 minutes apart, so the throttle is always already satisfied. Only values above a
-    day are testable here -- and live, they are the difference between re-ranking hourly and
-    re-ranking weekly.
+    ``theme_rotation_interval_days`` is the interesting one: it throttles how often the theme
+    set may change at all, independently of how often the algorithm runs.
     """
     base = {**deployed_tuning("dual_momentum"), "risk_on_universe": list(WIDE)}
     variants = [("wide/baseline", dict(base))]
 
-    for minutes, name in ((1440, "1d"), (4320, "3d"), (10080, "7d")):
-        variants.append(_axis(base, f"wide/signal_refresh={name}", signal_refresh_minutes=minutes))
+    for days in (1, 3, 7):
+        variants.append(_axis(base, f"wide/rotation={days}d", theme_rotation_interval_days=days))
     for cap in (0.20, 0.25, 0.35):
         variants.append(_axis(base, f"wide/name_weight_max={cap}", name_weight_max=cap))
     for floor in (0.25, 0.5, 0.75):
         variants.append(_axis(base, f"wide/min_base_score={floor}", min_base_score=floor))
     # The plausible combination: re-rank weekly, trade only on real drift, hold more names so
     # each one matters less.
-    variants.append(_axis(base, "wide/low_churn_combo", signal_refresh_minutes=10080,
+    variants.append(_axis(base, "wide/low_churn_combo", theme_rotation_interval_days=7,
                           rebalance_weight_threshold=0.10, max_positions=8,
                           entry_rank_max=8, exit_rank_max=10))
     return variants
@@ -752,9 +747,44 @@ def dual_confirm() -> list[tuple[str, dict[str, Any]]]:
     ]
 
 
+def dual_sticky() -> list[tuple[str, dict[str, Any]]]:
+    """Does making the book stick actually cost anything?
+
+    Three levers pull the same way and are separated here because they are not the same idea:
+    holding fewer themes, re-ranking less often than the algorithm runs, and how much of the
+    book one theme may carry. ``orders`` and ``turnover_x_stake`` matter as much as return in
+    this stage -- the point is to find the cheapest book that keeps the return, not the best
+    return at any turnover.
+
+    The cadence knobs only started doing anything when ``action_due`` was wired; the single
+    ``signal_refresh_minutes`` that preceded them was declared, documented, and read by
+    nothing, so every value behaved identically to 0.
+    """
+    base = _dual_baseline()
+    variants = [("deployed", dict(base))]
+    # Where the book was before this round: four themes, re-ranked every session.
+    variants.append(_axis(base, "before/4themes-daily", max_positions=4, entry_rank_max=4,
+                          name_weight_max=0.5, theme_rotation_interval_days=0,
+                          entry_interval_days=0, intra_theme_interval_days=0))
+    for days in (0, 3, 7, 14):
+        variants.append(_axis(base, f"rotation={days}d", theme_rotation_interval_days=days))
+    for days in (0, 3, 5, 10):
+        variants.append(_axis(base, f"intra={days}d", intra_theme_interval_days=days))
+    for days in (0, 3, 5, 10):
+        variants.append(_axis(base, f"entry={days}d", entry_interval_days=days))
+    for positions in (1, 2, 3):
+        variants.append(_axis(base, f"themes={positions}", max_positions=positions,
+                              entry_rank_max=positions + 1))
+    for cap in (0.5, 0.8, 1.0):
+        variants.append(_axis(base, f"theme_cap={cap}", name_weight_max=cap))
+    for rank in (2, 4):
+        variants.append(_axis(base, f"entry_rank={rank}", entry_rank_max=rank))
+    return [variant for variant in variants if variant[0] == "deployed" or variant[1] != base]
+
+
 GRIDS: dict[str, dict[str, Callable[[], list[tuple[str, dict[str, Any]]]]]] = {
     "dual_momentum": {"axes": dual_axes, "wide": dual_wide, "wide_churn": dual_wide_churn,
-                      "y2023": dual_2023, "confirm": dual_confirm},
+                      "y2023": dual_2023, "confirm": dual_confirm, "sticky": dual_sticky},
     "fast_momentum": {"axes": fast_axes},
     "bursty_dca": {"axes": bursty_axes},
     "spy_rotation": {"axes": spy_axes},
@@ -866,7 +896,7 @@ def main(argv: list[str] | None = None) -> int:
                              "are a separate post-hoc model, so do not use both at once")
     parser.add_argument("--open-in", default="",
                         help="park the opening balance in this symbol (e.g. SGOV) instead of cash")
-    parser.add_argument("--stage", default="axes", choices=["axes", "wide", "wide_churn", "y2023", "confirm", "finalists"])
+    parser.add_argument("--stage", default="axes", choices=["axes", "wide", "wide_churn", "y2023", "confirm", "sticky", "finalists"])
     parser.add_argument("--from", dest="axes_results", default="data/config_sweep_12m.csv",
                         help="finalists stage: the axes run to recombine")
     parser.add_argument("--period", default="12m", help="comma-separated, e.g. 12m,6m")

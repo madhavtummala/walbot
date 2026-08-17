@@ -1,7 +1,12 @@
-"""The four gates, in order: regime, absolute eligibility, entry timing, then sizing.
+"""Two layers, in order: absolute eligibility, then sizing.
 
 Relative strength selects and absolute momentum permits -- each layer here answers one of
 those questions and nothing else.
+
+There were four. The market-regime gate and the entry-timing gate are gone: both had been
+switched off in the deployed configuration for long enough to be measured, and both were
+measured as subtracting. What remains of the regime layer is :func:`universe_data_ok`, which
+is not a market view at all -- it refuses to trade a cache too thin to judge.
 """
 
 from __future__ import annotations
@@ -23,64 +28,39 @@ logger = logging.getLogger(__name__)
 
 
 
-def market_regime(
+def universe_data_ok(
     scored: dict[str, dict[str, Any]],
     config: DualMomentumConfig,
 ) -> dict[str, Any]:
-    """The raw risk-on gate: is enough of the universe itself in an uptrend?
+    """Whether enough of the universe can be judged at all. Not a view on the market.
 
-    Breadth alone, measured over the names the algorithm could actually buy. There is no
-    benchmark test here any more, on purpose. Dual momentum's absolute-momentum leg is
-    ``eligibility`` -- each name must clear its own 100-day average and its own 60/20-day
-    return floors -- and ``analyze_universe`` already holds the defensive sleeve when nothing
-    qualifies. "Defensive when there is no strong risk-on option" is therefore already the
-    behaviour, and a benchmark overlay on top of it can only subtract: it vetoes names that
-    passed every test the strategy asks of them because one unrelated ETF is weak.
+    All that survives of the breadth regime gate. That gate asked "is enough of the universe
+    in an uptrend", which duplicated the question :func:`eligibility` already asks per name --
+    and answered it worse, by vetoing names that had passed every test the strategy makes of
+    them because other, unrelated names were weak. It was measured at ``breadth_min: 0.0`` for
+    long enough to be sure it was only ever subtracting, so it is gone.
 
-    Raw because the hysteresis that turns this into a *state* needs to count consecutive
-    observations, and counting requires memory that ``analyze`` is not allowed to have.
+    This check is a different kind of thing and is kept for that reason: too little usable
+    history is not a bearish reading, it is an unusable one. A cold or truncated cache would
+    otherwise read as "nothing is above its average", which is a bear market that never
+    happened. Below the coverage floor the algorithm holds the defensive sleeve and says why.
     """
     risk_on = [scored[symbol] for symbol in config.risk_on_universe if symbol in scored]
     usable = [row for row in risk_on if row.get("enough_history")]
-    # Measured over the names that can be judged, not over the whole list: a symbol with a
-    # short cache is unknown, and counting it as "not above its average" is a bearish reading
-    # of a data gap.
-    above = [row for row in usable if row.get("above_moving_average")]
-    breadth = len(above) / len(usable) if usable else 0.0
     coverage = len(usable) / len(risk_on) if risk_on else 0.0
-
-    # Too little usable history is not a bearish reading, it is an unusable one. Say so, and
-    # stay risk-off: guessing is worse than declining to act.
-    if not usable or coverage < config.min_universe_coverage:
-        return {
-            "risk_on": False,
-            "breadth": breadth,
-            "breadth_ok": False,
-            "coverage": coverage,
-            "data_ok": False,
-            "detail": (
-                f"only {len(usable)} of {len(risk_on)} risk-on names have "
-                f"{config.etf_ma_days} daily bars"
-            ),
-        }
-
-    breadth_ok = breadth >= config.breadth_min
+    ok = bool(usable) and coverage >= config.min_universe_coverage
     return {
-        "risk_on": breadth_ok,
-        "breadth": breadth,
-        "breadth_ok": breadth_ok,
+        "data_ok": ok,
         "coverage": coverage,
-        "data_ok": True,
-        "detail": (
-            f"breadth {breadth:.0%} at or above {config.breadth_min:.0%}"
-            if breadth_ok
-            else f"breadth {breadth:.0%} below {config.breadth_min:.0%}"
+        "detail": "" if ok else (
+            f"only {len(usable)} of {len(risk_on)} risk-on names have "
+            f"{config.etf_ma_days} daily bars"
         ),
     }
 
 
 # =========================================================================================
-# Layer 2: absolute eligibility
+# Layer 1: absolute eligibility
 
 
 def eligibility(row: dict[str, Any], config: DualMomentumConfig) -> tuple[bool, str]:
@@ -128,55 +108,7 @@ def hold_eligibility(row: dict[str, Any], config: DualMomentumConfig) -> tuple[b
 
 
 # =========================================================================================
-# Layer 3: entry timing
-
-
-def timing(row: dict[str, Any], config: DualMomentumConfig) -> tuple[bool, str]:
-    """Whether *now* is a moment to open or add, given the name already qualifies.
-
-    Two independent ways in: accelerating volatility-normalised momentum, or a pullback
-    inside an intact uptrend. Deliberately a flag rather than a score term -- as a bonus, a
-    deep enough dip could outvote the trend horizons and promote a weak ETF.
-
-    Switchable via ``require_entry_timing``, because what it does is clear but whether it pays
-    is not. Both entry paths are shaped to catch a *spike*, and neither fires during a steady
-    advance:
-
-    * ``momentum_change`` is the one-session return minus the three-session return, each
-      divided by the square root of its own length. In any sustained trend the three-session
-      return is about three times the one-session return, and dividing by sqrt(3) leaves the
-      slower term ~1.7x larger -- so the difference is structurally negative and the gate asks
-      the last session to be more than 58% of the last three sessions' move.
-    * the pullback path needs ``nano_z <= -0.75``, a dip a grind-up rally never supplies.
-
-    In November 2023 this blocked all 13 eligible names for eight consecutive sessions while
-    the S&P rose 7.98% -- the single worst month of that year against SPY.
-
-    It does not follow that removing it is an improvement, and measurement says it is not: over
-    2023 as a whole, switching it off *lost* 8pp (+15.8% to +7.8%) and raised turnover from 74x
-    to 85x. Blocking entries is costly when the trend is real and valuable when it is not, and
-    over that year the second effect dominated. Treat the November finding as "this gate cannot
-    distinguish a trend from a spike", not as "delete it".
-    """
-    if not config.require_entry_timing:
-        return True, "Entry timing off"
-    if float(row.get("momentum_change", 0.0)) > config.momentum_change_enter:
-        return True, "Momentum accelerating"
-
-    z = row.get("z", {}) if isinstance(row.get("z"), dict) else {}
-    pullback = (
-        float(z.get("macro", 0.0)) >= config.pullback_macro_z_min
-        and float(z.get("meso", 0.0)) >= config.pullback_meso_z_min
-        and float(z.get("nano", 0.0)) <= config.pullback_nano_z_max
-        and float(row.get("micro_return", 0.0)) >= config.pullback_micro_return_min
-    )
-    if pullback:
-        return True, "Pullback in uptrend"
-    return False, "Waiting for entry timing"
-
-
-# =========================================================================================
-# Layer 4: sizing and portfolio volatility
+# Layer 2: sizing and portfolio volatility
 
 
 def covariance_matrix(
