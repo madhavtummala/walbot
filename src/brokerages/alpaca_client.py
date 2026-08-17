@@ -66,6 +66,23 @@ def get_positions(trading_client: TradingClient) -> dict[str, float]:
     return parsed
 
 
+def get_position_marks(trading_client: TradingClient) -> dict[str, float]:
+    """Last price per held symbol, as Alpaca marks it on the position itself.
+
+    Falls back to market value over quantity, which is the same number by a different route
+    and survives ``current_price`` being absent on a stale position payload.
+    """
+    marks: dict[str, float] = {}
+    for position in trading_client.get_all_positions():
+        price = _float_attr(position, "current_price")
+        if price <= 0:
+            quantity = _float_attr(position, "qty")
+            price = (_float_attr(position, "market_value") / quantity) if quantity else 0.0
+        if price > 0:
+            marks[position.symbol] = price
+    return marks
+
+
 def _bool_attr(obj, name: str, default: bool = False) -> bool:
     return as_bool(getattr(obj, name, default), default)
 

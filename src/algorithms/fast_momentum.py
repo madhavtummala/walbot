@@ -476,10 +476,9 @@ class FastMomentumAlgorithm(BaseAlgorithm):
         )
 
     def sizing(self, config: Any) -> dict[str, float]:
-        """No cash buffer: gross exposure is already capped inside the weights."""
+        """Gross exposure is capped inside the weights; funding is the account's business."""
         strategy_config = DefensiveMomentumConfig.from_runtime_config(config)
         return {
-            "cash_buffer": 0.0,
             "min_trade_dollars": strategy_config.per_trade_value_min,
             "rebalance_threshold": strategy_config.rebalance_threshold,
         }

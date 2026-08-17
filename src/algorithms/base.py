@@ -61,16 +61,22 @@ def _summary_from(decision: AlgorithmDecision, leaders: List[Dict[str, Any]]) ->
         ]
 
     exposure = sum(float(weight) for weight in decision.target_weights.values() if weight > 0)
-    market_sentiment = decision.metadata.get("market_sentiment")
-    return [
+    rows = [
         {"label": "Allocation", "value": str(allocation_mode)},
         {"label": "Exposure", "value": f"{exposure:.0%}"},
-        {
+    ]
+    # Only when the algorithm actually reads sentiment. It used to be unconditional, so an
+    # algorithm with both sentiment weights at zero -- which is every one of them by default,
+    # and there is no sentiment provider configured -- still rendered a "No recent records"
+    # row, which reads as a broken feed rather than as a switched-off input.
+    if "market_sentiment" in decision.metadata:
+        market_sentiment = decision.metadata["market_sentiment"]
+        rows.append({
             "label": "Sentiment",
             "value": "No recent records" if not market_sentiment else f"{float(market_sentiment):+.2f}",
-        },
-        {"label": "Universe", "value": str(len(leaders))},
-    ]
+        })
+    rows.append({"label": "Universe", "value": str(len(leaders))})
+    return rows
 
 class BaseAlgorithm(AlgorithmPlugin):
     def __init__(self, config: Dict[str, Any]):

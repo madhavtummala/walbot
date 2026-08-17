@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+import logging
 import math
 import pandas as pd
 
@@ -13,6 +14,9 @@ from .fast_momentum import apply_risk_guards, compute_composite_scores
 from ..common.config_utils import account_sizing_fallbacks, load_tuning, tuning_section
 from ..core.interfaces import DAILY_AT_OPEN, AlgorithmContext, AlgorithmDecision, AlgorithmRequirements
 from ..data.bars import closes_of, realized_volatility, return_over_minutes, return_over_periods
+from ..data.state_store import load_state, save_state
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -39,6 +43,27 @@ class InvestSpyConfig:
     flat_equity_income_exposure: float = 0.50
     max_crisis_hedge_exposure: float = 0.15
     max_crisis_hedge_weight: float = 0.10
+    #: Hedge exposure in FALLING, which holds nothing but bills through every decline. Kept at
+    #: 0, because enabling it made returns worse in *every* window tested -- including the 2022
+    #: bear market it exists for, where it took the strategy from -10.4% to -18.2%. SH is -1x
+    #: *daily* and pays reset drag; VXX is a futures roll product that lost 49% in a year with
+    #: no distributions at all. Neither survives being entered and exited every few sessions.
+    max_falling_hedge_exposure: float = 0.0
+    max_falling_hedge_weight: float = 0.0
+    #: Momentum gate on the income sleeve. The argument for switching it off is good and the
+    #: measurement disagrees with it: a covered-call fund's price is flat-to-declining by
+    #: construction, so gating it on rising price looks like a refusal to buy it in the market
+    #: it exists for -- but ungating it lost money in every window tested (2022 bear, 2023
+    #: rebound, and the full 2022-2026 span). It collects more distributions and gives back
+    #: more than that in price decay and churn. Left on, with the knobs exposed so the claim
+    #: can be re-tested rather than re-argued.
+    income_requires_trend: bool = True
+    min_income_meso_return: float | None = 0.0
+    #: Consecutive readings a *new* state needs before the book acts on it. ``classify_spy_state``
+    #: is a pure function of the latest three returns with no memory, so a reading that straddles
+    #: a threshold flips the entire book between 100% SPY and 100% bills and pays the spread both
+    #: ways. Measured spells were a median of one session. 1 disables the confirmation.
+    state_confirm_bars: int = 1
     min_income_score: float = 0.0
     min_defensive_score: float = 0.0
     min_crisis_hedge_score: float = 0.0
@@ -187,14 +212,30 @@ def decide_invest_spy_weights(
         return weights
 
     if spy_state == "FLAT":
-        income = _ranked(scores_by_symbol, config.equity_income_universe, config.min_income_score, 0.0)
+        income = _ranked(
+            scores_by_symbol,
+            config.equity_income_universe,
+            config.min_income_score,
+            config.min_income_meso_return,
+            require_macro_trend=config.income_requires_trend,
+        )
         _allocate_dynamic(weights, income, min(config.flat_equity_income_exposure, config.max_gross_exposure), 1, config.max_single_position_weight)
         remaining = max(config.max_gross_exposure - sum(weights.values()), 0.0)
         defensive = _ranked(scores_by_symbol, config.defensive_universe, config.min_defensive_score, require_macro_trend=False)
         _allocate_dynamic(weights, defensive, remaining, config.max_defensive_positions, config.max_single_position_weight)
         return weights
 
-    if spy_state == "CRISIS":
+    # Both downside states may hedge, at their own sizes. FALLING used to skip this entirely and
+    # sit the whole decline out in bills, so the hedge sleeve was unreachable in the state that
+    # actually covers a fall -- CRISIS fires on roughly 3% of sessions.
+    hedge_exposure, hedge_weight = (
+        (config.max_crisis_hedge_exposure, config.max_crisis_hedge_weight)
+        if spy_state == "CRISIS"
+        else (config.max_falling_hedge_exposure, config.max_falling_hedge_weight)
+        if spy_state == "FALLING"
+        else (0.0, 0.0)
+    )
+    if hedge_exposure > 0:
         hedge = _ranked(
             scores_by_symbol,
             config.crisis_hedge_universe,
@@ -205,9 +246,9 @@ def decide_invest_spy_weights(
         _allocate_dynamic(
             weights,
             hedge,
-            min(config.max_crisis_hedge_exposure, config.max_gross_exposure),
+            min(hedge_exposure, config.max_gross_exposure),
             config.max_crisis_hedge_positions,
-            config.max_crisis_hedge_weight,
+            hedge_weight or hedge_exposure,
         )
 
     remaining = max(config.max_gross_exposure - sum(weights.values()), 0.0)
@@ -242,13 +283,45 @@ def score_universe(
     return scores, state
 
 
+#: Where the confirmed state is remembered between runs, per account.
+STATE_KEY = "invest_spy_state"
+
+
+def confirm_spy_state(
+    state: dict[str, Any], proposed: str, confirm_bars: int
+) -> tuple[str, dict[str, Any]]:
+    """Require ``confirm_bars`` consecutive readings before switching state.
+
+    Returns ``(confirmed_state, new_state)``. A proposal that agrees with what is already
+    confirmed resets the counter, so it takes an unbroken run to move -- one dissenting
+    reading in the middle of a wobble does not accumulate toward a switch.
+    """
+    confirmed = str(state.get("spy_state") or "") or proposed
+    pending = str(state.get("pending_state") or "")
+    count = int(state.get("pending_count") or 0)
+
+    if proposed == confirmed:
+        return confirmed, {"spy_state": confirmed, "pending_state": "", "pending_count": 0}
+
+    count = count + 1 if proposed == pending else 1
+    if count >= max(confirm_bars, 1):
+        return proposed, {"spy_state": proposed, "pending_state": "", "pending_count": 0}
+    return confirmed, {"spy_state": confirmed, "pending_state": proposed, "pending_count": count}
+
+
 def signals_from_scores(
     scores_by_symbol: dict[str, dict[str, Any]],
     target_weights: dict[str, float],
+    spy_state: str = "",
 ) -> dict[str, dict[str, Any]]:
-    """Per-symbol signal rows the dashboard and step 2 both read."""
+    """Per-symbol signal rows the dashboard and step 2 both read.
+
+    ``spy_state`` rides along on every row because ``refine`` is handed signals rather than
+    metadata, and the confirmation there has to know what state was proposed.
+    """
     return {
         symbol: {
+            "spy_state": spy_state,
             "signal": 1 if float(target_weights.get(symbol, 0.0)) > 0 else 0,
             "score": float(row.get("score", 0.0)),
             "price_score": float(row.get("macro_return", 0.0)),
@@ -289,10 +362,9 @@ class InvestSpyAlgorithm(BaseAlgorithm):
         )
 
     def sizing(self, config: Any) -> dict[str, float]:
-        """No cash buffer: gross exposure is already capped inside the weights."""
+        """Gross exposure is capped inside the weights; funding is the account's business."""
         strategy_config = InvestSpyConfig.from_runtime_config(config)
         return {
-            "cash_buffer": 0.0,
             "min_trade_dollars": strategy_config.per_trade_value_min,
             "rebalance_threshold": strategy_config.rebalance_threshold,
         }
@@ -304,7 +376,7 @@ class InvestSpyAlgorithm(BaseAlgorithm):
         raw_weights = decide_invest_spy_weights(scores, state, strategy_config)
         return AlgorithmDecision(
             target_weights=raw_weights,
-            signals=signals_from_scores(scores, raw_weights),
+            signals=signals_from_scores(scores, raw_weights, state),
             metadata={
                 "allocation_mode": state,
                 "market_sentiment": context.market_sentiment,
@@ -321,10 +393,33 @@ class InvestSpyAlgorithm(BaseAlgorithm):
         config: Any,
         as_of: datetime,
     ) -> dict[str, float]:
-        """Apply the position-aware risk guards to a reviewed set of weights."""
+        """Confirm the state change, then apply the position-aware risk guards.
+
+        The confirmation lives here rather than in ``analyze`` because it is memory: it needs
+        to know what state the book is already in, which step 1 is forbidden to look at.
+        """
         strategy_config = InvestSpyConfig.from_runtime_config(config)
         current_weights = snapshot.weights(latest_prices)
         scores = {symbol: dict(row) for symbol, row in signals.items()}
+
+        proposed = next((str(row.get("spy_state") or "") for row in signals.values() if row.get("spy_state")), "")
+        if proposed and strategy_config.state_confirm_bars > 1:
+            account = str(getattr(config, "account_id", "") or "")
+            state_key = f"{STATE_KEY}:{account}" if account else STATE_KEY
+            stored = load_state(state_key, {})
+            if not isinstance(stored, dict):
+                stored = {}
+            confirmed, stored = confirm_spy_state(stored, proposed, strategy_config.state_confirm_bars)
+            save_state(state_key, stored)
+            # An unconfirmed proposal holds the current book rather than acting. Skipped when
+            # nothing is held: there is no position to protect, and waiting out the
+            # confirmation would just sit in cash through the opening of every position.
+            if confirmed != proposed and any(current_weights.values()):
+                logger.info(
+                    "SPY Rotation holding %s: %s proposed but not yet confirmed", confirmed, proposed
+                )
+                target_weights = {symbol: current_weights.get(symbol, 0.0) for symbol in target_weights}
+
         return apply_risk_guards(
             target_weights,
             scores,

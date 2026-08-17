@@ -25,8 +25,9 @@ from typing import Any
 import pandas as pd
 
 from ..brokerages.providers.paper import PaperBrokerage
-from ..core.interfaces import AlgorithmPlugin, AlgorithmResult, CashDividend
+from ..core.interfaces import AlgorithmPlugin, AlgorithmResult, CashDividend, OrderRequest
 from ..core.market_context import ContextSource, build_algorithm_context
+from ..core.orders import round_shares
 from ..core.pipeline import place_orders
 from ..data.bars import TRADING_MINUTES_PER_DAY, calendar_days_for, coverage_minutes, read_history
 from ..data.state_store import ephemeral_state
@@ -282,6 +283,32 @@ class ReplayContextSource(ContextSource):
 
 
 
+def _open_in_cash_equivalent(
+    book: PaperBrokerage, symbol: str, closes: dict[str, float], fractional: bool
+) -> None:
+    """Park the whole opening balance in ``symbol`` instead of holding it as raw cash.
+
+    A funded account does not sit at 0% waiting to be invested -- the balance is in T-bills
+    earning the bill rate until something needs it. Opening in cash therefore flatters nothing
+    but understates income, and, more importantly, never exercises the liquidation a real
+    rebalance has to perform to get at that money. Starting here measures both.
+    """
+    price = float(closes.get(symbol, 0.0) or 0.0)
+    if price <= 0:
+        logger.warning("No %s price on the first trade date; the book opens in cash instead", symbol)
+        return
+    cash = float(book.state.get("cash", 0.0))
+    # Truncated, never rounded: rounding a whole balance up asks for a fraction of a cent more
+    # than the account holds, and the book refuses the order rather than overdraw.
+    quantity = round_shares(cash / price, supports_fractional_shares=fractional)
+    if quantity <= 0:
+        return
+    book.submit_order(
+        OrderRequest(symbol=symbol, action="buy", quantity=quantity, extra={"latest_price": price})
+    )
+    logger.info("Book opens in %s: %s shares at %.2f", symbol, quantity, price)
+
+
 def replay(
     algorithm: AlgorithmPlugin,
     config: Any,
@@ -294,6 +321,7 @@ def replay(
     fractional: bool = True,
     dividends: dict[str, list[CashDividend]] | None = None,
     history: "HistoryCache | None" = None,
+    open_in: str = "",
 ) -> tuple[pd.DataFrame, Coverage]:
     """Step ``algorithm`` through ``trade_dates``, trading at each date's close.
 
@@ -307,6 +335,10 @@ def replay(
     ``history`` lets a caller replaying the same symbols over the same dates many times -- a
     parameter sweep -- read the bar store once for all of them instead of once per run. It is
     a pure cache of what the store holds, so sharing it cannot make two runs differ.
+
+    ``open_in`` names a symbol to park the opening balance in -- ``"SGOV"`` for an account
+    whose idle cash really sits in T-bills. Its bars must be in ``daily_history``, or the book
+    opens in cash as usual.
     """
     requirements = algorithm.requirements(config, {})
     coverage = Coverage()
@@ -324,6 +356,10 @@ def replay(
     pending: list[tuple[pd.Timestamp, str, float]] = []
     dividend_income = 0.0
     contributed = 0.0
+    # Carried between dates rather than reset: on a date the algorithm does not run, the book
+    # is still positioned the way the last decision left it, which is what attributing a day's
+    # P&L to a mode has to mean.
+    allocation_mode = ""
 
     # The book is a real ``PaperBrokerage`` on a throwaway state store, not the configured
     # local paper account: that account is for live scheduled testing and must never be moved
@@ -339,6 +375,10 @@ def replay(
                 for symbol, frame in daily_history.items()
                 if trade_date in frame.index
             }
+            # Seeded before anything reads the book, so the opening balance is already in the
+            # sleeve on the first date rather than a day late.
+            if index == 0 and open_in:
+                _open_in_cash_equivalent(book, open_in.upper(), closes, fractional)
             positions = book.get_positions()
 
             # Entitlement is settled before this date trades: owning the shares through the
@@ -381,6 +421,10 @@ def replay(
                     ),
                 )
                 decision = algorithm.analyze(context)
+                # The regime the algorithm believes it is in. Recorded so a result can be
+                # attributed to the states that produced it -- "which mode earned this, and how
+                # long was it in each" is not answerable from an equity curve alone.
+                allocation_mode = str(decision.metadata.get("allocation_mode", "") or allocation_mode)
 
                 # Step 2 exactly as the live runner performs it -- the same sizing, the same
                 # rebalance threshold and minimum trade size, the same brokerage call. The
@@ -437,6 +481,7 @@ def replay(
                     "dividends_paid": paid_today,
                     "turnover": turnover,
                     "order_count": order_count,
+                    "allocation_mode": allocation_mode,
                 }
             )
 

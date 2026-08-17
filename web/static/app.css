@@ -1052,19 +1052,6 @@ h2 {
   text-transform: uppercase;
 }
 
-.navAdd {
-  width: 22px;
-  min-height: 22px;
-  padding: 0;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.7);
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 1;
-  cursor: pointer;
-}
-
 .navList {
   margin: 0;
   padding: 0;
@@ -1310,6 +1297,21 @@ h2 {
      while the one beside it scrolls, which reads as a rendering bug rather than a choice. */
   align-items: start;
   gap: 14px;
+}
+
+/* Account page: positions sit above dividends in the left column, and the order feed takes
+   the remaining width so its wider rows never squeeze. */
+.accountLayout {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  align-items: start;
+  gap: 14px;
+}
+
+.accountStack {
+  display: grid;
+  gap: 14px;
+  align-items: start;
 }
 
 .card {
@@ -1746,80 +1748,6 @@ h2 {
 }
 
 
-.watchRow {
-  display: grid;
-  grid-template-columns: 12px minmax(0, 1fr) auto 46px 18px;
-  cursor: grab;
-  gap: 6px;
-  align-items: center;
-  padding: 5px 8px;
-  border-radius: 8px;
-  font-size: 12px;
-}
-
-.watchRow:hover {
-  background: rgba(17, 24, 39, 0.05);
-}
-
-.watchRow.is-dragging {
-  opacity: 0.45;
-  cursor: grabbing;
-}
-
-.watchGrip {
-  color: rgba(17, 24, 39, 0.28);
-  font-size: 11px;
-  line-height: 1;
-}
-
-.watchSymbol {
-  min-width: 0;
-  overflow: hidden;
-  font-weight: 850;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.watchPrice {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 750;
-  font-variant-numeric: tabular-nums;
-}
-
-.watchChange {
-  font-size: 11px;
-  font-weight: 850;
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-}
-
-.watchRemove {
-  width: 18px;
-  min-height: 18px;
-  padding: 0;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  box-shadow: none;
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 1;
-  opacity: 0;
-  cursor: pointer;
-}
-
-.watchRow:hover .watchRemove {
-  opacity: 1;
-}
-
-.watchRemove:hover {
-  border: 0;
-  background: rgba(180, 35, 24, 0.12);
-  box-shadow: none;
-  color: var(--bad);
-}
-
 .deployControl {
   display: flex;
   gap: 5px;
@@ -1920,6 +1848,10 @@ h2 {
   }
 
   .cardGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .accountLayout {
     grid-template-columns: minmax(0, 1fr);
   }
 

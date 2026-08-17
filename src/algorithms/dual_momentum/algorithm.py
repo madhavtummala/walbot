@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 from .config import STATE_KEY, DualMomentumConfig
-from .layers import score_to_weights, volatility_scale
+from .layers import hold_eligibility, park_residual, theme_allocation, theme_of, volatility_scale
 from .proposal import allocation_mode, analyze_universe, build_signals
-from .stateful import _defensive_book, _in_cooldown, _minutes_between, _parse_time, _record_exits, _resolve_replacements, _run_facts, apply_turnover_filters, confirm_regime, intraday_drawdown_breached
+from .stateful import track_eligibility, resolve_themes, _defensive_book, _in_cooldown, _record_exits, _run_facts, apply_turnover_filters, confirm_regime, intraday_drawdown_breached
 
 
 
@@ -16,7 +16,7 @@ from typing import Any
 
 
 from ..base import BaseAlgorithm
-from ...core.interfaces import AlgorithmContext, AlgorithmDecision, AlgorithmRequirements, Schedule
+from ...core.interfaces import DAILY_AT_OPEN, AlgorithmContext, AlgorithmDecision, AlgorithmRequirements
 from ...data.state_store import load_state, save_state
 
 logger = logging.getLogger(__name__)
@@ -27,11 +27,14 @@ class DualMomentumAlgorithm(BaseAlgorithm):
 
     algorithm_id = "dual_momentum"
 
-    #: Every 15 minutes: that is the risk and timing cadence. Re-ranking is throttled
-    #: separately to ``signal_refresh_minutes`` inside ``refine``, so the expensive decision
-    #: (which names to own) stays slow while the cheap ones (scale, stop, time an entry)
-    #: stay fast.
-    schedule = Schedule(refresh_minutes=15, jitter_minutes=2)
+    #: Once per session. Every feature is computed from daily bars now, so a second look
+    #: before the close reads the same closes and cannot produce a different answer -- which
+    #: is exactly what ``DAILY_AT_OPEN`` exists for.
+    #:
+    #: This was every 15 minutes, from when the score was built on intraday bars. Left there
+    #: it would re-run the same decision ~26 times a session; a live binding at ``1hr`` was
+    #: doing roughly that, against a backtest that only ever steps once a day.
+    schedule = DAILY_AT_OPEN
 
     def requirements(self, config: Any, current_positions: dict[str, int]) -> AlgorithmRequirements:
         strategy_config = DualMomentumConfig.from_runtime_config(config)
@@ -39,22 +42,24 @@ class DualMomentumAlgorithm(BaseAlgorithm):
             price_symbols=sorted(set(strategy_config.symbols) | set(current_positions)),
             daily_lookback_days=strategy_config.required_daily_bars,
             daily_ma_days=strategy_config.etf_ma_days,
+            # Nothing intraday: every feature comes from the daily bars above. Asking for a
+            # history window would make the live path fetch one on each run and the replay
+            # build a HistoryCache over it, both for data no layer reads.
             history_lookback_minutes=strategy_config.required_history_minutes,
-            preferred_bar_minutes=strategy_config.intraday_bar_minutes,
             needs_sentiment=strategy_config.uses_sentiment,
             # Unproven: keep it on paper until walk-forward results say otherwise.
             paper_only=True,
         )
 
     def sizing(self, config: Any) -> dict[str, float]:
-        """Honor the configured cash buffer so the plan never targets the full book.
+        """Exposure comes from ``risk_on_gross_max``; affording it is the funding stage's job.
 
-        The reserved cash keeps the defensive sleeve's buy under available funds even when a
-        sub-threshold residual position is deliberately left in place.
+        This used to carry the account cash buffer so a plan built on top of a deliberately
+        retained sub-threshold position could still be paid for. Order funding now checks that
+        directly against buying power, so the buffer no longer has to be guessed at here.
         """
         strategy_config = DualMomentumConfig.from_runtime_config(config)
         return {
-            "cash_buffer": float(getattr(config, "cash_buffer", 0.0) or 0.0),
             "min_trade_dollars": strategy_config.minimum_trade_notional,
             "rebalance_threshold": strategy_config.rebalance_weight_threshold,
         }
@@ -77,7 +82,10 @@ class DualMomentumAlgorithm(BaseAlgorithm):
             ),
             metadata={
                 "allocation_mode": allocation_mode(weights, regime, strategy_config),
-                "market_sentiment": context.market_sentiment,
+                # Reported only when it is actually an input, so the dashboard does not show a
+                # sentiment reading for a run that never asked for one.
+                **({"market_sentiment": context.market_sentiment}
+                   if strategy_config.uses_sentiment else {}),
                 "regime": regime,
                 "portfolio_volatility": outcome["volatility"]["portfolio_volatility"],
                 "vol_scale": outcome["volatility"]["scale"],
@@ -123,9 +131,23 @@ class DualMomentumAlgorithm(BaseAlgorithm):
         book = _defensive_book(rows)
 
         def settle(weights: dict[str, float]) -> dict[str, float]:
-            """Apply the turnover filters, record exits, and persist state."""
+            """Apply the turnover filters, record exits, and persist state.
+
+            The symbol set is the union of what step 1 proposed, what is currently held, and
+            what this layer decided to hold. It used to be ``target_weights`` alone, which
+            silently discarded every decision this layer had just made about a name step 1 did
+            not re-propose -- and ``pipeline.place_orders`` drops zero-weight intents before
+            ``refine`` runs, so ``target_weights`` only ever contains the current proposal.
+
+            An incumbent that ``refine`` kept therefore vanished from the returned weights, and
+            ``MODE_TARGET`` reads an absent symbol as a target of zero: the position was sold.
+            Over a 12-month replay that force-sold a still-qualifying holding on 73% of
+            decisions, left roughly half the book in raw cash, and was the single largest
+            source of turnover.
+            """
+            symbols = set(target_weights) | set(current) | set(weights)
             result = apply_turnover_filters(
-                {symbol: float(weights.get(symbol, 0.0)) for symbol in target_weights},
+                {symbol: float(weights.get(symbol, 0.0)) for symbol in symbols},
                 current,
                 float(snapshot.equity or 0.0),
                 strategy_config,
@@ -143,56 +165,84 @@ class DualMomentumAlgorithm(BaseAlgorithm):
 
         if not risk_on:
             # The raw gate may read risk-on while the confirmation is still pending; the
-            # risk-on proposal must not be acted on until it is confirmed. Deliberately not
-            # stamping last_selection_at: no selection happened, and pretending one did would
-            # throttle the first real one.
+            # risk-on proposal must not be acted on until it is confirmed.
             return settle(book)
 
-        proposed = {symbol for symbol, weight in target_weights.items() if weight > 0} - defensive
+        # Eligibility is tracked per *theme*, not per name: the book's slow decision is which
+        # exposures to hold, and a theme counts as qualifying on a day when any of its ETFs
+        # does. Which ETF inside it is a sizing question, settled every day by
+        # ``theme_allocation`` with no confirmation at all.
+        theme_rows: dict[str, dict[str, Any]] = {}
+        for symbol, row in rows.items():
+            if symbol in defensive:
+                continue
+            theme = theme_of(symbol, strategy_config)
+            prior = theme_rows.get(theme)
+            better = prior is None or (
+                int(row.get("eligible", 0)),
+                float(row.get("base_score", 0.0)),
+            ) > (int(prior.get("eligible", 0)), float(prior.get("base_score", 0.0)))
+            if better:
+                theme_rows[theme] = row
+        history = track_eligibility(state, theme_rows, strategy_config)
+        window = max(strategy_config.eligibility_window, 1)
+        theme_score = {t: float(r.get("base_score", 0.0)) for t, r in theme_rows.items()}
+
+        def eligible_days(theme: str) -> int:
+            return sum(history.get(theme, []))
+
+        def watched_long_enough(theme: str) -> bool:
+            return len(history.get(theme, [])) >= window
+
+        held_themes = {theme_of(symbol, strategy_config) for symbol in held - defensive}
 
         keep: set[str] = set()
-        for symbol in held - defensive:
-            row = rows.get(symbol, {})
-            rank = int(row.get("rank") or 0)
-            if not int(row.get("eligible", 0)):
-                logger.info("Dual Momentum exiting %s: %s", symbol, row.get("eligibility_reason"))
+        for theme in held_themes:
+            row = theme_rows.get(theme, {})
+            # Two ways out, answering different questions. The count is the slow one: this
+            # theme has stopped qualifying for long enough to mean something. The band, via
+            # hold_eligibility, is the fast one -- including the single-session crash stop.
+            days = eligible_days(theme)
+            # Only once the window is full: a cold state store has no history, and reading
+            # that as "ineligible" would sell everything on the first run.
+            if watched_long_enough(theme) and days <= strategy_config.exit_max_eligible_days:
+                logger.info(
+                    "Dual Momentum exiting theme %s: eligible on only %d of the last %d runs",
+                    theme, days, window,
+                )
                 continue
-            if rank and rank > strategy_config.exit_rank_max:
-                logger.info("Dual Momentum exiting %s: rank %d beyond exit rank", symbol, rank)
+            stays, why = hold_eligibility(row, strategy_config)
+            if not stays:
+                logger.info("Dual Momentum exiting theme %s: %s", theme, why)
                 continue
-            # An incumbent is held while it stays eligible and ranked, even if the timing flag
-            # is false: timing decides when to *enter*, not whether to stay.
-            keep.add(symbol)
+            keep.add(theme)
 
-        # Re-ranking is throttled: between selection refreshes the book keeps its membership
-        # and only the risk layer acts, which is what "slow selection, fast timing" means.
-        # A free slot is exempt -- the throttle exists to stop churn between comparable names,
-        # and sitting in cash while a qualified name waits out the hour is lag, not risk
-        # management.
-        since_selection = _minutes_between(as_of, _parse_time(str(state.get("last_selection_at", ""))))
-        may_reselect = (
-            since_selection >= max(strategy_config.signal_refresh_minutes, 0)
-            or len(keep) < max(strategy_config.max_positions, 0)
-        )
+        entrant_themes = {
+            theme
+            for theme, row in theme_rows.items()
+            if theme not in keep
+            and eligible_days(theme) >= strategy_config.entry_min_eligible_days
+            and int(row.get("rank") or 0)
+            and int(row["rank"]) <= strategy_config.entry_rank_max
+            and float(row.get("base_score", 0.0)) >= strategy_config.min_base_score
+            and int(row.get("timing", 1))
+            and not _in_cooldown(state, theme, as_of, strategy_config)
+        }
+        selection = resolve_themes(keep, entrant_themes, theme_score, strategy_config)
+        state["last_selection_at"] = stamp
 
-        if may_reselect:
-            entrants = {symbol for symbol in proposed if symbol not in keep}
-            entrants = {symbol for symbol in entrants if not _in_cooldown(state, symbol, as_of, strategy_config)}
-            selection = _resolve_replacements(keep, entrants, rows, strategy_config)
-            state["last_selection_at"] = stamp
-        else:
-            selection = set(keep)
+        # Budget per theme, split inside it by today's scores -- no confirmation, every day.
+        weights = theme_allocation(selection, rows, strategy_config)
 
-        chosen_rows = [rows[symbol] for symbol in selection if symbol in rows]
-        weights = score_to_weights(chosen_rows, strategy_config) if chosen_rows else {}
-
-        covariance = {symbol: dict(rows[symbol].get("covariance_row") or {}) for symbol in selection if symbol in rows}
+        covariance = {symbol: dict(rows[symbol].get("covariance_row") or {}) for symbol in weights}
         vol = volatility_scale(weights, covariance, strategy_config)
         if vol["below_floor"]:
             logger.info("Dual Momentum de-risking to defensive: ex-ante vol %.1f%%", 100 * vol["portfolio_volatility"])
             weights = dict(book)
         else:
             weights = {symbol: weight * vol["scale"] for symbol, weight in weights.items()}
+            # Same rule as step 1: undeployed gross belongs in bills, not in cash.
+            weights = park_residual(weights, book, strategy_config)
 
         if not any(weights.values()):
             # Nothing qualifies: sit in the defensive sleeve rather than in the least-bad name.

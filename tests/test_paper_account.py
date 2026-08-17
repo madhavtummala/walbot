@@ -209,3 +209,28 @@ def test_config_resolves_real_files_from_the_repo_root() -> None:
     config = get_config()
     assert config.account_id != UNNAMED_ACCOUNT_ID, "a configured default account must be found"
     assert config.symbols, "the tradable universe must load"
+
+
+def test_the_book_values_its_cash_equivalents_for_order_funding() -> None:
+    """Funding has to value holdings the running algorithm may never price.
+
+    DCA buys VTI and has no reason to look up SGOV, yet SGOV is exactly what would fund the
+    buy -- so the mark comes from the broker's own book rather than from the plan's prices.
+    """
+    with ephemeral_state():
+        config = Config(account_id="funding_paper", cash_equivalents=["SGOV", "BIL"])
+        book = PaperBrokerage(config)
+        book.submit_order(_order("SGOV", "buy", 10, 100.0))
+        book.submit_order(_order("SPY", "buy", 1, 50.0))
+
+        holdings = book.get_cash_equivalents()
+
+        assert holdings == {"SGOV": {"shares": 10.0, "price": 100.0, "value": 1_000.0}}
+
+
+def test_cash_equivalents_are_empty_when_the_account_configures_none() -> None:
+    with ephemeral_state():
+        book = PaperBrokerage(Config(account_id="funding_paper", cash_equivalents=[]))
+        book.submit_order(_order("SGOV", "buy", 10, 100.0))
+
+        assert book.get_cash_equivalents() == {}

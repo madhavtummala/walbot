@@ -14,9 +14,10 @@ from typing import Any
 import pandas as pd
 
 from ...data.bars import (
-    bar_interval_minutes,
+    TRADING_MINUTES_PER_DAY,
     closes_of as _closes,
     ema,
+    market_minutes_per_bar,
     realized_volatility,
     return_over_periods as _return_over,
     return_path,
@@ -38,20 +39,22 @@ def _rolling_volatility(closes: pd.Series, window: int) -> float:
 
 def compute_features(
     symbol: str,
-    history_bars: Any,
     daily_bars: Any,
     config: DualMomentumConfig,
 ) -> dict[str, Any]:
     """Everything about one symbol that the layers below need, computed once.
 
-    Selection horizons are measured in market minutes against ``history_bars``, whatever
-    resolution those turn out to be; the eligibility and regime gates are measured in daily
-    bars, because "above its 100-day average" is a statement about the trend, not about the
-    last few hours.
+    Daily bars, and only daily bars. The selection horizons used to be measured against a
+    separate intraday window; they are now measured against these, at session granularity.
+    That window was never reliably intraday anyway -- ``read_history`` blends resolutions, so
+    the same backtest scored its early months from ~18 daily closes and its later ones from
+    ~1,300 five-minute bars, with the score's EMA silently collapsing to a single sample
+    wherever the cache was daily. One source removes both inconsistencies, and lets a replay
+    reach back as far as the daily store does rather than as far as the intraday cache does.
     """
-    closes = _closes(history_bars)
-    daily_closes = _closes(daily_bars)
-    step = bar_interval_minutes(history_bars)
+    closes = _closes(daily_bars)
+    daily_closes = closes
+    step = market_minutes_per_bar(daily_bars, TRADING_MINUTES_PER_DAY)
     smoothing = max(config.score_ema_minutes, step)
 
     horizons = {
@@ -61,20 +64,28 @@ def compute_features(
         "macro": config.selection_horizon_macro_minutes,
     }
     return_series = {
-        name: return_path(history_bars, minutes, span_minutes=smoothing)
+        name: return_path(daily_bars, minutes, span_minutes=smoothing)
         for name, minutes in horizons.items()
     }
 
     # Volatility-normalised momentum change: fast momentum relative to its own noise, minus
     # the same for the medium horizon. Positive means the near term is accelerating away
     # from the trend, which is what "enter now" should mean.
-    nano_vol = realized_volatility(history_bars, config.selection_horizon_nano_minutes)
-    meso_vol = realized_volatility(history_bars, config.selection_horizon_meso_minutes)
+    #
+    # One volatility for both terms, over ``momentum_change_vol_days``, rather than one per
+    # horizon: on daily bars ``nano`` spans a single return and has no standard deviation at
+    # all, so the old per-horizon estimate returned 0.0 and the division blew up. Each term is
+    # instead scaled by the square root of its own horizon, which is what makes a one-session
+    # and a three-session return comparable under a random walk.
+    vol = realized_volatility(daily_bars, config.momentum_change_vol_days * TRADING_MINUTES_PER_DAY)
+    nano_sessions = max(config.selection_horizon_nano_minutes / TRADING_MINUTES_PER_DAY, 1.0)
+    meso_sessions = max(config.selection_horizon_meso_minutes / TRADING_MINUTES_PER_DAY, 1.0)
     change_span = max(config.momentum_change_ema_minutes, step)
-    nano_path = return_path(history_bars, config.selection_horizon_nano_minutes, span_minutes=change_span)
-    meso_path = return_path(history_bars, config.selection_horizon_meso_minutes, span_minutes=change_span)
+    nano_path = return_path(daily_bars, config.selection_horizon_nano_minutes, span_minutes=change_span)
+    meso_path = return_path(daily_bars, config.selection_horizon_meso_minutes, span_minutes=change_span)
     change_series = [
-        (nano / (nano_vol + EPSILON)) - (meso / (meso_vol + EPSILON))
+        (nano / ((vol * math.sqrt(nano_sessions)) + EPSILON))
+        - (meso / ((vol * math.sqrt(meso_sessions)) + EPSILON))
         for nano, meso in zip(nano_path, meso_path)
     ]
 
@@ -99,6 +110,9 @@ def compute_features(
         "momentum_change": ema(change_series, change_span, step),
         "moving_average": moving_average,
         "above_moving_average": bool(enough_history and last_daily > moving_average > 0),
+        # Signed distance from the trend line, so a *held* name can be given a wider
+        # band to leave through than it had to clear to enter.
+        "ma_distance": (last_daily / moving_average - 1.0) if moving_average > 0 else 0.0,
         "daily_bars": int(len(daily_closes)),
         "enough_history": bool(enough_history),
         "abs_return": _return_over(daily_closes, config.etf_abs_return_days),

@@ -12,17 +12,20 @@ from src.algorithms.dual_momentum import (
     DualMomentumConfig,
     _in_cooldown,
     _record_exits,
-    _resolve_replacements,
+    resolve_themes,
     analyze_universe,
     apply_turnover_filters,
     confirm_regime,
     covariance_matrix,
     defensive_weights,
     eligibility,
+    hold_eligibility,
     intraday_drawdown_breached,
     market_regime,
+    park_residual,
     score_to_weights,
     timing,
+    track_eligibility,
     volatility_scale,
     zscores,
 )
@@ -96,21 +99,46 @@ def test_risk_off_holds_the_defensive_sleeve_rather_than_the_least_bad_etf() -> 
     assert outcome["weights"]["BBB"] == 0
 
 
-def test_a_missing_benchmark_history_is_reported_as_a_data_gap_not_a_bear_market() -> None:
+def test_a_thin_universe_is_reported_as_a_data_gap_not_a_bear_market() -> None:
     """A short cache would otherwise read as "below its 100-day average", which is a lie."""
-    config = Runtime(risk_on_universe=["AAA"], defensive_universe=["BIL"], benchmark="QQQM")
+    config = Runtime(risk_on_universe=["AAA", "BBB", "CCC", "DDD"], defensive_universe=["BIL"])
     strategy = DualMomentumConfig.from_runtime_config(config)
     scored = {
         "AAA": {"symbol": "AAA", "above_moving_average": True, "enough_history": True, "daily_bars": 140},
-        "QQQM": {"symbol": "QQQM", "above_moving_average": False, "enough_history": False, "daily_bars": 0},
+        "BBB": {"symbol": "BBB", "above_moving_average": False, "enough_history": False, "daily_bars": 0},
+        "CCC": {"symbol": "CCC", "above_moving_average": False, "enough_history": False, "daily_bars": 0},
+        "DDD": {"symbol": "DDD", "above_moving_average": False, "enough_history": False, "daily_bars": 0},
     }
 
     regime = market_regime(scored, strategy)
 
     assert regime["risk_on"] is False
     assert regime["data_ok"] is False
-    assert "no usable QQQM history" in regime["detail"]
+    assert "1 of 4 risk-on names" in regime["detail"]
     assert "average" not in regime["detail"]
+    # The one name that *can* be judged is in an uptrend, so this is not a breadth reading.
+    assert regime["breadth"] == 1.0
+
+
+def test_a_weak_benchmark_no_longer_vetoes_a_universe_that_is_working() -> None:
+    """The March 2026 case: QQQM below its average while the rest of the book is fine.
+
+    The benchmark legs of this gate are gone precisely so that one unrelated ETF cannot
+    override the per-name absolute-momentum test that ``eligibility`` already applies.
+    """
+    config = Runtime(risk_on_universe=["QQQM", "USO", "XOP", "GLD"], benchmark="QQQM", breadth_min=0.5)
+    strategy = DualMomentumConfig.from_runtime_config(config)
+    scored = {
+        "QQQM": {"symbol": "QQQM", "above_moving_average": False, "enough_history": True, "abs_return": -0.05},
+        "USO": {"symbol": "USO", "above_moving_average": True, "enough_history": True, "abs_return": 0.55},
+        "XOP": {"symbol": "XOP", "above_moving_average": True, "enough_history": True, "abs_return": 0.18},
+        "GLD": {"symbol": "GLD", "above_moving_average": True, "enough_history": True, "abs_return": 0.09},
+    }
+
+    regime = market_regime(scored, strategy)
+
+    assert regime["breadth"] == 0.75
+    assert regime["risk_on"] is True, "a weak benchmark is not a reason to hold nothing"
 
 
 def test_breadth_blocks_a_narrow_rally() -> None:
@@ -125,7 +153,7 @@ def test_breadth_blocks_a_narrow_rally() -> None:
 
     regime = market_regime(scored, strategy)
 
-    assert regime["trend_ok"] and regime["momentum_ok"]
+    assert regime["data_ok"] is True
     assert regime["breadth"] == 0.25
     assert regime["risk_on"] is False
     assert "breadth" in regime["detail"]
@@ -263,6 +291,40 @@ def test_an_entry_needs_timing_but_a_holding_does_not() -> None:
     assert kept["AAA"] > 0, "an eligible, ranked holding is kept even with the timing flag false"
 
 
+def test_a_holding_survives_the_intent_round_trip_the_pipeline_actually_performs() -> None:
+    """The same guarantee, through ``refine`` rather than ``refine_weights``.
+
+    ``pipeline.place_orders`` drops zero-weight intents before step 2 runs, so the weight dict
+    that reaches ``refine_weights`` in production contains only what ``analyze`` proposed this
+    bar. ``settle`` used to iterate that dict alone, which discarded every keep decision about
+    a name absent from it -- and ``MODE_TARGET`` reads an absent symbol as "sell it all".
+
+    The test above cannot catch that: it hands over the complete vector, zeros included.
+    """
+    config = Runtime(risk_on_universe=["AAA"], defensive_universe=["BIL"], benchmark="AAA",
+                     regime_confirm_bars=1, min_base_score=-99)
+    daily = {"AAA": daily_bars(80, 130), "BIL": daily_bars(100, 101)}
+    intraday = {"AAA": intraday_bars(130, 130), "BIL": intraday_bars(101, 101)}
+    context = context_for(config, daily, intraday)
+    algorithm = DualMomentumAlgorithm(config)
+    decision = algorithm.analyze(context)
+    assert decision.signals["AAA"]["timing"] == 0
+    assert decision.target_weights["AAA"] == 0, "no timing, no new entry"
+
+    # Exactly what the pipeline passes on: weight intents, zero-valued ones removed.
+    proposed = [i for i in decision.resolved_intents() if i.kind != "weight" or i.value]
+    assert "AAA" not in {i.symbol for i in proposed}, "the fixture only bites while this holds"
+
+    with ephemeral_state():
+        holder = PortfolioSnapshot(positions={"AAA": 10}, equity=10_000.0)
+        for _ in range(2):  # the first run confirms the regime, the second acts on it
+            final = algorithm.refine(proposed, decision.signals, holder,
+                                     context.latest_prices, config, context.timestamp)
+
+    weights = {intent.symbol: intent.value for intent in final if intent.kind == "weight"}
+    assert weights.get("AAA", 0) > 0, "a kept holding must survive a proposal that omits it"
+
+
 # =========================================================================================
 # Ranking hysteresis
 # =========================================================================================
@@ -276,15 +338,17 @@ def test_a_challenger_must_win_by_the_replacement_margin() -> None:
     }
     config = DualMomentumConfig(max_positions=1, min_score_delta_to_replace=0.35)
 
-    assert _resolve_replacements({"HELD"}, {"CLOSE"}, rows, config) == {"HELD"}
-    assert _resolve_replacements({"HELD"}, {"CLEAR"}, rows, config) == {"CLEAR"}
+    scores = {symbol: float(row["base_score"]) for symbol, row in rows.items()}
+    assert resolve_themes({"HELD"}, {"CLOSE"}, scores, config) == {"HELD"}
+    assert resolve_themes({"HELD"}, {"CLEAR"}, scores, config) == {"CLEAR"}
 
 
 def test_free_slots_are_filled_before_anything_is_displaced() -> None:
     rows = {"HELD": {"base_score": 1.0}, "NEW": {"base_score": 0.2}}
     config = DualMomentumConfig(max_positions=2, min_score_delta_to_replace=0.35)
 
-    assert _resolve_replacements({"HELD"}, {"NEW"}, rows, config) == {"HELD", "NEW"}
+    scores = {symbol: float(row["base_score"]) for symbol, row in rows.items()}
+    assert resolve_themes({"HELD"}, {"NEW"}, scores, config) == {"HELD", "NEW"}
 
 
 def test_a_name_that_just_exited_waits_out_its_cooldown() -> None:
@@ -605,8 +669,8 @@ def test_the_algorithm_is_registered_and_declares_what_it_needs() -> None:
     # The benchmark has to be fetched even though it is never traded.
     assert "QQQM" in requirements.price_symbols
     assert "ZZZ" in requirements.price_symbols, "held positions are priced too"
-    # Twelve sessions of wall-clock time, not a bar count that means nothing without a grid.
-    assert requirements.history_lookback_minutes > 320 * 15
+    # No intraday window at all: every feature is computed from the daily bars below.
+    assert requirements.history_lookback_minutes == 0
     assert requirements.daily_lookback_days >= 100
     assert requirements.paper_only is True
     assert requirements.needs_sentiment is False, "sentiment is off until it is phased in"
@@ -621,10 +685,16 @@ def test_sentiment_is_requested_only_once_it_is_switched_on() -> None:
     assert algorithm.requirements(config, {}).needs_sentiment is True
 
 
-def test_sizing_leaves_no_double_counted_cash_buffer() -> None:
+def test_sizing_carries_no_cash_buffer() -> None:
+    """Exposure is stated by ``risk_on_gross_max``; funding is checked against buying power.
+
+    The algorithm used to carry the account cash buffer here so a plan built over a retained
+    sub-threshold position could still be paid for. Order funding measures that directly now,
+    and a buffer applied at sizing time would just under-invest on top of it.
+    """
     algorithm = DualMomentumAlgorithm(Runtime())
 
-    assert algorithm.sizing(Runtime())["cash_buffer"] == 0.0
+    assert "cash_buffer" not in algorithm.sizing(Runtime())
 
 
 def test_every_signal_row_carries_the_audit_trail() -> None:
@@ -641,3 +711,117 @@ def test_every_signal_row_carries_the_audit_trail() -> None:
                 "regime_risk_on", "regime_detail", "regime_breadth", "vol_scale",
                 "portfolio_volatility", "reason"):
         assert key in row, key
+
+
+def test_a_close_is_not_blocked_by_the_rebalance_threshold() -> None:
+    """A position under the threshold could never clear it, so it was held forever.
+
+    The threshold suppresses small *adjustments* to a name the algorithm still wants. Applied
+    to a close it traps the position instead: an 8-position book carried a mean of 12 names,
+    5 of them frozen below the threshold and holding a fifth of the equity.
+    """
+    config = DualMomentumConfig(rebalance_weight_threshold=0.08, minimum_trade_notional=100.0,
+                                minimum_trade_nav_fraction=0.0)
+
+    # Held at 3% and targeted at zero: a 3% move, far under the 8% threshold.
+    exited = apply_turnover_filters({"AAA": 0.0}, {"AAA": 0.03}, 10_000.0, config)
+    assert exited["AAA"] == 0.0, "an exit must not be gated by the rebalance threshold"
+
+    # A small *trim* of the same size is still suppressed -- that is what the threshold is for.
+    trimmed = apply_turnover_filters({"AAA": 0.09}, {"AAA": 0.12}, 10_000.0, config)
+    assert trimmed["AAA"] == 0.12, "a sub-threshold adjustment is still skipped"
+
+    # The absolute notional floor still applies, so this cannot spray dust orders.
+    tiny = apply_turnover_filters({"AAA": 0.0}, {"AAA": 0.005}, 10_000.0, config)
+    assert tiny["AAA"] == 0.005, "below the notional floor it is still left alone"
+
+
+def test_the_per_name_cap_is_re_spread_rather_than_dropped() -> None:
+    """Capping one name used to lose its overflow, leaving the book under-invested."""
+    config = DualMomentumConfig(risk_on_gross_max=0.96, name_weight_max=0.5,
+                                min_base_score=0.0, volatility_tilt=0.0)
+
+    # One name: the cap binds and 46% cannot be deployed inside the per-name limit.
+    one = score_to_weights([{"symbol": "AAA", "base_score": 1.0, "annual_volatility": 0.2}], config)
+    assert one["AAA"] == pytest.approx(0.5)
+
+    # Two names, wildly different scores: the stronger caps at 50% and its excess goes to the
+    # other rather than evaporating, so the pair deploys the full 96%.
+    two = score_to_weights([
+        {"symbol": "AAA", "base_score": 10.0, "annual_volatility": 0.2},
+        {"symbol": "BBB", "base_score": 1.0, "annual_volatility": 0.2},
+    ], config)
+    assert two["AAA"] == pytest.approx(0.5)
+    assert sum(two.values()) == pytest.approx(0.96), "the overflow is re-spread, not dropped"
+
+
+def test_undeployed_gross_is_parked_in_bills_not_left_as_cash() -> None:
+    """A funded account holds bills, not idle cash, for whatever the risk sleeve cannot use."""
+    config = DualMomentumConfig(risk_on_gross_max=0.96, name_weight_max=0.5)
+
+    parked = park_residual({"AAA": 0.5}, {"BIL": 0.96}, config)
+
+    assert parked["AAA"] == pytest.approx(0.5)
+    assert parked["BIL"] == pytest.approx(0.46)
+    assert sum(parked.values()) == pytest.approx(0.96)
+
+    # Fully deployed: nothing to park.
+    full = park_residual({"AAA": 0.48, "BBB": 0.48}, {"BIL": 0.96}, config)
+    assert "BIL" not in full
+
+
+def test_eligibility_becomes_a_state_rather_than_a_daily_coin_flip() -> None:
+    """A name near a floor used to flip in and out on consecutive sessions."""
+    config = DualMomentumConfig(eligibility_window=10, entry_min_eligible_days=8,
+                                exit_max_eligible_days=3)
+    state: dict = {}
+
+    # Alternating in and out: never a settled enough signal to open.
+    for flag in [1, 0] * 5:
+        history = track_eligibility(state, {"AAA": {"eligible": flag}}, config)
+    assert sum(history["AAA"]) == 5
+    assert sum(history["AAA"]) < config.entry_min_eligible_days, "chop does not earn an entry"
+    assert sum(history["AAA"]) > config.exit_max_eligible_days, "nor does it force an exit"
+
+    # A settled signal does.
+    for _ in range(10):
+        history = track_eligibility(state, {"AAA": {"eligible": 1}}, config)
+    assert sum(history["AAA"]) == 10
+
+    # The window is bounded, so a sustained breakdown eventually clears the exit bar.
+    for _ in range(8):
+        history = track_eligibility(state, {"AAA": {"eligible": 0}}, config)
+    assert sum(history["AAA"]) == 2 <= config.exit_max_eligible_days
+
+
+def test_a_cold_state_store_does_not_liquidate_the_book() -> None:
+    """With no history a count reads as zero, which must not be read as 'ineligible'."""
+    config = DualMomentumConfig(eligibility_window=10, exit_max_eligible_days=3)
+    state: dict = {}
+
+    history = track_eligibility(state, {"AAA": {"eligible": 1}}, config)
+
+    assert sum(history["AAA"]) == 1 <= config.exit_max_eligible_days
+    assert len(history["AAA"]) < config.eligibility_window, (
+        "the window is not full, so the exit rule must not fire yet"
+    )
+
+
+def test_a_holding_that_crashes_in_one_session_is_sold_at_once() -> None:
+    """The portfolio-level breaker cannot fire at a daily cadence; this one can."""
+    config = DualMomentumConfig(max_daily_drop=0.10, exit_threshold_slack=0.05,
+                                etf_min_abs_return=0.0, etf_min_fast_return=-0.02)
+    healthy = {"enough_history": 1, "ma_distance": 0.08, "abs_return": 0.20,
+               "fast_return": 0.05, "nano_return": -0.01}
+
+    stays, _ = hold_eligibility(healthy, config)
+    assert stays
+
+    crashed = {**healthy, "nano_return": -0.12}
+    stays, why = hold_eligibility(crashed, config)
+    assert stays is False
+    assert "one session" in why
+
+    # Still inside the limit: everything else about the name is fine, so it is kept.
+    dipped = {**healthy, "nano_return": -0.08}
+    assert hold_eligibility(dipped, config)[0] is True

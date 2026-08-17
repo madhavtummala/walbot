@@ -7,6 +7,7 @@ from src.brokerages.alpaca_client import (
     DIVIDEND_ACTIVITY_TYPES,
     create_trading_client,
     get_account_activities,
+    get_position_marks,
     get_positions,
     submit_market_order,
     submit_option_limit_order,
@@ -56,6 +57,10 @@ class AlpacaBrokerage(BaseBrokerage):
 
     def get_positions(self) -> Dict[str, float]:
         return get_positions(self.client)
+
+    def get_marks(self, symbols) -> Dict[str, float]:
+        marks = get_position_marks(self.client)
+        return {symbol: marks[symbol] for symbol in symbols if symbol in marks}
 
     def submit_order(self, request: OrderRequest) -> Dict[str, Any]:
         if request.order_type == "market":

@@ -223,6 +223,11 @@ class PaperBrokerage(BaseBrokerage):
     def cancel_all_orders(self) -> None:
         """No-op: paper orders fill immediately, so nothing is ever open."""
 
+    def get_marks(self, symbols) -> Dict[str, float]:
+        """The book's own marks, which ``mark_prices`` keeps current."""
+        prices = self.state.get("prices", {})
+        return {symbol: float(prices[symbol]) for symbol in symbols if float(prices.get(symbol, 0.0) or 0.0) > 0}
+
     def mark_prices(self, latest_prices: Dict[str, float]) -> None:
         """Update marks so equity reflects current prices rather than last fill prices."""
         self.state.setdefault("prices", {}).update({s: float(p) for s, p in latest_prices.items() if p > 0})

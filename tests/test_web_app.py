@@ -49,7 +49,7 @@ def _assets():
 def test_shell_is_a_sidebar_beside_scrolling_content() -> None:
     app_js, app_css, index_html = _assets()
 
-    for element in ('id="sidebar"', 'id="algorithmNav"', 'id="watchlist"', 'id="content"', 'id="navToggle"'):
+    for element in ('id="sidebar"', 'id="algorithmNav"', 'id="content"', 'id="navToggle"'):
         assert element in index_html, element
     assert "function renderSidebar" in app_js
     assert ".shell {" in app_css
@@ -113,18 +113,18 @@ def test_controls_are_not_stretched_by_the_base_button_rule() -> None:
     assert "grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));" in app_css
 
 
-def test_sidebar_carries_a_configurable_watchlist() -> None:
+def test_sidebar_no_longer_carries_a_watchlist() -> None:
     app_js, app_css, index_html = _assets()
 
-    assert 'id="watchlist"' in index_html
-    assert 'id="addWatchButton"' in index_html
+    assert 'id="watchlist"' not in index_html
+    assert 'id="addWatchButton"' not in index_html
     assert 'id="targetNav"' not in index_html
     assert 'id="globalStats"' not in index_html
-    assert "function renderWatchlist" in app_js
-    assert "function addWatchTicker" in app_js
-    assert "function removeWatchTicker" in app_js
-    assert "/api/watchlist" in app_js
-    assert ".watchRow {" in app_css
+    assert "function renderWatchlist" not in app_js
+    assert "function addWatchTicker" not in app_js
+    assert "function removeWatchTicker" not in app_js
+    assert "/api/watchlist" not in app_js
+    assert ".watchRow {" not in app_css
 
 
 def test_watchlist_round_trips_through_the_state_store() -> None:
@@ -281,15 +281,12 @@ def test_a_deferred_repaint_is_not_silently_dropped() -> None:
     assert 'addEventListener("focusout"' in app_js
 
 
-def test_watchlist_can_be_reordered_by_drag() -> None:
+def test_watchlist_drag_reorder_left_with_the_watchlist() -> None:
     app_js, app_css, _ = _assets()
 
-    assert "function reorderWatchlist" in app_js
-    assert "function wireWatchlistDrag" in app_js
-    assert 'draggable="true"' in app_js
-    # Firefox will not start a drag unless data is set on the transfer.
-    assert 'event.dataTransfer.setData("text/plain"' in app_js
-    assert ".watchRow.is-dragging {" in app_css
+    assert "function reorderWatchlist" not in app_js
+    assert "function wireWatchlistDrag" not in app_js
+    assert ".watchRow.is-dragging {" not in app_css
 
 
 def test_tune_tab_renders_the_right_editor_per_algorithm() -> None:
@@ -345,7 +342,7 @@ def test_frontend_keeps_the_configured_backtest_period_and_chart() -> None:
     assert "chart-crosshair" in app_js
     assert "backtestPositions(row.positions)" in app_js
     assert "renderUniverseProposalRows" in app_js
-    assert "app.js?v=20260815-backtest-periods" in index_html
+    assert "app.js?v=20260816-account-layout" in index_html
 
 
 def test_options_and_carousel_stay_gone() -> None:

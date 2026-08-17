@@ -8,6 +8,7 @@ from src.algorithms.registry import get_algorithm_class
 from src.brokerages import BROKERAGE_REGISTRY
 from src.core.config import get_account_broker_type
 from src.core.interfaces import (
+    MODE_INCREMENTAL,
     MODE_TARGET,
     AlgorithmDecision,
     AlgorithmResult,
@@ -17,7 +18,15 @@ from src.core.interfaces import (
     weights_from_intents,
 )
 from src.core.market_context import build_algorithm_context
-from src.core.orders import plan_share_orders, resolve_target_shares, submit_planned_orders
+from src.core.orders import (
+    FUNDING_GREEDY,
+    FUNDING_PRO_RATA,
+    SHARE_EPSILON,
+    fund_planned_orders,
+    plan_share_orders,
+    resolve_target_shares,
+    submit_planned_orders,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +67,18 @@ def read_snapshot(config, brokerage: Brokerage) -> PortfolioSnapshot:
     equity = sizing_equity(config, account_equity)
     if equity < account_equity:
         logger.info("Algorithm sizing equity capped at %.2f from account equity %.2f", equity, account_equity)
-    return PortfolioSnapshot(positions=brokerage.get_positions(), equity=equity)
+    return PortfolioSnapshot(
+        positions=brokerage.get_positions(),
+        equity=equity,
+        cash=float(account_state.get("cash", 0.0) or 0.0),
+        # Absent is not the same as zero. A brokerage that reports no buying power tells us
+        # nothing about what it will fund, and reading that silence as "no money" would trim
+        # every buy to nothing; fall back to the widest figure it did report instead, which
+        # leaves such a brokerage behaving as it did before funding existed.
+        buying_power=float(
+            account_state.get("buying_power", account_state.get("cash", account_equity)) or 0.0
+        ),
+    )
 
 
 # --------------------------------------------------------------------------------------
@@ -168,14 +188,16 @@ def place_orders(
         proposed, result.signals, snapshot, latest_prices, config, result.as_of
     )
 
-    investable_equity = snapshot.equity * max(0.0, min(1.0, 1.0 - sizing["cash_buffer"]))
+    fractional = getattr(brokerage, "supports_fractional_shares", False)
+    # Sized against the whole book. What the account can afford is a separate question, asked
+    # once below against buying power rather than smuggled in here as a haircut on targets.
     sized_shares = resolve_target_shares(
         final_intents,
         mode,
         snapshot.positions,
         latest_prices,
-        investable_equity,
-        supports_fractional_shares=getattr(brokerage, "supports_fractional_shares", False),
+        snapshot.equity,
+        supports_fractional_shares=fractional,
     )
 
     planned_orders = plan_share_orders(
@@ -185,15 +207,37 @@ def place_orders(
         snapshot.equity,
         min_trade_dollars=sizing["min_trade_dollars"],
         rebalance_threshold=sizing["rebalance_threshold"],
-        supports_fractional_shares=getattr(brokerage, "supports_fractional_shares", False),
+        supports_fractional_shares=fractional,
         target_weights=weights_from_intents(final_intents),
     )
+
+    fundable, unfunded, funding = fund_planned_orders(
+        planned_orders,
+        buying_power=snapshot.buying_power,
+        # A fraction of the book, not of buying power: on a margin account the latter is an
+        # inflated number and a percentage of it would reserve an arbitrary amount.
+        reserve=snapshot.equity * max(0.0, min(1.0, float(getattr(config, "cash_buffer", 0.0) or 0.0))),
+        # Optional on the brokerage, like ``mark_prices``: one that cannot value its holdings
+        # simply funds from buying power alone.
+        cash_equivalents=getattr(brokerage, "get_cash_equivalents", dict)(),
+        min_trade_dollars=sizing["min_trade_dollars"],
+        supports_fractional_shares=fractional,
+        # An incremental batch is a set of independent commitments; a target batch is one
+        # portfolio. See the policy constants in ``orders``.
+        policy=FUNDING_GREEDY if mode == MODE_INCREMENTAL else FUNDING_PRO_RATA,
+    )
+
     order_results = submit_planned_orders(
         brokerage,
-        planned_orders,
+        fundable,
         require_approval=require_approval,
         approval_timeout_seconds=approval_timeout_seconds,
         approval_poll_seconds=approval_poll_seconds,
+    )
+    # Recorded as results rather than dropped, so a caller can tell a leg that was deliberately
+    # left out for want of funds from one that never existed.
+    order_results.extend(
+        {**order, "action": "skip", "quantity": 0, "status": "unfunded"} for order in unfunded
     )
 
     algorithm.settle(config, order_results, final_intents)
@@ -205,15 +249,16 @@ def place_orders(
 
     rejected = [order for order in order_results if order.get("status") == "rejected"]
     submitted = [order for order in order_results if order.get("status") == "submitted"]
-    # Reported as the portfolio the sized orders actually land on, so an incremental run --
-    # whose intents describe a change rather than a destination -- reports something meaningful.
+    # Built from what was actually submitted rather than from the pre-funding targets, so a
+    # trimmed, unfunded, or broker-rejected leg is reflected instead of being reported as
+    # though it had filled at full size.
     resulting_weights = PortfolioSnapshot(
-        positions={**snapshot.positions, **sized_shares}, equity=snapshot.equity
+        positions=_resulting_positions(snapshot.positions, submitted), equity=snapshot.equity
     ).weights(latest_prices)
     return {
         "strategy": result.strategy,
         "mode": mode,
-        "status": _batch_status(order_results, submitted, rejected),
+        "status": _batch_status(order_results, submitted, rejected, unfunded, funding),
         "equity": snapshot.equity,
         "proposed_weights": weights_from_intents(proposed),
         "final_weights": resulting_weights,
@@ -224,11 +269,31 @@ def place_orders(
         "diff": weight_diff(snapshot.weights(latest_prices), resulting_weights),
         "planned_orders": planned_orders,
         "order_results": order_results,
+        # How the batch was paid for, so a caller can explain a trim rather than just report
+        # one -- and tell a deliberate downsizing apart from a refusal it should react to.
+        "funding": funding,
+        "unfunded": [
+            {"symbol": order["symbol"], "action": order["action"], "reason": order["reason"]}
+            for order in unfunded
+        ],
         "rejected": [
             {"symbol": order["symbol"], "action": order["action"], "reason": order["reason"]}
             for order in rejected
         ],
     }
+
+
+def _resulting_positions(
+    positions: dict[str, float], submitted: list[dict[str, Any]]
+) -> dict[str, float]:
+    """Apply the submitted legs to the held book, at the sizes that were actually sent."""
+    resulting = dict(positions)
+    for order in submitted:
+        quantity = float(order.get("quantity") or 0.0)
+        signed = quantity if order.get("action") == "buy" else -quantity
+        symbol = str(order["symbol"])
+        resulting[symbol] = float(resulting.get(symbol, 0.0)) + signed
+    return {symbol: shares for symbol, shares in resulting.items() if abs(shares) > SHARE_EPSILON}
 
 
 def _assert_fresh(result: AlgorithmResult, max_age_seconds: int) -> None:
@@ -242,9 +307,24 @@ def _assert_fresh(result: AlgorithmResult, max_age_seconds: int) -> None:
         )
 
 
-def _batch_status(order_results, submitted, rejected) -> str:
+#: Every leg went out at the size the plan asked for.
+STATUS_SUBMITTED = "submitted"
+#: The batch was deliberately fitted to available funds. A success, not a failure: an agent
+#: that reads this as a rejection and retries would be re-submitting orders that were trimmed
+#: on purpose, which is exactly what the old ``partial`` reading caused.
+STATUS_SUBMITTED_REDUCED = "submitted_reduced"
+
+
+def _batch_status(order_results, submitted, rejected, unfunded=(), funding=None) -> str:
     if not order_results:
         return "no_orders"
-    if not rejected:
-        return "submitted"
-    return "partial" if submitted else "rejected"
+    # Checked before anything else: a denied approval means nothing was attempted, so reading
+    # the batch for funding or refusals afterwards would describe a submission that never
+    # happened -- which is what reporting it as "submitted" used to do.
+    if any(order.get("approval_status") == "not_approved" for order in order_results):
+        return "not_approved"
+    if rejected:
+        return "partial" if submitted else "rejected"
+    if unfunded or (funding or {}).get("reduced"):
+        return STATUS_SUBMITTED_REDUCED if submitted else "unfunded"
+    return STATUS_SUBMITTED
