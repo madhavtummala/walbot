@@ -72,7 +72,6 @@ def monthly_performance(curve: pd.DataFrame) -> pd.DataFrame:
 def report(curve: pd.DataFrame, tuning: dict[str, Any], label: str, top: int = 8) -> None:
     weights = monthly_weights(curve)
     performance = monthly_performance(curve)
-    themes = {s.upper(): t for s, t in (tuning.get("themes") or {}).items()}
     defensive = {str(s).upper() for s in (tuning.get("defensive_universe") or [])}
 
     print(f"\n{'=' * 92}\n{label}\n{'=' * 92}")
@@ -93,24 +92,13 @@ def report(curve: pd.DataFrame, tuning: dict[str, Any], label: str, top: int = 8
               f"{int(row['orders']):7d}  {'  '.join(parts)}")
     print("  (* = defensive sleeve; weights are the month's daily average, not a month-end snapshot)")
 
-    print("\n-- exposure by theme, monthly average ----------------------------------------------")
-    by_theme = weights.rename(columns=lambda s: "cash" if s == "cash"
-                              else ("DEFENSIVE" if s in defensive else themes.get(s, s)))
-    by_theme = by_theme.T.groupby(level=0).sum().T
-    ordered = by_theme.mean().sort_values(ascending=False)
-    ordered = ordered[ordered > 0.005]
-    print(f"{'month':8s} " + " ".join(f"{name[:9]:>10s}" for name in ordered.index))
-    for stamp, row in by_theme.iterrows():
-        print(f"{stamp:8s} " + " ".join(f"{row[name]:9.0%} " for name in ordered.index))
-
     print("\n-- most-held names -----------------------------------------------------------------")
     overall = weights.mean().sort_values(ascending=False)
     for symbol, weight in overall[overall > 0.005].items():
         months = int((weights[symbol] > 0.005).sum())
-        theme = "cash" if symbol == "cash" else (
-            "defensive" if symbol in defensive else themes.get(symbol, symbol))
+        kind = "cash" if symbol == "cash" else ("defensive" if symbol in defensive else "risk")
         print(f"  {symbol:6s} {weight:6.1%} average   held in {months}/{len(weights)} months"
-              f"   [{theme}]")
+              f"   [{kind}]")
 
 
 def main(argv: list[str] | None = None) -> int:

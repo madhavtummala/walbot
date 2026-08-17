@@ -3,10 +3,17 @@
 Relative strength selects and absolute momentum permits -- each layer here answers one of
 those questions and nothing else.
 
-There were four. The market-regime gate and the entry-timing gate are gone: both had been
-switched off in the deployed configuration for long enough to be measured, and both were
-measured as subtracting. What remains of the regime layer is :func:`universe_data_ok`, which
-is not a market view at all -- it refuses to trade a cache too thin to judge.
+There were four, and briefly a fifth. The market-regime gate and the entry-timing gate are
+gone: both had been switched off in the deployed configuration long enough to be measured, and
+both measured as subtracting. What remains of the regime layer is :func:`universe_data_ok`,
+which is not a market view at all -- it refuses to trade a cache too thin to judge.
+
+A theme layer -- correlation clusters over the ETFs, selected and rotated as units -- is also
+gone. It was aimed at a real problem, that a cross-sectional score treats near-substitutes as
+independent choices, but a universe of sector and thematic ETFs already *is* one instrument per
+exposure, so the clustering mostly restated the universe with more machinery: a theme map, a
+per-theme cap, a per-theme rank, an intra-theme replacement margin and a separate allocation
+path, all to decide what ranking the names already said. Selection is per ETF again.
 """
 
 from __future__ import annotations
@@ -97,20 +104,6 @@ def crash_stop(row: dict[str, Any], config: DualMomentumConfig) -> tuple[bool, s
     return True, ""
 
 
-def theme_ranks(theme_score: dict[str, float]) -> dict[str, int]:
-    """Themes ordered by score, best first. 1 is the strongest theme.
-
-    A theme's own rank, which the algorithm did not previously have. Entry was gated on
-    ``entry_rank_max`` against the *ETF* rank of a theme's best member, which asks a different
-    question entirely: with fifteen ETFs across eight themes, "top 3 ETF" and "top 3 theme"
-    diverge as soon as one theme owns several of the leaders -- metals holding both SLV and
-    GLD at ranks 1 and 2 pushed every other theme's best name down the ETF ladder and out of
-    entry range, whatever its own standing.
-    """
-    ordered = sorted(theme_score, key=lambda theme: -float(theme_score.get(theme, 0.0)))
-    return {theme: position for position, theme in enumerate(ordered, start=1)}
-
-
 def hold_eligibility(row: dict[str, Any], config: DualMomentumConfig) -> tuple[bool, str]:
     """Whether a name already held may stay, on floors widened by ``exit_threshold_slack``.
 
@@ -139,82 +132,18 @@ def hold_eligibility(row: dict[str, Any], config: DualMomentumConfig) -> tuple[b
 # Layer 2: sizing and portfolio volatility
 
 
-def covariance_matrix(
-    daily_bars_by_symbol: dict[str, Any],
-    symbols: list[str],
-    config: DualMomentumConfig,
-) -> dict[str, dict[str, float]]:
-    """Annualised covariance of daily returns over ``vol_estimation_days``.
-
-    Returned as nested dicts rather than a frame because it travels to step 2 inside the
-    signal rows, and step 2 only ever receives JSON-shaped signals.
-    """
-    frame = pd.DataFrame(
-        {
-            symbol: _closes(daily_bars_by_symbol.get(symbol)).pct_change().dropna().tail(config.vol_estimation_days)
-            for symbol in symbols
-        }
-    ).dropna(how="all")
-    if frame.empty or len(frame) < 2:
-        return {symbol: {symbol: 0.0} for symbol in symbols}
-    covariance = frame.cov() * TRADING_DAYS
-    return {
-        row: {
-            column: float(value) if pd.notna(value) else 0.0
-            for column, value in covariance.loc[row].items()
-        }
-        for row in covariance.index
-    }
-
-
-def portfolio_volatility(weights: dict[str, float], covariance: dict[str, dict[str, float]]) -> float:
-    """Ex-ante annualised volatility, sqrt(w' Sigma w)."""
-    variance = 0.0
-    for left, left_weight in weights.items():
-        if not left_weight:
-            continue
-        row = covariance.get(left, {})
-        for right, right_weight in weights.items():
-            if not right_weight:
-                continue
-            variance += left_weight * right_weight * float(row.get(right, 0.0))
-    return math.sqrt(variance) if variance > 0 else 0.0
-
-
-def volatility_scale(
-    weights: dict[str, float],
-    covariance: dict[str, dict[str, float]],
-    config: DualMomentumConfig,
-) -> dict[str, Any]:
-    """Scale factor that pulls ex-ante volatility back toward the target.
-
-    Scaling only engages once the estimate exceeds ``high_vol_trigger`` times the target, so
-    a portfolio already inside its budget is not re-sized on every 15-minute tick -- turnover
-    is a cost, and this overlay is a risk-budgeting device rather than a source of return.
-    """
-    estimate = portfolio_volatility(weights, covariance)
-    target = max(config.target_portfolio_vol, 0.0)
-    if estimate <= EPSILON or target <= 0:
-        return {"scale": 1.0, "portfolio_volatility": estimate, "engaged": False, "below_floor": False}
-    if estimate <= target * max(config.high_vol_trigger, 1.0):
-        return {"scale": 1.0, "portfolio_volatility": estimate, "engaged": False, "below_floor": False}
-
-    raw = target / (estimate + EPSILON)
-    floor = max(config.vol_scale_floor, 0.0)
-    return {
-        "scale": min(1.0, max(raw, floor)),
-        "portfolio_volatility": estimate,
-        "engaged": True,
-        # Too volatile to hold even at the floor: the honest answer is the defensive sleeve.
-        "below_floor": raw < floor,
-    }
-
-
 def score_to_weights(rows: list[dict[str, Any]], config: DualMomentumConfig) -> dict[str, float]:
-    """Score-over-volatility weights, capped per name and in total.
+    """Split ``risk_on_gross_max`` between the selected names, in proportion to score.
 
-    The score enters as its excess over ``min_base_score``, so a name that only just clears
-    the quality floor gets a small position rather than an equal one.
+    The score enters as its excess over ``min_base_score``, so a name that only just clears the
+    quality floor gets a small position rather than an equal one, tilted by ``volatility_tilt``.
+
+    No per-name cap. A cap on top of a two-name split does not diversify anything -- it just
+    forces the pair toward equal weight and throws away the ranking the whole algorithm exists
+    to produce. It also came with a water-filling routine to re-spread the overflow, because
+    the first version dropped it and left the book quietly under-invested: one selected name
+    produced a 50% position and 50% idle cash rather than the gross the configuration asked
+    for. Both are gone; the proportional split cannot leave a residual.
     """
     raw: dict[str, float] = {}
     for row in rows:
@@ -224,46 +153,12 @@ def score_to_weights(rows: list[dict[str, Any]], config: DualMomentumConfig) -> 
         scale = (volatility + EPSILON) ** config.volatility_tilt if config.volatility_tilt else 1.0
         raw[str(row["symbol"])] = excess * scale
 
+    gross = max(config.risk_on_gross_max, 0.0)
     total = sum(raw.values())
     if total <= EPSILON:
         # Every candidate sits exactly at the floor: equal-weight rather than divide by zero.
-        share = min(config.name_weight_max, config.risk_on_gross_max / len(raw)) if raw else 0.0
-        return {symbol: share for symbol in raw}
-
-    return _water_fill(raw, max(config.risk_on_gross_max, 0.0), max(config.name_weight_max, 0.0))
-
-
-def _water_fill(raw: dict[str, float], gross: float, cap: float) -> dict[str, float]:
-    """Split ``gross`` in proportion to ``raw``, capping each name and re-spreading the excess.
-
-    The cap used to be applied once and the overflow simply dropped, so the book was quietly
-    under-invested whenever it bound: one selected name produced a 50% position and 50% idle
-    cash rather than the 96% gross the configuration asks for. Measured over 2023, step 2 asked
-    for a mean gross of 80% on risk-on days -- 49.9% with one name held, 78.1% with two, 88.2%
-    with three -- and the shortfall earned nothing.
-
-    Re-spreading is iterative because capping one name raises everyone else's share, which can
-    push the next name over the cap in turn. Terminates when no name exceeds the cap, or when
-    every name is capped -- at which point the remainder genuinely cannot be deployed within
-    the per-name limit, and the caller parks it in the defensive sleeve.
-    """
-    weights: dict[str, float] = {}
-    uncapped = {symbol: value for symbol, value in raw.items() if value > 0}
-    remaining = gross
-    while uncapped and remaining > EPSILON:
-        total = sum(uncapped.values())
-        if total <= EPSILON:
-            break
-        over = [s for s, v in uncapped.items() if remaining * v / total > cap]
-        if not over:
-            for symbol, value in uncapped.items():
-                weights[symbol] = remaining * value / total
-            return weights
-        for symbol in over:
-            weights[symbol] = cap
-            remaining -= cap
-            uncapped.pop(symbol)
-    return weights
+        return {symbol: gross / len(raw) for symbol in raw} if raw else {}
+    return {symbol: gross * value / total for symbol, value in raw.items()}
 
 
 def defensive_weights(
@@ -273,7 +168,7 @@ def defensive_weights(
     """Where the book sits when risk-on is not permitted.
 
     Ranked by medium-term absolute return so the defensive sleeve is itself chosen rather
-    than fixed, and deliberately *not* subject to ``name_weight_max``: that cap limits
+    than fixed. There is no per-name cap on the risk sleeve any more; there was one, and it limited
     single-name risk in the risky sleeve, and applying it here would force idle cash for no
     reason when the whole point is to be in T-bills.
     """
@@ -284,121 +179,6 @@ def defensive_weights(
     chosen = candidates[: max(config.defensive_max_positions, 1)]
     share = max(config.risk_on_gross_max, 0.0) / len(chosen)
     return {str(row["symbol"]): share for row in chosen}
-
-
-def theme_of(symbol: str, config: DualMomentumConfig) -> str:
-    """The theme ``symbol`` belongs to, or the symbol itself when it is unmapped."""
-    return str(config.themes.get(str(symbol).upper(), str(symbol).upper()))
-
-
-def limit_per_theme(
-    ranked: list[dict[str, Any]],
-    config: DualMomentumConfig,
-    already: dict[str, int] | None = None,
-) -> list[dict[str, Any]]:
-    """Take ``ranked`` best-first, skipping names whose theme is already full.
-
-    ``already`` counts themes held outside this list -- incumbents the caller is keeping --
-    so the cap applies to the whole book rather than to each half of it separately.
-    """
-    cap = max(config.max_positions_per_theme, 0)
-    if not cap:
-        return list(ranked)
-    counts = dict(already or {})
-    kept: list[dict[str, Any]] = []
-    for row in ranked:
-        theme = theme_of(str(row.get("symbol", "")), config)
-        if counts.get(theme, 0) >= cap:
-            continue
-        counts[theme] = counts.get(theme, 0) + 1
-        kept.append(row)
-    return kept
-
-
-def theme_allocation(
-    themes: set[str],
-    rows: dict[str, dict[str, Any]],
-    config: DualMomentumConfig,
-    current: dict[str, float] | None = None,
-) -> dict[str, float]:
-    """Budget each selected theme, then split it across that theme's eligible members.
-
-    Two speeds on purpose. *Which* themes are held is a slow, confirmed decision made in
-    ``refine``; *how much of each ETF inside a theme* is a fast one, recomputed from today's
-    scores with no confirmation at all. Rotating between QQQM and XSD is a sizing question,
-    not a change of view, and it should not have to clear the same bar as dropping growth for
-    energy.
-
-    A theme is scored by its best eligible member, and the split inside it is proportional to
-    each member's score excess -- so a theme whose second name is nearly as strong holds both,
-    and one carried by a single name concentrates there.
-
-    "Fast" was previously "free": which members filled a theme's slots was decided on today's
-    scores with no reference at all to what was already held, so two near-tied siblings could
-    trade places on any session that reordered them by a hair. Measured over 2023 that path was
-    13.9% of all turnover. ``current`` and ``intra_theme_delta_to_replace`` put a bar on it --
-    a sitting name keeps its slot unless a sibling beats it by that margin. The knob was
-    documented in the config and in the dashboard's explainers but read by nothing, so this is
-    the rule that was already described rather than a new one.
-    """
-    held = {str(symbol).upper() for symbol, weight in (current or {}).items() if weight > 0}
-    incumbency = max(config.intra_theme_delta_to_replace, 0.0)
-
-    def excess(row: dict[str, Any]) -> float:
-        return max(float(row.get("base_score", 0.0)) - config.min_base_score, 0.0)
-
-    def standing(row: dict[str, Any]) -> float:
-        """Score for the purpose of *keeping a slot*, not for sizing one.
-
-        The margin is added to the incumbent rather than subtracted from the challenger so a
-        name near the quality floor cannot be pushed below zero and stop counting entirely.
-        """
-        return excess(row) + (incumbency if str(row.get("symbol", "")).upper() in held else 0.0)
-
-    def tilt(row: dict[str, Any]) -> float:
-        volatility = float(row.get("annual_volatility", 0.0))
-        return (volatility + EPSILON) ** config.volatility_tilt if config.volatility_tilt else 1.0
-
-    members: dict[str, list[dict[str, Any]]] = {}
-    for symbol, row in rows.items():
-        theme = theme_of(symbol, config)
-        if theme not in themes or not int(row.get("eligible", 0)):
-            continue
-        members.setdefault(theme, []).append(dict(row, symbol=symbol))
-    if not members:
-        return {}
-
-    per_theme = max(config.max_positions_per_theme, 0)
-    for theme, rowset in members.items():
-        # Slots go by ``standing`` -- score plus the incumbent's margin -- while the split
-        # across whoever wins them stays proportional to raw score, so holding a slot does not
-        # also earn a bigger position.
-        rowset.sort(key=standing, reverse=True)
-        kept = rowset[:per_theme] if per_theme else list(rowset)
-        kept.sort(key=excess, reverse=True)
-        members[theme] = kept
-
-    # Theme budgets, from the strongest member of each, water-filled so a capped theme's
-    # overflow reaches the others instead of becoming cash.
-    raw = {theme: excess(rowset[0]) * tilt(rowset[0]) for theme, rowset in members.items()}
-    if sum(raw.values()) <= EPSILON:
-        share = min(config.name_weight_max, config.risk_on_gross_max / len(raw))
-        budgets = {theme: share for theme in raw}
-    else:
-        budgets = _water_fill(raw, max(config.risk_on_gross_max, 0.0), max(config.name_weight_max, 0.0))
-
-    weights: dict[str, float] = {}
-    for theme, budget in budgets.items():
-        rowset = members[theme]
-        inner = {str(row["symbol"]): excess(row) * tilt(row) for row in rowset}
-        total = sum(inner.values())
-        if total <= EPSILON:
-            for symbol in inner:
-                weights[symbol] = budget / len(inner)
-            continue
-        for symbol, value in inner.items():
-            weights[symbol] = budget * value / total
-    return weights
 
 
 def park_residual(

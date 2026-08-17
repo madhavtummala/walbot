@@ -243,9 +243,8 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "            or the pullback setup (macro and meso leading while nano dips)",
             "enter if eligible and rank <= entry_rank_max and score >= min_base_score and timing",
             "hold while eligible and rank <= exit_rank_max, even if timing is false",
-            "w(i) = max(score - min_base_score, 0) / sigma(i), normalised, capped at name_weight_max",
-            "k = clip(target_portfolio_vol / sqrt(w' Sigma w), vol_scale_floor, 1) once vol exceeds",
-            "    high_vol_trigger x target; below the floor it goes defensive instead",
+            "w(i) = max(score - min_base_score, 0) x sigma(i)^volatility_tilt, normalised to",
+            "  risk_on_gross_max. No per-name cap and no portfolio volatility overlay.",
         ],
         "behavior": (
             "Runs every 15 minutes for timing and risk, but only re-ranks every "
@@ -260,21 +259,14 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "risk_on_universe": {"what": "The ETFs it may hold.", "effect": "Scores are cross-sectional, so adding or removing a name changes every other name's z-score."},
             "defensive_universe": {"what": "Where the book sits when nothing qualifies, and where undeployed gross is parked.", "effect": "Short-duration choices (BIL) make risk-off flat; TLT or GLD make it an active macro bet."},
             "benchmark": {"what": "Charted alongside the book as a reference line.", "effect": "None on selection at all. It used to gate the whole portfolio; that gate is gone."},
-            "theme_rotation_interval_days": {
-                "what": "Days between chances to enter or leave a theme. 0 means every run.",
-                "effect": "The most expensive decision the algorithm makes and the one worth slowing most. Over 2026 the theme set changed on half of all sessions and theme entries and exits were 44% of turnover.",
-            },
-            "entry_interval_days": {
-                "what": "Days between chances to open any new position, including a new name inside a theme already held.",
-                "effect": "Separate from the rotation clock so a new name cannot slip in as 'sizing' between rotations.",
-            },
-            "intra_theme_interval_days": {
-                "what": "Days between re-splits of weight among names already held, and re-sizes to the volatility target.",
-                "effect": "The cheapest turnover to skip and the most frequent: 36% of 2026 turnover was resize and 13% intra-theme rotation, none of it a change of view.",
-            },
-            "exit_interval_days": {
-                "what": "Days between chances to close a holding that failed eligibility or the crash stop.",
-                "effect": "Meant to stay 0. An exit that waits for a clock is a stop-loss that does not stop anything.",
+            "rerank_interval_days": {
+                "what": "Trading days between re-rankings. Counted in runs, so 3 means three sessions.",
+                "effect": (
+                    "Selection, entry, replacement and the considered exits all happen on this clock; "
+                    "the -10% crash stop does not and runs every session regardless. The slowest "
+                    "selection horizon is twelve sessions, so re-ranking daily asks the score a "
+                    "question it cannot answer that fast. 0 re-ranks every run."
+                ),
             },
             "risk_refresh_minutes": {"what": "The unit cooldown_after_exit is counted in.", "effect": "The algorithm runs once a session, so anything below 390 makes cooldown_after_exit expire before the next run and do nothing."},
             "intraday_bar_minutes": {
@@ -310,23 +302,6 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             },
             "etf_min_fast_return": {"what": "Floor on that short return.", "effect": "Less negative ejects weakening names sooner and increases turnover."},
             "max_positions": {"what": "How many risk-on names it holds at once.", "effect": "Fewer concentrates in the leader; more diversifies but dilutes the signal."},
-            "max_positions_per_theme": {
-                "what": "How many holdings may come from one theme. 0 is off.",
-                "effect": (
-                    "The cross-sectional score treats the universe as N independent choices, and it "
-                    "is not: eight of the deployed names correlate 0.79+ with SPY on daily returns, "
-                    "and SPY/IWM/RSP/QUAL/VTV cluster at 0.80 all-pairs. At 1 a four-position book is "
-                    "four different exposures; at 0 it can be one bet sliced four ways."
-                ),
-            },
-            "themes": {
-                "what": "Symbol to theme label. Symbols left out are each their own theme.",
-                "effect": "Only read when max_positions_per_theme is set. Grouping too coarsely starves the book of candidates; too finely and the cap stops binding.",
-            },
-            "intra_theme_delta_to_replace": {
-                "what": "Score margin a sibling in the same theme needs before the book swaps between them.",
-                "effect": "Higher keeps one name standing for a theme; lower lets the book rotate between near-identical ETFs. Distinct from min_score_delta_to_replace, which governs displacing the theme itself.",
-            },
             "min_base_score": {"what": "Score quality floor, in cross-sectional z units.", "effect": "Raise to hold fewer names more often; the shortfall stays in the defensive sleeve, not in a weaker name."},
             "entry_rank_max": {"what": "Worst rank that may be newly entered.", "effect": "Tighter than exit_rank_max on purpose: it is harder to get in than to stay in."},
             "exit_rank_max": {"what": "Rank at which an incumbent is finally dropped.", "effect": "Wider than entry_rank_max gives a holding room to wobble without being sold."},
@@ -337,12 +312,8 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "sentiment_clip": {"what": "Cap on the normalised sentiment input.", "effect": "Bounds how much a single loud news cycle can move either sentiment term."},
             "sentiment_lookback_minutes": {"what": "How recent a story must be to count.", "effect": "Longer keeps stale headlines alive in the score; shorter makes sentiment sparse."},
             "volatility_tilt": {"what": "Exponent on volatility in sizing: weight follows score x sigma ** tilt.", "effect": "-1 is risk parity, so calm names get the big positions. 0 ignores volatility. +1 leans into it, concentrating in the wildest movers -- more return while a trend runs, more damage when it turns."},
-            "name_weight_max": {"what": "Cap on any one ETF before portfolio scaling.", "effect": "Binds before max_positions when few names qualify."},
             "risk_on_gross_max": {"what": "Cap on total invested fraction of equity.", "effect": "Below 1.0 it always holds cash. The simplest single lever on overall risk."},
-            "target_portfolio_vol": {"what": "Annualised ex-ante volatility target.", "effect": "Lower means smaller positions in volatile markets. A risk budget, not a return booster."},
-            "vol_estimation_days": {"what": "Daily window for volatility and covariance.", "effect": "Shorter reacts to volatility spikes faster and re-sizes more often."},
-            "vol_scale_floor": {"what": "Smallest scale factor before switching to defensive.", "effect": "Below this, holding a shrunken risk position is worse than holding none."},
-            "high_vol_trigger": {"what": "Multiple of target volatility at which scaling engages.", "effect": "Above 1.0 it stops re-sizing a portfolio already inside its budget, which saves turnover."},
+            "vol_estimation_days": {"what": "Daily window for the per-name volatility estimate.", "effect": "Only read by volatility_tilt, which is the one place volatility now enters."},
             "rebalance_weight_threshold": {"what": "Smallest weight change worth trading.", "effect": "Higher tolerates more drift from target in exchange for less churn."},
             "rebalance_step": {
                 "what": "How far to move toward the new target each run: (1-step) x current + step x target.",
