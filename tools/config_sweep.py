@@ -748,35 +748,37 @@ def dual_confirm() -> list[tuple[str, dict[str, Any]]]:
 
 
 def dual_sticky() -> list[tuple[str, dict[str, Any]]]:
-    """Does making the book stick actually cost anything?
+    """What each cadence and each cap is worth, one axis at a time.
 
-    Three levers pull the same way and are separated here because they are not the same idea:
-    holding fewer themes, re-ranking less often than the algorithm runs, and how much of the
-    book one theme may carry. ``orders`` and ``turnover_x_stake`` matter as much as return in
-    this stage -- the point is to find the cheapest book that keeps the return, not the best
-    return at any turnover.
+    ``orders`` and ``turnover_x_stake`` matter as much as return here: the point is the
+    cheapest book that keeps the return, not the best return at any turnover.
 
-    The cadence knobs only started doing anything when ``action_due`` was wired; the single
-    ``signal_refresh_minutes`` that preceded them was declared, documented, and read by
-    nothing, so every value behaved identically to 0.
+    The cadence axes are counted in trading days. Read them with suspicion -- a single fixed
+    interval is one arbitrary sample of *which* sessions the decision lands on, and the first
+    sweep of these came out badly non-monotone (3 days far worse than either 1 or 7, and a
+    14-day variant with a -17% 2024). Prefer an axis with a shape over a single winner.
     """
     base = _dual_baseline()
     variants = [("deployed", dict(base))]
-    # Where the book was before this round: four themes, re-ranked every session.
+    # Where the book was two rounds ago: four themes, every decision every session, capped.
     variants.append(_axis(base, "before/4themes-daily", max_positions=4, entry_rank_max=4,
                           name_weight_max=0.5, theme_rotation_interval_days=0,
-                          entry_interval_days=0, intra_theme_interval_days=0))
-    for days in (0, 3, 7, 14):
-        variants.append(_axis(base, f"rotation={days}d", theme_rotation_interval_days=days))
+                          entry_interval_days=0, intra_theme_interval_days=0, exit_interval_days=0))
+    variants.append(_axis(base, "prev/7-5-5-cap0.65", theme_rotation_interval_days=7,
+                          entry_interval_days=5, intra_theme_interval_days=5,
+                          exit_interval_days=0, name_weight_max=0.65))
+    for days in (0, 3, 5, 10):
+        variants.append(_axis(base, f"rotation={days}d", theme_rotation_interval_days=days,
+                              entry_interval_days=days))
     for days in (0, 3, 5, 10):
         variants.append(_axis(base, f"intra={days}d", intra_theme_interval_days=days))
-    for days in (0, 3, 5, 10):
-        variants.append(_axis(base, f"entry={days}d", entry_interval_days=days))
-    for positions in (1, 2, 3):
+    for days in (0, 3, 10):
+        variants.append(_axis(base, f"exit={days}d", exit_interval_days=days))
+    for cap in (0.5, 0.65, 0.8):
+        variants.append(_axis(base, f"theme_cap={cap}", name_weight_max=cap))
+    for positions in (1, 3):
         variants.append(_axis(base, f"themes={positions}", max_positions=positions,
                               entry_rank_max=positions + 1))
-    for cap in (0.5, 0.8, 1.0):
-        variants.append(_axis(base, f"theme_cap={cap}", name_weight_max=cap))
     for rank in (2, 4):
         variants.append(_axis(base, f"entry_rank={rank}", entry_rank_max=rank))
     return [variant for variant in variants if variant[0] == "deployed" or variant[1] != base]
