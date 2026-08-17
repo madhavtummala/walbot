@@ -22,7 +22,6 @@ from ...core.interfaces import (
     Intent,
     PortfolioSnapshot,
     SignalView,
-    describe_schedule,
 )
 from ..base import BaseAlgorithm
 from . import BUCKETS, raw_plan_from_config, sanitize_dca_plan, unknown_plan_symbols
@@ -191,7 +190,6 @@ class DCAAlgorithm(BaseAlgorithm):
             metadata={
                 "allocation_mode": "DCA",
                 "monthly_total": sum(abs(value) for value in budgets.values()),
-                "schedule": describe_schedule(self.schedule),
             },
         )
 
@@ -231,7 +229,6 @@ class DCAAlgorithm(BaseAlgorithm):
         monthly_total = float(decision.metadata.get("monthly_total") or 0.0)
         summary = [
             {"label": "Mode", "value": str(decision.metadata.get("allocation_mode") or "DCA")},
-            {"label": "Schedule", "value": str(decision.metadata.get("schedule") or "--")},
             # The configured monthly total, not what happens to be deployable this minute.
             {"label": "Planned", "value": f"${monthly_total:.0f}/month"},
             {"label": "Symbols", "value": str(len(leaders))},
