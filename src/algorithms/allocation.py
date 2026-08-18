@@ -24,9 +24,8 @@ def rank_by_score(
     """The rows from ``symbols`` that qualify, best score first.
 
     ``gate_key``/``min_gate`` is the second, raw-return floor an algorithm may apply alongside
-    the cross-sectional score -- Fast Momentum gates on ``micro_return``, SPY Rotation on
-    ``meso_return``. It is a sanity check rather than a ranking term: it stops the best of a
-    uniformly falling universe being bought for being least bad.
+    the cross-sectional score. It is a sanity check rather than a ranking term: it stops the
+    best of a uniformly falling universe being bought for being least bad.
 
     ``require_trend`` reads ``macro_trend_ok``. Defensive sleeves switch it off, because the
     point of holding bills is that nothing else is trending.

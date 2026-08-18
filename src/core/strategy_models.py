@@ -3,12 +3,8 @@
 Not an algorithm registry, despite the name and despite once holding a branch per strategy.
 The real algorithms live in ``src/algorithms/`` behind ``AlgorithmPlugin``; what survives here
 is the daily-bar feature frame the backtest fetcher also uses, and one scoring rule --
-``dual_momentum`` in the *rule set* sense, a 126/252-day blend -- which ``options/swing.py``
+``rally_rotation`` in the *rule set* sense, a 126/252-day blend -- which ``options/swing.py``
 uses to pick which underlyings to buy contracts on.
-
-The other five branches (``trend_following``, ``mean_reversion``, ``breakout``, ``risk_parity``
-and a second ``fast_momentum`` scorer) were reachable only from their own tests, and the
-``fast_momentum`` one was a fourth implementation of dual momentum on top of that.
 """
 
 from __future__ import annotations
@@ -25,11 +21,7 @@ from src.data.signals.signals import compute_social_trend_score
 STRATEGY_LABELS = {
     "dca": "DCA",
     "bursty_dca": "Bursty DCA",
-    "fast_momentum": "Fast Momentum",
-    "dual_momentum": "Dual Momentum",
-    # Named for what it does: classify SPY into GROWING / FLAT / FALLING / CRISIS and rotate
-    # between growth, covered-call income, cash, and hedges.
-    "spy_rotation": "SPY Rotation",
+    "rally_rotation": "Rally Rotation",
 }
 
 
@@ -71,7 +63,7 @@ def strategy_row_from_prepared(
     social_lookback_days: int = 30,
     social_weight: float = 0.0,
 ) -> dict[str, Any]:
-    """One symbol's row under the ``dual_momentum`` rule set: 60% of R126 plus 40% of R252.
+    """One symbol's row under the ``rally_rotation`` rule set: 60% of R126 plus 40% of R252.
 
     ``strategy`` is kept in the signature because the row carries it through to the caller and
     because an unknown name must produce a neutral row rather than an error, which is what a
@@ -97,7 +89,7 @@ def strategy_row_from_prepared(
     reason = "No active setup"
     social = {"social_score": 0.0, "sentiment": 0.0}
 
-    if strategy == "dual_momentum":
+    if strategy == "rally_rotation":
         social = compute_social_trend_score(social_df, social_lookback_days)
         price_score = 0.6 * ret_126 + 0.4 * ret_252
         sentiment_tilt = max(0.0, min(float(social_weight or 0.0), 0.5)) * as_float(social.get("social_score"))
@@ -153,7 +145,7 @@ def strategy_row(
 def _rank_strategy_rows(strategy: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Top five long, bottom two short, everything else flat -- then ordered for display."""
     rows = [dict(row) for row in rows]
-    if strategy == "dual_momentum":
+    if strategy == "rally_rotation":
         ranked = sorted(rows, key=lambda item: item["score"], reverse=True)
         selected_symbols = {row["symbol"] for row in ranked[: min(5, len(ranked))] if row["score"] > 0}
         weak_symbols = {row["symbol"] for row in ranked[-2:] if row["score"] < -0.02}

@@ -143,9 +143,9 @@ class HistoryCache:
 
     Daily bars have always been loaded once and sliced -- see :func:`_slice_daily` -- but the
     intraday window was re-read from the store on every trade date, for every symbol, for every
-    configured provider. A twelve-month Fast Momentum backtest spent 97 of its 99 seconds on
-    21,000 database round trips, which put it past the dashboard's request timeout and surfaced
-    as an aborted fetch rather than as anything explicable.
+    configured provider. A twelve-month backtest spent 97 of its 99 seconds on 21,000 database
+    round trips, which put it past the dashboard's request timeout and surfaced as an aborted
+    fetch rather than as anything explicable.
 
     The window one date needs is a sub-range of the window the whole replay needs, so a single
     read per symbol answers all of them. Slicing reproduces ``read_history``'s own window --

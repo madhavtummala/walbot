@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
-from .config import STATE_KEY, DualMomentumConfig
-from .layers import crash_stop, hold_eligibility, park_residual, score_to_weights
+from .config import STATE_KEY, RallyRotationConfig
+from .layers import crash_stop, climax_top, hold_eligibility, park_residual, score_to_weights
 from .proposal import allocation_mode, analyze_universe, build_signals
-from .stateful import track_eligibility, resolve_positions, _defensive_book, _in_cooldown, _record_exits, _run_facts, apply_turnover_filters, partial_adjustment, action_due, advance_run, record_action
+from .stateful import track_eligibility, track_ranking, resolve_positions, _defensive_book, _record_exits, _run_facts, apply_turnover_filters, partial_adjustment, action_due, advance_run, record_action
 
 
 
@@ -22,10 +22,10 @@ from ...data.state_store import load_state, save_state
 logger = logging.getLogger(__name__)
 
 
-class DualMomentumAlgorithm(BaseAlgorithm):
+class RallyRotationAlgorithm(BaseAlgorithm):
     """Dual momentum: cross-sectional rank, per-name absolute momentum, theme-level rotation."""
 
-    algorithm_id = "dual_momentum"
+    algorithm_id = "rally_rotation"
 
     #: Once per session. Every feature is computed from daily bars now, so a second look
     #: before the close reads the same closes and cannot produce a different answer -- which
@@ -37,7 +37,7 @@ class DualMomentumAlgorithm(BaseAlgorithm):
     schedule = DAILY_AT_OPEN
 
     def requirements(self, config: Any, current_positions: dict[str, int]) -> AlgorithmRequirements:
-        strategy_config = DualMomentumConfig.from_runtime_config(config)
+        strategy_config = RallyRotationConfig.from_runtime_config(config)
         return AlgorithmRequirements(
             price_symbols=sorted(set(strategy_config.symbols) | set(current_positions)),
             daily_lookback_days=strategy_config.required_daily_bars,
@@ -58,14 +58,14 @@ class DualMomentumAlgorithm(BaseAlgorithm):
         retained sub-threshold position could still be paid for. Order funding now checks that
         directly against buying power, so the buffer no longer has to be guessed at here.
         """
-        strategy_config = DualMomentumConfig.from_runtime_config(config)
+        strategy_config = RallyRotationConfig.from_runtime_config(config)
         return {
             "min_trade_dollars": strategy_config.minimum_trade_notional,
             "rebalance_threshold": strategy_config.rebalance_weight_threshold,
         }
 
     def analyze(self, context: AlgorithmContext) -> AlgorithmDecision:
-        strategy_config = DualMomentumConfig.from_runtime_config(context.config)
+        strategy_config = RallyRotationConfig.from_runtime_config(context.config)
         outcome = analyze_universe(context, strategy_config)
         weights = outcome["weights"]
         data = outcome["data"]
@@ -103,7 +103,7 @@ class DualMomentumAlgorithm(BaseAlgorithm):
         Everything here needs either what is currently held or memory of previous runs, which
         is exactly what ``analyze`` is forbidden to touch.
         """
-        strategy_config = DualMomentumConfig.from_runtime_config(config)
+        strategy_config = RallyRotationConfig.from_runtime_config(config)
         account = str(getattr(config, "account_id", "") or "")
         state_key = f"{STATE_KEY}:{account}" if account else STATE_KEY
         state = load_state(state_key, {})
@@ -157,15 +157,19 @@ class DualMomentumAlgorithm(BaseAlgorithm):
 
         if not facts["data_ok"]:
             # Not a bearish reading -- an unusable one. See ``universe_data_ok``.
-            logger.warning("Dual Momentum holding the defensive sleeve: %s", facts["data_detail"])
+            logger.warning("Rally Rotation holding the defensive sleeve: %s", facts["data_detail"])
             return settle(book)
 
         risk_rows = {symbol: row for symbol, row in rows.items() if symbol not in defensive}
         history = track_eligibility(state, risk_rows, strategy_config)
+        rank_history = track_ranking(state, risk_rows, strategy_config)
         window = max(strategy_config.eligibility_window, 1)
 
         def eligible_days(symbol: str) -> int:
             return sum(history.get(symbol, []))
+
+        def ranked_top_days(symbol: str) -> int:
+            return sum(rank_history.get(symbol, []))
 
         def watched_long_enough(symbol: str) -> bool:
             return len(history.get(symbol, [])) >= window
@@ -181,19 +185,30 @@ class DualMomentumAlgorithm(BaseAlgorithm):
         }
         for symbol in crashed:
             logger.warning(
-                "Dual Momentum crash stop on %s: %s", symbol,
+                "Rally Rotation crash stop on %s: %s", symbol,
                 crash_stop(rows.get(symbol, {}), strategy_config)[1],
+            )
+
+        # Climax top exit: fires every session like crash_stop, outside normal cadence.
+        climax_exits = {
+            symbol for symbol in held - defensive - crashed
+            if not climax_top(rows.get(symbol, {}), strategy_config)[0]
+        }
+        for symbol in climax_exits:
+            logger.warning(
+                "Rally Rotation climax top exit on %s: %s", symbol,
+                climax_top(rows.get(symbol, {}), strategy_config)[1],
             )
 
         if not action_due(state, "rerank", strategy_config.rerank_interval_days):
             # Between re-rankings the book may only shrink, and only for a crash. Everything
             # else stays exactly where it is, which is the whole point of the throttle.
-            survivors = (held - defensive) - crashed
+            survivors = (held - defensive) - crashed - climax_exits
             weights = {symbol: float(current.get(symbol, 0.0)) for symbol in survivors}
         else:
             record_action(state, "rerank")
             keep: set[str] = set()
-            for symbol in (held - defensive) - crashed:
+            for symbol in (held - defensive) - crashed - climax_exits:
                 row = rows.get(symbol, {})
                 # Two ways out, answering different questions. The count is the slow one: this
                 # name has stopped qualifying for long enough to mean something. The band, via
@@ -203,13 +218,13 @@ class DualMomentumAlgorithm(BaseAlgorithm):
                 # that as "ineligible" would sell everything on the first run.
                 if watched_long_enough(symbol) and days <= strategy_config.exit_max_eligible_days:
                     logger.info(
-                        "Dual Momentum exiting %s: eligible on only %d of the last %d runs",
+                        "Rally Rotation exiting %s: eligible on only %d of the last %d runs",
                         symbol, days, window,
                     )
                     continue
                 stays, why = hold_eligibility(row, strategy_config)
                 if not stays:
-                    logger.info("Dual Momentum exiting %s: %s", symbol, why)
+                    logger.info("Rally Rotation exiting %s: %s", symbol, why)
                     continue
                 keep.add(symbol)
 
@@ -220,15 +235,14 @@ class DualMomentumAlgorithm(BaseAlgorithm):
                 )
                 if int(row.get("eligible", 0))
                 and (
-                    # Held names face eligibility alone. The quality floor, the settling
-                    # period and the cooldown are all *entry* conditions: a holding that
-                    # would not be bought today is not thereby worth selling, and applying
-                    # them symmetrically sells a name the moment it stops being a purchase.
+                    # Held names face eligibility alone. The quality floor and the settling
+                    # period are all *entry* conditions: a holding that would not be bought
+                    # today is not thereby worth selling, and applying them symmetrically
+                    # sells a name the moment it stops being a purchase.
                     symbol in keep
                     or (
                         float(row.get("base_score", 0.0)) >= strategy_config.min_base_score
-                        and eligible_days(symbol) >= strategy_config.entry_min_eligible_days
-                        and not _in_cooldown(state, symbol, as_of, strategy_config)
+                        and ranked_top_days(symbol) >= strategy_config.entry_min_eligible_days
                     )
                 )
             ]

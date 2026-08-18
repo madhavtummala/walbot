@@ -8,16 +8,16 @@ def test_sanitize_controls_defaults_and_bools() -> None:
 
     assert controls == {
         "trading_account_id": "",
-        "equities": {"enabled": False, "strategy": "fast_momentum"},
+        "equities": {"enabled": False, "strategy": "rally_rotation"},
         "options": {"enabled": False, "strategy": "none", "account_id": ""},
-        "algorithm": {"enabled": False, "strategy": "fast_momentum"},
+        "algorithm": {"enabled": False, "strategy": "rally_rotation"},
         "options_trading": {"enabled": False, "strategy": "none", "account_id": ""},
         "algorithm_enabled": False,
         "options_trading_enabled": False,
         "bindings": [
-            {"id": "b1", "strategy": "fast_momentum", "account_id": "", "enabled": False, "frequency": "1hr"},
+            {"id": "b1", "strategy": "rally_rotation", "account_id": "", "enabled": False, "frequency": "1hr"},
         ],
-        "active_strategy": "fast_momentum",
+        "active_strategy": "rally_rotation",
         "options_strategy": "none",
         "options_trading_account_id": "",
     }
@@ -51,7 +51,7 @@ def test_save_and_load_controls_uses_split_bot_files(tmp_path, monkeypatch) -> N
             "equities": {"enabled": True, "strategy": "breakout"},
             "options": {
                 "enabled": True,
-                "strategy": "options_swing_dual_momentum",
+                "strategy": "options_swing_rally_rotation",
                 "account_id": "paper-options",
             },
         }

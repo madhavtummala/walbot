@@ -16,7 +16,7 @@ from ...data.bars import TRADING_MINUTES_PER_DAY
 
 logger = logging.getLogger(__name__)
 
-STATE_KEY = "dual_momentum_runtime"
+STATE_KEY = "rally_rotation_runtime"
 
 EPSILON = 1e-9
 
@@ -25,7 +25,7 @@ TRADING_DAYS = 252
 
 
 @dataclass(frozen=True)
-class DualMomentumConfig:
+class RallyRotationConfig:
     """Every knob, with the spec's starting values.
 
     These are research defaults, not recommended live settings: they need converting to your
@@ -35,8 +35,6 @@ class DualMomentumConfig:
     # -- universes ------------------------------------------------------------------------
     risk_on_universe: list[str] = field(default_factory=lambda: ["QQQM", "VTI", "IWM", "IEMG", "XSD"])
     defensive_universe: list[str] = field(default_factory=lambda: ["BIL", "IEF", "AGG", "GLD"])
-    benchmark: str = field(default="QQQM", metadata={"coerce": "symbol"})
-
     # -- decision cadence -------------------------------------------------------------------
     #: How often the cross-section is re-ranked, in *trading* days -- counted in runs, since
     #: the algorithm runs once a session. The algorithm runs every session; that is the rate at
@@ -49,14 +47,9 @@ class DualMomentumConfig:
     #: can gap 30% across a week of throttled sessions while the algorithm waits its turn.
     #:
     #: 0 means every run, which is what the algorithm did before this existed.
-    rerank_interval_days: int = 3
-
-    risk_refresh_minutes: int = 15
+    rerank_interval_days: int = 5
 
     # -- selection score ------------------------------------------------------------------
-    #: Kept at 0 -- this algorithm reads daily bars only, so there is no intraday grid to
-    #: prefer. See ``requirements``, which asks for no history window at all.
-    intraday_bar_minutes: int = 0
     #: Selection horizons, in minutes the market is open, at *daily* granularity: one, two,
     #: three and twelve sessions (``TRADING_MINUTES_PER_DAY`` is 390).
     #:
@@ -75,10 +68,10 @@ class DualMomentumConfig:
     selection_horizon_micro_minutes: int = field(default=780, metadata={"legacy_key": "selection_horizon_micro"})
     selection_horizon_meso_minutes: int = field(default=1170, metadata={"legacy_key": "selection_horizon_meso"})
     selection_horizon_macro_minutes: int = field(default=4680, metadata={"legacy_key": "selection_horizon_macro"})
-    w_nano: float = 0.10
-    w_micro: float = 0.20
-    w_meso: float = 0.35
-    w_macro: float = 0.35
+    w_nano: float = 0.05
+    w_micro: float = 0.15
+    w_meso: float = 0.30
+    w_macro: float = 0.50
     robust_zscore: bool = True
     #: Rank on return-per-unit-of-volatility rather than raw return. Off, the cross-section
     #: rewards amplitude and the highest-volatility name that happened to rise wins.
@@ -127,9 +120,16 @@ class DualMomentumConfig:
     #: breaker beside it, ``intraday_drawdown_limit``, which could not fire: it rebases
     #: its session high on every run, so at ``DAILY_AT_OPEN`` the drawdown it measured
     #: was always exactly zero. A knob that reads as protection and provides none is
-    #: worse than no knob, so it is gone. ``session_drawdown_breached`` remains in
-    #: ``algorithms/risk.py`` for Fast Momentum, which genuinely runs intraday.
+    #: worse than no knob, so it is gone.
     max_daily_drop: float = 0.10
+    # -- trend filter (medium-term) -------------------------------------------------------
+    #: Names must be above this MA to be eligible. Filters out short-term rallies
+    #: in names still in a medium-term downtrend. 0 = off.
+    trend_ma_days: int = 20
+    #: Names must have positive return over this many days to be eligible. 0 = off.
+    trend_return_days: int = 20
+    #: Minimum return over trend_return_days. 0 = off.
+    trend_min_return: float = 0.0
     # -- eligibility persistence ----------------------------------------------------------
     #: Eligibility is a stateless per-day test, so a name sitting near any of its floors
     #: flipped in and out on consecutive sessions: membership changed on 126 of 250 days in
@@ -154,7 +154,6 @@ class DualMomentumConfig:
     entry_rank_max: int = 5
     exit_rank_max: int = 7
     min_score_delta_to_replace: float = 0.35
-    cooldown_after_exit: int = 4
 
     # -- sentiment (phased in last; both weights default to off) --------------------------
     sentiment_weight: float = 0.0
@@ -170,7 +169,7 @@ class DualMomentumConfig:
     #:   -1.0  risk parity -- divide by volatility, so calm names get the big positions
     #:    0.0  score alone -- volatility does not enter sizing at all
     #:   +1.0  lean in -- scale up with volatility, which is what an ungated momentum book
-    #:         like Fast Momentum does implicitly by never dividing
+    #:         does implicitly by never dividing
     #:
     #: One number rather than a boolean because the useful settings are not binary: the
     #: question is how hard to press, and the answer is a market regime opinion.
@@ -181,6 +180,19 @@ class DualMomentumConfig:
     volatility_tilt: float = 1.0
     #: Daily window for the per-name volatility estimate that ``volatility_tilt`` reads.
     vol_estimation_days: int = 20
+    #: Reject any name whose 20-day annualized volatility exceeds this ceiling. 0 = off.
+    vol_ceiling: float = 0.0
+    #: Reject any name whose 5-day vol is above its 20-day vol by more than this ratio
+    #: (e.g. 0.3 means 5d vol must not exceed 20d vol by 30%). 0 = off.
+    vol_rising_threshold: float = 0.0
+    #: Maximum ratio of current intraday range (high-low)/close to the 20-day average range.
+    #: Names with range expansion beyond this multiple are flagged. 0 = off.
+    range_expansion_limit: float = 0.0
+    #: Minimum distance (as fraction of price) above the 100-day MA to treat a climax
+    #: signal as a sell. Below this distance, the same pattern is a buy-the-dip. 0 = off.
+    climax_ma_distance_min: float = 0.0
+    #: Minimum volume ratio (current / 20d avg) to confirm a climax signal. 0 = off.
+    climax_volume_ratio_min: float = 0.0
 
     rebalance_weight_threshold: float = 0.03
     #: How far to move toward the new target on each run, as a fraction: the book becomes
@@ -203,18 +215,13 @@ class DualMomentumConfig:
     defensive_max_positions: int = 2
 
     @classmethod
-    def from_runtime_config(cls, config: Any) -> "DualMomentumConfig":
-        return load_tuning(cls, tuning_section(config, "dual_momentum"))
+    def from_runtime_config(cls, config: Any) -> "RallyRotationConfig":
+        return load_tuning(cls, tuning_section(config, "rally_rotation"))
 
     @property
     def symbols(self) -> list[str]:
-        """Everything the algorithm needs priced, benchmark included.
-
-        ``benchmark`` gates nothing -- the regime layer that used it is gone -- but it is still
-        carried here so the dashboard can chart it, and it is normally in the risk-on
-        universe anyway.
-        """
-        return sorted(set(self.risk_on_universe) | set(self.defensive_universe) | {self.benchmark})
+        """Everything the algorithm needs priced."""
+        return sorted(set(self.risk_on_universe) | set(self.defensive_universe))
 
     @property
     def uses_sentiment(self) -> bool:
@@ -256,6 +263,8 @@ class DualMomentumConfig:
                 self.etf_ma_days,
                 self.etf_abs_return_days,
                 self.vol_estimation_days,
+                self.trend_ma_days,
+                self.trend_return_days,
                 self.selection_horizon_days + smoothing_days,
             )
             + 5

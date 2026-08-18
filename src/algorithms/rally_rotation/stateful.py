@@ -1,17 +1,14 @@
-"""Step 2: the decisions that need memory -- cooldowns, eligibility runs, theme rotation.
+"""Step 2: the decisions that need memory -- eligibility runs, theme rotation.
 """
 
 from __future__ import annotations
 
-from .config import EPSILON, DualMomentumConfig
+from .config import EPSILON, RallyRotationConfig
 
 
 
 import logging
-from datetime import datetime
 from typing import Any
-
-from ...common.timeutils import minutes_between as _minutes_between, parse_iso_utc as _parse_time
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +41,7 @@ def apply_turnover_filters(
     target: dict[str, float],
     current: dict[str, float],
     equity: float,
-    config: DualMomentumConfig,
+    config: RallyRotationConfig,
 ) -> dict[str, float]:
     """Drop trades too small to be worth their costs, keeping the current weight instead.
 
@@ -78,7 +75,7 @@ def _fit_to_budget(
     target: dict[str, float],
     current: dict[str, float],
     equity: float,
-    config: DualMomentumConfig,
+    config: RallyRotationConfig,
 ) -> dict[str, float]:
     """Give back whatever holding a name at its current weight borrowed from the budget.
 
@@ -134,7 +131,7 @@ def _fit_to_budget(
 def partial_adjustment(
     target: dict[str, float],
     current: dict[str, float],
-    config: DualMomentumConfig,
+    config: RallyRotationConfig,
 ) -> dict[str, float]:
     """Move ``config.rebalance_step`` of the way from ``current`` to ``target``.
 
@@ -198,7 +195,7 @@ def record_action(state: dict[str, Any], action: str) -> None:
 def track_eligibility(
     state: dict[str, Any],
     rows: dict[str, dict[str, Any]],
-    config: DualMomentumConfig,
+    config: RallyRotationConfig,
 ) -> dict[str, list[int]]:
     """Record today's eligibility per symbol and return each one's recent window.
 
@@ -227,10 +224,38 @@ def track_eligibility(
     return updated
 
 
+def track_ranking(
+    state: dict[str, Any],
+    signals: dict[str, dict[str, Any]],
+    config: RallyRotationConfig,
+) -> dict[str, list[int]]:
+    """Record today's top-N ranking per symbol and return each one's recent window.
+
+    Similar to ``track_eligibility`` but checks whether the symbol was ranked within
+    ``entry_rank_max`` rather than merely eligible. A tighter gate: the name must not only
+    pass absolute momentum but also be among the best relative performers.
+    """
+    window = max(config.eligibility_window, 1)
+    rank_limit = max(config.entry_rank_max, 0)
+    history = state.get("ranked_top_history")
+    if not isinstance(history, dict):
+        history = {}
+    updated: dict[str, list[int]] = {}
+    for symbol, row in signals.items():
+        past = history.get(symbol) or []
+        if not isinstance(past, list):
+            past = []
+        rank = int(row.get("rank") or 0)
+        in_top = 1 if (rank > 0 and rank <= rank_limit) else 0
+        updated[symbol] = [*past, in_top][-window:]
+    state["ranked_top_history"] = updated
+    return updated
+
+
 def resolve_positions(
     held: set[str],
     ranked: list[dict[str, Any]],
-    config: DualMomentumConfig,
+    config: RallyRotationConfig,
 ) -> set[str]:
     """Which ETFs the book holds: keep what still ranks, fill free slots, then displace.
 
@@ -280,7 +305,7 @@ def resolve_positions(
         if score.get(symbol, 0.0) <= score.get(weakest, 0.0) + delta:
             continue
         logger.info(
-            "Dual Momentum replacing %s (%.2f) with %s (%.2f)",
+            "Rally Rotation replacing %s (%.2f) with %s (%.2f)",
             weakest, score.get(weakest, 0.0), symbol, score.get(symbol, 0.0),
         )
         selection.discard(weakest)
@@ -292,36 +317,4 @@ def resolve_positions(
 
 
 def _record_exits(state: dict[str, Any], held: set[str], final: set[str], as_of: str) -> None:
-    """Remember when a symbol left the book, so re-entry can be held off for a cooldown."""
-    exits = state.setdefault("exited_at", {})
-    if not isinstance(exits, dict):
-        exits = {}
-        state["exited_at"] = exits
-    for symbol in held - final:
-        exits[str(symbol)] = as_of
-    for symbol in final:
-        exits.pop(str(symbol), None)
-
-
-def _in_cooldown(
-    state: dict[str, Any],
-    symbol: str,
-    now: datetime | None,
-    config: DualMomentumConfig,
-) -> bool:
-    """Whether ``symbol`` exited too recently to be re-entered.
-
-    Elapsed wall-clock minutes, not market ones: ``cooldown_after_exit`` counts algorithm
-    *runs*, so the window is that many times ``risk_refresh_minutes``. Compared against the
-    timestamp ``analyze`` recorded -- which the backtester sets to the historical bar, so a
-    replay applies the same cooldown the live runner would have.
-    """
-    exits = state.get("exited_at") if isinstance(state.get("exited_at"), dict) else {}
-    exited_at = _parse_time(str(exits.get(symbol, "")))
-    if exited_at is None:
-        return False
-    window = max(config.cooldown_after_exit, 0) * max(config.risk_refresh_minutes, 1)
-    if _minutes_between(now, exited_at) >= window:
-        return False
-    logger.info("Dual Momentum holding off %s: inside the %d-minute re-entry cooldown", symbol, window)
-    return True
+    """No-op retained for interface compatibility. Cooldown was removed as ineffective."""

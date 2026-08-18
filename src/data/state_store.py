@@ -13,7 +13,7 @@ from .duckdb_store import DUCKDB_STATE_PATH, _connect
 STATE_DUCKDB_PATH = DUCKDB_STATE_PATH
 
 #: When set, reads and writes go to this dict instead of DuckDB. A backtest replays algorithms
-#: that carry state between runs -- DCA's accrued budget, Fast Momentum's intraday risk flag --
+#: that carry state between runs -- DCA's accrued budget, Rally Rotation's eligibility history --
 #: and without this it would read and then overwrite the live account's state. A ContextVar
 #: rather than a parameter so no algorithm has to know it is being replayed.
 _EPHEMERAL_STATE: ContextVar[dict[str, Any] | None] = ContextVar("ephemeral_state", default=None)

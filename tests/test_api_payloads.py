@@ -5,7 +5,6 @@ import pytest
 
 from src.api import api_payloads as api_payloads
 from src.core import market_context
-from src.algorithms import fast_momentum as fast_momentum
 from src.algorithms import dca as dca
 from src.algorithms.dca import bot as dca_bot
 from src.core.config import Config
@@ -210,30 +209,6 @@ def test_controls_payload_returns_persisted_choices() -> None:
     assert "dca" not in payload["bot"]
 
 
-def test_fast_momentum_reason_uses_configured_defensive_symbols() -> None:
-    row = {"symbol": "XYLD", "macro_trend_ok": True}
-    config = fast_momentum.DefensiveMomentumConfig(defensive_universe=["BIL", "XYLD"])
-
-    reason = fast_momentum._defensive_momentum_reason(row, 0.25, config)
-
-    assert reason == "Top Rank"
-
-
-def test_fast_momentum_reason_describes_risk_on_rank_cutoff() -> None:
-    config = fast_momentum.DefensiveMomentumConfig(
-        risk_on_universe=["XSD", "AIQ"],
-        defensive_universe=["BIL", "XYLD"],
-        max_positions=4,
-        min_risk_on_micro_return=0.0,
-    )
-
-    assert fast_momentum._defensive_momentum_reason({"symbol": "AIQ", "macro_trend_ok": True}, 0.0, config) == "No rank slot"
-    assert (
-        fast_momentum._defensive_momentum_reason({"symbol": "XSD", "macro_trend_ok": True, "micro_return": -0.001}, 0.0, config)
-        == "Micro too low"
-    )
-
-
 def test_save_controls_payload_does_not_wake_runtimes(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("TRADING_ALGORITHM_BOT_FILE", str(tmp_path / "algorithm_bot.yaml"))
     monkeypatch.setenv("TRADING_OPTIONS_BOT_FILE", str(tmp_path / "options_bot.yaml"))
@@ -270,9 +245,9 @@ def test_cache_only_backtest_does_not_compute_without_cached_rows(monkeypatch) -
     _patch_payloads(monkeypatch, "_load_backtest_cache", lambda: {"version": 2, "items": {}})
     _patch_payloads(monkeypatch, "_compute_backtest", fail_compute)
 
-    payload = backtest_payload({"strategy": "fast_momentum", "period": "6m", "cache_only": True})
+    payload = backtest_payload({"strategy": "rally_rotation", "period": "6m", "cache_only": True})
 
-    assert payload["strategy"] == "fast_momentum"
+    assert payload["strategy"] == "rally_rotation"
     assert payload["period_label"] == "6M"
     assert payload["cached"] is False
     assert "error" in payload
@@ -286,9 +261,9 @@ def test_non_refresh_backtest_does_not_compute_without_cached_rows(monkeypatch) 
     _patch_payloads(monkeypatch, "_load_backtest_cache", lambda: {"version": 4, "items": {}})
     _patch_payloads(monkeypatch, "_compute_backtest", fail_compute)
 
-    payload = backtest_payload({"strategy": "fast_momentum", "period": "2m"})
+    payload = backtest_payload({"strategy": "rally_rotation", "period": "2m"})
 
-    assert payload["strategy"] == "fast_momentum"
+    assert payload["strategy"] == "rally_rotation"
     assert payload["cached"] is False
     assert "error" in payload
 
@@ -355,44 +330,6 @@ def test_backtest_response_explains_profit_loss_breakdown() -> None:
     assert payload["rows"][-1]["positions"] == {"SPY": 7000.0, "QQQ": 2211.0}
 
 
-def test_fast_momentum_backtest_honors_configured_max_positions(monkeypatch) -> None:
-    symbols = ["AAA", "BBB", "CCC", "DDD", "EEE"]
-    configured_symbols = sorted([*symbols, "FFF"])
-    bars = {symbol: _strategy_bars([100 + index * 0.2 for index in range(280)]) for symbol in configured_symbols}
-    captured_fetch = {}
-    config = Config(
-        symbols=["IGNORED"],
-        cash_buffer=0.0,
-        transaction_cost_bps=0.0,
-        algorithm_configs={
-            "fast_momentum": {
-                "risk_on_universe": symbols,
-                "defensive_universe": ["FFF"],
-                "max_positions": 4,
-                "max_single_position_weight": 0.25,
-                "max_gross_exposure": 1.0,
-            }
-        },
-    )
-
-    _patch_payloads(monkeypatch, "get_config", lambda *args, **kwargs: config)
-    _patch_payloads(monkeypatch, "create_data_client", lambda config: object())
-
-    def fake_fetch_daily_bars(requested_symbols, **kwargs):
-        captured_fetch.update({"symbols": requested_symbols, **kwargs})
-        return {symbol: bars[symbol] for symbol in requested_symbols}
-
-    _patch_payloads(monkeypatch, "fetch_daily_bars", fake_fetch_daily_bars)
-    payload = api_payloads._compute_backtest("fast_momentum", "1m")
-    history = pd.DataFrame(payload["rows"]).set_index("timestamp")
-
-    position_counts = history["positions"].apply(len)
-    assert position_counts.max() == 4
-    assert all("EEE" not in positions for positions in history["positions"])
-    assert captured_fetch["symbols"] == configured_symbols
-    assert captured_fetch["lookback_days"] >= 180
-    assert captured_fetch["extra_buffer_days"] >= 22 + 10
-
 
 def test_history_backtest_reads_configured_provider_order(monkeypatch) -> None:
     calls = []
@@ -437,60 +374,6 @@ def test_history_backtest_reads_configured_provider_order(monkeypatch) -> None:
     assert coverage.as_dict()["history_ratio"] == 1.0
     assert coverage.missing_symbols == set()
 
-
-def test_spy_rotation_backtest_uses_spy_state_logic(monkeypatch) -> None:
-    symbols = ["SPY", "XYLD", "BIL", "SH"]
-    bars = {symbol: _strategy_bars([100 + index * 0.4 for index in range(280)]) for symbol in symbols}
-    config = Config(
-        symbols=["IGNORED"],
-        cash_buffer=0.0,
-        transaction_cost_bps=0.0,
-        algorithm_configs={
-            "invest_spy": {
-                "spy_symbol": "SPY",
-                "equity_income_universe": ["XYLD"],
-                "defensive_universe": ["BIL"],
-                "crisis_hedge_universe": ["SH"],
-                "macro_trend_lookback_days": 60,
-                "micro_momentum_lookback_minutes": 45,
-                "meso_momentum_lookback_minutes": 390,
-                "max_gross_exposure": 1.0,
-                "max_single_position_weight": 1.0,
-            }
-        },
-    )
-
-    _patch_payloads(monkeypatch, "get_config", lambda *args, **kwargs: config)
-    _patch_payloads(monkeypatch, "create_data_client", lambda config: object())
-    _patch_payloads(monkeypatch, "fetch_daily_bars",
-        lambda symbols, *args, **kwargs: {symbol: bars[symbol] for symbol in symbols},
-    )
-
-    # The replay's history read is stubbed rather than left to hit the shared bar store: the
-    # store holds real cached bars for these very symbols, so without this the assertions
-    # below would quietly depend on what the market did last week.
-    def fake_read_history(symbol, *, lookback_minutes, end, provider=None, **kwargs):
-        closes = [100 + index * 0.4 for index in range(60)]
-        return pd.DataFrame(
-            {
-                "timestamp": pd.date_range(end - pd.Timedelta(minutes=15 * 60), periods=60, freq="15min"),
-                "close": closes,
-                "open": closes,
-                "high": closes,
-                "low": closes,
-                "volume": [1_000 for _ in closes],
-                "interval_minutes": 15,
-            }
-        )
-
-    monkeypatch.setattr(replay_module, "read_history", fake_read_history)
-
-    payload = api_payloads._compute_backtest("spy_rotation", "6m")
-    history = pd.DataFrame(payload["rows"]).set_index("timestamp")
-
-    assert history["order_count"].sum() > 0
-    assert history["positions"].iloc[-1]["SPY"] > 0
-    assert "IGNORED" not in history["positions"].iloc[-1]
 
 
 def test_none_strategy_resolves_to_dca(monkeypatch) -> None:
@@ -661,65 +544,6 @@ def test_dca_backtest_never_spends_more_cash_than_it_has(monkeypatch) -> None:
     assert history["dca_contributions"].iloc[-1] <= 1_000.0 + 0.01
 
 
-def test_defensive_momentum_signals_include_inactive_universe_rows(monkeypatch) -> None:
-    """Every configured symbol gets a row, including those holding no weight.
-
-    The context is constructed here rather than fetched: this used to patch the algorithm's
-    own fetch helpers, which the signal view no longer calls, so the assertions silently ran
-    against whatever the live cache held and flipped whenever the market moved.
-    """
-    from src.algorithms.fast_momentum import DefensiveMomentumConfig
-    from src.core import market_context
-    from src.core.config import get_config
-    from src.core.interfaces import AlgorithmContext
-
-    def intraday(symbol: str) -> pd.DataFrame:
-        # Genuinely minute-spaced, because the fast horizons are wall-clock: 200 fifteen-minute
-        # bars span ~50 hours, enough to reach the 1170-minute micro lookback. Daily bars here
-        # would put every horizon inside a single observation and score the field flat.
-        step = 0.8 if symbol == "XSD" else -0.2 if symbol == "VXX" else 0.05
-        prices = [100 + index * step for index in range(200)]
-        return pd.DataFrame(
-            {
-                "timestamp": pd.date_range("2024-01-02 14:30", periods=len(prices), freq="15min", tz="UTC"),
-                "open": prices,
-                "high": [price * 1.01 for price in prices],
-                "low": [price * 0.99 for price in prices],
-                "close": [price * 1.002 for price in prices],
-                "volume": [1_000_000 + index for index in range(len(prices))],
-            }
-        )
-
-    def daily(symbol: str) -> pd.DataFrame:
-        step = 0.5 if symbol in {"SPY", "XSD"} else -0.2 if symbol == "VXX" else 0.05
-        return _strategy_bars([100 + index * step for index in range(220)])
-
-    def fake_context(config, requirements, **_kwargs) -> AlgorithmContext:
-        symbols = list(requirements.price_symbols)
-        return AlgorithmContext(
-            config=config,
-            bars_by_symbol={symbol: daily(symbol) for symbol in symbols},
-            history_bars_by_symbol={symbol: intraday(symbol) for symbol in symbols},
-            sentiment_scores={"SPY": 0.5, "XSD": 0.3},
-            latest_prices={symbol: float(daily(symbol)["close"].iloc[-1]) for symbol in symbols},
-        )
-
-    monkeypatch.setattr(market_context, "build_algorithm_context", fake_context)
-
-    payload = strategy_signals_payload("fast_momentum")
-
-    # Derived from the configured universes rather than hard-coded, so editing them in
-    # walbot.yaml does not silently break this.
-    strategy_config = DefensiveMomentumConfig.from_runtime_config(get_config(strategy_id="fast_momentum"))
-    defensive = strategy_config.defensive_universe[0]
-
-    by_symbol = {row["symbol"]: row for row in payload["leaders"]}
-    assert {"XSD", defensive} <= set(by_symbol)
-    assert by_symbol["XSD"]["signal"] == "LONG", "the steepest riser should be held"
-    assert "score_components" in by_symbol["XSD"]
-    assert payload["summary"][0]["value"] == "Dynamic rank"
-    assert by_symbol[defensive]["reason"], "an unheld symbol still explains itself"
-
 
 
 
@@ -736,13 +560,13 @@ def test_an_algorithm_declares_what_invalidates_its_cached_backtest() -> None:
     dca = get_algorithm_class("dca").from_config(get_config(strategy_id="dca"))
     assert "plan" in dca.config_fingerprint(get_config(strategy_id="dca"))
 
-    momentum = get_algorithm_class("dual_momentum").from_config(get_config(strategy_id="dual_momentum"))
-    assert "plan" not in momentum.config_fingerprint(get_config(strategy_id="dual_momentum"))
+    momentum = get_algorithm_class("rally_rotation").from_config(get_config(strategy_id="rally_rotation"))
+    assert "plan" not in momentum.config_fingerprint(get_config(strategy_id="rally_rotation"))
 
     # Stable for the same inputs, and distinct per strategy and per period.
-    assert _cache_key("dual_momentum", "6m") == _cache_key("dual_momentum", "6m")
-    assert _cache_key("dual_momentum", "6m") != _cache_key("dual_momentum", "4m")
-    assert _cache_key("dual_momentum", "6m") != _cache_key("dca", "6m")
+    assert _cache_key("rally_rotation", "6m") == _cache_key("rally_rotation", "6m")
+    assert _cache_key("rally_rotation", "6m") != _cache_key("rally_rotation", "4m")
+    assert _cache_key("rally_rotation", "6m") != _cache_key("dca", "6m")
 
 
 def test_an_unknown_strategy_still_hashes_rather_than_raising() -> None:

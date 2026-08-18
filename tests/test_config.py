@@ -22,7 +22,7 @@ social:
     algorithms_path.write_text(
         """
 algorithms:
-  fast_momentum:
+  rally_rotation:
     momentum_lookback_days: 42
     max_longs: 3
 """,
@@ -109,7 +109,7 @@ data_sources:
     assert config.sentiment_data_provider_order == ["stocktwits"]
     assert config.news_sentiment_cache_ttl_seconds == 20
     assert config.sentiment_data_cache_ttl_seconds == 20
-    assert "fast_momentum" in config.algorithm_configs
+    assert "rally_rotation" in config.algorithm_configs
     assert config.account_options == [
         {"id": "paper", "label": "Paper Desk"},
         {"id": "second", "label": "Second Desk"},
@@ -311,7 +311,7 @@ algorithm_bot:
     algorithms_path.write_text(
         """
 algorithms:
-  dual_momentum:
+  rally_rotation:
     momentum_lookback_days: 126
     max_longs: 4
 """,
@@ -347,7 +347,7 @@ tradable_universe:
     monkeypatch.setenv("TRADING_CONNECTORS_FILE", str(connectors_path))
     monkeypatch.delenv("SYMBOLS", raising=False)
 
-    config = get_config(strategy_id="dual_momentum")
+    config = get_config(strategy_id="rally_rotation")
 
     assert config.symbols == ["SPY", "QQQ", "GLD"]
     assert config.momentum_lookback_days == 126
@@ -387,14 +387,10 @@ def test_the_tradable_universe_covers_every_symbol_an_algorithm_can_hold() -> No
     algorithms = document["algorithms"]
 
     held: set[str] = set()
-    for key in ("dual_momentum", "fast_momentum"):
+    for key in ("rally_rotation",):
         section = algorithms[key]
         held |= set(section["risk_on_universe"]) | set(section["defensive_universe"])
         held.add(section.get("benchmark"))
-    rotation = algorithms.get("invest_spy", {})
-    for key in ("equity_income_universe", "defensive_universe", "crisis_hedge_universe"):
-        held |= set(rotation.get(key) or [])
-    held.add(rotation.get("spy_symbol"))
     held.discard(None)
 
     universe = set(document["tradable_universe"]["symbols"])

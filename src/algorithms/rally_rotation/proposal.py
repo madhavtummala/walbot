@@ -6,7 +6,7 @@ what lets the backtester drive the same call the live runner does.
 
 from __future__ import annotations
 
-from .config import DualMomentumConfig
+from .config import RallyRotationConfig
 from .layers import defensive_weights, eligibility, park_residual, score_to_weights, sentiment_adjusted, universe_data_ok
 from .scoring import base_scores, compute_features
 
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 def rank_candidates(
     scored: dict[str, dict[str, Any]],
-    config: DualMomentumConfig,
+    config: RallyRotationConfig,
 ) -> list[dict[str, Any]]:
     """Eligible risk-on names, best first. Ineligible names are never ranked."""
     eligible = []
@@ -40,15 +40,13 @@ def rank_candidates(
     return eligible
 
 
-def _selection_reason(row: dict[str, Any], weight: float, data: dict[str, Any], config: DualMomentumConfig) -> str:
+def _selection_reason(row: dict[str, Any], weight: float, data: dict[str, Any], config: RallyRotationConfig) -> str:
     """One line saying why this symbol is or is not held, for the dashboard and the audit."""
     symbol = str(row.get("symbol", ""))
     if weight > 0:
         if symbol in {name.upper() for name in config.defensive_universe}:
             return "Defensive sleeve"
         return f"Rank {int(row.get('rank') or 0)} - held"
-    if symbol == config.benchmark and symbol not in config.risk_on_universe:
-        return "Benchmark only"
     if symbol in {name.upper() for name in config.defensive_universe}:
         return "Defensive sleeve idle" if data.get("data_ok") else "Not the strongest defensive"
     if not data.get("data_ok"):
@@ -68,7 +66,7 @@ def build_signals(
     weights: dict[str, float],
     data: dict[str, Any],
     defensive_book: dict[str, float],
-    config: DualMomentumConfig,
+    config: RallyRotationConfig,
 ) -> dict[str, dict[str, Any]]:
     """Per-symbol rows: the dashboard's view, step 2's input, and the audit record.
 
@@ -117,7 +115,7 @@ def build_signals(
     return signals
 
 
-def allocation_mode(weights: dict[str, float], config: DualMomentumConfig) -> str:
+def allocation_mode(weights: dict[str, float], config: RallyRotationConfig) -> str:
     """The one-word summary the dashboard prints for this run."""
     defensive = {name.upper() for name in config.defensive_universe}
     held = {symbol for symbol, weight in weights.items() if weight > 0}
@@ -126,7 +124,7 @@ def allocation_mode(weights: dict[str, float], config: DualMomentumConfig) -> st
     return "Defensive" if held <= defensive else "Risk-on"
 
 
-def analyze_universe(context: AlgorithmContext, config: DualMomentumConfig) -> dict[str, Any]:
+def analyze_universe(context: AlgorithmContext, config: RallyRotationConfig) -> dict[str, Any]:
     """The whole read-only pipeline: features, scores, eligibility, ranking, weights.
 
     Returned as a dict rather than assembled inline so tests and the dashboard can inspect

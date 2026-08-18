@@ -16,8 +16,8 @@ from src.api.payloads.backtest import (
     _fetch_backtest_history,
     _configured_history_providers,
 )
-from src.algorithms.dual_momentum.config import DualMomentumConfig
-from src.algorithms.dual_momentum.proposal import analyze_universe
+from src.algorithms.rally_rotation.config import RallyRotationConfig
+from src.algorithms.rally_rotation.proposal import analyze_universe
 from src.core.config import get_config
 from src.core.market_context import build_algorithm_context
 from src.core.interfaces import AlgorithmRequirements
@@ -26,10 +26,10 @@ from src.data.duckdb_store import pooled_connections
 
 
 def run():
-    strategy = "dual_momentum"
+    strategy = "rally_rotation"
     config = get_config(strategy_id=strategy)
     algorithm = get_algorithm_class(strategy).from_config(config)
-    dm_config = DualMomentumConfig.from_runtime_config(config)
+    dm_config = RallyRotationConfig.from_runtime_config(config)
     requirements = algorithm.requirements(config, {})
     starting_equity = _backtest_starting_equity()
 

@@ -20,9 +20,9 @@ def _trend_bars(start: float, end: float, periods: int = 320) -> pd.DataFrame:
     )
 
 
-def test_builtin_dual_momentum_keeps_original_long_short_template() -> None:
+def test_builtin_rally_rotation_keeps_original_long_short_template() -> None:
     rows = strategy_signal_rows(
-        "dual_momentum",
+        "rally_rotation",
         {
             "SPY": _trend_bars(100, 130),
             "XBI": _trend_bars(100, 90),
@@ -38,7 +38,7 @@ def test_builtin_dual_momentum_keeps_original_long_short_template() -> None:
     assert by_symbol["SPY"]["score"] == 0.6 * by_symbol["SPY"]["ret_126"] + 0.4 * by_symbol["SPY"]["ret_252"]
 
 
-def test_dual_momentum_can_apply_sentiment_tilt() -> None:
+def test_rally_rotation_can_apply_sentiment_tilt() -> None:
     social = {
         "SPY": pd.DataFrame(
             {
@@ -50,7 +50,7 @@ def test_dual_momentum_can_apply_sentiment_tilt() -> None:
         )
     }
     rows = strategy_signal_rows(
-        "dual_momentum",
+        "rally_rotation",
         {"SPY": _trend_bars(100, 130), "BIL": _trend_bars(100, 104)},
         social_by_symbol=social,
         social_weight=0.1,
@@ -75,59 +75,29 @@ def test_a_history_requirement_needs_no_grid_to_be_meaningful() -> None:
 
 def test_algorithms_state_horizons_in_minutes_not_bars() -> None:
     """No algorithm counts in bars any more, so none of them pins a bar size."""
-    from src.algorithms.dual_momentum import DualMomentumConfig
-    from src.algorithms.fast_momentum import DefensiveMomentumConfig
-    from src.algorithms.invest_spy import InvestSpyConfig
+    from src.algorithms.rally_rotation import RallyRotationConfig
 
-    for config_cls in (DualMomentumConfig, DefensiveMomentumConfig, InvestSpyConfig):
-        # 0 means "whatever the feed prefers" -- the grid is the data layer's business now.
-        assert config_cls().intraday_bar_minutes == 0, config_cls.__name__
-
-    # Still stated in minutes, but dual momentum reads daily bars only, so it asks for no
+    # Still stated in minutes, but rally rotation reads daily bars only, so it asks for no
     # intraday window at all rather than one it would not look at.
-    assert DualMomentumConfig().required_history_minutes == 0
-    for config_cls in (DefensiveMomentumConfig, InvestSpyConfig):
-        assert config_cls().required_history_minutes > 0, config_cls.__name__
+    assert RallyRotationConfig().required_history_minutes == 0
 
-    # The horizons carried over at their 15-minute wall-clock equivalents, except dual
-    # momentum's, which are now whole sessions: 4680 is twelve of them.
-    assert DefensiveMomentumConfig().micro_momentum_lookback_minutes == 78 * 15
-    assert DualMomentumConfig().selection_horizon_macro_minutes == 12 * 390
-    assert InvestSpyConfig().meso_momentum_lookback_minutes == 26 * 15
-
-
-def test_a_config_saved_in_bars_is_read_as_the_minutes_it_meant() -> None:
-    """Dashboard tuning saved under the old names must not silently revert to defaults."""
-    from src.algorithms.fast_momentum import DefensiveMomentumConfig
-
-    class _Runtime:
-        algorithm_configs = {
-            "fast_momentum": {
-                "intraday_bar_minutes": 15,
-                "micro_momentum_lookback_bars": 78,
-                "volatility_lookback_bars": 13,
-            }
-        }
-
-    parsed = DefensiveMomentumConfig.from_runtime_config(_Runtime())
-    assert parsed.micro_momentum_lookback_minutes == 1170
-    assert parsed.volatility_lookback_minutes == 195
+    # The horizons are now whole sessions: 4680 is twelve of them.
+    assert RallyRotationConfig().selection_horizon_macro_minutes == 12 * 390
 
 
 def test_a_minutes_key_wins_over_a_stale_bars_key() -> None:
     """Once saved in minutes, a leftover bars key must not override it."""
-    from src.algorithms.dual_momentum import DualMomentumConfig
+    from src.algorithms.rally_rotation import RallyRotationConfig
 
     class _Runtime:
         algorithm_configs = {
-            "dual_momentum": {
-                "intraday_bar_minutes": 15,
+            "rally_rotation": {
                 "selection_horizon_macro": 320,
                 "selection_horizon_macro_minutes": 2400,
             }
         }
 
-    assert DualMomentumConfig.from_runtime_config(_Runtime()).selection_horizon_macro_minutes == 2400
+    assert RallyRotationConfig.from_runtime_config(_Runtime()).selection_horizon_macro_minutes == 2400
 
 
 def test_live_signals_are_ordered_by_score_not_by_its_magnitude() -> None:

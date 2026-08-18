@@ -20,7 +20,7 @@ the same churn a second time.
 **One window is not evidence.** A ranking over a single period is a statement about that
 period. Run the finalists over more than one window and prefer what survives all of them.
 
-    python -m tools.config_sweep --algorithm dual_momentum --stage axes --period 12m
+    python -m tools.config_sweep --algorithm rally_rotation --stage axes --period 12m
     python -m tools.config_sweep --algorithm both --stage finalists --period 12m,6m,24m
 """
 
@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 # allowed to be -- and because the cross-sectional z-score means adding a name changes every
 # other name's score, so these are genuinely different strategies, not a size knob.
 
-#: What is deployed for dual_momentum now: the thematic set plus broad US and quality/value
+#: What is deployed for rally_rotation now: the thematic set plus broad US and quality/value
 #: exposure, the exploration's ``wide`` -- less thematic, more index-like.
 CURRENT = ["QQQM", "XSD", "XBI", "XOP", "KRE", "XRT", "IJH", "IEMG", "EWJ", "VGK", "GLD", "IBIT", "USO",
            "SPY", "IWM", "RSP", "QUAL", "VTV", "SCHD", "SLV"]
@@ -84,11 +84,6 @@ DEFENSIVE_SETS = {
     "bil_tlt": ["BIL", "TLT"],
     "sgov_tlt_gld": ["SGOV", "TLT", "GLD"],
 }
-
-#: SPY rotation's sleeves, which are not momentum candidates and so appear in no universe
-#: above. Loaded anyway: a sleeve the date axis does not price is a state the strategy can
-#: never be measured in, and it would read as the state simply never occurring.
-SPY_ROTATION_SYMBOLS = ["SPY", "XYLD", "GPIX", "SH", "VXX", "BIL", "SGOV"]
 
 
 # =========================================================================================
@@ -187,8 +182,7 @@ class Sweep:
         show up as skill.
         """
         symbols = sorted({symbol for names in UNIVERSES.values() for symbol in names}
-                         | {symbol for names in DEFENSIVE_SETS.values() for symbol in names}
-                         | set(SPY_ROTATION_SYMBOLS))
+                         | {symbol for names in DEFENSIVE_SETS.values() for symbol in names})
         # Reuse the backtest tab's own fetch, so the bars are the ones it would have used --
         # but that fetch takes its symbol list from the algorithm's *requirements*, so the
         # candidate set has to be handed over as an algorithm universe rather than as
@@ -299,16 +293,16 @@ def _fetch_depth_period(period: str) -> str:
 def _fetch_backtest_history_for(symbols: list[str], period: str, config) -> dict[str, pd.DataFrame]:
     """The backtest tab's daily fetch, for an explicit symbol list.
 
-    Fast Momentum is used only as the vehicle: its ``requirements`` ask for the deepest daily
+    Rally Rotation is used only as the vehicle: its ``requirements`` ask for the deepest daily
     window of any algorithm here (180 days against dual momentum's 105), so one fetch serves
     both without either being short.
     """
     forced = dataclasses.replace(
         config,
         symbols=list(symbols),
-        algorithm_configs={"fast_momentum": {"risk_on_universe": list(symbols), "defensive_universe": []}},
+        algorithm_configs={"rally_rotation": {"risk_on_universe": list(symbols), "defensive_universe": []}},
     )
-    return _fetch_backtest_history("fast_momentum", _fetch_depth_period(period), forced)
+    return _fetch_backtest_history("rally_rotation", _fetch_depth_period(period), forced)
 
 
 def _exposure(curve: pd.DataFrame, defensive: set[str]) -> dict[str, Any]:
@@ -410,11 +404,7 @@ def deployed_tuning(algorithm_id: str) -> dict[str, Any]:
 
 
 def _dual_baseline() -> dict[str, Any]:
-    return deployed_tuning("dual_momentum")
-
-
-def _fast_baseline() -> dict[str, Any]:
-    return deployed_tuning("fast_momentum")
+    return deployed_tuning("rally_rotation")
 
 
 def _axis(baseline: dict[str, Any], name: str, **overrides: Any) -> tuple[str, dict[str, Any]]:
@@ -460,40 +450,6 @@ def dual_axes() -> list[tuple[str, dict[str, Any]]]:
     return [variant for variant in variants if variant[0] == "baseline" or variant[1] != base]
 
 
-def fast_axes() -> list[tuple[str, dict[str, Any]]]:
-    base = _fast_baseline()
-    variants = [("baseline", dict(base))]
-    for name, symbols in UNIVERSES.items():
-        if list(symbols) == base.get("risk_on_universe"):
-            continue
-        variants.append(_axis(base, f"universe={name}", risk_on_universe=list(symbols)))
-    for positions in (3, 5, 6, 8):
-        variants.append(_axis(base, f"max_positions={positions}", max_positions=positions))
-    for cap in (0.25, 0.35):
-        variants.append(_axis(base, f"max_single_weight={cap}", max_single_position_weight=cap))
-    for delta in (0.0, 0.6):
-        variants.append(_axis(base, f"delta_to_replace={delta}", min_score_delta_to_replace=delta))
-    for pullback in (0.0, 0.25):
-        variants.append(_axis(base, f"w_pullback={pullback}", w_pullback_uptrend=pullback))
-    # No sentiment axis: ``ReplayContextSource`` returns neutral scores, so ``w_sentiment``
-    # cannot move a backtest at all. Anything it appears to show would be noise.
-    variants.append(_axis(base, "horizons=slow", w_price_nano=0.10, w_price_micro=0.20,
-                          w_price_meso=0.40, w_price_macro=0.30))
-    variants.append(_axis(base, "horizons=fast", w_price_nano=0.40, w_price_micro=0.40,
-                          w_price_meso=0.15, w_price_macro=0.05))
-    # The brakes, as for dual momentum: the replay trades for free, so the cost of churn is
-    # only visible by comparing these rows against the turnover column.
-    for threshold in (0.03, 0.06):
-        variants.append(_axis(base, f"rebalance_threshold={threshold}", rebalance_threshold=threshold))
-    for minimum in (150.0, 300.0):
-        variants.append(_axis(base, f"per_trade_min={minimum:.0f}", per_trade_value_min=minimum))
-    variants.append(_axis(base, "low_churn_combo", rebalance_threshold=0.05,
-                          per_trade_value_min=200.0, min_score_delta_to_replace=0.6))
-    for name, symbols in DEFENSIVE_SETS.items():
-        if name != "sgov":
-            variants.append(_axis(base, f"defensive={name}", defensive_universe=list(symbols)))
-    return [variant for variant in variants if variant[0] == "baseline" or variant[1] != base]
-
 
 def dual_wide() -> list[tuple[str, dict[str, Any]]]:
     """The wide universe as the new starting point, then the knobs that matter on top of it.
@@ -502,7 +458,7 @@ def dual_wide() -> list[tuple[str, dict[str, Any]]]:
     universe changed the answer enough that the other knobs deserve re-asking against it --
     ``max_positions`` in particular, since a wider candidate pool is the reason to hold more.
     """
-    base = {**deployed_tuning("dual_momentum"), "risk_on_universe": list(WIDE)}
+    base = {**deployed_tuning("rally_rotation"), "risk_on_universe": list(WIDE)}
     variants = [("wide/deployed-positions", dict(base))]
 
     for positions in (5, 6, 8, 10):
@@ -551,60 +507,6 @@ def bursty_axes() -> list[tuple[str, dict[str, Any]]]:
     return [variant for variant in variants if variant[0] == "baseline" or variant[1] != base]
 
 
-def spy_axes() -> list[tuple[str, dict[str, Any]]]:
-    """SPY rotation's state machine: where the boundaries sit, and what each state holds.
-
-    The axes are grouped by the question they answer, because this strategy's return is
-    decided by two separable things -- *how often* it is in each state, and *what it holds*
-    once it is there. A knob that only moves the second cannot fix a state it never enters.
-    """
-    base = deployed_tuning("spy_rotation")
-    variants = [("baseline", dict(base))]
-
-    # --- Where the GROWING boundary sits. The deployed 2% over 60 days is a low bar for
-    # "growing", so this is the axis most likely to control time spent fully in SPY.
-    for threshold in (-0.02, 0.0, 0.05):
-        variants.append(_axis(base, f"growth_macro={threshold}", growth_macro_return=threshold))
-    for threshold in (-0.01, 0.01):
-        variants.append(_axis(base, f"growth_meso={threshold}", growth_meso_return=threshold))
-
-    # --- Where FALLING and CRISIS begin. Leaving equities early is only free if the exit is
-    # right; these say how twitchy the two downside states are.
-    for threshold in (-0.02, 0.02):
-        variants.append(_axis(base, f"falling_macro={threshold}", falling_macro_return=threshold))
-    for threshold in (-0.02, -0.005):
-        variants.append(_axis(base, f"falling_meso={threshold}", falling_meso_return=threshold))
-    for threshold in (-0.10, -0.02):
-        variants.append(_axis(base, f"crisis_macro={threshold}", crisis_macro_return=threshold))
-    for threshold in (-0.04, -0.01):
-        variants.append(_axis(base, f"crisis_meso={threshold}", crisis_meso_return=threshold))
-
-    # --- What each non-SPY state actually holds.
-    for exposure in (0.0, 0.25, 0.75, 1.0):
-        variants.append(_axis(base, f"flat_income={exposure}", flat_equity_income_exposure=exposure))
-    for exposure in (0.0, 0.30, 0.50):
-        variants.append(_axis(base, f"crisis_hedge={exposure}", max_crisis_hedge_exposure=exposure,
-                              max_crisis_hedge_weight=exposure))
-    variants.append(_axis(base, "hedge=SH_only", crisis_hedge_universe=["SH"]))
-    variants.append(_axis(base, "defensive=SGOV", defensive_universe=["SGOV"]))
-    variants.append(_axis(base, "income=XYLD_only", equity_income_universe=["XYLD"]))
-    variants.append(_axis(base, "income=GPIX_only", equity_income_universe=["GPIX"]))
-
-    # --- PULLBACK is currently indistinguishable from GROWING: both hold 100% SPY. Moving the
-    # boundary is the only way to tell whether the state is doing anything at all.
-    for threshold in (-0.02, 0.0):
-        variants.append(_axis(base, f"pullback_micro={threshold}", pullback_micro_return=threshold))
-
-    # --- Sentiment is neutral under replay (``ReplayContextSource`` serves no scores), so the
-    # sentiment thresholds cannot move a backtest and are deliberately not swept.
-    for cap in (0.5, 0.95):
-        variants.append(_axis(base, f"max_gross={cap}", max_gross_exposure=cap))
-    for threshold in (0.0, 0.03):
-        variants.append(_axis(base, f"rebalance_threshold={threshold}", rebalance_threshold=threshold))
-
-    return [variant for variant in variants if variant[0] == "baseline" or variant[1] != base]
-
-
 def dca_axes() -> list[tuple[str, dict[str, Any]]]:
     """Plain DCA, as the benchmark Bursty has to beat. It has no trigger to tune."""
     return [("baseline", dict(deployed_tuning("dca")))]
@@ -621,7 +523,7 @@ def dual_wide_churn() -> list[tuple[str, dict[str, Any]]]:
     ``theme_rotation_interval_days`` is the interesting one: it throttles how often the theme
     set may change at all, independently of how often the algorithm runs.
     """
-    base = {**deployed_tuning("dual_momentum"), "risk_on_universe": list(WIDE)}
+    base = {**deployed_tuning("rally_rotation"), "risk_on_universe": list(WIDE)}
     variants = [("wide/baseline", dict(base))]
 
     for days in (1, 3, 7):
@@ -763,11 +665,9 @@ def dual_sticky() -> list[tuple[str, dict[str, Any]]]:
 
 
 GRIDS: dict[str, dict[str, Callable[[], list[tuple[str, dict[str, Any]]]]]] = {
-    "dual_momentum": {"axes": dual_axes, "wide": dual_wide, "wide_churn": dual_wide_churn,
+    "rally_rotation": {"axes": dual_axes, "wide": dual_wide, "wide_churn": dual_wide_churn,
                       "y2023": dual_2023, "confirm": dual_confirm, "sticky": dual_sticky},
-    "fast_momentum": {"axes": fast_axes},
     "bursty_dca": {"axes": bursty_axes},
-    "spy_rotation": {"axes": spy_axes},
     "dca": {"axes": dca_axes},
 }
 
@@ -867,8 +767,8 @@ def write_results(runs: list[Run], path: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--algorithm", default="both",
-                        choices=["dual_momentum", "fast_momentum", "bursty_dca", "dca", "spy_rotation", "both"])
+    parser.add_argument("--algorithm", default="rally_rotation",
+                        choices=["rally_rotation", "bursty_dca", "dca"])
     parser.add_argument("--starting-equity", type=float, default=None,
                         help="override the backtest stake; a DCA plan needs one that funds it")
     parser.add_argument("--cost-bps", type=float, default=0.0,
@@ -884,12 +784,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    for noisy in ("src.core.orders", "src.brokerages.providers.paper", "src.algorithms.dual_momentum.algorithm",
-                  "src.algorithms.fast_momentum", "src.data.provider_cache", "src.connectors"):
+    for noisy in ("src.core.orders", "src.brokerages.providers.paper", "src.algorithms.rally_rotation.algorithm",
+                  "src.data.provider_cache", "src.connectors"):
         logging.getLogger(noisy).setLevel(logging.ERROR)
 
     periods = [item.strip() for item in args.period.split(",") if item.strip()]
-    algorithms = ["dual_momentum", "fast_momentum"] if args.algorithm == "both" else [args.algorithm]
+    algorithms = [args.algorithm]
 
     sweep = Sweep(periods, starting_equity=args.starting_equity, open_in=args.open_in,
                   cost_bps=args.cost_bps)

@@ -5,7 +5,7 @@ import pytest
 from src.algorithms.explainers import EXPLAINERS, explainer_for
 from src.api.api_payloads import algorithm_config_payload
 
-ALGORITHMS = ("dca", "bursty_dca", "fast_momentum", "dual_momentum", "spy_rotation")
+ALGORITHMS = ("dca", "bursty_dca", "rally_rotation")
 
 
 @pytest.mark.parametrize("algorithm_id", ALGORITHMS)
@@ -26,15 +26,11 @@ def _config_fields(algorithm_id: str) -> set[str]:
 
     from src.algorithms.dca import DCA_ALGORITHMS, PLAN_KEY
     from src.algorithms.dca.bursty import BurstyConfig
-    from src.algorithms.dual_momentum import DualMomentumConfig
-    from src.algorithms.fast_momentum import DefensiveMomentumConfig
-    from src.algorithms.invest_spy import InvestSpyConfig
+    from src.algorithms.rally_rotation import RallyRotationConfig
 
     dataclasses = {
         "bursty_dca": BurstyConfig,
-        "fast_momentum": DefensiveMomentumConfig,
-        "dual_momentum": DualMomentumConfig,
-        "spy_rotation": InvestSpyConfig,
+        "rally_rotation": RallyRotationConfig,
     }
     cls = dataclasses.get(algorithm_id)
     known = {field.name for field in fields(cls)} if cls else set()
@@ -100,7 +96,7 @@ def test_the_prose_does_not_describe_knobs_that_no_longer_exist(algorithm_id: st
 
     ``test_documented_knobs_still_exist_on_the_algorithm`` only checks the keys, so an
     explainer can pass every other test here while its prose describes a completely different
-    algorithm. Dual Momentum's did exactly that: long after the regime gate, the entry-timing
+    algorithm. Rally Rotation's did exactly that: long after the regime gate, the entry-timing
     signal and the volatility overlay were deleted, the summary still opened "a benchmark trend
     and breadth gate sets the regime", the formula still carried ``timing(i) = ...``, and the
     behaviour text still said it ran every 15 minutes and cited ``signal_refresh_minutes``,

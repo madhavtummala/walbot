@@ -66,7 +66,7 @@ def test_run_options_once_submits_buy_to_open(monkeypatch) -> None:
         "load_controls",
         lambda: {
             "options_trading_enabled": True,
-            "options_strategy": "options_swing_dual_momentum",
+            "options_strategy": "options_swing_rally_rotation",
             "options_trading_account_id": "paper-options",
             "trading_account_id": "paper",
         },
@@ -78,7 +78,7 @@ def test_run_options_once_submits_buy_to_open(monkeypatch) -> None:
     monkeypatch.setattr(options_trader, "create_option_data_client", lambda config: object())
     monkeypatch.setattr(options_trader, "get_account_equity", lambda client: 10_000.0)
     monkeypatch.setattr(options_trader, "get_positions", lambda client: {})
-    monkeypatch.setattr(options_trader, "dual_momentum_option_signals", lambda config, data_client=None: [{"symbol": "SPY", "side": "LONG", "score": 0.4}])
+    monkeypatch.setattr(options_trader, "rally_rotation_option_signals", lambda config, data_client=None: [{"symbol": "SPY", "side": "LONG", "score": 0.4}])
     monkeypatch.setattr(options_trader, "get_latest_price", lambda symbol, data_client, data_feed=None: 100.0)
     monkeypatch.setattr(
         options_trader,
@@ -120,7 +120,7 @@ def test_run_options_once_exits_when_market_clock_is_closed(monkeypatch) -> None
         "load_controls",
         lambda: {
             "options_trading_enabled": True,
-            "options_strategy": "options_swing_dual_momentum",
+            "options_strategy": "options_swing_rally_rotation",
             "options_trading_account_id": "paper-options",
             "trading_account_id": "paper",
         },

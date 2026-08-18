@@ -131,7 +131,7 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
     for legacy_id in LEGACY_ALGORITHM_IDS.get(selected_strategy_id, []):
         # A renamed algorithm's tuning is still filed under its old id. Reading every retired
         # id keeps saved tuning working through the rename instead of silently reverting to
-        # defaults -- ``spy_rotation`` has two, having been renamed twice.
+        # defaults.
         if algorithm:
             break
         algorithm = _section(algorithm_configs, legacy_id)

@@ -8,7 +8,7 @@ from src.data.state_store import ephemeral_state
 def test_orders_are_recorded_with_the_algorithm_that_placed_them() -> None:
     with ephemeral_state():
         record_orders("dca", "paper", [{"symbol": "SPY", "action": "buy", "quantity": 2, "status": "submitted", "order_id": "abc"}])
-        record_orders("fast_momentum", "paper", [{"symbol": "QQQ", "action": "sell", "quantity": 1, "status": "submitted"}])
+        record_orders("rally_rotation", "paper", [{"symbol": "QQQ", "action": "sell", "quantity": 1, "status": "submitted"}])
 
         rows = load_order_journal(strategy="dca")
 
@@ -30,7 +30,7 @@ def test_journal_is_newest_first_and_capped() -> None:
 def test_a_skipped_order_still_records_why() -> None:
     """A short sale the broker refuses never reaches the brokerage and carries no status."""
     with ephemeral_state():
-        record_orders("fast_momentum", "paper", [
+        record_orders("rally_rotation", "paper", [
             {"symbol": "TSLA", "action": "skip", "quantity": 0, "reason": "not shortable"},
         ])
 
@@ -49,7 +49,7 @@ def test_journalling_never_raises_on_a_bad_payload() -> None:
 def test_activity_payload_is_scoped_to_one_algorithm() -> None:
     with ephemeral_state():
         record_orders("dca", "paper", [{"symbol": "SPY", "action": "buy", "quantity": 1, "status": "submitted"}])
-        record_orders("fast_momentum", "paper", [{"symbol": "QQQ", "action": "buy", "quantity": 1, "status": "submitted"}])
+        record_orders("rally_rotation", "paper", [{"symbol": "QQQ", "action": "buy", "quantity": 1, "status": "submitted"}])
 
         payload = algorithm_activity_payload(strategy="dca", limit=10)
 

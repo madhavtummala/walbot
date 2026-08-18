@@ -113,7 +113,7 @@ def test_warm_market_data_cache_selects_algorithm_intraday_date_range(monkeypatc
     )
 
     result = cache_warmup.warm_market_data_cache(
-        algorithm_id="fast_momentum",
+        algorithm_id="rally_rotation",
         start_date="2026-06-03",
         end_date="2026-06-03",
         warm_eod=False,
@@ -341,7 +341,7 @@ def test_warming_defaults_to_the_tradable_universe_not_what_is_held(monkeypatch)
 
     assert cache_warmup._wanted_symbols(None) == ["AAA", "BBB", "VTEB"]
     # Naming an algorithm still narrows to just what that algorithm needs.
-    assert cache_warmup._wanted_symbols(None, algorithm_id="fast_momentum") == ["AAA"]
+    assert cache_warmup._wanted_symbols(None, algorithm_id="rally_rotation") == ["AAA"]
     # And an explicit list always wins.
     assert cache_warmup._wanted_symbols(["zzz"]) == ["ZZZ"]
 

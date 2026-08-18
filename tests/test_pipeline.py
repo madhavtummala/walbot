@@ -6,7 +6,6 @@ from typing import Any
 import pytest
 
 from src.algorithms.base import BaseAlgorithm
-from src.algorithms.fast_momentum import DefensiveMomentumConfig, apply_stickiness
 from src.algorithms.registry import register_algorithm
 from src.core import pipeline
 from src.core.config import Config
@@ -121,51 +120,6 @@ def test_weight_diff_reports_direction_and_magnitude() -> None:
     assert rows[0]["symbol"] == "AAA"  # largest change first
 
 
-# --------------------------------------------------------------------------------------
-# Stickiness, now applied in step 2 against an already-chosen set.
-# --------------------------------------------------------------------------------------
-
-
-def _momentum_config(**overrides) -> DefensiveMomentumConfig:
-    settings = {"max_positions": 2, "min_score_delta_to_replace": 0.5, **overrides}
-    return DefensiveMomentumConfig(**settings)
-
-
-def test_stickiness_retains_a_held_symbol_a_marginal_challenger_would_replace() -> None:
-    kept = apply_stickiness(
-        target_weights={"NEW": 0.5, "KEEP": 0.5},
-        scores_by_symbol={"HELD": {"score": 1.0}, "NEW": {"score": 1.2}, "KEEP": {"score": 2.0}},
-        current_weights={"HELD": 0.5, "KEEP": 0.5},
-        config=_momentum_config(),
-    )
-
-    # NEW beats HELD by only 0.2, under the 0.5 delta, so the incumbent stays.
-    assert kept["HELD"] == 0.5
-    assert kept["NEW"] == 0.0
-
-
-def test_stickiness_yields_to_a_clearly_better_challenger() -> None:
-    kept = apply_stickiness(
-        target_weights={"NEW": 0.5, "KEEP": 0.5},
-        scores_by_symbol={"HELD": {"score": 1.0}, "NEW": {"score": 2.5}, "KEEP": {"score": 3.0}},
-        current_weights={"HELD": 0.5, "KEEP": 0.5},
-        config=_momentum_config(),
-    )
-
-    assert kept == {"NEW": 0.5, "KEEP": 0.5}
-
-
-def test_stickiness_is_off_when_the_delta_is_zero() -> None:
-    kept = apply_stickiness(
-        target_weights={"NEW": 1.0},
-        scores_by_symbol={"HELD": {"score": 1.0}, "NEW": {"score": 1.1}},
-        current_weights={"HELD": 1.0},
-        config=_momentum_config(min_score_delta_to_replace=0.0),
-    )
-
-    assert kept == {"NEW": 1.0}
-
-
 def test_no_algorithm_sizes_against_a_cash_buffer() -> None:
     """Sizing states a portfolio; funding decides what the account can pay for.
 
@@ -176,7 +130,7 @@ def test_no_algorithm_sizes_against_a_cash_buffer() -> None:
     from src.algorithms.registry import get_algorithm_class
 
     config = Config(cash_buffer=0.02)
-    for strategy in ("fast_momentum", "invest_spy", "dual_momentum", "dca"):
+    for strategy in ("rally_rotation", "dca"):
         sizing = get_algorithm_class(strategy).from_config(config).sizing(config)
         assert "cash_buffer" not in sizing, strategy
 

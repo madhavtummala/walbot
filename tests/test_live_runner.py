@@ -53,19 +53,14 @@ def test_live_runner_sizing_equity_cap_is_optional() -> None:
 
 def test_algorithm_registry_returns_plugin_class() -> None:
     config = Config(symbols=["AAA"])
-    algorithm = get_algorithm_class("fast_momentum").from_config(config)
+    algorithm = get_algorithm_class("rally_rotation").from_config(config)
 
     requirements = algorithm.requirements(config, {"HELD": 1})
 
-    assert algorithm.algorithm_id == "fast_momentum"
+    assert algorithm.algorithm_id == "rally_rotation"
     # A held symbol has to be priced even when it is not in the algorithm's own universe.
     assert "HELD" in requirements.price_symbols
     assert requirements.daily_lookback_days > 0
-
-
-def test_registry_resolves_a_renamed_algorithm_through_its_old_id() -> None:
-    """Saved controls still name ``invest_spy``; it must keep resolving after the rename."""
-    assert get_algorithm_class("invest_spy") is get_algorithm_class("spy_rotation")
 
 
 def test_live_runner_uses_selected_template_strategy(monkeypatch) -> None:
@@ -85,7 +80,7 @@ def test_live_runner_uses_selected_template_strategy(monkeypatch) -> None:
         ),
     )
     monkeypatch.setattr(
-        live_runner, "load_controls", lambda: {"algorithm_enabled": True, "active_strategy": "spy_rotation"}
+        live_runner, "load_controls", lambda: {"algorithm_enabled": True, "active_strategy": "rally_rotation"}
     )
 
     fake_registry = {"alpaca": lambda config: FakeBrokerage(is_open=True)}
@@ -114,7 +109,7 @@ def test_live_runner_uses_selected_template_strategy(monkeypatch) -> None:
 
     live_runner.main()
 
-    assert captured["strategy"] == "spy_rotation"
+    assert captured["strategy"] == "rally_rotation"
     assert captured["signals"]["AAA"]["signal"] == 1
     assert captured["weights"]["AAA"] == 0.5
     assert captured["orders_weights"]["AAA"] == 0.5
@@ -126,7 +121,7 @@ def test_live_runner_exits_when_market_clock_is_closed(monkeypatch) -> None:
     monkeypatch.setattr(live_runner, "configure_logging", lambda *a, **kw: None)
     monkeypatch.setattr(live_runner, "get_config", lambda **kw: Config(kill_switch=False))
     monkeypatch.setattr(
-        live_runner, "load_controls", lambda: {"algorithm_enabled": True, "active_strategy": "fast_momentum"}
+        live_runner, "load_controls", lambda: {"algorithm_enabled": True, "active_strategy": "rally_rotation"}
     )
     fake_registry = {"alpaca": lambda config: FakeBrokerage(is_open=False)}
     monkeypatch.setattr(pipeline, "BROKERAGE_REGISTRY", fake_registry)
@@ -138,7 +133,7 @@ def test_live_runner_exits_when_market_clock_is_closed(monkeypatch) -> None:
 
 
 def test_every_retired_id_still_resolves_to_its_algorithm() -> None:
-    """``spy_rotation`` has been renamed twice, so it has two retired ids, not one."""
+    """Retired ids still resolve to their current algorithm."""
     from src.algorithms.registry import ALGORITHM_ALIASES, canonical_algorithm_id
 
     for retired, current in ALGORITHM_ALIASES.items():
@@ -147,19 +142,10 @@ def test_every_retired_id_still_resolves_to_its_algorithm() -> None:
 
 
 def test_renamed_algorithm_still_reads_tuning_saved_under_an_older_id() -> None:
-    """The reverse alias map has to keep every retired id: a plain reverse dict would drop all
-    but the newest, and the key actually on disk is the oldest -- so saved tuning would
-    silently revert to defaults with no error anywhere.
-    """
-    from src.algorithms.invest_spy import InvestSpyConfig
-    from src.algorithms.registry import LEGACY_ALGORITHM_IDS
+    """The reverse alias map has to keep every retired id so saved tuning does not revert to defaults."""
+    from src.algorithms.registry import ALGORITHM_ALIASES, LEGACY_ALGORITHM_IDS, canonical_algorithm_id
 
-    assert set(LEGACY_ALGORITHM_IDS["spy_rotation"]) == {"invest_spy", "regime_rotation"}
-
-    class Config:
-        algorithm_configs = {"invest_spy": {"spy_symbol": "IVV", "max_defensive_positions": 7}}
-
-    tuning = InvestSpyConfig.from_runtime_config(Config())
-
-    assert tuning.spy_symbol == "IVV"
-    assert tuning.max_defensive_positions == 7
+    for retired, current in ALGORITHM_ALIASES.items():
+        assert canonical_algorithm_id(retired) == current
+        assert get_algorithm_class(retired) is get_algorithm_class(current)
+        assert retired in LEGACY_ALGORITHM_IDS[current]

@@ -6,11 +6,10 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import pytest
 
-from src.algorithms.dual_momentum import (
-    DualMomentumAlgorithm,
+from src.algorithms.rally_rotation import (
+    RallyRotationAlgorithm,
     base_scores,
-    DualMomentumConfig,
-    _in_cooldown,
+    RallyRotationConfig,
     _record_exits,
     resolve_positions,
     analyze_universe,
@@ -57,7 +56,7 @@ class Runtime:
     """Minimal stand-in for the runtime config object algorithms read."""
 
     def __init__(self, **tuning):
-        self.algorithm_configs = {"dual_momentum": tuning}
+        self.algorithm_configs = {"rally_rotation": tuning}
         self.account_id = "test"
         self.symbols = []
         self.cash_buffer = 0.0
@@ -87,8 +86,8 @@ def test_a_falling_universe_holds_the_defensive_sleeve_rather_than_the_least_bad
     the only thing standing between a falling market and a fully invested book -- so this test
     matters more than it did, not less.
     """
-    config = Runtime(risk_on_universe=["AAA", "BBB"], defensive_universe=["BIL"], benchmark="AAA")
-    strategy = DualMomentumConfig.from_runtime_config(config)
+    config = Runtime(risk_on_universe=["AAA", "BBB"], defensive_universe=["BIL"])
+    strategy = RallyRotationConfig.from_runtime_config(config)
     falling = {
         "AAA": daily_bars(120, 80),
         "BBB": daily_bars(120, 60),   # least bad is still falling
@@ -111,7 +110,7 @@ def test_a_thin_universe_is_reported_as_a_data_gap_not_a_bear_market() -> None:
     statement about the data, not about the market.
     """
     config = Runtime(risk_on_universe=["AAA", "BBB", "CCC", "DDD"], defensive_universe=["BIL"])
-    strategy = DualMomentumConfig.from_runtime_config(config)
+    strategy = RallyRotationConfig.from_runtime_config(config)
     scored = {
         "AAA": {"symbol": "AAA", "above_moving_average": True, "enough_history": True, "daily_bars": 140},
         "BBB": {"symbol": "BBB", "above_moving_average": False, "enough_history": False, "daily_bars": 0},
@@ -134,8 +133,8 @@ def test_the_data_check_has_no_opinion_about_trends() -> None:
     is not the portfolio layer's business at all -- ``eligibility`` will decline those three
     individually, and the fourth is still allowed to be held.
     """
-    config = Runtime(risk_on_universe=["AAA", "BBB", "CCC", "DDD"], benchmark="AAA")
-    strategy = DualMomentumConfig.from_runtime_config(config)
+    config = Runtime(risk_on_universe=["AAA", "BBB", "CCC", "DDD"])
+    strategy = RallyRotationConfig.from_runtime_config(config)
     scored = {
         "AAA": {"symbol": "AAA", "above_moving_average": True, "enough_history": True},
         "BBB": {"symbol": "BBB", "above_moving_average": False, "enough_history": True},
@@ -168,7 +167,7 @@ def test_the_data_check_has_no_opinion_about_trends() -> None:
     ],
 )
 def test_each_absolute_gate_rejects_and_says_why(row: dict, expected: str) -> None:
-    ok, reason = eligibility(row, DualMomentumConfig())
+    ok, reason = eligibility(row, RallyRotationConfig())
 
     assert ok is False
     assert expected in reason
@@ -176,10 +175,10 @@ def test_each_absolute_gate_rejects_and_says_why(row: dict, expected: str) -> No
 
 def test_an_ineligible_name_is_never_ranked_so_a_thin_field_means_holding_less() -> None:
     config = Runtime(
-        risk_on_universe=["AAA", "BBB", "CCC"], defensive_universe=["BIL"], benchmark="AAA",
+        risk_on_universe=["AAA", "BBB", "CCC"], defensive_universe=["BIL"],
         max_positions=3, min_base_score=-99,
     )
-    strategy = DualMomentumConfig.from_runtime_config(config)
+    strategy = RallyRotationConfig.from_runtime_config(config)
     daily = {
         "AAA": daily_bars(80, 130),    # eligible
         "BBB": daily_bars(130, 90),    # below its own average
@@ -208,12 +207,12 @@ def test_an_entry_must_clear_the_score_floor_but_a_holding_need_not() -> None:
     the floor stands in for it here -- the property under test is the same one: ``analyze``
     proposing nothing for a name does not mean step 2 should sell it.
     """
-    config = Runtime(risk_on_universe=["AAA"], defensive_universe=["BIL"], benchmark="AAA",
+    config = Runtime(risk_on_universe=["AAA"], defensive_universe=["BIL"],
                      min_base_score=99)
     daily = {"AAA": daily_bars(80, 130), "BIL": daily_bars(100, 101)}
     intraday = {"AAA": intraday_bars(130, 130), "BIL": intraday_bars(101, 101)}
     context = context_for(config, daily, intraday)
-    algorithm = DualMomentumAlgorithm(config)
+    algorithm = RallyRotationAlgorithm(config)
 
     decision = algorithm.analyze(context)
     assert decision.target_weights["AAA"] == 0, "below the floor, no new entry"
@@ -236,12 +235,12 @@ def test_a_holding_survives_the_intent_round_trip_the_pipeline_actually_performs
 
     The test above cannot catch that: it hands over the complete vector, zeros included.
     """
-    config = Runtime(risk_on_universe=["AAA"], defensive_universe=["BIL"], benchmark="AAA",
+    config = Runtime(risk_on_universe=["AAA"], defensive_universe=["BIL"],
                      min_base_score=99)
     daily = {"AAA": daily_bars(80, 130), "BIL": daily_bars(100, 101)}
     intraday = {"AAA": intraday_bars(130, 130), "BIL": intraday_bars(101, 101)}
     context = context_for(config, daily, intraday)
-    algorithm = DualMomentumAlgorithm(config)
+    algorithm = RallyRotationAlgorithm(config)
     decision = algorithm.analyze(context)
     assert decision.target_weights["AAA"] == 0, "below the floor, no new entry"
 
@@ -274,7 +273,7 @@ def _ranked(**scores: float) -> list[dict[str, object]]:
 
 def test_a_challenger_must_win_by_the_replacement_margin() -> None:
     """Displacing an incumbent costs the spread twice, so it needs daylight, not a hair."""
-    config = DualMomentumConfig(max_positions=1, entry_rank_max=3, exit_rank_max=5,
+    config = RallyRotationConfig(max_positions=1, entry_rank_max=3, exit_rank_max=5,
                                 min_score_delta_to_replace=0.35)
 
     close = _ranked(HELD=1.00, CLOSE=1.20)
@@ -285,7 +284,7 @@ def test_a_challenger_must_win_by_the_replacement_margin() -> None:
 
 
 def test_free_slots_are_filled_before_anything_is_displaced() -> None:
-    config = DualMomentumConfig(max_positions=2, entry_rank_max=3, exit_rank_max=5,
+    config = RallyRotationConfig(max_positions=2, entry_rank_max=3, exit_rank_max=5,
                                 min_score_delta_to_replace=0.35)
     rows = _ranked(HELD=1.0, NEW=0.2)
 
@@ -298,7 +297,7 @@ def test_an_incumbent_is_held_through_a_rank_it_could_not_have_entered_on() -> N
     Ejecting on the entry rank meant a holding that drifted to 7th of 14 on scores separated
     by 0.15 was sold, and the freed slot refilled from the top with no margin required at all.
     """
-    config = DualMomentumConfig(max_positions=2, entry_rank_max=2, exit_rank_max=5,
+    config = RallyRotationConfig(max_positions=2, entry_rank_max=2, exit_rank_max=5,
                                 min_score_delta_to_replace=5.0)
     rows = _ranked(A=1.0, B=0.9, C=0.8, HELD=0.7, E=0.6, F=0.5)
 
@@ -310,22 +309,11 @@ def test_an_incumbent_is_held_through_a_rank_it_could_not_have_entered_on() -> N
     assert "HELD" not in resolve_positions({"HELD"}, far, config)
 
 
-def test_a_name_that_just_exited_waits_out_its_cooldown() -> None:
-    config = DualMomentumConfig(cooldown_after_exit=4, risk_refresh_minutes=15)
-    exit_time = datetime(2026, 6, 5, 14, 0, tzinfo=timezone.utc)
-    state: dict = {}
-    _record_exits(state, {"AAA"}, set(), exit_time.isoformat())
-
-    assert _in_cooldown(state, "AAA", exit_time + timedelta(minutes=30), config) is True
-    assert _in_cooldown(state, "AAA", exit_time + timedelta(minutes=61), config) is False
-
-
-def test_re_entering_clears_the_exit_record() -> None:
+def test_record_exits_is_a_noop() -> None:
     state: dict = {}
     _record_exits(state, {"AAA"}, set(), "2026-06-05T14:00:00+00:00")
     _record_exits(state, set(), {"AAA"}, "2026-06-05T15:00:00+00:00")
-
-    assert state["exited_at"] == {}
+    assert "exited_at" not in state
 
 
 # =========================================================================================
@@ -339,7 +327,7 @@ def test_a_zero_tilt_sizes_on_score_alone() -> None:
     The score is already a cross-sectional comparison; dividing by volatility on top of it
     underweighted the leaders, which cost return *and* drawdown on full-coverage replay.
     """
-    config = DualMomentumConfig(min_base_score=0.0, risk_on_gross_max=1.0,
+    config = RallyRotationConfig(min_base_score=0.0, risk_on_gross_max=1.0,
                                 volatility_tilt=0.0)
     rows = [
         {"symbol": "CALM", "base_score": 1.0, "annual_volatility": 0.10},
@@ -354,7 +342,7 @@ def test_a_zero_tilt_sizes_on_score_alone() -> None:
 
 def test_a_positive_tilt_leans_into_the_volatile_name() -> None:
     """The shipped default: same score, bigger position in the wilder name."""
-    config = DualMomentumConfig(min_base_score=0.0, risk_on_gross_max=1.0,
+    config = RallyRotationConfig(min_base_score=0.0, risk_on_gross_max=1.0,
                                 volatility_tilt=1.0)
     rows = [
         {"symbol": "CALM", "base_score": 1.0, "annual_volatility": 0.10},
@@ -367,7 +355,7 @@ def test_a_positive_tilt_leans_into_the_volatile_name() -> None:
 
 
 def test_a_negative_tilt_restores_risk_parity() -> None:
-    config = DualMomentumConfig(min_base_score=0.0, risk_on_gross_max=1.0,
+    config = RallyRotationConfig(min_base_score=0.0, risk_on_gross_max=1.0,
                                 volatility_tilt=-1.0)
     rows = [
         {"symbol": "CALM", "base_score": 1.0, "annual_volatility": 0.10},
@@ -390,7 +378,7 @@ def test_sizing_is_proportional_and_uncapped() -> None:
     ~0.7 and parked a third of the book in bills, which is a drag on a strategy whose job is
     to be in the market when the market is working.
     """
-    config = DualMomentumConfig(min_base_score=0.0, risk_on_gross_max=1.0, volatility_tilt=0.0)
+    config = RallyRotationConfig(min_base_score=0.0, risk_on_gross_max=1.0, volatility_tilt=0.0)
     rows = [
         {"symbol": "BIG", "base_score": 3.0, "annual_volatility": 0.5},
         {"symbol": "SMALL", "base_score": 1.0, "annual_volatility": 0.1},
@@ -405,7 +393,7 @@ def test_sizing_is_proportional_and_uncapped() -> None:
 
 def test_a_single_qualifying_name_takes_the_whole_book() -> None:
     """The direct consequence of removing the cap, stated so it cannot surprise anyone later."""
-    config = DualMomentumConfig(min_base_score=0.0, risk_on_gross_max=1.0, volatility_tilt=0.0)
+    config = RallyRotationConfig(min_base_score=0.0, risk_on_gross_max=1.0, volatility_tilt=0.0)
 
     weights = score_to_weights([{"symbol": "ONLY", "base_score": 1.0, "annual_volatility": 0.6}], config)
 
@@ -413,7 +401,7 @@ def test_a_single_qualifying_name_takes_the_whole_book() -> None:
 
 
 def test_trivial_trades_are_left_alone() -> None:
-    config = DualMomentumConfig(rebalance_weight_threshold=0.03, minimum_trade_notional=100.0,
+    config = RallyRotationConfig(rebalance_weight_threshold=0.03, minimum_trade_notional=100.0,
                                 minimum_trade_nav_fraction=0.005)
     current = {"AAA": 0.30, "BBB": 0.30}
 
@@ -424,7 +412,7 @@ def test_trivial_trades_are_left_alone() -> None:
 
 
 def test_a_trade_below_the_notional_floor_is_skipped() -> None:
-    config = DualMomentumConfig(rebalance_weight_threshold=0.0, minimum_trade_notional=100.0,
+    config = RallyRotationConfig(rebalance_weight_threshold=0.0, minimum_trade_notional=100.0,
                                 minimum_trade_nav_fraction=0.005)
 
     filtered = apply_turnover_filters({"AAA": 0.05}, {"AAA": 0.0}, 1_000.0, config)
@@ -462,8 +450,8 @@ def test_raw_ranking_prefers_the_louder_name_and_risk_adjusted_does_not() -> Non
                  "return_series": {h: [0.03] * 3 for h in ("nano", "micro", "meso", "macro")}},
     }
 
-    raw = base_scores(features, DualMomentumConfig(risk_adjusted_score=False))
-    adjusted = base_scores(features, DualMomentumConfig(risk_adjusted_score=True))
+    raw = base_scores(features, RallyRotationConfig(risk_adjusted_score=False))
+    adjusted = base_scores(features, RallyRotationConfig(risk_adjusted_score=True))
 
     assert raw["WILD"]["base_score"] > raw["CALM"]["base_score"]
     # Same return per unit of risk, so neither leads.
@@ -478,7 +466,7 @@ def test_an_unmeasurable_volatility_borrows_the_median_rather_than_dividing_by_z
                  "return_series": {h: [0.05] * 3 for h in ("nano", "micro", "meso", "macro")}},
     }
 
-    scored = base_scores(features, DualMomentumConfig(risk_adjusted_score=True))
+    scored = base_scores(features, RallyRotationConfig(risk_adjusted_score=True))
 
     assert math.isfinite(scored["THIN"]["base_score"])
     assert scored["THIN"]["base_score"] == pytest.approx(scored["GOOD"]["base_score"], abs=1e-9)
@@ -489,7 +477,7 @@ def test_zscores_of_an_identical_cross_section_are_zero() -> None:
 
 
 def test_the_defensive_sleeve_is_itself_ranked() -> None:
-    config = DualMomentumConfig(defensive_universe=["BIL", "IEF", "AGG"], defensive_max_positions=2)
+    config = RallyRotationConfig(defensive_universe=["BIL", "IEF", "AGG"], defensive_max_positions=2)
     scored = {
         "BIL": {"symbol": "BIL", "abs_return": 0.01},
         "IEF": {"symbol": "IEF", "abs_return": 0.05},
@@ -516,8 +504,7 @@ def test_a_session_breaker_cannot_fire_at_this_algorithms_cadence() -> None:
     far the book has fallen since yesterday. A knob that reads as crash protection and
     provides none is worse than no knob.
 
-    Kept as a test because the trap is in the interaction, not in either piece: the function
-    is correct, and Fast Momentum, which runs intraday, still relies on it.
+    Kept as a test because the trap is in the interaction, not in either piece.
     """
     from src.algorithms.risk import session_drawdown_breached
 
@@ -530,13 +517,13 @@ def test_a_session_breaker_cannot_fire_at_this_algorithms_cadence() -> None:
     assert session_drawdown_breached(state, 8_000.0, -0.015, tuesday) is False
     assert state["session_drawdown"] == 0.0
 
-    # Called twice inside one session -- Fast Momentum's cadence -- it works as intended.
+    # Called twice inside one session -- it works as intended.
     assert session_drawdown_breached(state, 7_800.0, -0.015, tuesday) is True
 
 
 def test_a_single_session_collapse_still_sells_the_holding() -> None:
     """``max_daily_drop`` is the stop that survives, and it reads close-to-close returns."""
-    config = DualMomentumConfig(max_daily_drop=0.10)
+    config = RallyRotationConfig(max_daily_drop=0.10)
     held = {"symbol": "AAA", "eligible": 1, "above_moving_average": True,
             "ma_distance": 0.20, "abs_return": 0.30, "fast_return": -0.12,
             "enough_history": True, "nano_return": -0.15}
@@ -557,15 +544,13 @@ def test_the_algorithm_is_registered_and_declares_what_it_needs() -> None:
     from src.core.config import ALGORITHM_IDS
     from src.core.strategy_models import STRATEGY_LABELS
 
-    assert "dual_momentum" in ALGORITHM_IDS
-    assert STRATEGY_LABELS["dual_momentum"] == "Dual Momentum"
+    assert "rally_rotation" in ALGORITHM_IDS
+    assert STRATEGY_LABELS["rally_rotation"] == "Rally Rotation"
 
-    config = Runtime(risk_on_universe=["AAA"], defensive_universe=["BIL"], benchmark="QQQM")
-    algorithm = get_algorithm_class("dual_momentum")(config)
+    config = Runtime(risk_on_universe=["AAA"], defensive_universe=["BIL"])
+    algorithm = get_algorithm_class("rally_rotation")(config)
     requirements = algorithm.requirements(config, {"ZZZ": 3})
 
-    # The benchmark has to be fetched even though it is never traded.
-    assert "QQQM" in requirements.price_symbols
     assert "ZZZ" in requirements.price_symbols, "held positions are priced too"
     # No intraday window at all: every feature is computed from the daily bars below.
     assert requirements.history_lookback_minutes == 0
@@ -578,7 +563,7 @@ def test_sentiment_is_requested_only_once_it_is_switched_on() -> None:
     from src.algorithms.registry import get_algorithm_class
 
     config = Runtime(sentiment_size_scale=0.05)
-    algorithm = get_algorithm_class("dual_momentum")(config)
+    algorithm = get_algorithm_class("rally_rotation")(config)
 
     assert algorithm.requirements(config, {}).needs_sentiment is True
 
@@ -590,15 +575,15 @@ def test_sizing_carries_no_cash_buffer() -> None:
     sub-threshold position could still be paid for. Order funding measures that directly now,
     and a buffer applied at sizing time would just under-invest on top of it.
     """
-    algorithm = DualMomentumAlgorithm(Runtime())
+    algorithm = RallyRotationAlgorithm(Runtime())
 
     assert "cash_buffer" not in algorithm.sizing(Runtime())
 
 
 def test_every_signal_row_carries_the_audit_trail() -> None:
     """Config-driven decisions are only auditable if each gate's verdict is recorded."""
-    config = Runtime(risk_on_universe=["AAA"], defensive_universe=["BIL"], benchmark="AAA")
-    algorithm = DualMomentumAlgorithm(config)
+    config = Runtime(risk_on_universe=["AAA"], defensive_universe=["BIL"])
+    algorithm = RallyRotationAlgorithm(config)
     daily = {"AAA": daily_bars(80, 130), "BIL": daily_bars(100, 101)}
     intraday = {"AAA": intraday_bars(100, 130), "BIL": intraday_bars(100, 101)}
 
@@ -617,7 +602,7 @@ def test_a_close_is_not_blocked_by_the_rebalance_threshold() -> None:
     to a close it traps the position instead: an 8-position book carried a mean of 12 names,
     5 of them frozen below the threshold and holding a fifth of the equity.
     """
-    config = DualMomentumConfig(rebalance_weight_threshold=0.08, minimum_trade_notional=100.0,
+    config = RallyRotationConfig(rebalance_weight_threshold=0.08, minimum_trade_notional=100.0,
                                 minimum_trade_nav_fraction=0.0)
 
     # Held at 3% and targeted at zero: a 3% move, far under the 8% threshold.
@@ -640,7 +625,7 @@ def test_partial_adjustment_moves_a_fraction_of_the_way_but_exits_in_full() -> N
     drift, the step damps a target that swings hard every session. An exit is exempt from
     both, or a name the strategy has dropped decays off the book over a week.
     """
-    config = DualMomentumConfig(rebalance_step=0.5)
+    config = RallyRotationConfig(rebalance_step=0.5)
 
     stepped = partial_adjustment({"AAA": 0.40, "BBB": 0.10}, {"AAA": 0.20, "BBB": 0.30}, config)
     assert stepped["AAA"] == pytest.approx(0.30), "half way up from 0.20 toward 0.40"
@@ -655,12 +640,12 @@ def test_partial_adjustment_moves_a_fraction_of_the_way_but_exits_in_full() -> N
     assert exit_now["AAA"] == 0.0, "an exit is never decayed"
 
     # The default is a full jump, so the knob is inert until it is turned on.
-    assert partial_adjustment({"AAA": 0.40}, {"AAA": 0.20}, DualMomentumConfig())["AAA"] == 0.40
+    assert partial_adjustment({"AAA": 0.40}, {"AAA": 0.20}, RallyRotationConfig())["AAA"] == 0.40
 
 
 def test_undeployed_gross_is_parked_in_bills_not_left_as_cash() -> None:
     """A funded account holds bills, not idle cash, for whatever the risk sleeve cannot use."""
-    config = DualMomentumConfig(risk_on_gross_max=0.96)
+    config = RallyRotationConfig(risk_on_gross_max=0.96)
 
     parked = park_residual({"AAA": 0.5}, {"BIL": 0.96}, config)
 
@@ -675,7 +660,7 @@ def test_undeployed_gross_is_parked_in_bills_not_left_as_cash() -> None:
 
 def test_eligibility_becomes_a_state_rather_than_a_daily_coin_flip() -> None:
     """A name near a floor used to flip in and out on consecutive sessions."""
-    config = DualMomentumConfig(eligibility_window=10, entry_min_eligible_days=8,
+    config = RallyRotationConfig(eligibility_window=10, entry_min_eligible_days=8,
                                 exit_max_eligible_days=3)
     state: dict = {}
 
@@ -699,7 +684,7 @@ def test_eligibility_becomes_a_state_rather_than_a_daily_coin_flip() -> None:
 
 def test_a_cold_state_store_does_not_liquidate_the_book() -> None:
     """With no history a count reads as zero, which must not be read as 'ineligible'."""
-    config = DualMomentumConfig(eligibility_window=10, exit_max_eligible_days=3)
+    config = RallyRotationConfig(eligibility_window=10, exit_max_eligible_days=3)
     state: dict = {}
 
     history = track_eligibility(state, {"AAA": {"eligible": 1}}, config)
@@ -712,7 +697,7 @@ def test_a_cold_state_store_does_not_liquidate_the_book() -> None:
 
 def test_a_holding_that_crashes_in_one_session_is_sold_at_once() -> None:
     """The portfolio-level breaker cannot fire at a daily cadence; this one can."""
-    config = DualMomentumConfig(max_daily_drop=0.10, exit_threshold_slack=0.05,
+    config = RallyRotationConfig(max_daily_drop=0.10, exit_threshold_slack=0.05,
                                 etf_min_abs_return=0.0, etf_min_fast_return=-0.02)
     healthy = {"enough_history": 1, "ma_distance": 0.08, "abs_return": 0.20,
                "fast_return": 0.05, "nano_return": -0.01}
@@ -738,7 +723,7 @@ def test_the_no_trade_band_cannot_push_the_book_over_its_gross_budget() -> None:
     passing a new entry through at full size, produced a plan that could not be paid for --
     16 of 24 sessions that January, and on one of them the entry was dropped outright.
     """
-    config = DualMomentumConfig(rebalance_weight_threshold=0.08, minimum_trade_notional=0.0,
+    config = RallyRotationConfig(rebalance_weight_threshold=0.08, minimum_trade_notional=0.0,
                                 minimum_trade_nav_fraction=0.0)
     target = {"IEMG": 0.066, "SLV": 0.475, "XSD": 0.291, "XBI": 0.121, "EWJ": 0.022, "GLD": 0.025}
     current = {"IEMG": 0.122, "SLV": 0.466, "XSD": 0.360}
@@ -760,7 +745,7 @@ def test_a_shrunken_entry_survives_the_band_but_not_the_notional_floor() -> None
     whenever the freed budget was smaller than the band -- the opposite of the intent. The
     dollar floor still applies, because a $12 order costs the same spread as a real one.
     """
-    config = DualMomentumConfig(rebalance_weight_threshold=0.08, minimum_trade_notional=100.0,
+    config = RallyRotationConfig(rebalance_weight_threshold=0.08, minimum_trade_notional=100.0,
                                 minimum_trade_nav_fraction=0.0)
     target = {"HELD": 0.90, "NEW": 0.10}
     current = {"HELD": 0.95}
@@ -823,9 +808,9 @@ def test_the_crash_stop_answers_to_no_clock() -> None:
     Otherwise a name can gap 30% across a week of throttled sessions while the algorithm waits
     its turn to look at it.
     """
-    config = DualMomentumConfig(max_daily_drop=0.10)
+    config = RallyRotationConfig(max_daily_drop=0.10)
 
     assert crash_stop({"nano_return": -0.15}, config)[0] is False
     assert crash_stop({"nano_return": -0.05}, config)[0] is True
     # 0 turns it off entirely.
-    assert crash_stop({"nano_return": -0.99}, DualMomentumConfig(max_daily_drop=0.0))[0] is True
+    assert crash_stop({"nano_return": -0.99}, RallyRotationConfig(max_daily_drop=0.0))[0] is True

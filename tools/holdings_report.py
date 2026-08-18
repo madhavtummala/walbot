@@ -22,7 +22,7 @@ from typing import Any
 
 import pandas as pd
 
-from src.algorithms.dual_momentum.config import DualMomentumConfig
+from src.algorithms.rally_rotation.config import RallyRotationConfig
 from tools.attribution import _parse_overrides
 from tools.config_sweep import Sweep, deployed_tuning
 
@@ -110,15 +110,15 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     for noisy in ("src.core.orders", "src.brokerages.providers.paper",
-                  "src.algorithms.dual_momentum.algorithm", "src.data.provider_cache",
+                  "src.algorithms.rally_rotation.algorithm", "src.data.provider_cache",
                   "src.connectors"):
         logging.getLogger(noisy).setLevel(logging.ERROR)
 
-    tuning = {**deployed_tuning("dual_momentum"), **_parse_overrides(args.overrides)}
+    tuning = {**deployed_tuning("rally_rotation"), **_parse_overrides(args.overrides)}
     sweep = Sweep([args.period])
-    run = sweep.run("dual_momentum", "deployed", tuning, args.period)
+    run = sweep.run("rally_rotation", "deployed", tuning, args.period)
     curve, _coverage = sweep.last_curve
-    report(curve, tuning, f"dual_momentum  /  {args.period}", top=args.top)
+    report(curve, tuning, f"rally_rotation  /  {args.period}", top=args.top)
     print(f"\ntotal return {run.metrics['total_return']:+.2%}   "
           f"net@5bps {run.metrics['net_return_5bps']:+.2%}   "
           f"max drawdown {run.metrics['max_drawdown']:+.2%}   "

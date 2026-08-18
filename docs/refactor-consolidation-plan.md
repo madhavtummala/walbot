@@ -19,7 +19,7 @@ Worth stating plainly, because the name suggests something narrower than the beh
 The trigger has nothing to do with order size against equity. It is
 `equity / session_opening_equity - 1 <= intraday_drawdown_limit` -- a fall in *account equity*
 within one session, measured from the equity at the session's first run (-2% for Fast Momentum,
--3% for SPY Rotation, -1.5% for Dual Momentum).
+-3% for SPY Rotation, -1.5% for Rally Rotation).
 
 When it trips, `apply_risk_guards` returns every proposed weight as zero. In `target` mode that
 is not "stop buying" -- `resolve_target_shares` seeds every *currently held* symbol at zero
@@ -36,7 +36,7 @@ So: it liquidates to cash, and stays flat for the rest of that session however t
 moves. There is no "buys blocked but sells allowed" state, and no partial de-risking -- the
 volatility scaler is the graduated response; this one is the stop. The next session re-anchors
 on whatever equity it opens with and the algorithm trades normally again, which is why it is a
-session breaker rather than a kill switch in the permanent sense. (Dual Momentum's breaker is
+session breaker rather than a kill switch in the permanent sense. (Rally Rotation's breaker is
 gentler: it parks the book in the defensive sleeve rather than in cash.)
 
 One consequence worth knowing when reading backtest numbers: **the breaker never fires in a
@@ -60,7 +60,7 @@ the first simulated day that is 2% below the *first* day of the backtest latches
 and every subsequent date proposes all-zero weights. The backtest is measuring nothing after
 that point, and it says so once per date.
 
-`dual_momentum.stateful.intraday_drawdown_breached` already solves exactly this, by taking a
+`rally_rotation.stateful.intraday_drawdown_breached` already solves exactly this, by taking a
 `session` string derived from the algorithm's own timestamp rather than the wall clock. Its
 docstring even describes the failure Fast Momentum still has. One concept, two implementations,
 one of them fixed.
@@ -194,7 +194,7 @@ field sends -- still means unset.
 
 | | lines |
 |---|---|
-| `DualMomentumConfig.from_runtime_config` | 80 |
+| `RallyRotationConfig.from_runtime_config` | 80 |
 | `InvestSpyConfig.from_runtime_config` | 70 |
 | `DefensiveMomentumConfig.from_runtime_config` | 48 |
 | `BurstyConfig.from_runtime_config` | 12 (already generic -- the pattern to generalise) |
@@ -223,12 +223,12 @@ nothing else.
 Found by name across `src/`:
 
 - `_return_over(closes, periods)` -- identical in `fast_momentum`, `invest_spy`,
-  `dual_momentum/scoring` -> `data.bars.return_over_periods`.
-- `_closes(bars)` -- `dual_momentum/scoring`, `brokerages/schwab_datacheck`, plus the same
+  `rally_rotation/scoring` -> `data.bars.return_over_periods`.
+- `_closes(bars)` -- `rally_rotation/scoring`, `brokerages/schwab_datacheck`, plus the same
   expression inline in both momentum algorithms -> `data.bars.closes`.
 - `json_number` / `_finite` -- four copies (`common/config_utils`, `core/strategy_models`,
   `connectors/support`, `connectors/utils`) -> one, in `common/config_utils`.
-- `_parse_time` / `_parse_timestamp` -- `dual_momentum/stateful`, `dca/accrual` ->
+- `_parse_time` / `_parse_timestamp` -- `rally_rotation/stateful`, `dca/accrual` ->
   `common/timeutils.parse_iso_utc`.
 - `dca/accrual._as_float` -> `config_utils.as_float`.
 - `fast_momentum.weights_from_positions` -> `PortfolioSnapshot.weights` (same arithmetic).
@@ -254,27 +254,27 @@ redistributing version is the correct one.
 
 ## Pass E -- delete the third dual momentum
 
-`src/algorithms/equities/dual_momentum_optimizer.py` is a complete third implementation of dual
-momentum -- its own `DualMomentumConfig` (colliding by name with the real one), its own scoring,
+`src/algorithms/equities/rally_rotation_optimizer.py` is a complete third implementation of dual
+momentum -- its own `RallyRotationConfig` (colliding by name with the real one), its own scoring,
 its own simulation loop. Nothing imports it except its own test: not the registry, the API, the
 dashboard, the MCP server, or `bot_runtime`. Delete the module, the `equities` package and
-`tests/test_dual_momentum_optimizer.py`.
+`tests/test_rally_rotation_optimizer.py`.
 
 ## Pass F -- strip the parallel scoring model to what is actually reached
 
 `core/strategy_models.strategy_row_from_prepared` implements six strategies. Production reaches
-exactly one: `"dual_momentum"`, from `options/swing.py`. The `trend_following`,
+exactly one: `"rally_rotation"`, from `options/swing.py`. The `trend_following`,
 `mean_reversion`, `breakout`, `risk_parity` and `fast_momentum` branches, plus
 `_rank_defensive_momentum_rows`, `_defensive_momentum_flat_reason` and the
 `DEFENSIVE_MOMENTUM_*` constants (whose only other user is the module Pass E deletes), are
 reachable only from their own tests. Remove them and prune the tests to the surviving path.
 
-*Deliberately not done:* pointing `options/swing.py` at the real `dual_momentum` algorithm
+*Deliberately not done:* pointing `options/swing.py` at the real `rally_rotation` algorithm
 instead of this daily 126/252-day rule. It would delete the rest of the module, but it changes
 which underlyings the options runner trades, which is a strategy decision rather than a
 refactor.
 
-## Pass G -- package hygiene in `dual_momentum`
+## Pass G -- package hygiene in `rally_rotation`
 
 The five modules of the package each redeclare `STATE_KEY`, `EPSILON` and `TRADING_DAYS`
 (leftovers from the file split), and `__init__` re-exports 25 names of which 12 are private.
@@ -332,7 +332,7 @@ configuration`.
 Unified the backtest paths and extracted the coercion helpers.
 
 1. **Divergent backtesting paths**: an ad-hoc simulation loop in
-   `algorithms/equities/dual_momentum_optimizer.py` alongside the canonical point-in-time
+   `algorithms/equities/rally_rotation_optimizer.py` alongside the canonical point-in-time
    replay in `execution/replay.py`. (Pass E above finishes this by deleting the module.)
 2. **Duplicated type coercion**: `_as_float`, `number`, `integer`, `symbols`, `flag`,
    `json_number`, `minutes_knob` copied across seven modules -> `common/config_utils.py`.

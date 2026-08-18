@@ -22,7 +22,7 @@ class DummyMCP:
 
 def _binding(**overrides) -> dict:
     """A binding an agent is allowed to drive: switched on, parked on ``mcp``."""
-    binding = {"id": "b1", "strategy": "fast_momentum", "account_id": "paper", "enabled": True, "frequency": "mcp"}
+    binding = {"id": "b1", "strategy": "rally_rotation", "account_id": "paper", "enabled": True, "frequency": "mcp"}
     binding.update(overrides)
     return binding
 
@@ -52,7 +52,7 @@ def test_create_mcp_server_exposes_expected_tools(monkeypatch) -> None:
 
 def _result_payload(**overrides) -> dict:
     payload = {
-        "strategy": "fast_momentum",
+        "strategy": "rally_rotation",
         "as_of": datetime.now(timezone.utc).isoformat(),
         "target_weights": {"AAA": 0.5},
         "latest_prices": {"AAA": 100.0},
@@ -96,7 +96,7 @@ def test_result_payload_round_trips_through_the_agent() -> None:
 
     restored = mcp_server._result_from_payload(payload)
 
-    assert restored.strategy == "fast_momentum"
+    assert restored.strategy == "rally_rotation"
     assert restored.target_weights == {"AAA": 0.5}
     assert restored.latest_prices == {"AAA": 100.0}
 
@@ -125,7 +125,7 @@ def test_place_orders_refuses_a_switched_off_binding(monkeypatch) -> None:
 
 
 def test_place_orders_refuses_an_algorithm_with_no_binding(monkeypatch) -> None:
-    fake_server = _build(monkeypatch, [_binding(strategy="dual_momentum")])
+    fake_server = _build(monkeypatch, [_binding(strategy="dca")])
 
     result = fake_server.place_orders(_result_payload())
 
@@ -171,7 +171,7 @@ def test_get_algorithm_result_runs_for_a_scheduled_binding_but_says_it_cannot_tr
     fake_server = _build(monkeypatch, [_binding(frequency="1hr")])
     monkeypatch.setattr(mcp_server, "get_config", lambda **kw: Config(kill_switch=True))
 
-    result = fake_server.get_algorithm_result("fast_momentum")
+    result = fake_server.get_algorithm_result("rally_rotation")
 
     assert result["can_place_orders"] is False
     assert result["status"] == "error"  # stopped by the kill switch, not by the binding
@@ -180,7 +180,7 @@ def test_get_algorithm_result_runs_for_a_scheduled_binding_but_says_it_cannot_tr
 def test_list_bindings_reports_what_the_agent_may_drive(monkeypatch) -> None:
     fake_server = _build(
         monkeypatch,
-        [_binding(id="b1"), _binding(id="b2", strategy="dual_momentum", frequency="1hr"), _binding(id="b3", enabled=False)],
+        [_binding(id="b1"), _binding(id="b2", strategy="rally_rotation", frequency="1hr"), _binding(id="b3", enabled=False)],
     )
 
     rows = {row["binding_id"]: row for row in fake_server.list_bindings()["bindings"]}

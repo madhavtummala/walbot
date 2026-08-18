@@ -1,6 +1,6 @@
 """A record of the orders this bot placed, tagged with the algorithm that placed them.
 
-The brokerage cannot answer "what did Fast Momentum do this week": it reports one blended
+The brokerage cannot answer "what did Rally Rotation do this week": it reports one blended
 stream per account, and a hand-placed order looks exactly like an algorithm's. So the bot
 writes its own line as it submits, which is the only place that attribution exists.
 
