@@ -22,7 +22,7 @@ social:
     algorithms_path.write_text(
         """
 algorithms:
-  fast_momentum:
+  rally_rotation:
     momentum_lookback_days: 42
     max_longs: 3
 """,
@@ -109,7 +109,7 @@ data_sources:
     assert config.sentiment_data_provider_order == ["stocktwits"]
     assert config.news_sentiment_cache_ttl_seconds == 20
     assert config.sentiment_data_cache_ttl_seconds == 20
-    assert "fast_momentum" in config.algorithm_configs
+    assert "rally_rotation" in config.algorithm_configs
     assert config.account_options == [
         {"id": "paper", "label": "Paper Desk"},
         {"id": "second", "label": "Second Desk"},
@@ -292,7 +292,6 @@ data_sources:
 def test_get_config_reads_split_bot_and_universe_files(tmp_path, monkeypatch) -> None:
     algorithm_bot_path = tmp_path / "algorithm_bot.yaml"
     algorithms_path = tmp_path / "algorithms.yaml"
-    options_bot_path = tmp_path / "options_bot.yaml"
     dca_bot_path = tmp_path / "dca_bot.yaml"
     universe_path = tmp_path / "universe.yaml"
     accounts_path = tmp_path / "accounts.yaml"
@@ -311,16 +310,9 @@ algorithm_bot:
     algorithms_path.write_text(
         """
 algorithms:
-  dual_momentum:
+  rally_rotation:
     momentum_lookback_days: 126
     max_longs: 4
-""",
-        encoding="utf-8",
-    )
-    options_bot_path.write_text(
-        """
-options:
-  swing_dte_min: 35
 """,
         encoding="utf-8",
     )
@@ -340,14 +332,13 @@ tradable_universe:
     connectors_path.write_text("data_sources: {}\n", encoding="utf-8")
     monkeypatch.setenv("TRADING_ALGORITHM_BOT_FILE", str(algorithm_bot_path))
     monkeypatch.setenv("TRADING_ALGORITHMS_FILE", str(algorithms_path))
-    monkeypatch.setenv("TRADING_OPTIONS_BOT_FILE", str(options_bot_path))
     monkeypatch.setenv("TRADING_DCA_BOT_FILE", str(dca_bot_path))
     monkeypatch.setenv("TRADING_UNIVERSE_FILE", str(universe_path))
     monkeypatch.setenv("TRADING_ACCOUNTS_FILE", str(accounts_path))
     monkeypatch.setenv("TRADING_CONNECTORS_FILE", str(connectors_path))
     monkeypatch.delenv("SYMBOLS", raising=False)
 
-    config = get_config(strategy_id="dual_momentum")
+    config = get_config(strategy_id="rally_rotation")
 
     assert config.symbols == ["SPY", "QQQ", "GLD"]
     assert config.momentum_lookback_days == 126
@@ -355,7 +346,6 @@ tradable_universe:
     assert config.require_trade_approval is True
     assert config.trade_approval_timeout_seconds == 120
     assert config.trade_approval_poll_seconds == 2
-    assert config.options_swing_dte_min == 35
 
 
 def test_the_kill_switch_is_an_environment_brake_not_a_config_key(tmp_path, monkeypatch) -> None:
@@ -387,16 +377,61 @@ def test_the_tradable_universe_covers_every_symbol_an_algorithm_can_hold() -> No
     algorithms = document["algorithms"]
 
     held: set[str] = set()
-    for key in ("dual_momentum", "fast_momentum"):
+    for key in ("rally_rotation",):
         section = algorithms[key]
         held |= set(section["risk_on_universe"]) | set(section["defensive_universe"])
         held.add(section.get("benchmark"))
-    rotation = algorithms.get("invest_spy", {})
-    for key in ("equity_income_universe", "defensive_universe", "crisis_hedge_universe"):
-        held |= set(rotation.get(key) or [])
-    held.add(rotation.get("spy_symbol"))
     held.discard(None)
 
     universe = set(document["tradable_universe"]["symbols"])
 
     assert held <= universe, f"tradable_universe is missing {sorted(held - universe)}"
+
+
+def test_an_explicitly_empty_universe_is_honoured_not_replaced_by_the_default() -> None:
+    """``defensive_universe: []`` must mean "no sleeve", not "the five-name default".
+
+    Absent and empty were the same value here, so a setting written to turn something off
+    looked obeyed and restored the default instead.
+    """
+    from src.common.config_utils import parse_symbols
+
+    assert parse_symbols([], ["BIL", "GLD"]) == []
+    assert parse_symbols(None, ["BIL", "GLD"]) == ["BIL", "GLD"]
+    # A blank string is still "unset": that is what an empty form field sends.
+    assert parse_symbols("", ["BIL", "GLD"]) == ["BIL", "GLD"]
+    assert parse_symbols("spy, qqq", ["BIL"]) == ["SPY", "QQQ"]
+
+
+def test_as_bool_falls_back_rather_than_guessing() -> None:
+    """One truth table, and an unrecognised value is not silently true.
+
+    There were five bool coercions and they disagreed: this one reached ``bool(value)`` for
+    anything it did not recognise, so ``enabled: mabye`` in a config file read as *on*, while
+    the dashboard's own coercer read the same typo as *off*.
+    """
+    from src.common.config_utils import as_bool
+
+    for truthy in ("true", "1", "yes", "y", "on", "  TRUE  ", True):
+        assert as_bool(truthy) is True, truthy
+    for falsey in ("false", "0", "no", "n", "off", False):
+        assert as_bool(falsey, default=True) is False, falsey
+
+    # The divergence that mattered: unrecognised means "use the default", both ways.
+    assert as_bool("mabye", default=False) is False
+    assert as_bool("mabye", default=True) is True
+    assert as_bool(None, default=True) is True
+
+
+def test_as_float_rejects_infinity_as_well_as_nan() -> None:
+    """``isnan`` alone let ``inf`` through, where it survives arithmetic and only surfaces
+    later as an unserialisable weight. The private ``_finite`` copies this replaced were the
+    strict ones, so consolidating onto the shared helper had to tighten it, not loosen them."""
+    from src.common.config_utils import as_float
+
+    assert as_float(float("inf"), 0.5) == 0.5
+    assert as_float(float("-inf"), 0.5) == 0.5
+    assert as_float(float("nan"), 0.5) == 0.5
+    assert as_float("not a number", 0.5) == 0.5
+    assert as_float(None, 0.5) == 0.5
+    assert as_float("2.5") == 2.5

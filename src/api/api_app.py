@@ -20,7 +20,6 @@ from src.api.api_payloads import (
     backtest_payload,
     complete_schwab_auth_payload,
     controls_payload,
-    dca_payload,
     recommend_universe_payload,
     refresh_social_payload,
     save_controls_payload,
@@ -28,7 +27,6 @@ from src.api.api_payloads import (
     save_account_payload,
     save_algorithm_config_payload,
     save_watchlist_payload,
-    save_dca_payload,
     schwab_auth_payload,
     positions_payload,
     social_payload,
@@ -114,16 +112,6 @@ def apply_universe(body: dict[str, Any]) -> dict[str, Any]:
     return apply_universe_payload(body)
 
 
-@app.get("/api/dca")
-def dca(account_id: str = Query(default="", max_length=80)) -> dict[str, Any]:
-    return dca_payload(account_id=account_id)
-
-
-@app.post("/api/dca")
-def save_dca(body: dict[str, Any]) -> dict[str, Any]:
-    return save_dca_payload(body)
-
-
 @app.get("/api/controls")
 def controls() -> dict[str, Any]:
     return controls_payload()
@@ -140,8 +128,13 @@ def social(limit: int = Query(default=250, ge=1, le=5000)) -> dict[str, Any]:
 
 
 @app.get("/api/strategy-signals")
-def strategy_signals(strategy: str = Query(default=DEFAULT_STRATEGY_ID, max_length=80)) -> dict[str, Any]:
-    return strategy_signals_payload(strategy=strategy)
+def strategy_signals(
+    strategy: str = Query(default=DEFAULT_STRATEGY_ID, max_length=80),
+    account_id: str = Query(default="", max_length=80),
+) -> dict[str, Any]:
+    # ``account_id`` is optional: omitted, the strategy's binding decides. The dashboard sends
+    # it so the view it renders is the one whose plan its own editor is writing.
+    return strategy_signals_payload(strategy=strategy, account_id=account_id)
 
 
 @app.post("/api/refresh-social")

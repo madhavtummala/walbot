@@ -312,9 +312,6 @@ select.ctl {
 .signalRows {
   display: grid;
   gap: 10px;
-  overflow-y: auto;
-  padding-right: 2px;
-  max-height: 220px;
 }
 
 .signalRows article {
@@ -488,6 +485,46 @@ select.ctl {
 
 .signalRows strong {
   overflow-wrap: anywhere;
+}
+
+/* -- signal table (compact per-symbol row) ---------------------------------- */
+
+.signalTable {
+  font-size: 11px;
+}
+
+.signalTable th {
+  font-size: 9px;
+}
+
+.signalTable td {
+  padding: 4px 6px;
+}
+
+.signalStatus {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 750;
+  max-width: 260px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.signalMa.pos {
+  color: var(--good);
+}
+
+.signalMa.neg {
+  color: var(--bad);
+}
+
+.signalRow--held td {
+  background: rgba(220, 252, 231, 0.12);
+}
+
+.signalRow--rejected td {
+  background: rgba(254, 226, 226, 0.10);
 }
 
 .metricGrid {
@@ -724,6 +761,42 @@ body.dca-off .asset.live circle {
   caret-color: var(--ink);
   background: transparent;
   border: 0;
+}
+
+/* Typed budget entry, centred on the selected bubble. Visible, unlike #symbolEntry: there is
+   no live SVG preview behind it, so the input itself has to show what you are typing. */
+/* Typed budget entry. Invisible but for its caret, exactly like #symbolEntry: the value
+   being typed is drawn by the bubble's own amount label, so a second box floating over the
+   board would be showing the reader the same number twice. Sits over that label rather than
+   the bubble's centre. */
+#amountEntry {
+  position: absolute;
+  z-index: 20;
+  width: 52px;
+  height: 18px;
+  border: 0;
+  padding: 0;
+  color: transparent;
+  background: transparent;
+  box-shadow: none;
+  font:
+    900 12px/1 Inter,
+    ui-sans-serif,
+    system-ui;
+  text-align: center;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  caret-color: transparent;
+  outline: none;
+}
+
+#amountEntry.show {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  caret-color: var(--ink);
 }
 
 label {
@@ -1052,19 +1125,6 @@ h2 {
   text-transform: uppercase;
 }
 
-.navAdd {
-  width: 22px;
-  min-height: 22px;
-  padding: 0;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.7);
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 1;
-  cursor: pointer;
-}
-
 .navList {
   margin: 0;
   padding: 0;
@@ -1312,6 +1372,21 @@ h2 {
   gap: 14px;
 }
 
+/* Account page: positions sit above dividends in the left column, and the order feed takes
+   the remaining width so its wider rows never squeeze. */
+.accountLayout {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  align-items: start;
+  gap: 14px;
+}
+
+.accountStack {
+  display: grid;
+  gap: 14px;
+  align-items: start;
+}
+
 .card {
   min-width: 0;
   padding: 15px 16px;
@@ -1354,6 +1429,12 @@ h2 {
   font-weight: 700;
 }
 
+/* The bubble board's only save feedback: it writes on every gesture and has no button. */
+.saveStatus {
+  color: var(--accent, inherit);
+  white-space: nowrap;
+}
+
 .cardBody {
   margin: 0;
   color: var(--muted);
@@ -1366,6 +1447,12 @@ h2 {
   display: flex;
   justify-content: flex-end;
   margin-top: 12px;
+}
+
+/* ``display: flex`` above outranks the ``hidden`` attribute's own ``display: none``, so an
+   algorithm with no tunable parameters would still be offered a Save button. */
+.cardActions[hidden] {
+  display: none;
 }
 
 .chipRow {
@@ -1630,8 +1717,7 @@ h2 {
 }
 
 .tabBody .signalRows {
-  max-height: var(--panel-scroll);
-  overflow-y: auto;
+  /* The table inside handles its own scrolling via .tableWrap.is-scroll. */
 }
 
 
@@ -1746,80 +1832,6 @@ h2 {
 }
 
 
-.watchRow {
-  display: grid;
-  grid-template-columns: 12px minmax(0, 1fr) auto 46px 18px;
-  cursor: grab;
-  gap: 6px;
-  align-items: center;
-  padding: 5px 8px;
-  border-radius: 8px;
-  font-size: 12px;
-}
-
-.watchRow:hover {
-  background: rgba(17, 24, 39, 0.05);
-}
-
-.watchRow.is-dragging {
-  opacity: 0.45;
-  cursor: grabbing;
-}
-
-.watchGrip {
-  color: rgba(17, 24, 39, 0.28);
-  font-size: 11px;
-  line-height: 1;
-}
-
-.watchSymbol {
-  min-width: 0;
-  overflow: hidden;
-  font-weight: 850;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.watchPrice {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 750;
-  font-variant-numeric: tabular-nums;
-}
-
-.watchChange {
-  font-size: 11px;
-  font-weight: 850;
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-}
-
-.watchRemove {
-  width: 18px;
-  min-height: 18px;
-  padding: 0;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  box-shadow: none;
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 1;
-  opacity: 0;
-  cursor: pointer;
-}
-
-.watchRow:hover .watchRemove {
-  opacity: 1;
-}
-
-.watchRemove:hover {
-  border: 0;
-  background: rgba(180, 35, 24, 0.12);
-  box-shadow: none;
-  color: var(--bad);
-}
-
 .deployControl {
   display: flex;
   gap: 5px;
@@ -1920,6 +1932,10 @@ h2 {
   }
 
   .cardGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .accountLayout {
     grid-template-columns: minmax(0, 1fr);
   }
 

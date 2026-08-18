@@ -20,63 +20,9 @@ def _trend_bars(start: float, end: float, periods: int = 320) -> pd.DataFrame:
     )
 
 
-def test_defensive_momentum_selects_risk_on_symbols_above_bil_hurdle() -> None:
+def test_builtin_rally_rotation_keeps_original_long_short_template() -> None:
     rows = strategy_signal_rows(
-        "fast_momentum",
-        {
-            "SPY": _trend_bars(100, 125),
-            "XBI": _trend_bars(100, 180),
-            "BIL": _trend_bars(100, 104),
-            "SHY": _trend_bars(100, 102),
-            "AGG": _trend_bars(100, 101),
-        },
-    )
-
-    active = [row for row in rows if row["signal"] == 1]
-
-    assert {row["symbol"] for row in active} == {"XBI", "SPY"}
-    assert all(row["side"] == "LONG" for row in active)
-    assert all(row["ret_252"] > row["cash_hurdle"] for row in active)
-
-
-def test_defensive_momentum_rotates_to_defensive_when_risk_on_fails() -> None:
-    rows = strategy_signal_rows(
-        "fast_momentum",
-        {
-            "SPY": _trend_bars(100, 98),
-            "XBI": _trend_bars(100, 92),
-            "BIL": _trend_bars(100, 104),
-            "SHY": _trend_bars(100, 102),
-            "AGG": _trend_bars(100, 101),
-            "TLT": _trend_bars(100, 95),
-        },
-    )
-
-    active = [row for row in rows if row["signal"] == 1]
-
-    assert [row["symbol"] for row in active] == ["BIL", "SHY", "AGG"]
-    assert all(row["side"] == "LONG" for row in active)
-    assert all("defensive" in row["reason"].lower() for row in active)
-
-
-def test_defensive_momentum_goes_to_cash_without_defensive_symbols() -> None:
-    rows = strategy_signal_rows(
-        "fast_momentum",
-        {
-            "VTI": _trend_bars(100, 98),
-            "VXUS": _trend_bars(100, 97),
-            "IEMG": _trend_bars(100, 95),
-            "ACWI": _trend_bars(100, 96),
-        },
-    )
-
-    assert all(row["signal"] == 0 for row in rows)
-    assert all(row["side"] == "FLAT" for row in rows)
-
-
-def test_builtin_dual_momentum_keeps_original_long_short_template() -> None:
-    rows = strategy_signal_rows(
-        "dual_momentum",
+        "rally_rotation",
         {
             "SPY": _trend_bars(100, 130),
             "XBI": _trend_bars(100, 90),
@@ -92,7 +38,7 @@ def test_builtin_dual_momentum_keeps_original_long_short_template() -> None:
     assert by_symbol["SPY"]["score"] == 0.6 * by_symbol["SPY"]["ret_126"] + 0.4 * by_symbol["SPY"]["ret_252"]
 
 
-def test_dual_momentum_can_apply_sentiment_tilt() -> None:
+def test_rally_rotation_can_apply_sentiment_tilt() -> None:
     social = {
         "SPY": pd.DataFrame(
             {
@@ -104,7 +50,7 @@ def test_dual_momentum_can_apply_sentiment_tilt() -> None:
         )
     }
     rows = strategy_signal_rows(
-        "dual_momentum",
+        "rally_rotation",
         {"SPY": _trend_bars(100, 130), "BIL": _trend_bars(100, 104)},
         social_by_symbol=social,
         social_weight=0.1,
@@ -117,24 +63,62 @@ def test_dual_momentum_can_apply_sentiment_tilt() -> None:
     assert "sentiment tilt" in spy["reason"]
 
 
-def test_intraday_requirement_must_declare_its_bar_grid() -> None:
-    """A lookback counted in bars is meaningless until the algorithm names the grid."""
-    import pytest
-
+def test_a_history_requirement_needs_no_grid_to_be_meaningful() -> None:
+    """A lookback in minutes states its own span, so no bar size has to accompany it."""
     from src.core.interfaces import AlgorithmRequirements
 
-    with pytest.raises(ValueError, match="must declare intraday_bar_minutes"):
-        AlgorithmRequirements(price_symbols=["SPY"], intraday_lookback_bars=100)
+    wanted = AlgorithmRequirements(price_symbols=["SPY"], history_lookback_minutes=1170)
+    assert wanted.history_lookback_minutes == 1170
+    # Naming a grid stays optional, and means "prefer this fidelity", not "count in these".
+    assert wanted.preferred_bar_minutes == 0
 
-    # Declining intraday data entirely stays valid, and states no grid.
-    assert AlgorithmRequirements(price_symbols=["SPY"]).intraday_bar_minutes == 0
+
+def test_algorithms_state_horizons_in_minutes_not_bars() -> None:
+    """No algorithm counts in bars any more, so none of them pins a bar size."""
+    from src.algorithms.rally_rotation import RallyRotationConfig
+
+    # Still stated in minutes, but rally rotation reads daily bars only, so it asks for no
+    # intraday window at all rather than one it would not look at.
+    assert RallyRotationConfig().required_history_minutes == 0
+
+    # The horizons are now whole sessions: 4680 is twelve of them.
+    assert RallyRotationConfig().selection_horizon_macro_minutes == 12 * 390
 
 
-def test_intraday_algorithms_declare_their_own_grid() -> None:
-    """The 15-minute assumption lives on each algorithm now, not in the base interface."""
-    from src.algorithms.dual_momentum import DualMomentumConfig
-    from src.algorithms.fast_momentum import DefensiveMomentumConfig
-    from src.algorithms.invest_spy import InvestSpyConfig
+def test_a_minutes_key_wins_over_a_stale_bars_key() -> None:
+    """Once saved in minutes, a leftover bars key must not override it."""
+    from src.algorithms.rally_rotation import RallyRotationConfig
 
-    for config_cls in (DualMomentumConfig, DefensiveMomentumConfig, InvestSpyConfig):
-        assert config_cls().intraday_bar_minutes == 15, config_cls.__name__
+    class _Runtime:
+        algorithm_configs = {
+            "rally_rotation": {
+                "selection_horizon_macro": 320,
+                "selection_horizon_macro_minutes": 2400,
+            }
+        }
+
+    assert RallyRotationConfig.from_runtime_config(_Runtime()).selection_horizon_macro_minutes == 2400
+
+
+def test_live_signals_are_ordered_by_score_not_by_its_magnitude() -> None:
+    """The dashboard list should read in the order the ranking was decided in.
+
+    The previous ordering grouped LONG/SHORT/FLAT and then sorted on ``-abs(score)``, which
+    seats the worst name in the universe next to the best: -3.0 sorted ahead of +1.0. For a
+    cross-sectional ranker the sign is the entire signal.
+    """
+    from src.algorithms.base import signal_view_from_decision
+    from src.core.interfaces import AlgorithmDecision
+
+    decision = AlgorithmDecision(
+        target_weights={"GOOD": 0.6},
+        signals={
+            "WORST": {"signal": 0, "score": -3.0},
+            "GOOD": {"signal": 1, "score": 1.0},
+            "MID": {"signal": 0, "score": 0.2},
+        },
+    )
+
+    view = signal_view_from_decision(decision)
+
+    assert [row["symbol"] for row in view.leaders] == ["GOOD", "MID", "WORST"]

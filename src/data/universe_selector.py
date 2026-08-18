@@ -6,6 +6,8 @@ from typing import Any
 
 import pandas as pd
 
+from src.common.config_utils import as_float
+
 
 @dataclass(frozen=True)
 class CandidateSpec:
@@ -78,14 +80,6 @@ def candidate_specs_by_symbol(tradable_symbols: set[str]) -> dict[str, Candidate
     return {spec.symbol: spec for spec in PREFERRED_CANDIDATES if spec.symbol in tradable_symbols}
 
 
-def _finite(value: Any, default: float = 0.0) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if math.isfinite(parsed) else default
-
-
 def _avg_dollar_volume(df: pd.DataFrame) -> float:
     tail = df.tail(20)
     close = pd.to_numeric(tail.get("close"), errors="coerce")
@@ -100,8 +94,8 @@ def _return_over(df: pd.DataFrame, days: int) -> float:
     close = pd.to_numeric(df["close"], errors="coerce").dropna()
     if len(close) <= days:
         return 0.0
-    start = _finite(close.iloc[-days - 1])
-    end = _finite(close.iloc[-1])
+    start = as_float(close.iloc[-days - 1])
+    end = as_float(close.iloc[-1])
     return end / start - 1 if start > 0 else 0.0
 
 
@@ -110,7 +104,7 @@ def _trend_gap(df: pd.DataFrame) -> float:
     if len(close) < 200:
         return 0.0
     sma_200 = float(close.tail(200).mean())
-    latest = _finite(close.iloc[-1])
+    latest = as_float(close.iloc[-1])
     return latest / sma_200 - 1 if sma_200 > 0 else 0.0
 
 

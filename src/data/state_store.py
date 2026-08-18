@@ -13,7 +13,7 @@ from .duckdb_store import DUCKDB_STATE_PATH, _connect
 STATE_DUCKDB_PATH = DUCKDB_STATE_PATH
 
 #: When set, reads and writes go to this dict instead of DuckDB. A backtest replays algorithms
-#: that carry state between runs -- DCA's accrued budget, Fast Momentum's intraday risk flag --
+#: that carry state between runs -- DCA's accrued budget, Rally Rotation's eligibility history --
 #: and without this it would read and then overwrite the live account's state. A ContextVar
 #: rather than a parameter so no algorithm has to know it is being replayed.
 _EPHEMERAL_STATE: ContextVar[dict[str, Any] | None] = ContextVar("ephemeral_state", default=None)
@@ -30,7 +30,7 @@ def ephemeral_state(initial: dict[str, Any] | None = None) -> Iterator[dict[str,
         _EPHEMERAL_STATE.reset(token)
 
 
-def load_state(key: str, default: Any, db_path: str = STATE_DUCKDB_PATH) -> Any:
+def load_state(key: str, default: Any, db_path: str | None = None) -> Any:
     store = _EPHEMERAL_STATE.get()
     if store is not None:
         return store.get(key, default)
@@ -45,7 +45,7 @@ def load_state(key: str, default: Any, db_path: str = STATE_DUCKDB_PATH) -> Any:
     return default
 
 
-def save_state(key: str, value: Any, db_path: str = STATE_DUCKDB_PATH) -> Any:
+def save_state(key: str, value: Any, db_path: str | None = None) -> Any:
     store = _EPHEMERAL_STATE.get()
     if store is not None:
         store[key] = value
@@ -63,6 +63,6 @@ def save_state(key: str, value: Any, db_path: str = STATE_DUCKDB_PATH) -> Any:
     return value
 
 
-def delete_state(key: str, db_path: str = STATE_DUCKDB_PATH) -> None:
+def delete_state(key: str, db_path: str | None = None) -> None:
     with _connect(db_path) as connection:
         connection.execute("DELETE FROM app_state WHERE key = ?", [key])

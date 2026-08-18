@@ -3,6 +3,8 @@ import logging
 import math
 from datetime import datetime, timedelta, timezone
 
+from ..common.config_utils import as_bool
+
 try:
     import pandas as pd
 except ImportError:  # type: ignore
@@ -64,11 +66,25 @@ def get_positions(trading_client: TradingClient) -> dict[str, float]:
     return parsed
 
 
+def get_position_marks(trading_client: TradingClient) -> dict[str, float]:
+    """Last price per held symbol, as Alpaca marks it on the position itself.
+
+    Falls back to market value over quantity, which is the same number by a different route
+    and survives ``current_price`` being absent on a stale position payload.
+    """
+    marks: dict[str, float] = {}
+    for position in trading_client.get_all_positions():
+        price = _float_attr(position, "current_price")
+        if price <= 0:
+            quantity = _float_attr(position, "qty")
+            price = (_float_attr(position, "market_value") / quantity) if quantity else 0.0
+        if price > 0:
+            marks[position.symbol] = price
+    return marks
+
+
 def _bool_attr(obj, name: str, default: bool = False) -> bool:
-    value = getattr(obj, name, default)
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
+    return as_bool(getattr(obj, name, default), default)
 
 
 def _float_attr(obj, name: str, default: float = 0.0) -> float:
@@ -365,6 +381,7 @@ def submit_option_limit_order(
     qty: int,
     limit_price: float,
     position_intent: str = "buy_to_open",
+    time_in_force: str = "day",
 ):
     if side.lower() not in {"buy", "sell"}:
         raise ValueError("side must be 'buy' or 'sell'")
@@ -373,13 +390,59 @@ def submit_option_limit_order(
     if limit_price <= 0:
         raise ValueError("limit_price must be positive")
     intent = PositionIntent(position_intent)
+    tif = TimeInForce.GTC if time_in_force.lower() == "gtc" else TimeInForce.DAY
     order = LimitOrderRequest(
         symbol=symbol,
         qty=qty,
         side=OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL,
         type=OrderType.LIMIT,
-        time_in_force=TimeInForce.DAY,
+        time_in_force=tif,
         limit_price=round(float(limit_price), 2),
         position_intent=intent,
     )
     return trading_client.submit_order(order_data=order)
+
+
+#: Alpaca's activity types for cash distributions. ``DIV`` is the ordinary case; the rest cover
+#: capital gains, return of capital, and the withholding variants, all of which are still cash
+#: moving into or out of the account and belong in an income figure.
+DIVIDEND_ACTIVITY_TYPES = ("DIV", "DIVCGL", "DIVCGS", "DIVNRA", "DIVROC", "DIVTXEX", "DIVWH")
+
+
+def get_account_activities(
+    config: Config,
+    activity_types: "tuple[str, ...] | None" = None,
+    *,
+    page_size: int = 100,
+    after: "datetime | None" = None,
+    timeout_seconds: float = 20.0,
+) -> list[dict]:
+    """Raw account activities for this Alpaca account.
+
+    Lives here rather than at the call site because ``alpaca-py`` 0.43 exposes no wrapper for
+    ``/v2/account/activities`` -- ``TradingClient`` has ``get_account`` and nothing for
+    activities. Keeping the request in the client module means the rest of the codebase still
+    talks to a brokerage, not to an endpoint.
+    """
+    import requests
+
+    base = (config.alpaca_base_url or "").rstrip("/")
+    if not base or not config.alpaca_api_key:
+        return []
+    params: dict = {"page_size": int(page_size)}
+    if activity_types:
+        params["activity_types"] = ",".join(activity_types)
+    if after is not None:
+        params["after"] = after.isoformat()
+    response = requests.get(
+        f"{base}/v2/account/activities",
+        headers={
+            "APCA-API-KEY-ID": config.alpaca_api_key,
+            "APCA-API-SECRET-KEY": config.alpaca_api_secret,
+        },
+        params=params,
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    return payload if isinstance(payload, list) else []

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from ..base import BaseBrokerage
 from ...core.interfaces import OrderRequest
 from src.brokerages.alpaca_client import (
+    DIVIDEND_ACTIVITY_TYPES,
     create_trading_client,
+    get_account_activities,
+    get_position_marks,
     get_positions,
     submit_market_order,
     submit_option_limit_order,
@@ -17,10 +20,28 @@ class AlpacaBrokerage(BaseBrokerage):
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        # Assuming config is a dict with keys like 'alpaca_api_key', etc.
-        # or it might be a Config object. alpaca_client functions expect Config object or similar.
-        # For now, let's pass config as is.
         self.client = create_trading_client(config)
+        self._config = config
+
+    def get_dividend_activity(self, start=None, end=None) -> List[Dict[str, Any]]:
+        from datetime import datetime, time, timezone
+
+        after = datetime.combine(start, time.min, tzinfo=timezone.utc) if start else None
+        rows: List[Dict[str, Any]] = []
+        for item in get_account_activities(self._config, DIVIDEND_ACTIVITY_TYPES, after=after):
+            stamp = str(item.get("date") or item.get("transaction_time") or "")[:10]
+            if end and stamp and stamp > end.isoformat():
+                continue
+            rows.append(
+                {
+                    "symbol": str(item.get("symbol") or ""),
+                    "date": stamp,
+                    "amount": float(item.get("net_amount") or 0.0),
+                    "description": str(item.get("description") or item.get("activity_type") or ""),
+                }
+            )
+        rows.sort(key=lambda row: row["date"], reverse=True)
+        return rows
 
     def get_account_state(self) -> Dict[str, Any]:
         account = self.client.get_account()
@@ -34,6 +55,10 @@ class AlpacaBrokerage(BaseBrokerage):
     def get_positions(self) -> Dict[str, float]:
         return get_positions(self.client)
 
+    def get_marks(self, symbols) -> Dict[str, float]:
+        marks = get_position_marks(self.client)
+        return {symbol: marks[symbol] for symbol in symbols if symbol in marks}
+
     def submit_order(self, request: OrderRequest) -> Dict[str, Any]:
         if request.order_type == "market":
             order = submit_market_order(
@@ -42,20 +67,21 @@ class AlpacaBrokerage(BaseBrokerage):
                 side=request.action,
                 qty=request.quantity
             )
-        elif request.order_type == "limit" and "to_open" in (request.extra or {}).get("position_intent", ""):
-            # Handle options/limit orders if needed
+        elif request.order_type == "limit":
+            position_intent = (request.extra or {}).get("position_intent", "buy_to_open")
+            time_in_force = (request.extra or {}).get("time_in_force", "day")
             order = submit_option_limit_order(
                 self.client,
                 symbol=request.symbol,
                 side=request.action,
                 qty=request.quantity,
                 limit_price=request.limit_price,
-                position_intent=request.extra.get("position_intent")
+                position_intent=position_intent,
+                time_in_force=time_in_force,
             )
         else:
-            # Fallback or other order types
             raise NotImplementedError(f"Order type {request.order_type} not implemented for Alpaca")
-            
+
         return {
             "order_id": str(order.id),
             "client_order_id": str(order.client_order_id),

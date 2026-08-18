@@ -1,15 +1,18 @@
 const SVG_NS = "http://www.w3.org/2000/svg";
 const BUCKET_NAMES = ["buy", "sell"];
 const MAX_AMOUNT = 2000;
-const DCA_ALGORITHM_KEYS = ["dca", "bursty_dca"];
+const DCA_ALGORITHM_KEYS = ["bursty_dca"];
 const WHEEL_STEP = 25;
+//: Vertical offset of a bubble's amount label from its centre. Shared so the typing caret
+//: lands on the number it is editing rather than near it.
+const AMOUNT_LABEL_DY = 14;
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 let BACKTEST_PERIOD = "4m";
 let BACKTEST_LABEL = "4M";
 
 //: Selectable backtest windows. The configured default from status still wins on first load;
 //: this only lets you look at a different window without editing config.
-const BACKTEST_PERIOD_CHOICES = ["1m", "2m", "3m", "4m", "6m", "12m", "24m"];
+const BACKTEST_PERIOD_CHOICES = ["1m", "3m", "6m", "12m", "24m"];
 
 const ENABLED_COLORS = {
   buy: "#024c4a",
@@ -23,62 +26,41 @@ const DISABLED_COLORS = {
 
 const STRATEGIES = [
   {
-    key: "dca",
-    blurb: "Buys each symbol's monthly budget as soon as it clears the broker minimum.",
-    name: "DCA",
-    status: "Live",
-    horizon: "Continuous",
-    risk: "Lower",
-    logic: "Accrues each symbol's monthly budget against elapsed wall-clock time and buys as soon as the accrued amount can clear a broker minimum, so the schedule controls only when it may act, never how much it spends.",
-    signals: ["Monthly budget", "Accrued amount", "Minimum executable trade", "Whole-share threshold"],
-  },
-  {
     key: "bursty_dca",
-    blurb: "Same monthly budget as DCA, but only deployed into a dip above the 200-day.",
+    blurb: "Buys sized proportionally to drawdown from peak. Deeper dips get bigger buys.",
     name: "Bursty DCA",
     status: "Live",
     horizon: "Continuous",
     risk: "Medium",
-    logic: "Accrues the same monthly budget as DCA but only deploys it into a dip: price must be above its 200-day moving average, and Bollinger %B or Connors RSI(2) must be stretched. Trade size follows a value-averaging path, clamped per trade and per month.",
-    signals: ["200-day regime gate", "Bollinger %B", "Connors RSI(2)", "Value-averaging path", "Trade and monthly clamps"],
+    logic: "Accrues a monthly budget per symbol and sizes each buy proportionally to how far the price has fallen from its peak. Monthly cap scales with drawdown so crash months deploy more capital. Sells at peak.",
+    signals: ["Drawdown from peak", "Scaling factor", "Monthly cap with cap_boost", "Picky threshold"],
   },
   {
-    key: "fast_momentum",
-    blurb: "Ranks risk-on and defensive ETFs on multi-horizon momentum, then sizes with caps.",
-    name: "Fast Momentum",
-    status: "Live",
-    horizon: "Intraday",
-    risk: "Medium",
-    logic: "Ranks risk-on and defensive ETFs with nano, micro, meso, and macro momentum scores, then sizes selected positions dynamically with caps and rebalance thresholds.",
-    signals: ["Nano momentum", "Micro momentum", "Meso trend", "Macro trend", "Pullback bonus"],
-  },
-  {
-    key: "dual_momentum",
+    key: "rally_rotation",
     blurb: "Relative momentum picks the leaders; absolute momentum decides if it may hold any.",
-    name: "Dual Momentum",
+    name: "Rally Rotation",
+    status: "Paper",
+    horizon: "Daily",
+    risk: "High",
+    logic: "Scores every ETF against the others and requires each to clear its own trend and return floors before it is ranked. Holds the top few, re-ranks on its own clock rather than every session, and needs a score margin to displace a sitting position. Sizing is proportional to score with no per-name cap, so a concentrated book is normal; a single-session drop sells outright.",
+    signals: ["Absolute eligibility", "Cross-sectional rank", "Replacement margin", "Crash stop"],
+  },
+  {
+    key: "intraday_pick",
+    blurb: "Macro trend picks direction; intraday setup picks the option. Limit entry, GTC limit exit.",
+    name: "Intraday Pick",
     status: "Paper",
     horizon: "Intraday",
-    risk: "Medium",
-    logic: "Gates risk-on exposure on a benchmark trend and breadth regime, requires each ETF to clear its own absolute-trend test before it is ranked, times entries with a separate fast signal, and scales weights toward a portfolio volatility target.",
-    signals: ["Regime gate", "Breadth", "Absolute eligibility", "Slow rank", "Entry timing", "Vol target"],
-  },
-  {
-    key: "spy_rotation",
-    blurb: "Classifies the SPY regime, then rotates between growth, income, cash, and hedges.",
-    name: "SPY Rotation",
-    status: "Live",
-    horizon: "Intraday",
-    risk: "Medium",
-    logic: "Classifies SPY as growing, flat, falling, or crisis using micro, meso, macro, and sentiment signals, then rotates among growth, covered-call income, cash, and capped hedges.",
-    signals: ["SPY state", "Micro/meso/macro", "Sentiment", "XYLD flat state", "SH/VXX crisis hedge"],
+    risk: "High",
+    logic: "Detects the macro trend from the SPY 50-day moving average, then scores each candidate on volatility regime, range expansion, and momentum. Buys calls in bull trends, puts in bear trends. Entry is a buy limit below fair value; exit is a GTC sell limit above.",
+    signals: ["Macro trend (SPY 50-day MA)", "Vol regime", "Range expansion", "Intraday momentum", "VWAP alignment"],
   },
 ];
 
 //: A saved strategy id that is unknown (or the retired "none") lands here.
-const DEFAULT_ALGORITHM_KEY = "dca";
+const DEFAULT_ALGORITHM_KEY = "bursty_dca";
 
 //: Strategies driven by the DCA plan, so a plan edit invalidates their cached views.
-const DCA_STRATEGY_KEYS = ["dca", "bursty_dca"];
 
 const state = {
   status: null,
@@ -86,11 +68,17 @@ const state = {
   controls: {
     trading_account_id: "",
     algorithm_enabled: false,
-    active_strategy: "fast_momentum",
+    active_strategy: "rally_rotation",
   },
   accounts: { rows: [] },
   bot: null,
-  dca: null,
+  //: Which algorithm's plan the bubble board is editing, set when the board renders.
+  planStrategy: "",
+  //: Which algorithm ``state.nodes`` were built from, so they cannot be synced into another.
+  nodesStrategy: "",
+  //: "", "saving" or the time of the last successful plan save. The board has no save button
+  //: -- it writes on every gesture -- so this is the only feedback that an edit landed.
+  planSaveStatus: "",
   layout: null,
   nodes: [],
   invalidNodes: [],
@@ -101,6 +89,9 @@ const state = {
   boardPointers: new Map(),
   boardPinch: null,
   draft: null,
+  //: The bubble whose budget is being typed, or null. Holds the symbol rather than the node,
+  //: because the board rebuilds its nodes on every render and the object would go stale.
+  amountEdit: null,
   animationId: null,
   backtests: {},
   backtestLoading: {},
@@ -114,8 +105,6 @@ const state = {
   renderedBindingKey: "",
   algorithmConfigs: {},
   algorithmConfigLoading: {},
-  watchlist: null,
-  watchDrag: null,
   positions: {},
   positionsLoading: {},
   activity: {},
@@ -155,9 +144,35 @@ async function api(path, options = {}) {
       signal: controller.signal,
       ...fetchOptions,
     });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || `Request failed: ${response.status}`);
+    // Read as text first. A 500 from FastAPI's default handler is plain "Internal Server
+    // Error", not JSON, so parsing before checking the status threw the parser's complaint
+    // instead of the server's -- in Safari, "The string did not match the expected pattern",
+    // which names neither the request nor the cause.
+    const body = await response.text();
+    let payload;
+    try {
+      payload = body ? JSON.parse(body) : {};
+    } catch {
+      if (!response.ok) throw new Error(`Request failed: ${response.status} ${body.trim().slice(0, 200)}`.trim());
+      throw new Error(`${path} returned ${response.status} but not JSON: ${body.trim().slice(0, 200)}`);
+    }
+    // ``detail`` is what FastAPI's HTTPException produces; ``error`` is what the payload
+    // builders return for a failure they handled themselves.
+    if (!response.ok) {
+      throw new Error(payload.error || payload.detail || `Request failed: ${response.status}`);
+    }
     return payload;
+  } catch (error) {
+    // Every browser words an aborted fetch differently -- "fetch aborted", "The user aborted
+    // a request", "signal is aborted without reason" -- and none of them say that *we* gave
+    // up waiting, which is the only thing the reader can act on. The request itself is still
+    // running on the server, so a retry usually finds the answer cached.
+    if (error.name === "AbortError") {
+      throw new Error(
+        `Timed out after ${Math.round(timeoutMs / 1000)}s. The server may still be working; try again in a moment.`,
+      );
+    }
+    throw error;
   } finally {
     window.clearTimeout(timeout);
   }
@@ -190,16 +205,40 @@ function bucketStrokeColor(bucketName) {
   return shadeColor(bucketColor(bucketName), isDcaEnabled() ? -48 : -34);
 }
 
+//: Which algorithm's plan the board is editing. DCA is a normal algorithm with a custom
+//: editor, so its plan is ordinary tuning living at algorithms.<id>.plan -- which is why
+//: ``dca`` and ``bursty_dca`` now have separate budgets rather than sharing one.
+function planStrategyKey() {
+  return state.planStrategy || DEFAULT_ALGORITHM_KEY;
+}
+
+//: The plan object inside the loaded config, created empty if this algorithm has none yet.
+//: Returns null until the config has arrived, which is what the board's guards test.
+function currentPlan() {
+  const config = state.algorithmConfigs[planStrategyKey()]?.config;
+  if (!config) return null;
+  if (!config.plan || typeof config.plan !== "object") config.plan = {};
+  BUCKET_NAMES.forEach((bucketName) => {
+    if (!config.plan[bucketName] || typeof config.plan[bucketName] !== "object") {
+      config.plan[bucketName] = { amount: 0, items: [] };
+    }
+    if (!Array.isArray(config.plan[bucketName].items)) config.plan[bucketName].items = [];
+  });
+  return config.plan;
+}
+
 function bucketItems(bucketName) {
-  return state.dca?.plan?.[bucketName]?.items || [];
+  return currentPlan()?.[bucketName]?.items || [];
 }
 
 function setBucketItems(bucketName, items) {
-  state.dca.plan[bucketName].items = items.map((item) => ({
+  const plan = currentPlan();
+  if (!plan) return;
+  plan[bucketName].items = items.map((item) => ({
     symbol: item.symbol,
     amount: clamp(Number(item.amount || 0), 0, MAX_AMOUNT),
   }));
-  state.dca.plan[bucketName].amount = state.dca.plan[bucketName].items.reduce(
+  plan[bucketName].amount = plan[bucketName].items.reduce(
     (total, item) => total + Number(item.amount || 0),
     0,
   );
@@ -359,6 +398,9 @@ function smoothClosedPath(points) {
 function buildNodes() {
   const previous = new Map(state.nodes.map((node) => [`${node.bucketName}:${node.symbol}`, node]));
   state.nodes = [];
+  // Nodes belong to the plan they were built from. Recorded so nothing can write one
+  // algorithm's bubbles into another's plan -- see syncNodesToPlan.
+  state.nodesStrategy = planStrategyKey();
   BUCKET_NAMES.forEach((bucketName) => {
     const bucket = state.layout.buckets[bucketName];
     const items = bucketItems(bucketName);
@@ -396,12 +438,18 @@ function syncNodeToPlan(node) {
 }
 
 function syncNodesToPlan() {
+  // Nodes are the board's working copy of one algorithm's plan. Writing them into a
+  // different algorithm's plan overwrites it with budgets the reader never typed there --
+  // which is what happened on every navigation between two DCA pages, because renderDca
+  // syncs before it rebuilds. The nodes are rebuilt from the new plan a moment later, so
+  // there is nothing here worth carrying across.
+  if (state.nodesStrategy !== planStrategyKey()) return;
   state.nodes.forEach(syncNodeToPlan);
   BUCKET_NAMES.forEach((bucketName) => setBucketItems(bucketName, bucketItems(bucketName)));
 }
 
 function renderBoard() {
-  if (!state.dca?.plan || !$("#bubbleBoard")) return;
+  if (!currentPlan() || !$("#bubbleBoard")) return;
   window.cancelAnimationFrame(state.animationId);
   document.body.classList.toggle("dca-off", !isDcaEnabled());
   calculateLayout();
@@ -462,7 +510,7 @@ function renderAsset(svg, node, extraClass) {
   });
   group.appendChild(svgEl("circle", { r: node.radius, fill: bucketColor(node.bucketName) }));
   group.appendChild(textEl({ class: "symbol-label", y: -5 }, node.symbol));
-  group.appendChild(textEl({ class: "amount-label", y: 14 }, `$${Math.round(node.amount)}`));
+  group.appendChild(textEl({ class: "amount-label", y: AMOUNT_LABEL_DY }, `$${Math.round(node.amount)}`));
   group.addEventListener("pointerdown", (event) => startAssetPointer(event, node));
   group.addEventListener("wheel", (event) => resizeNode(event, node), { passive: false });
   group.addEventListener("dblclick", (event) => {
@@ -626,11 +674,19 @@ function updateTouchPointer(event, node) {
   });
 }
 
-function resizeNodeToAmount(node, amount) {
-  node.amount = clamp(Math.round(amount / WHEEL_STEP) * WHEEL_STEP, 0, MAX_AMOUNT);
+//: Set a budget to exactly what was asked for, in whole dollars. Scrolling and pinching go
+//: through resizeNodeToAmount instead, which snaps to the WHEEL_STEP grid -- a gesture has no
+//: business expressing $310, but a typed number means precisely what it says, so rounding it
+//: to the nearest $25 would silently discard what the reader just asked for.
+function setNodeAmount(node, amount) {
+  node.amount = clamp(Math.round(amount), 0, MAX_AMOUNT);
   node.radius = itemRadius(node.amount);
   syncNodeToPlan(node);
   schedulePlanSave();
+}
+
+function resizeNodeToAmount(node, amount) {
+  setNodeAmount(node, clamp(Math.round(amount / WHEEL_STEP) * WHEEL_STEP, 0, MAX_AMOUNT));
 }
 
 function selectedDcaNode() {
@@ -785,6 +841,94 @@ function hideSymbolEntry(cancelDraft = true) {
   }
 }
 
+// =========================================================================================
+// Typing a budget. Scrolling a bubble is quick but imprecise -- reaching $1,600 from $25 is
+// 63 notches, and the value can only ever land on a multiple of WHEEL_STEP. Selecting a
+// bubble and typing sets it outright.
+// =========================================================================================
+
+//: Places the caret over ``node``'s amount label and opens the edit. The input itself is
+//: invisible: the number being typed is drawn by the bubble, the same way a new bubble draws
+//: the symbol being typed into #symbolEntry.
+//:
+//: ``seed`` is the first character when the edit was started by typing a digit, because
+//: focusing an input during the keydown that caused it does not deliver that keystroke. An
+//: edit started with Enter seeds the current amount and selects it, so typing replaces.
+function showAmountEntry(node, seed = "") {
+  const board = $("#bubbleBoard");
+  if (!board || !node || !state.layout) return;
+  const entry = $("#amountEntry");
+  const rect = board.getBoundingClientRect();
+  const scaleX = rect.width / state.layout.width;
+  const scaleY = rect.height / state.layout.height;
+  state.amountEdit = { symbol: node.symbol, originalAmount: node.amount };
+  entry.value = seed || String(Math.round(node.amount));
+  entry.style.left = `${window.scrollX + rect.left + node.x * scaleX}px`;
+  // AMOUNT_LABEL_DY down from the bubble's centre, so the caret sits on the number it edits.
+  entry.style.top = `${window.scrollY + rect.top + (node.y + AMOUNT_LABEL_DY) * scaleY}px`;
+  entry.className = "show";
+  window.setTimeout(() => {
+    entry.focus();
+    if (seed) entry.setSelectionRange(entry.value.length, entry.value.length);
+    else entry.select();
+  }, 0);
+  previewAmountEntry();
+}
+
+//: Write each keystroke straight through to the plan, exactly as scrolling does. The bubble
+//: label, its radius and the bucket total then all follow the typing, and there is no second
+//: copy of the number anywhere to disagree with it. The save is debounced, so this costs one
+//: request once the typing stops rather than one per character.
+function previewAmountEntry() {
+  if (!state.amountEdit) return;
+  const entry = $("#amountEntry");
+  const digits = entry.value.replace(/[^0-9]/g, "").slice(0, 7);
+  if (entry.value !== digits) entry.value = digits;
+  const node = state.nodes.find((candidate) => candidate.symbol === state.amountEdit.symbol);
+  if (!node) return;
+  setNodeAmount(node, Number(digits || 0));
+  updateBoardElements();
+}
+
+function hideAmountEntry() {
+  const entry = $("#amountEntry");
+  if (!entry) return;
+  entry.className = "";
+  state.amountEdit = null;
+}
+
+//: Escape puts the budget back where it was. The preview has already been written to the
+//: plan, so abandoning has to be an edit of its own rather than simply closing the field.
+function cancelAmountEntry() {
+  const edit = state.amountEdit;
+  hideAmountEntry();
+  if (!edit) return;
+  const node = state.nodes.find((candidate) => candidate.symbol === edit.symbol);
+  if (node) setNodeAmount(node, edit.originalAmount);
+  renderBoard();
+}
+
+function commitAmountEntry() {
+  const entry = $("#amountEntry");
+  // Guarded rather than assumed: blur, Enter and a click elsewhere can all arrive for one
+  // edit, and only the first of them should be the one that closes it.
+  if (!state.amountEdit || !entry?.classList.contains("show")) return;
+  const edit = state.amountEdit;
+  const digits = entry.value.replace(/[^0-9]/g, "");
+  hideAmountEntry();
+
+  const node = state.nodes.find((candidate) => candidate.symbol === edit.symbol);
+  if (!node) return;
+  if (digits === "") {
+    // Cleared and confirmed reads as "never mind", not as a budget of zero -- type 0 for that.
+    setNodeAmount(node, edit.originalAmount);
+  } else if (Number(digits) > MAX_AMOUNT) {
+    // Already clamped on screen; say why, so a smaller number than was typed is not a mystery.
+    showToast(`${edit.symbol} capped at ${money(MAX_AMOUNT)}/month`);
+  }
+  renderBoard();
+}
+
 function commitSymbolEntry() {
   const entry = $("#symbolEntry");
   if (!state.draft || !entry.classList.contains("show")) return;
@@ -816,11 +960,11 @@ function commitSymbolEntry() {
   }
 
   const amount = 25;
-  state.dca.plan[draft.bucketName].items.push({
+  currentPlan()[draft.bucketName].items.push({
     symbol: row.symbol,
     amount,
   });
-  setBucketItems(draft.bucketName, state.dca.plan[draft.bucketName].items);
+  setBucketItems(draft.bucketName, currentPlan()[draft.bucketName].items);
   renderDca();
   schedulePlanSave();
   showToast(`${row.symbol} added`);
@@ -842,16 +986,16 @@ function moveAsset(node) {
   const found = fromItems.find(({ item }) => item.symbol === node.symbol);
   if (!found) return;
   BUCKET_NAMES.forEach((bucketName) => {
-    state.dca.plan[bucketName].items = bucketItems(bucketName).filter((item) => item.symbol !== node.symbol);
+    currentPlan()[bucketName].items = bucketItems(bucketName).filter((item) => item.symbol !== node.symbol);
   });
   found.item.amount = node.amount;
-  state.dca.plan[node.bucketName].items.push(found.item);
+  currentPlan()[node.bucketName].items.push(found.item);
   BUCKET_NAMES.forEach((bucketName) => setBucketItems(bucketName, bucketItems(bucketName)));
   schedulePlanSave();
 }
 
 function renderDca() {
-  if (!state.dca?.plan) return;
+  if (!currentPlan()) return;
   syncNodesToPlan();
   renderBoard();
 }
@@ -875,9 +1019,18 @@ function algorithmChoices() {
 }
 
 //: Bindings are pairs of algorithm and account. Signals and backtests are keyed by strategy,
-//: so two bindings on the same strategy share those views; the account only changes execution.
+//: but they are *computed* per account: a DCA plan is per account, so the account is not only
+//: an execution detail. ``accountForStrategy`` is the frontend half of the same rule the API
+//: applies in ``controls.account_for_strategy`` -- both pick the same binding, so the plan the
+//: board edits is the plan the signal view and the backtest read.
 function bindings() {
   return state.controls?.bindings || [];
+}
+
+function accountForStrategy(strategyKey) {
+  const candidates = bindings().filter((binding) => binding.strategy === strategyKey);
+  if (!candidates.length) return "";
+  return (candidates.find((binding) => binding.enabled) || candidates[0]).account_id || "";
 }
 
 function primaryDcaBindingId() {
@@ -1004,8 +1157,19 @@ async function loadBacktest(strategyKey, refresh, options = {}) {
   try {
     const payload = await api("/api/backtest", {
       method: "POST",
-      body: JSON.stringify({ strategy: strategyKey, period: BACKTEST_PERIOD, refresh, cache_only: cacheOnly }),
-      timeoutMs: 60000,
+      body: JSON.stringify({
+        strategy: strategyKey,
+        period: BACKTEST_PERIOD,
+        refresh,
+        cache_only: cacheOnly,
+        // Same account as the signal view and the Tune board: a DCA plan is per account, so
+        // replaying the default account backtested a plan nobody was editing.
+        account_id: accountForStrategy(strategyKey),
+      }),
+      // A fresh replay is the longest request the dashboard makes, and it grows with the
+      // window: the 24M option covers roughly five times the trade dates the 4M one does.
+      // The cache probe is a lookup and stays on the short timeout.
+      timeoutMs: cacheOnly ? 15000 : 300000,
     });
     if (isBacktestPayload(payload)) {
       state.backtests[strategyKey] = payload;
@@ -1064,13 +1228,10 @@ async function applyUniverseProposal() {
     state.universeProposal = null;
     state.signals = {};
     state.backtests = {};
-    const dcaPayload = await api(
-      `/api/dca?account_id=${encodeURIComponent(state.dca?.account_id || bindings()[0]?.account_id || "")}`,
-      { timeoutMs: 5000 },
-    );
-    state.dca = dcaPayload;
-    state.dca.plan.max_item_amount = MAX_AMOUNT;
-    renderDca();
+    // A plan is sanitised against the universe when it is read, so every cached config may
+    // now describe a different set of tradable symbols.
+    state.algorithmConfigs = {};
+    ensureAlgorithmConfig(currentRoute().id);
     render();
     // The universe change invalidates every algorithm's view, so reload the one on screen.
     loadSignals(currentRoute().id);
@@ -1092,9 +1253,12 @@ async function loadSignals(strategyKey) {
   state.signalLoading[strategyKey] = true;
   render();
   try {
-    state.signals[strategyKey] = await api(`/api/strategy-signals?strategy=${encodeURIComponent(strategyKey)}`, {
-      timeoutMs: 60000,
-    });
+    // Sent explicitly so the view is computed against the same account the Tune board writes.
+    const account = accountForStrategy(strategyKey);
+    state.signals[strategyKey] = await api(
+      `/api/strategy-signals?strategy=${encodeURIComponent(strategyKey)}&account_id=${encodeURIComponent(account)}`,
+      { timeoutMs: 60000 },
+    );
   } catch (error) {
     state.signals[strategyKey] = { error: error.message };
   } finally {
@@ -1103,86 +1267,69 @@ async function loadSignals(strategyKey) {
   }
 }
 
-function formatSignalDetail(strategyKey, row) {
-  if (strategyKey === "fast_momentum") {
-    const components = row.score_components || {};
-    const details = [
-      row.reason || "Signal pending",
-      `Macro ${signedNum(components.price_macro, 2)}`,
-      `Meso ${signedNum(components.price_meso, 2)}`,
-      `Micro ${signedNum(components.price_micro, 2)}`,
-      `Nano ${signedNum(components.price_nano, 2)}`,
-      `Pullback ${signedNum(components.pullback_uptrend, 2)}`,
-      `Sentiment ${signedNum(components.sentiment ?? row.sentiment_component ?? row.sentiment_score ?? row.social_score, 2)}`,
-    ];
-    return details.join(" / ");
-  }
-  // Each layer that could have stopped this symbol, in the order it is applied -- the point
-  // of the algorithm is that you can see which gate rejected a name, not just its score.
-  if (strategyKey === "dual_momentum") {
-    const details = [
-      row.reason || "Signal pending",
-      `Regime ${row.regime_risk_on ? "risk-on" : "risk-off"} (breadth ${percent(row.regime_breadth)})`,
-      `Eligible ${row.eligible ? "yes" : "no"}`,
-      row.rank ? `Rank ${row.rank}` : "Unranked",
-      `Timing ${row.timing ? "go" : "wait"} (${signedNum(row.momentum_change, 2)})`,
-      `Vol ${percent(row.annual_volatility)} / scale ${num(row.vol_scale, 2)}`,
-    ];
-    if (row.close) details.push(`Close ${money(row.close, 2)}`);
-    return details.join(" / ");
-  }
-  if (strategyKey === "spy_rotation") {
-    const details = [];
-    if (row.reason) details.push(row.reason);
-    if (row.spy_state) details.push(`SPY ${String(row.spy_state).toLowerCase()}`);
-    if (Math.abs(Number(row.pullback_score || 0)) >= 0.01) {
-      details.push(`Pullback ${Number(row.pullback_score) > 0 ? "+" : ""}${num(row.pullback_score, 2)}`);
-    }
-    if (Number(row.sentiment_records || 0) > 0) {
-      const providers = Array.isArray(row.sentiment_providers) && row.sentiment_providers.length
-        ? row.sentiment_providers.join(", ")
-        : "provider";
-      details.push(`Sentiment ${num(row.sentiment_component ?? row.sentiment_score ?? row.social_score, 2)} (${providers})`);
-    }
-    if (row.close) details.push(`Close ${money(row.close, 2)}`);
-    return details.join(" / ");
-  }
-  if (row.reason) {
-    const close = row.close ? ` / Close ${money(row.close, 2)}` : "";
-    return `${row.reason}${close}`;
-  }
-  if (DCA_ALGORITHM_KEYS.includes(strategyKey)) {
-    const budget = `${money(row.monthly_budget, 0)}/month`;
-    return `${budget} / Accrued ${money(row.accrued, 2)} of ${money(row.min_executable, 2)}`;
-  }
-  if (row.close) {
-    return `Close ${money(row.close, 2)}`;
-  }
-  return "Live feed pending";
+function signalRowColor(row) {
+  if (row.eligible !== undefined && !row.eligible) return "signalRow--rejected";
+  if (row.target_weight > 0) return "signalRow--held";
+  return "";
 }
 
-function signedNum(value, digits = 2) {
-  const parsed = Number(value || 0);
-  return `${parsed > 0 ? "+" : ""}${num(parsed, digits)}`;
-}
+function renderSignalTable(leaders) {
+  const hasScore = leaders.some((r) => r.score !== undefined && r.score !== null);
+  const hasRank = leaders.some((r) => r.rank !== undefined && r.rank !== null && r.rank !== 0);
+  const hasWeight = leaders.some((r) => r.target_weight !== undefined && r.target_weight !== null);
+  const hasMA = leaders.some((r) => r.moving_average > 0);
+  const hasVol5d = leaders.some((r) => r.vol_5d > 0);
+  const hasVolRatio = leaders.some((r) => r.volume_ratio > 0);
+  const hasBudget = leaders.some((r) => r.monthly_budget !== undefined && r.monthly_budget !== null);
 
-function formatSignalHeadline(strategyKey, row) {
-  if (DCA_ALGORITHM_KEYS.includes(strategyKey)) {
-    const parts = [row.side || row.signal || "Signal", row.reason || ""];
-    if (row.close) parts.push(`Close ${money(row.close, 2)}`);
-    if (row.warning) parts.push(row.warning);
-    return parts.filter(Boolean).join(" / ");
+  const extraHeaders = [];
+
+  if (hasScore) extraHeaders.push('<th class="num">Score</th>');
+  if (hasRank) extraHeaders.push('<th class="num">Rank</th>');
+  if (hasWeight) extraHeaders.push('<th class="num">Wt</th>');
+  if (hasMA) extraHeaders.push('<th class="num">100d MA</th>');
+  if (hasVol5d) extraHeaders.push('<th class="num">5d Vol</th>');
+  if (hasVolRatio) extraHeaders.push('<th class="num">Vol Ratio</th>');
+  if (hasBudget) {
+    extraHeaders.push('<th class="num">Budget</th>');
+    extraHeaders.push('<th class="num">Accrued</th>');
   }
-  if (strategyKey === "fast_momentum" || strategyKey === "spy_rotation" || strategyKey === "dual_momentum") {
-    const parts = [
-      row.side || row.signal || "Signal",
-      `Score ${num(row.score, 2)}`,
-      `Weight ${percent(row.target_weight)}`,
-    ];
-    if (row.close) parts.push(`Close ${money(row.close, 2)}`);
-    return parts.join(" / ");
-  }
-  return `${row.side || row.signal} / Score ${num(row.score, 2)} / Weight ${percent(row.target_weight)}`;
+
+  const rows = leaders.map((row) => {
+    const rowCls = signalRowColor(row);
+    const maCls = row.ma_distance > 0 ? "pos" : row.ma_distance < 0 ? "neg" : "";
+
+    let extra = "";
+    if (hasScore) extra += `<td class="num">${escapeHtml(num(row.score, 2))}</td>`;
+    if (hasRank) extra += `<td class="num">${row.rank ? escapeHtml(String(row.rank)) : "--"}</td>`;
+    if (hasWeight) extra += `<td class="num">${row.target_weight !== undefined && row.target_weight !== null ? escapeHtml(percent(row.target_weight)) : "--"}</td>`;
+    if (hasMA) extra += `<td class="num signalMa ${maCls}">${row.moving_average ? escapeHtml(money(row.moving_average, 2)) : "--"}</td>`;
+    if (hasVol5d) extra += `<td class="num">${escapeHtml(percent(row.vol_5d))}</td>`;
+    if (hasVolRatio) extra += `<td class="num">${row.volume_ratio ? escapeHtml(num(row.volume_ratio, 1)) + "x" : "--"}</td>`;
+    if (hasBudget) {
+      extra += `<td class="num">${row.monthly_budget !== undefined ? escapeHtml(money(row.monthly_budget, 0)) : "--"}</td>`;
+      extra += `<td class="num">${row.accrued !== undefined ? escapeHtml(money(row.accrued, 2)) : "--"}</td>`;
+    }
+
+    return `<tr class="${rowCls}">
+      <td><strong>${escapeHtml(row.symbol)}</strong></td>
+      <td><span class="side ${row.target_weight > 0 ? "is-buy" : row.side === "FLAT" ? "" : "is-sell"}">${escapeHtml(row.side || row.signal || "--")}</span></td>
+      <td class="num">${row.close ? escapeHtml(money(row.close, 2)) : "--"}</td>
+      ${extra}
+      <td class="signalStatus">${escapeHtml(row.reason || row.eligibility_reason || "—")}</td>
+    </tr>`;
+  }).join("");
+
+  return `<div class="tableWrap is-scroll"><table class="dataTable signalTable">
+    <thead><tr>
+      <th>Symbol</th>
+      <th>Side</th>
+      <th class="num">Price</th>
+      ${extraHeaders.join("")}
+      <th>Status</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>`;
 }
 
 function backtestStatusLabel(backtest, loading) {
@@ -1216,7 +1363,7 @@ function backtestOrderText(backtest) {
   const plannedText = planned > traded + 0.01
     ? ` / ${money(planned)} planned / ${money(skipped)} skipped`
     : "";
-  const tradingLabel = backtest.source === "dca" ? "filled" : "cumulative turnover";
+  const tradingLabel = "cumulative turnover";
   const peakText = cashCap
     ? ` / peak invested ${money(peakInvested)} of ${money(cashCap)} cap`
     : ` / peak invested ${money(peakInvested)}`;
@@ -1472,8 +1619,24 @@ function percent(value) {
 //: settles rather than one per tick.
 const PLAN_SAVE_DEBOUNCE_MS = 500;
 
+//: What the board says about its own saving. The board writes on every gesture and has no
+//: save button, so without this an edit that reached the server and one that failed silently
+//: looked exactly the same -- which is how a plan being written to the wrong account went
+//: unnoticed for as long as it did.
+function planSaveStatusText() {
+  if (state.planSaveStatus === "saving") return "Saving.";
+  return state.planSaveStatus ? `Saved ${state.planSaveStatus}` : "Saves automatically.";
+}
+
+function setPlanSaveStatus(status) {
+  state.planSaveStatus = status;
+  const node = $("#planSaveStatus");
+  if (node) node.textContent = planSaveStatusText();
+}
+
 function schedulePlanSave() {
   window.clearTimeout(schedulePlanSave.timer);
+  setPlanSaveStatus("saving");
   schedulePlanSave.timer = window.setTimeout(() => {
     // Saving swaps in the server's copy of the plan and re-renders the board, which would
     // yank it out from under a gesture that is still going. Wait for the hands to come off.
@@ -1486,29 +1649,28 @@ function schedulePlanSave() {
 }
 
 async function savePlan(quiet = true) {
-  if (!state.dca?.plan) return;
+  const strategyKey = planStrategyKey();
+  const entry = state.algorithmConfigs[strategyKey];
+  if (!entry?.config || !currentPlan()) return;
   syncNodesToPlan();
   try {
-    const [dcaPayload, controlsPayload] = await Promise.all([
-      api("/api/dca", {
-        method: "POST",
-        body: JSON.stringify({ plan: state.dca.plan, account_id: state.dca?.account_id || "" }),
-        timeoutMs: 5000,
-      }),
-      api("/api/controls", { method: "POST", body: JSON.stringify({ controls: state.controls }), timeoutMs: 5000 }),
-    ]);
-    state.dca = dcaPayload;
-    state.controls = controlsPayload.controls;
-    // The plan is an input to both DCA strategies, so their cached views are now stale.
-    // This used to clear "none", which was where the DCA view lived before it was selectable.
-    DCA_STRATEGY_KEYS.forEach((key) => {
-      delete state.backtests[key];
-      delete state.signals[key];
+    // The plan is part of this algorithm's config, so it saves through the same endpoint as
+    // every other knob -- there is no DCA-shaped write path any more.
+    const payload = await api("/api/algorithm-config", {
+      method: "POST",
+      body: JSON.stringify({ strategy: strategyKey, config: entry.config }),
+      timeoutMs: 5000,
     });
+    state.algorithmConfigs[strategyKey] = payload;
+    // Only this algorithm's views are stale: the plans are no longer shared.
+    delete state.backtests[strategyKey];
+    delete state.signals[strategyKey];
     renderDca();
+    setPlanSaveStatus(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
     if (!quiet) showToast("Saved");
   } catch (error) {
-    showToast(error.message);
+    setPlanSaveStatus("");
+    showToast(`Plan not saved: ${error.message}`);
   }
 }
 
@@ -1607,7 +1769,6 @@ function renderSidebar() {
   }
 
   renderAccountNav();
-  renderWatchlist();
   renderNavFooter();
 }
 
@@ -1648,108 +1809,6 @@ function renderAccountNav() {
   }).join("");
   // The sidebar is the only place an idle account's P/L shows, so it pulls its own numbers.
   rows.filter((account) => account.credentials_ready).forEach((account) => ensurePositions(account.id));
-}
-
-function renderWatchlist() {
-  const host = $("#watchlist");
-  if (!host) return;
-  const rows = state.watchlist?.rows || [];
-  if (!rows.length) {
-    host.innerHTML = `<li><span class="navEmpty">No tickers yet</span></li>`;
-    return;
-  }
-  host.innerHTML = rows.map((row) => `
-    <li>
-      <div class="watchRow" draggable="true" data-watch="${escapeHtml(row.symbol)}">
-        <span class="watchGrip" aria-hidden="true">⠿</span>
-        <span class="watchSymbol">${escapeHtml(row.symbol)}</span>
-        <span class="watchPrice">${row.price === null || row.price === undefined ? "--" : escapeHtml(money(row.price, 2))}</span>
-        <span class="watchChange ${(row.change || 0) >= 0 ? "gain" : "loss"}">${row.change === null || row.change === undefined ? "" : escapeHtml(percent(row.change))}</span>
-        <button class="watchRemove" type="button" data-remove-watch aria-label="Remove ${escapeHtml(row.symbol)}">&times;</button>
-      </div>
-    </li>`).join("");
-}
-
-function reorderWatchlist(fromSymbol, toSymbol) {
-  const current = [...(state.watchlist?.symbols || [])];
-  const from = current.indexOf(fromSymbol);
-  const to = current.indexOf(toSymbol);
-  if (from < 0 || to < 0 || from === to) return;
-  current.splice(to, 0, current.splice(from, 1)[0]);
-  // Paint the new order immediately; the save reconciles it.
-  state.watchlist = { ...state.watchlist, symbols: current, rows: current.map((symbol) =>
-    (state.watchlist.rows || []).find((row) => row.symbol === symbol) || { symbol, price: null, change: null }) };
-  renderWatchlist();
-  saveWatchlist(current);
-}
-
-function wireWatchlistDrag() {
-  const host = $("#watchlist");
-  if (!host) return;
-  host.addEventListener("dragstart", (event) => {
-    const row = event.target.closest("[data-watch]");
-    if (!row) return;
-    state.watchDrag = row.dataset.watch;
-    row.classList.add("is-dragging");
-    event.dataTransfer.effectAllowed = "move";
-    // Firefox refuses to start a drag without data on the transfer.
-    event.dataTransfer.setData("text/plain", row.dataset.watch);
-  });
-  host.addEventListener("dragover", (event) => {
-    if (!state.watchDrag) return;
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "move";
-  });
-  host.addEventListener("drop", (event) => {
-    const row = event.target.closest("[data-watch]");
-    if (!row || !state.watchDrag) return;
-    event.preventDefault();
-    reorderWatchlist(state.watchDrag, row.dataset.watch);
-    state.watchDrag = null;
-  });
-  host.addEventListener("dragend", () => {
-    state.watchDrag = null;
-    host.querySelectorAll(".is-dragging").forEach((node) => node.classList.remove("is-dragging"));
-  });
-}
-
-async function loadWatchlist() {
-  try {
-    state.watchlist = await api("/api/watchlist", { timeoutMs: 12000 });
-  } catch (error) {
-    state.watchlist = { rows: [] };
-  }
-  renderWatchlist();
-}
-
-function normalizeWatchlistSymbol(symbol) {
-  return String(symbol ?? "").trim().toUpperCase().slice(0, 10);
-}
-
-async function saveWatchlist(symbols) {
-  const normalized = [...new Set((Array.isArray(symbols) ? symbols : []).map(normalizeWatchlistSymbol).filter(Boolean))];
-  try {
-    state.watchlist = await api("/api/watchlist", {
-      method: "POST",
-      body: JSON.stringify({ symbols: normalized }),
-      timeoutMs: 12000,
-    });
-  } catch (error) {
-    showToast(error.message);
-  }
-  renderWatchlist();
-}
-
-function addWatchTicker() {
-  const symbol = window.prompt("Ticker to watch");
-  if (!symbol) return;
-  const current = state.watchlist?.symbols || [];
-  saveWatchlist([...current, symbol]);
-}
-
-function removeWatchTicker(symbol) {
-  const current = state.watchlist?.symbols || [];
-  saveWatchlist(current.filter((entry) => entry !== symbol));
 }
 
 function renderNavFooter() {
@@ -1846,18 +1905,36 @@ function tabBar(strategyKey, activeTab) {
   </nav>`;
 }
 
-function render() {
+//: A repaint that was deferred because a control had focus, and still owes the screen an
+//: update. Dropping it outright is what left a freshly selected backtest period showing
+//: nothing: the cached payload arrived, went into state, and no paint ever followed.
+let renderDeferred = false;
+
+function render(options = {}) {
   const route = currentRoute();
   renderSidebar();
   const content = $("#content");
   if (!content) return;
   // Rebuilding the body under an open <select> closes it mid-click, and under a focused
-  // input it discards what is being typed. While the user is holding a control, leave the
-  // body alone -- the next state change repaints it.
+  // input it discards what is being typed. While the user is holding a control, defer --
+  // but remember that a paint is owed, and flush it when focus leaves.
+  //
+  // ``force`` is for the handler of that control's own change event: a change means the
+  // interaction finished, so there is nothing left to disturb.
   const active = document.activeElement;
-  if (active && active.matches?.("select, input, textarea") && content.contains?.(active)) return;
+  if (!options.force && active && active.matches?.("select, input, textarea") && content.contains?.(active)) {
+    renderDeferred = true;
+    return;
+  }
+  renderDeferred = false;
   if (route.page === "account") renderAccountPage(content, route.id);
   else renderAlgorithmPage(content, route.id, route.tab);
+  // Both entry inputs live outside #content, so a route change rebuilds the page around them
+  // and would leave one floating over a board that is no longer there.
+  if (!$("#bubbleBoard")) {
+    hideAmountEntry();
+    hideSymbolEntry();
+  }
   closeNavOnMobile();
 }
 
@@ -1946,6 +2023,12 @@ function renderAccountPage(content, accountId) {
             : `${escapeHtml(money(positions.day_pl, 2))} (${escapeHtml(percent(positions.day_pl_percent))})`}</strong></div>
         <div class="metric"><span>Open P/L</span><strong class="${(positions?.total_pl || 0) >= 0 ? "gain" : "loss"}">${
           positions ? escapeHtml(money(positions.total_pl, 2)) : "--"}</strong></div>
+        <div class="metric"><span>Dividends (1y)</span><strong class="${(positions?.dividend_pl || 0) >= 0 ? "gain" : "loss"}">${
+          // Reported beside Open P/L, never inside it. Price appreciation and income are
+          // different things, and a T-bill sleeve earns almost entirely through this one.
+          positions?.dividend_pl === null || positions?.dividend_pl === undefined
+            ? "--"
+            : escapeHtml(money(positions.dividend_pl, 2))}</strong></div>
       </div>
       ${!account.credentials_ready
         ? `<p class="cardHint">Credentials missing: set <code>${escapeHtml(account.missing_env.join("</code> and <code>"))}</code> in <code>.env</code> and restart. It cannot trade until then.</p>`
@@ -1958,14 +2041,23 @@ function renderAccountPage(content, accountId) {
       ${deployed.length ? `<div class="chipRow">${deployed.map((binding) => `
         <a class="chip is-link" href="#/algo/${escapeHtml(binding.strategy)}/${DEFAULT_TAB}">${escapeHtml(strategyByKey(binding.strategy).name)}</a>`).join("")}</div>` : ""}
     </section>
-    <div class="cardGrid">
-      <section class="card">
-        <div class="cardHead">
-          <h2>Positions</h2>
-          <span class="cardHint">${positions?.rows?.length ? `${positions.rows.length} open` : ""}</span>
-        </div>
-        ${accountPositionsTable(positions)}
-      </section>
+    <div class="accountLayout">
+      <div class="accountStack">
+        <section class="card">
+          <div class="cardHead">
+            <h2>Positions</h2>
+            <span class="cardHint">${positions?.rows?.length ? `${positions.rows.length} open` : ""}</span>
+          </div>
+          ${accountPositionsTable(positions)}
+        </section>
+        <section class="card">
+          <div class="cardHead">
+            <h2>Dividends received</h2>
+            <span class="cardHint">${positions?.dividend_rows?.length ? `${positions.dividend_rows.length} shown` : ""}</span>
+          </div>
+          ${accountDividendsTable(positions)}
+        </section>
+      </div>
       <section class="card">
         <div class="cardHead">
           <h2>Recent orders</h2>
@@ -2001,6 +2093,33 @@ function accountPositionsTable(positions) {
               <td class="num">${escapeHtml(money(row.market_value, 2))}</td>
               <td class="num ${row.unrealized_pl >= 0 ? "gain" : "loss"}">${escapeHtml(money(row.unrealized_pl, 2))}
                 <span class="tableNote">${escapeHtml(percent(row.unrealized_plpc))}</span></td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function accountDividendsTable(positions) {
+  if (positions?.error) return `<p class="emptyState">${escapeHtml(positions.error)}</p>`;
+  if (!positions) return `<p class="emptyState">Loading dividends.</p>`;
+  if (!positions.dividend_rows?.length) {
+    // An account that has simply not been paid yet is not an error, and neither is a broker
+    // that cannot report income -- say so plainly rather than showing a blank card.
+    return `<p class="emptyState">No dividends received in the last year.</p>`;
+  }
+  return `
+    <div class="tableWrap is-scroll">
+      <table class="dataTable">
+        <thead>
+          <tr><th>Date</th><th>Symbol</th><th class="num">Amount</th></tr>
+        </thead>
+        <tbody>
+          ${positions.dividend_rows.map((row) => `
+            <tr>
+              <td>${escapeHtml(row.date || "")}</td>
+              <td><strong>${escapeHtml(row.symbol || "Cash")}</strong>${
+                row.description ? `<span class="tableNote">${escapeHtml(row.description)}</span>` : ""}</td>
+              <td class="num ${row.amount >= 0 ? "gain" : "loss"}">${escapeHtml(money(row.amount, 2))}</td>
             </tr>`).join("")}
         </tbody>
       </table>
@@ -2056,48 +2175,82 @@ function explainerCard(strategy) {
     </section>`;
 }
 
+// The two halves of an algorithm's tuning are separate things and both belong here. DCA's
+// budgets live in its plan (the bubble board, per account); everything else an algorithm
+// exposes lives in config/algorithms.yaml (the parameter form). DCA used to get only the
+// board, which left Bursty DCA's regime gate, RSI and value-averaging knobs -- all of them
+// present in config and served by /api/algorithm-config -- with no way to edit them at all.
 function renderTuneTab(body, strategy) {
   const isDca = DCA_ALGORITHM_KEYS.includes(strategy.key);
   ensureAlgorithmConfig(strategy.key);
   body.innerHTML = `
     ${explainerCard(strategy)}
+    ${isDca ? `
     <section class="card tuneCard">
       <div class="cardHead">
-        <h2>Configuration</h2>
+        <h2>Budgets</h2>
         <span class="cardHint" id="tuneHint"></span>
       </div>
+      <div class="tuneBody" id="dcaBoard"></div>
+    </section>` : ""}
+    <section class="card tuneCard">
+      <div class="cardHead">
+        <h2>${isDca ? "Parameters" : "Configuration"}</h2>
+        <span class="cardHint" id="configHint"></span>
+      </div>
       <div class="tuneBody" id="tuneBody"></div>
-      ${isDca ? "" : `<div class="cardActions"><button class="ctl" type="button" id="saveConfigButton">Save changes</button></div>`}
+      <div class="cardActions" id="configActions" hidden><button class="ctl" type="button" id="saveConfigButton">Save changes</button></div>
     </section>`;
-  const host = $("#tuneBody");
-  if (isDca) renderDcaTuner(host, strategy);
-  else renderConfigForm(host, strategy);
+  if (isDca) renderDcaTuner($("#dcaBoard"), strategy);
+  renderConfigForm($("#tuneBody"), strategy);
 }
 
 function renderDcaTuner(host, strategy) {
   const hint = $("#tuneHint");
-  const plan = state.algorithmConfigs[strategy.key]?.explainer?.parameters?.__plan__;
-  if (hint) hint.textContent = `Dollars per month, per symbol · ${accountLabel(state.dca?.account_id)}`;
+  const entry = state.algorithmConfigs[strategy.key];
+  const plan = entry?.explainer?.parameters?.plan;
+  // The board edits this algorithm's own plan, so which page you are on decides what you are
+  // editing. It used to edit the first DCA binding's account whichever page you were on.
+  if (state.planStrategy !== strategy.key) {
+    // A different algorithm's board: drop the old bubbles rather than animating them into
+    // place as though they were this plan's.
+    state.nodes = [];
+    state.selected = null;
+  }
+  state.planStrategy = strategy.key;
+  if (!entry) {
+    host.innerHTML = `<p class="emptyState">Loading budgets.</p>`;
+    return;
+  }
+  if (hint) hint.textContent = `Dollars per month, per symbol · algorithms.${entry.config_key || strategy.key}.plan`;
   host.innerHTML = `<svg class="bubbleBoard" id="bubbleBoard" role="img"
     aria-label="Interactive buy and sell budget bubbles"></svg>
-    <p class="cardHint">${escapeHtml(plan?.effect || "")} Scroll a bubble to change its budget, drag between buckets, double-click to add. Saves automatically.</p>`;
+    <p class="cardHint">${escapeHtml(plan?.effect || "")} Scroll a bubble to change its budget, or select one and type the amount. Drag between buckets, double-click to add.
+      <span id="planSaveStatus" class="saveStatus">${escapeHtml(planSaveStatusText())}</span></p>`;
   renderDca();
 }
 
 function renderConfigForm(host, strategy) {
   const entry = state.algorithmConfigs[strategy.key];
-  const hint = $("#tuneHint");
+  const hint = $("#configHint");
   if (!entry) {
     host.innerHTML = `<p class="emptyState">Loading configuration.</p>`;
     ensureAlgorithmConfig(strategy.key);
     return;
   }
   if (hint) hint.textContent = `config/algorithms.yaml · ${entry.config_key || strategy.key}`;
-  const fields = Object.entries(entry.config || {});
+  // The plan has its own editor on this page, so it is not also offered as a raw JSON box.
+  // saveCurrentConfig merges over the loaded config rather than replacing it, so leaving it
+  // out of the form does not drop it on save.
+  const fields = Object.entries(entry.config || {}).filter(([key]) => !isPlanField(strategy.key, key));
   const docs = entry.explainer?.parameters || {};
   host.innerHTML = fields.length
     ? `<div class="configForm">${fields.map(([key, value]) => renderConfigField(key, value, docs[key])).join("")}</div>`
     : `<p class="emptyState">This algorithm has no tunable parameters.</p>`;
+  // Plain DCA has no parameters of its own -- its config is the plan on the board above -- so
+  // it would otherwise offer a button that saves an empty object over its config section.
+  const actions = $("#configActions");
+  if (actions) actions.hidden = !fields.length;
 }
 
 function renderBacktestTab(body, strategy) {
@@ -2173,6 +2326,7 @@ function renderOverviewTab(body, strategy, deployment) {
 function renderSignalsTab(body, strategy) {
   const payload = state.signals[strategy.key];
   const loading = Boolean(state.signalLoading[strategy.key]);
+  // Already ordered strongest-first by ``signal_view_from_decision``.
   const leaders = payload?.leaders || [];
   body.innerHTML = `
     <section class="card">
@@ -2194,12 +2348,7 @@ function renderSignalsTab(body, strategy) {
             : payload?.error
               ? `<p class="emptyState">${escapeHtml(payload.error)}</p>`
               : leaders.length
-                ? leaders.map((row) => `
-                  <article>
-                    <strong>${escapeHtml(row.symbol)}</strong>
-                    <span>${escapeHtml(formatSignalHeadline(strategy.key, row))}</span>
-                    <span>${escapeHtml(formatSignalDetail(strategy.key, row))}</span>
-                  </article>`).join("")
+                ? renderSignalTable(leaders)
                 : renderSignalFallbackRows(strategy, payload, (strategy.signals || []).slice(0, 5))}
       </div>
     </section>`;
@@ -2327,6 +2476,12 @@ async function loadAccounts() {
   }
 }
 
+//: The plan is config, but it has the bubble board rather than a form field. Everything that
+//: walks the config form has to know to leave it alone.
+function isPlanField(strategyKey, key) {
+  return key === "plan" && DCA_ALGORITHM_KEYS.includes(strategyKey);
+}
+
 async function saveCurrentConfig(strategyKey) {
   const host = $("#tuneBody");
   if (!host) return;
@@ -2338,9 +2493,12 @@ async function saveCurrentConfig(strategyKey) {
     return;
   }
   try {
+    // Merged over the loaded config, not sent in its place: the server replaces the whole
+    // section, so posting only the rendered fields would delete the plan the board edits.
+    const merged = { ...(state.algorithmConfigs[strategyKey]?.config || {}), ...values };
     state.algorithmConfigs[strategyKey] = await api("/api/algorithm-config", {
       method: "POST",
-      body: JSON.stringify({ strategy: strategyKey, config: values }),
+      body: JSON.stringify({ strategy: strategyKey, config: merged }),
       timeoutMs: 8000,
     });
     // Tuning feeds the backtest cache key, so the cached curve no longer describes this config.
@@ -2471,12 +2629,6 @@ function wireEvents() {
     const open = sidebar?.classList.toggle("is-open");
     $("#navToggle")?.setAttribute("aria-expanded", String(Boolean(open)));
   });
-  $("#addWatchButton")?.addEventListener("click", addWatchTicker);
-  wireWatchlistDrag();
-  $("#watchlist")?.addEventListener("click", (event) => {
-    const row = event.target.closest("[data-watch]");
-    if (row && event.target.closest("[data-remove-watch]")) removeWatchTicker(row.dataset.watch);
-  });
 
   // Delegated: page bodies are replaced wholesale on every render.
   $("#content")?.addEventListener("click", (event) => {
@@ -2517,9 +2669,21 @@ function wireEvents() {
     }
     if (event.target.id === "backtestPeriodSelect") {
       configureBacktestPeriod(event.target.value);
-      render();
+      // Forced: the select still holds focus after its own change event, so an ordinary
+      // render would defer, and the cached payload for the newly chosen window would sit in
+      // state unpainted until something else moved focus.
+      render({ force: true });
       loadBacktest(currentRoute().id, false, { cacheOnly: true });
     }
+  });
+
+  // Whatever was deferred while a control had focus still owes the screen a paint. The
+  // timeout lets focus settle, since focusout fires before the new activeElement is set.
+  $("#content")?.addEventListener("focusout", () => {
+    if (!renderDeferred) return;
+    window.setTimeout(() => {
+      if (renderDeferred) render();
+    }, 0);
   });
 
   $("#navFooter")?.addEventListener("click", (event) => {
@@ -2537,9 +2701,35 @@ function wireEvents() {
   });
   $("#symbolEntry")?.addEventListener("blur", () => window.setTimeout(commitSymbolEntry, 80));
 
+  $("#amountEntry")?.addEventListener("keydown", (event) => {
+    // Kept off the window handler below, which ignores events from inputs: while this is open
+    // it owns the keyboard, so Escape must abandon rather than fall through to anything else.
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commitAmountEntry();
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelAmountEntry();
+    }
+  });
+  $("#amountEntry")?.addEventListener("input", previewAmountEntry);
+  $("#amountEntry")?.addEventListener("blur", () => window.setTimeout(commitAmountEntry, 80));
+
   window.addEventListener("keydown", (event) => {
     const tag = event.target?.tagName?.toLowerCase();
     if (tag === "input" || tag === "textarea" || event.target?.isContentEditable) return;
+    // Type on a selected bubble to set its budget outright. A digit starts the edit and is
+    // carried into the field, because focusing an input mid-keydown does not deliver the
+    // keystroke that caused it; Enter opens the field on the current value instead.
+    if (state.selected && !state.draft && (event.key === "Enter" || /^[0-9]$/.test(event.key))) {
+      const node = selectedDcaNode();
+      if (node) {
+        event.preventDefault();
+        showAmountEntry(node, event.key === "Enter" ? "" : event.key);
+        return;
+      }
+    }
     if ((event.key === "Delete" || event.key === "Backspace") && state.selected) {
       const found = BUCKET_NAMES.flatMap((bucketName) =>
         bucketItems(bucketName).map((item) => ({ bucketName, item })),
@@ -2568,7 +2758,6 @@ function wireEvents() {
 async function init() {
   wireEvents();
   loadSchwabAuth();
-  loadWatchlist();
   render();
   try {
     const [statusPayload, universePayload, controlsPayload] = await Promise.all([
@@ -2582,10 +2771,6 @@ async function init() {
     state.controls = controlsPayload.controls || state.controls;
     state.bot = controlsPayload.bot || statusPayload.bot || null;
     await loadAccounts();
-    // Plans are per account, so the plan to load is only knowable once controls are in.
-    const dcaAccount = bindingById(primaryDcaBindingId())?.account_id || "";
-    state.dca = await api(`/api/dca?account_id=${encodeURIComponent(dcaAccount)}`, { timeoutMs: 5000 });
-    state.dca.plan.max_item_amount = MAX_AMOUNT;
   } catch (error) {
     showToast(`Could not load dashboard: ${error.message}`);
   }

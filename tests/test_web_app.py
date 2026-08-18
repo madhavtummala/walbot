@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.api.web_app import controls_payload, dca_payload, status_payload, universe_payload
+from src.api.web_app import controls_payload, status_payload, universe_payload
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -23,19 +23,10 @@ def test_universe_payload_returns_configured_rows() -> None:
     assert {"symbol", "name", "bucket", "tradable", "enabled"} <= set(payload["rows"][0])
 
 
-def test_dca_payload_returns_plan_and_preview_shape() -> None:
-    payload = dca_payload()
-
-    assert "plan" in payload
-    assert "available" in payload
-    assert "preview" in payload
-    assert {"max_item_amount", "buy", "sell"} <= set(payload["plan"])
-
-
 def test_controls_payload_returns_switches() -> None:
     payload = controls_payload()
 
-    assert {"algorithm_enabled", "options_trading_enabled"} <= set(payload["controls"])
+    assert {"algorithm_enabled"} <= set(payload["controls"])
 
 
 def _assets():
@@ -49,7 +40,7 @@ def _assets():
 def test_shell_is_a_sidebar_beside_scrolling_content() -> None:
     app_js, app_css, index_html = _assets()
 
-    for element in ('id="sidebar"', 'id="algorithmNav"', 'id="watchlist"', 'id="content"', 'id="navToggle"'):
+    for element in ('id="sidebar"', 'id="algorithmNav"', 'id="content"', 'id="navToggle"'):
         assert element in index_html, element
     assert "function renderSidebar" in app_js
     assert ".shell {" in app_css
@@ -113,18 +104,18 @@ def test_controls_are_not_stretched_by_the_base_button_rule() -> None:
     assert "grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));" in app_css
 
 
-def test_sidebar_carries_a_configurable_watchlist() -> None:
+def test_sidebar_no_longer_carries_a_watchlist() -> None:
     app_js, app_css, index_html = _assets()
 
-    assert 'id="watchlist"' in index_html
-    assert 'id="addWatchButton"' in index_html
+    assert 'id="watchlist"' not in index_html
+    assert 'id="addWatchButton"' not in index_html
     assert 'id="targetNav"' not in index_html
     assert 'id="globalStats"' not in index_html
-    assert "function renderWatchlist" in app_js
-    assert "function addWatchTicker" in app_js
-    assert "function removeWatchTicker" in app_js
-    assert "/api/watchlist" in app_js
-    assert ".watchRow {" in app_css
+    assert "function renderWatchlist" not in app_js
+    assert "function addWatchTicker" not in app_js
+    assert "function removeWatchTicker" not in app_js
+    assert "/api/watchlist" not in app_js
+    assert ".watchRow {" not in app_css
 
 
 def test_watchlist_round_trips_through_the_state_store() -> None:
@@ -170,14 +161,15 @@ def test_broker_holdings_and_orders_live_on_the_account_page() -> None:
 
 
 def test_every_unbounded_list_panel_scrolls_inside_its_card() -> None:
-    """Positions, broker orders and the bot's own journal all grow without bound."""
+    """Positions, broker orders, received dividends and the bot's own journal all grow
+    without bound."""
     app_js, app_css, _ = _assets()
 
-    assert app_js.count('class="tableWrap is-scroll"') == 3
+    assert app_js.count('class="tableWrap is-scroll"') == 5
     assert ".tableWrap.is-scroll {" in app_css
     # One shared cap, so signals and the tables cut off at the same height.
     assert "--panel-scroll: min(46vh, 420px);" in app_css
-    assert app_css.count("max-height: var(--panel-scroll);") == 2
+    assert app_css.count("max-height: var(--panel-scroll);") == 1
     # A scrolling table keeps its header visible.
     assert ".tableWrap.is-scroll thead th {" in app_css
 
@@ -261,32 +253,162 @@ def test_backtest_period_is_selectable() -> None:
     assert 'id="backtestPeriodSelect"' in app_js
     # Switching period clears cached curves so the chart cannot show the wrong window.
     assert "configureBacktestPeriod(event.target.value);" in app_js
+    # A <select> keeps focus after its own change event, and render() defers while a control
+    # is focused -- so without forcing, the cached payload for the newly chosen window landed
+    # in state and was never painted. It only appeared once something else moved focus, which
+    # made "Run backtest" look like the only way to change period.
+    assert "render({ force: true });" in app_js
 
 
-def test_watchlist_can_be_reordered_by_drag() -> None:
+def test_a_deferred_repaint_is_not_silently_dropped() -> None:
+    """render() skips while a control has focus; the skipped paint still has to happen.
+
+    Otherwise any state that arrives during an interaction -- a cached backtest, a background
+    poll -- is applied to state and never reaches the screen.
+    """
+    app_js, _, _ = _assets()
+
+    assert "renderDeferred = true;" in app_js
+    assert 'addEventListener("focusout"' in app_js
+
+
+def test_watchlist_drag_reorder_left_with_the_watchlist() -> None:
     app_js, app_css, _ = _assets()
 
-    assert "function reorderWatchlist" in app_js
-    assert "function wireWatchlistDrag" in app_js
-    assert 'draggable="true"' in app_js
-    # Firefox will not start a drag unless data is set on the transfer.
-    assert 'event.dataTransfer.setData("text/plain"' in app_js
-    assert ".watchRow.is-dragging {" in app_css
+    assert "function reorderWatchlist" not in app_js
+    assert "function wireWatchlistDrag" not in app_js
+    assert ".watchRow.is-dragging {" not in app_css
 
 
 def test_tune_tab_renders_the_right_editor_per_algorithm() -> None:
     app_js, _, _ = _assets()
 
-    # DCA's config is its budgets, so it gets the bubble board; everything else gets a form.
+    # DCA's budgets are its plan and get the bubble board, but they are not all of its config:
+    # Bursty DCA's regime gate, RSI and value-averaging knobs live in config/algorithms.yaml
+    # like every other algorithm's. DCA used to get the board *instead of* the parameter form,
+    # which left those with no editor at all. It now gets both; everything else gets the form.
     assert "function renderDcaTuner" in app_js
     assert "function renderConfigForm" in app_js
-    assert "if (isDca) renderDcaTuner(host, strategy);" in app_js
-    assert "else renderConfigForm(host, strategy);" in app_js
+    assert 'if (isDca) renderDcaTuner($("#dcaBoard"), strategy);' in app_js
+    assert 'renderConfigForm($("#tuneBody"), strategy);' in app_js
+    # The save button is no longer suppressed for DCA, because DCA now has a form to save.
+    assert 'isDca ? "" : `<div class="cardActions">' not in app_js
     # Typed widgets, not a raw JSON box.
     assert "function configFieldKind" in app_js
     assert "function collectConfigValues" in app_js
     # Saving tuning invalidates the cached backtest, which is keyed on that tuning.
     assert "delete state.backtests[strategyKey];" in app_js
+
+
+def test_the_board_edits_the_algorithms_own_plan() -> None:
+    """DCA is a normal algorithm with a custom editor, nothing more.
+
+    The plan used to be a per-account section of its own, which had two consequences: ``dca``
+    and ``bursty_dca`` shared one budget because the key had no room for the algorithm, and
+    the board could be editing one account's plan while the views rendered another's. It is
+    ordinary tuning now, so the page you are on decides what you are editing.
+    """
+    app_js, _, _ = _assets()
+
+    assert "function planStrategyKey" in app_js
+    assert "function currentPlan" in app_js
+    assert "state.planStrategy = strategy.key;" in app_js
+    # No DCA-shaped read or write path survives.
+    assert "/api/dca" not in app_js
+    assert "state.dca" not in app_js
+    # The plan saves through the same endpoint as every other knob.
+    save = app_js[app_js.index("async function savePlan"):app_js.index("function shadeColor")]
+    assert '"/api/algorithm-config"' in save
+    # It has its own editor, so it is not also rendered as a raw JSON field -- and the form's
+    # save merges over the loaded config so leaving it out cannot delete it.
+    assert "function isPlanField" in app_js
+    assert "const merged = { ...(state.algorithmConfigs[strategyKey]?.config || {}), ...values };" in app_js
+
+
+def test_one_algorithms_bubbles_are_never_written_into_anothers_plan() -> None:
+    """``renderDca`` syncs the nodes into the plan before it rebuilds them from it.
+
+    With one plan per account that was harmless, because the board only ever showed one. Now
+    that each algorithm has its own, navigating from Bursty DCA to DCA synced the bubbles
+    still on screen -- Bursty's budgets -- into DCA's freshly loaded plan, and the next save
+    would have persisted them. The nodes record which plan built them so the sync can refuse.
+    """
+    app_js, _, _ = _assets()
+
+    assert "state.nodesStrategy = planStrategyKey();" in app_js
+    sync = app_js[app_js.index("function syncNodesToPlan"):app_js.index("function renderBoard")]
+    assert "if (state.nodesStrategy !== planStrategyKey()) return;" in sync
+    # And the board starts clean rather than animating the previous algorithm's bubbles.
+    tuner = app_js[app_js.index("function renderDcaTuner"):app_js.index("function renderConfigForm")]
+    assert "state.nodes = [];" in tuner
+
+
+def test_signals_and_backtests_still_name_the_account_they_ran_for() -> None:
+    """Accrual state stays per (algorithm, account), and the broker is per account, so a view
+    still has to say which deployment it describes even though the plan no longer varies."""
+    app_js, _, _ = _assets()
+
+    assert "function accountForStrategy" in app_js
+    assert "account_id=${encodeURIComponent(account)}" in app_js
+    assert "account_id: accountForStrategy(strategyKey)," in app_js
+
+
+def test_a_budget_can_be_typed_as_well_as_scrolled() -> None:
+    """Scrolling is quick but imprecise: it only ever lands on a multiple of WHEEL_STEP, and
+    reaching $1,600 from $25 is 63 notches. Selecting a bubble and typing sets it outright."""
+    app_js, app_css, index_html = _assets()
+
+    assert 'id="amountEntry"' in index_html
+    assert "function showAmountEntry" in app_js
+    assert "function commitAmountEntry" in app_js
+    # A digit starts the edit and is carried in, because focusing an input mid-keydown does
+    # not deliver the keystroke that caused it.
+    assert 'event.key === "Enter" || /^[0-9]$/.test(event.key)' in app_js
+    # A typed number means what it says, so it is not snapped to the scroll grid.
+    assert "function setNodeAmount" in app_js
+    assert "#amountEntry {" in app_css
+
+
+def test_typing_a_budget_shows_it_in_the_bubble_not_in_a_box_over_it() -> None:
+    """Same shape as naming a new bubble: the input is invisible but for its caret, and the
+    bubble draws what is being typed. A visible box would show the same number twice, and
+    would cover the bubble it belongs to.
+    """
+    app_js, app_css, _ = _assets()
+
+    entry_css = app_css[app_css.index("#amountEntry {"):app_css.index("#amountEntry.show {")]
+    assert "color: transparent;" in entry_css
+    assert "background: transparent;" in entry_css
+    assert "border: 0;" in entry_css
+    assert "caret-color: transparent;" in entry_css
+    # Only the caret becomes visible, and it sits on the amount label rather than the centre.
+    assert "caret-color: var(--ink);" in app_css[app_css.index("#amountEntry.show {"):]
+    assert "const AMOUNT_LABEL_DY = 14;" in app_js
+    assert "(node.y + AMOUNT_LABEL_DY) * scaleY" in app_js
+    # Each keystroke goes through the same write-through path scrolling uses, so the label,
+    # the radius and the bucket total all follow the typing.
+    assert "function previewAmountEntry" in app_js
+    assert '$("#amountEntry")?.addEventListener("input", previewAmountEntry);' in app_js
+    preview = app_js[app_js.index("function previewAmountEntry"):app_js.index("function hideAmountEntry")]
+    assert "setNodeAmount(node, Number(digits || 0));" in preview
+    # Because the preview is already in the plan, Escape has to be an edit of its own.
+    assert "function cancelAmountEntry" in app_js
+    assert "setNodeAmount(node, edit.originalAmount);" in app_js
+
+
+def test_the_bubble_board_reports_whether_an_edit_was_saved() -> None:
+    """The board has no save button -- it writes on every gesture -- so silence is ambiguous.
+
+    A save that reached the server and one that failed looked identical, which is part of why
+    a plan being written to the wrong account went unnoticed.
+    """
+    app_js, app_css, _ = _assets()
+
+    assert "function planSaveStatusText" in app_js
+    assert "function setPlanSaveStatus" in app_js
+    assert 'setPlanSaveStatus("saving");' in app_js
+    assert 'id="planSaveStatus"' in app_js
+    assert ".saveStatus {" in app_css
 
 
 def test_secrets_never_travel_through_the_accounts_api() -> None:
@@ -327,7 +449,7 @@ def test_frontend_keeps_the_configured_backtest_period_and_chart() -> None:
     assert "chart-crosshair" in app_js
     assert "backtestPositions(row.positions)" in app_js
     assert "renderUniverseProposalRows" in app_js
-    assert "app.js?v=20260813-sidebar" in index_html
+    assert "app.js?v=20260816-account-layout" in index_html
 
 
 def test_options_and_carousel_stay_gone() -> None:

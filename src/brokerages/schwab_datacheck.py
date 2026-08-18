@@ -5,7 +5,7 @@ Answers the two questions that block the switch:
 1. Are Schwab's daily closes dividend-adjusted? Alpaca's are (Adjustment.ALL), which is why
    SGOV shows its ~3.8% yield instead of a flat sawtooth. If Schwab returns raw closes,
    switching the EOD provider would silently delete every dividend from every backtest.
-2. How far back does 15-minute intraday actually go? yfinance caps at 60 days, which is what
+2. How far back does minute-level intraday actually go? yfinance caps at 60 days, which is what
    limits the backtest windows today. If Schwab reaches further, that is the real prize.
 
 Run it where the Schwab refresh token already lives, so only one machine ever touches the
@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
-from src.connectors.service import ProviderUnavailable, fetch_schwab_eod_bars, fetch_schwab_intraday_bars
+from src.connectors import ProviderUnavailable, fetch_schwab_eod_bars, fetch_schwab_intraday_bars
 from src.core.config import get_config
 from src.data import fetch_daily_bars
 
@@ -38,7 +38,7 @@ def check_dividend_adjustment(config) -> None:
     schwab = fetch_schwab_eod_bars(DIVIDEND_PAYERS, config, lookback_bars=260, force_refresh=True)
     alpaca = fetch_daily_bars(
         DIVIDEND_PAYERS, lookback_days=260, ma_days=0, extra_buffer_days=5,
-        data_feed=getattr(config, "alpaca_data_feed", "iex"), include_latest=True, config=config,
+        include_latest=True, config=config,
     )
     print(f"{'sym':<6}{'schwab':>10}{'alpaca':>10}{'gap':>9}   verdict")
     for symbol in DIVIDEND_PAYERS:
@@ -53,25 +53,26 @@ def check_dividend_adjustment(config) -> None:
 
 
 def check_intraday_depth(config) -> None:
-    print("\n=== 2. intraday depth at 15m (yfinance caps at ~60 days)")
+    print("\n=== 2. intraday depth at 5m (yfinance caps at ~60 days, and at 15m)")
     for symbol in INTRADAY_PROBES:
-        for requested in (1600, 5000, 12000):
+        # Roughly 60, 190, and 460 sessions, stated the way algorithms state horizons.
+        for requested in (24000, 75000, 180000):
             try:
                 bars = fetch_schwab_intraday_bars(
-                    [symbol], config, lookback_bars=requested, bar_minutes=15,
-                    start_date=datetime.now(timezone.utc) - timedelta(days=math.ceil(requested / 26) + 10),
+                    [symbol], config, lookback_minutes=requested, bar_minutes=5,
+                    start_date=datetime.now(timezone.utc) - timedelta(days=math.ceil(requested / 390) + 10),
                     force_refresh=True,
                 )
             except Exception as error:  # noqa: BLE001 - the failure mode is the answer
-                print(f"  {symbol} @ {requested:>6} bars -> {type(error).__name__}: {str(error)[:90]}")
+                print(f"  {symbol} @ {requested:>7}m -> {type(error).__name__}: {str(error)[:90]}")
                 continue
             frame = bars.get(symbol, pd.DataFrame())
             if frame.empty:
-                print(f"  {symbol} @ {requested:>6} bars -> empty")
+                print(f"  {symbol} @ {requested:>7}m -> empty")
                 continue
             stamps = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce").dropna()
             span = (stamps.max() - stamps.min()).days
-            print(f"  {symbol} @ {requested:>6} bars -> {len(frame):>5} rows spanning {span:>4} days "
+            print(f"  {symbol} @ {requested:>7}m -> {len(frame):>5} rows spanning {span:>4} days "
                   f"({stamps.min().date()} to {stamps.max().date()})")
 
 

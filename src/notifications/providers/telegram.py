@@ -7,16 +7,10 @@ import time
 from typing import Any
 from urllib import parse, request
 
+from ...common.config_utils import as_bool, direct_or_env
 from ..base import NotificationConnector, NotificationMessage
 
 logger = logging.getLogger(__name__)
-
-
-def _env_enabled(name: str, default: bool = True) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _notification_timeout() -> float:
@@ -26,31 +20,14 @@ def _notification_timeout() -> float:
         return 5.0
 
 
-def _env_ref(value: Any, default: str = "") -> str:
-    if value is None:
-        return default
-    if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
-        return os.getenv(value[2:-1], default)
-    return str(value)
-
-
-def _direct_or_env(section: dict[str, Any], key: str, env_key: str, fallback_env: str = "") -> str:
-    if section.get(key):
-        return _env_ref(section.get(key), "")
-    env_name = str(section.get(env_key) or "").strip()
-    if env_name:
-        return os.getenv(env_name, "")
-    return os.getenv(fallback_env, "") if fallback_env else ""
-
-
 class TelegramNotificationConnector(NotificationConnector):
     provider_name = "telegram"
 
     def settings(self) -> dict[str, Any]:
         return {
-            "enabled": bool(self.config.get("enabled", True)) and _env_enabled("TELEGRAM_NOTIFICATIONS_ENABLED"),
-            "bot_token": _direct_or_env(self.config, "bot_token", "bot_token_env", "TELEGRAM_BOT_TOKEN"),
-            "chat_id": _direct_or_env(self.config, "chat_id", "chat_id_env", "TELEGRAM_CHAT_ID"),
+            "enabled": bool(self.config.get("enabled", True)) and as_bool(os.getenv("TELEGRAM_NOTIFICATIONS_ENABLED"), True),
+            "bot_token": direct_or_env(self.config, "bot_token", "bot_token_env", "TELEGRAM_BOT_TOKEN"),
+            "chat_id": direct_or_env(self.config, "chat_id", "chat_id_env", "TELEGRAM_CHAT_ID"),
             "api_root": str(self.config.get("api_root") or os.getenv("TELEGRAM_API_ROOT", "https://api.telegram.org")),
             "timeout_seconds": self.config.get("timeout_seconds"),
         }

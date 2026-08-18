@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import pandas as pd
 
@@ -73,6 +73,69 @@ class SchwabBrokerage(BaseBrokerage):
             if quantity:
                 positions[symbol] = quantity
         return positions
+
+    def get_marks(self, symbols) -> Dict[str, float]:
+        """Schwab prices each position on the account payload, so no quote call is needed."""
+        wanted = {str(symbol).upper() for symbol in symbols}
+        account = self._account_payload(fields="positions")
+        marks: Dict[str, float] = {}
+        for row in account.get("positions", []) or []:
+            symbol = str((row.get("instrument") or {}).get("symbol", "")).upper()
+            if symbol not in wanted:
+                continue
+            quantity = float(row.get("longQuantity", 0.0) or 0.0) - float(row.get("shortQuantity", 0.0) or 0.0)
+            market_value = float(row.get("marketValue", 0.0) or 0.0)
+            if quantity and market_value:
+                marks[symbol] = market_value / quantity
+        return marks
+
+    def get_dividend_activity(self, start=None, end=None) -> List[Dict[str, Any]]:
+        """Cash distributions credited to this account, from ``/accounts/{hash}/transactions``.
+
+        Schwab files dividends and cash interest under one ``DIVIDEND_OR_INTEREST`` type, which
+        is the right granularity here: both are income the account received rather than price
+        appreciation, and a T-bill fund's payment is literally interest.
+        """
+        from datetime import datetime, time, timedelta, timezone
+
+        end_dt = (
+            datetime.combine(end, time.max, tzinfo=timezone.utc)
+            if end else datetime.now(timezone.utc)
+        )
+        start_dt = (
+            datetime.combine(start, time.min, tzinfo=timezone.utc)
+            if start else end_dt - timedelta(days=365)
+        )
+        payload = self.session.get(
+            f"{TRADER_BASE}/accounts/{self.account_hash}/transactions",
+            params={
+                "startDate": start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                "endDate": end_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                "types": "DIVIDEND_OR_INTEREST",
+            },
+        )
+        rows: List[Dict[str, Any]] = []
+        for item in payload or []:
+            if not isinstance(item, dict):
+                continue
+            # The symbol lives on the transferItem describing the instrument, when there is
+            # one at all -- account-level cash interest has no instrument.
+            symbol = ""
+            for leg in item.get("transferItems", []) or []:
+                candidate = str((leg.get("instrument") or {}).get("symbol", "")).upper()
+                if candidate:
+                    symbol = candidate
+                    break
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "date": str(item.get("tradeDate") or item.get("time") or "")[:10],
+                    "amount": float(item.get("netAmount") or 0.0),
+                    "description": str(item.get("description") or item.get("type") or ""),
+                }
+            )
+        rows.sort(key=lambda row: row["date"], reverse=True)
+        return rows
 
     def submit_order(self, request: OrderRequest) -> Dict[str, Any]:
         if request.order_type != "market":

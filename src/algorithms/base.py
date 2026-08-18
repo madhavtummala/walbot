@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
-import math
-from typing import Dict, Any, List
+from datetime import datetime
+from typing import Any, Dict, List
+
+from ..common.config_utils import json_number
 from ..core.interfaces import (
     AlgorithmDecision,
     AlgorithmPlugin,
@@ -17,14 +19,6 @@ from ..core.interfaces import (
 
 logger = logging.getLogger(__name__)
 
-
-def json_number(value: Any) -> float | None:
-    """Coerce ``value`` to a JSON-safe float, mapping non-finite values to ``None``."""
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return number if math.isfinite(number) else None
 
 
 def signal_view_from_decision(decision: AlgorithmDecision, latest_prices: Dict[str, float] | None = None) -> SignalView:
@@ -46,7 +40,13 @@ def signal_view_from_decision(decision: AlgorithmDecision, latest_prices: Dict[s
             }
         )
         leaders.append(row)
-    leaders.sort(key=lambda item: (item["signal"] != "LONG", item["signal"] == "FLAT", -abs(float(item.get("score") or 0.0))))
+    # Strongest first, so the list reads in the same order the ranking was decided in.
+    #
+    # This used to group LONG/SHORT/FLAT first and then sort on ``-abs(score)``, which put the
+    # *worst* name in the universe alongside the best: a score of -3.0 sorted ahead of +1.0.
+    # For a cross-sectional ranker the sign is the whole point, and the held names come out on
+    # top anyway because they are the ones that ranked.
+    leaders.sort(key=lambda item: -float(item.get("score") or 0.0))
     return SignalView(leaders=leaders, summary=_summary_from(decision, leaders))
 
 
@@ -67,16 +67,22 @@ def _summary_from(decision: AlgorithmDecision, leaders: List[Dict[str, Any]]) ->
         ]
 
     exposure = sum(float(weight) for weight in decision.target_weights.values() if weight > 0)
-    market_sentiment = decision.metadata.get("market_sentiment")
-    return [
+    rows = [
         {"label": "Allocation", "value": str(allocation_mode)},
         {"label": "Exposure", "value": f"{exposure:.0%}"},
-        {
+    ]
+    # Only when the algorithm actually reads sentiment. It used to be unconditional, so an
+    # algorithm with both sentiment weights at zero -- which is every one of them by default,
+    # and there is no sentiment provider configured -- still rendered a "No recent records"
+    # row, which reads as a broken feed rather than as a switched-off input.
+    if "market_sentiment" in decision.metadata:
+        market_sentiment = decision.metadata["market_sentiment"]
+        rows.append({
             "label": "Sentiment",
             "value": "No recent records" if not market_sentiment else f"{float(market_sentiment):+.2f}",
-        },
-        {"label": "Universe", "value": str(len(leaders))},
-    ]
+        })
+    rows.append({"label": "Universe", "value": str(len(leaders))})
+    return rows
 
 class BaseAlgorithm(AlgorithmPlugin):
     def __init__(self, config: Dict[str, Any]):
@@ -90,6 +96,24 @@ class BaseAlgorithm(AlgorithmPlugin):
 
     def requirements(self, config: Any, current_positions: Dict[str, int]) -> AlgorithmRequirements:
         return AlgorithmRequirements()
+
+    def config_fingerprint(self, config: Any) -> Dict[str, Any]:
+        """Everything this algorithm's behaviour depends on, for cache invalidation.
+
+        A cached backtest is only valid while the inputs that produced it are unchanged, and
+        "the inputs" differ per algorithm. This used to be handled by threading DCA's plan
+        through three backtest signatures as a special case -- an argument that never reached
+        the algorithm and existed solely to change a hash. An algorithm that reads extra
+        configuration declares it here instead, and the backtest stays generic.
+
+        The value only has to be stable and JSON-encodable; it is hashed, never read.
+        """
+        selected = (
+            config.algorithm_configs.get(self.algorithm_id, {})
+            if isinstance(getattr(config, "algorithm_configs", None), dict)
+            else {}
+        )
+        return {"tuning": selected, "symbols": list(getattr(config, "symbols", []) or [])}
 
     def generate_signals(self, context: AlgorithmContext) -> List[Dict[str, Any]]:
         # Default implementation: no signals
@@ -105,6 +129,7 @@ class BaseAlgorithm(AlgorithmPlugin):
         snapshot: PortfolioSnapshot,
         latest_prices: Dict[str, float],
         config: Any,
+        as_of: datetime,
     ) -> List[Intent]:
         """Route weight intents through :meth:`refine_weights` and pass anything else through.
 
@@ -114,7 +139,7 @@ class BaseAlgorithm(AlgorithmPlugin):
         """
         weights = weights_from_intents(intents)
         others = [intent for intent in intents if intent.kind != "weight"]
-        refined = self.refine_weights(weights, signals, snapshot, latest_prices, config)
+        refined = self.refine_weights(weights, signals, snapshot, latest_prices, config, as_of)
         return intents_from_weights(refined) + others
 
     def refine_weights(
@@ -124,6 +149,7 @@ class BaseAlgorithm(AlgorithmPlugin):
         snapshot: PortfolioSnapshot,
         latest_prices: Dict[str, float],
         config: Any,
+        as_of: datetime,
     ) -> Dict[str, float]:
         """Weight-mode step 2: adjust proposed weights for what is already held."""
         return dict(target_weights)
@@ -141,5 +167,3 @@ class BaseAlgorithm(AlgorithmPlugin):
         )
         return signal_view_from_decision(self.analyze(context), context.latest_prices)
 
-    def log_signal(self, symbol: str, signal_type: str, details: Dict[str, Any]):
-        logger.info(f"[{self.algorithm_id}] {symbol} SIGNAL: {signal_type} | {details}")

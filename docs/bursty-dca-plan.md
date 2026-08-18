@@ -137,7 +137,7 @@ Sell side is the mirror: sell the excess when position value runs above the path
 growth, covered-call income, cash, and hedges — regime switching, hence the name.
 
 Remove the six `generic:*` strategies (momentum_social, trend_following, mean_reversion,
-breakout, risk_parity, dual_momentum).
+breakout, risk_parity, rally_rotation).
 
 Targets:
 - `src/algorithms/registry.py` — drop the six `generic:*` entries
@@ -148,7 +148,7 @@ Targets:
 - `src/api/api_payloads.py` — the `strategy == "none"` branch and `_dca_signal_payload` become
   the real `dca` algorithm
 - `web/static/app.js` — strategy dropdown and hardcoded ids
-- tests referencing momentum_social / risk_parity / dual_momentum need rewriting
+- tests referencing momentum_social / risk_parity / rally_rotation need rewriting
 
 **Decide first:** renaming `invest_spy` changes its key under `algorithm_configs`, so saved
 tuning silently falls back to defaults. Either read both keys for a release, or keep the id
@@ -251,8 +251,8 @@ still says `invest_spy:`, so saved tuning survives with zero risk.
 `strategy_signal_rows_from_prepared` fallback in `_compute_backtest` was reachable only for
 unregistered names, so it now raises instead. That left `strategy_signal_rows_from_prepared`
 and `weights_from_strategy_rows` with no callers and they were deleted; `strategy_signal_rows`
-stays, because `algorithms/options/swing.py` still uses the `dual_momentum` *rule set* (which is
-not the same thing as the deleted `dual_momentum` strategy). Three tests that backtested deleted
+stays, because `algorithms/options/swing.py` still uses the `rally_rotation` *rule set* (which is
+not the same thing as the deleted `rally_rotation` strategy). Three tests that backtested deleted
 strategies were removed rather than retargeted.
 
 **Fixed alongside, as the plan suggested:** `web_app.py`'s uvicorn module path, and the
@@ -437,3 +437,130 @@ Verified for all four algorithms — backtest and signal view, every one now `so
    deck card in `app.js`.
 
 Signal view and backtest both work with no further wiring.
+
+---
+
+## Follow-up: the account a view is computed for, and the two halves of tuning
+
+Editing a DCA budget on the Tune page changed neither the live signals nor the backtest. Three
+separate things were wrong, all of them variations on one theme: a DCA plan is *per account*,
+and several places had been written as though the account were only an execution detail.
+
+**The board and the views were reading different accounts.** The bubble board loads and saves
+through the first DCA binding's account (`primaryDcaBindingId`), while `strategy_signals_payload`
+and `_compute_backtest` built their config with `get_config(strategy_id=...)` and no account at
+all -- so they fell back to the *default* account. With `dca` bound to `local_paper` and the
+default account `paper`, the board wrote `dca_plans.local_paper` and both views rendered
+`dca_plans.paper`. Neither ever showed an edit, and since `analyze` persists accrual, the signal
+view was also writing an accrual ledger under an account that would never trade.
+
+Both sides now resolve the account from the strategy's binding, by the same rule on each side:
+`controls.account_for_strategy` on the server, `accountForStrategy` in `app.js`. The frontend
+sends the account it resolved rather than letting the two derive it independently, and both
+payloads report the account they answered for. `config_for_strategy_view` lives in
+`src/api/payloads/strategy_config.py` rather than beside `account_for_strategy` in `controls`,
+so it resolves `get_config` through the same module-level name every other payload module does
+-- which is what lets one test patch cover the package.
+
+Unlike `resolve_binding_for_origin`, this cannot refuse when the answer is ambiguous: a view
+places no orders, so it has to answer for *some* account. An enabled binding wins over a
+switched-off one, and a binding naming a deleted account falls back to the default rather than
+500-ing the dashboard -- `sanitize_binding` never checked that the account exists, so a binding
+can outlive one.
+
+**The backtest cache key was account-blind.** Two DCA bindings on different accounts have
+different plans and therefore different curves, but they hashed to one entry, so whichever ran
+first answered for both. The account is now part of the basis.
+
+**DCA got the bubble board *instead of* the parameter form.** `renderTuneTab` branched on
+`isDca` and rendered one or the other, which meant every knob in `algorithms.bursty_dca` --
+`regime_ma_days`, `percent_b_threshold`, `rsi_lookback`, `rsi_threshold`, `max_trade_multiple`,
+`backlog_relax_months`, `value_averaging` -- had no editor anywhere in the UI, despite being in
+config and served by `/api/algorithm-config`. Budgets are the plan; everything else is ordinary
+algorithm config. A DCA page now renders both cards. Plain `dca` has no parameters of its own,
+so its Save button is hidden rather than offering to write an empty config section.
+
+**The board never said whether a save landed.** It writes on every gesture with no button, and
+`savePlan(quiet=true)` showed nothing on success -- so a save that reached the server and one
+that failed looked identical. There is now a saving/saved line on the board.
+
+### Two smaller corrections found alongside
+
+**`describe_schedule` was describing a cadence nothing uses.** Section "Follow-up: per-algorithm
+schedules" says cadence lives on the algorithm class with **no config override**. That is no
+longer true and has not been for a while: `_binding_run_key` buckets on the *binding's*
+`frequency` (`15m`/`30m`/`1hr`/`2hr`/`1d`/`mcp`, set from the Deploy tab) and takes only the
+weekday set and the session window from the class. `refresh_minutes` is now read only by the
+options loop. So the signal view's Schedule row read "Weekdays at 08:30" for a binding firing
+every hour. `describe_schedule` takes a `refresh_minutes` override, and
+`controls.describe_deployed_schedule` combines the class's window with the binding's cadence for
+every algorithm's view -- an algorithm has no business reading the binding table itself, so the
+correction is applied in the payload.
+
+**Two reason strings promised things they could not deliver.** `settle` subtracts the filled
+notional with no floor, so a Bursty DCA trade sized above what had accrued -- which is what
+value averaging does when it is catching up to the path -- leaves the balance negative. That is
+the mechanism keeping the long-run spend rate honest, but it reached the dashboard as
+`Accruing ($-450 of $1)`; it now reads as repayment. And the signal view is built from
+`analyze`, which is step 1, while value averaging sizes the trade in `refine`, which is step 2
+and the first point that can see the position: a symbol already at or above its value path is
+dropped there, so a bare "Ready" announced an order that would never be placed. Bursty's rows
+say "Ready (sized to value path)", and the drop is logged rather than silent.
+
+### Still open
+
+- The signal view still cannot show the value-averaging veto itself, only warn that step 2 gets
+  a say. Doing better means giving the view a `PortfolioSnapshot`, and `BaseAlgorithm.signal_view`
+  is deliberately account-free ("so the dashboard never needs an account").
+- Signals and backtests are cached per strategy in the frontend, not per (strategy, account).
+  Two bindings of one strategy on different accounts would share those cached views. The server
+  keys correctly; only the browser-side cache is coarse.
+
+---
+
+## Follow-up: the plan is ordinary algorithm config
+
+DCA is a normal algorithm that happens to have a custom editor on the Tune screen, and nothing
+more. Its plan had been categorised well beyond that: a `dca_bot` section of its own, keyed by
+account (`dca_plans`) with a shared template (`dca_plan`) behind it, reached through a dedicated
+`/api/dca` endpoint and a `dca_payload` module, and held in the dashboard as `state.dca`.
+
+That key had no room for the algorithm, which forced the two variants to share one budget --
+`dca` and `bursty_dca` showed and traded identical bubbles however differently they behave. It
+also bought a per-account dimension no other algorithm has, which is what let the editor and the
+views disagree about whose plan they were looking at in the first place.
+
+The plan now lives at `algorithms.<id>.plan`, read and written through `/api/algorithm-config`
+like every other algorithm's knobs. `dca` and `bursty_dca` have independent budgets. Deleted:
+`DCA_PLAN_SECTION`, `DCA_PLANS_SECTION`, `load_dca_plan`, `save_dca_plan`, `_raw_plan_from_config`,
+`src/api/payloads/dca.py`, both `/api/dca` endpoints, `state.dca` and `dcaAccountForStrategy`.
+`raw_plan_from_config` replaces them and is the only reader.
+
+The price, chosen deliberately: two accounts running `dca` now share a plan. That is the same
+price every other algorithm already pays for its tuning, and no deployment here was using the
+per-account dimension. Existing `dca_plans` entries were not migrated -- the section was dropped
+and both algorithms seeded from `DEFAULT_DCA_PLAN`.
+
+**An unconfigured plan now buys nothing.** `raw_plan_from_config` and `sanitize_dca_plan` used to
+fall back to `DEFAULT_DCA_PLAN`, which meant an algorithm with no plan -- or one whose bubbles had
+all been cleared -- would have quietly traded SPY, QQQ, GLD and TLT while the board showed an
+empty page. The default is a seed for a new config, not a standing order.
+
+**The account still matters to a view, just not to the plan.** Accrual state is keyed
+`dca_accrual:{algorithm}:{account}` and the brokerage is per account, so `account_for_strategy`
+and the account threading from the previous pass stay exactly as they were.
+
+### Found by testing it in a browser rather than by reading it
+
+`renderDca` syncs the nodes into the plan *before* rebuilding them from it. With one plan per
+account that was harmless, because the board only ever showed one. With a plan per algorithm,
+navigating from Bursty DCA to DCA synced the bubbles still on screen -- Bursty's budgets -- into
+DCA's freshly loaded plan, and the next save would have written them to disk. Symptom: the DCA
+board showed a budget only ever typed on the Bursty page, while the API had served the correct
+one. `state.nodesStrategy` records which plan built the nodes and `syncNodesToPlan` refuses to
+write them anywhere else.
+
+Two smaller ones from the same session: the plan appeared as a raw JSON box in the parameter
+form beside its own bubble board, and `saveCurrentConfig` posted only the rendered fields --
+so saving any tuned knob would have deleted the plan. The form filters the plan out and the
+save merges over the loaded config rather than replacing it.

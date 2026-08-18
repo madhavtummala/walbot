@@ -1,18 +1,8 @@
 from __future__ import annotations
 
-import math
 from datetime import datetime
-from typing import Any
 
 import pandas as pd
-
-
-def _finite(value: Any) -> float | None:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if math.isfinite(parsed) else None
 
 
 def normalize_intraday_frame(df: pd.DataFrame) -> pd.DataFrame:

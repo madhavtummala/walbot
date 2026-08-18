@@ -22,10 +22,9 @@ from ...core.interfaces import (
     Intent,
     PortfolioSnapshot,
     SignalView,
-    describe_schedule,
 )
 from ..base import BaseAlgorithm
-from . import BUCKETS, load_dca_plan, unknown_plan_symbols
+from . import BUCKETS, raw_plan_from_config, sanitize_dca_plan, unknown_plan_symbols
 from .accrual import (
     SymbolState,
     accrue,
@@ -92,23 +91,35 @@ class DCAAlgorithm(BaseAlgorithm):
     # Plan and configuration
     # ----------------------------------------------------------------------------------
 
+    def config_fingerprint(self, config: Any) -> dict[str, Any]:
+        """The plan is this algorithm's real configuration, so it belongs in the fingerprint.
+
+        Editing a bucket weight changes every future decision, and a cached backtest computed
+        under the old plan describes a strategy that no longer exists.
+        """
+        return {**super().config_fingerprint(config), "plan": self.plan(config)}
+
     def plan(self, config: Any) -> dict[str, Any]:
         from ...api.api_payloads import universe_payload
 
-        # The plan is this account's config, so it must be read for the account being traded.
-        return load_dca_plan(universe_payload()["rows"], account_id=str(getattr(config, "account_id", "") or ""))
+        # Ordinary algorithm config, read from this algorithm's own section. ``dca`` and
+        # ``bursty_dca`` therefore have separate plans, which the old per-account key could
+        # not express -- it had no room for the algorithm, so the two shared one budget.
+        return sanitize_dca_plan(
+            raw_plan_from_config(config, self.algorithm_id), universe_payload()["rows"]
+        )
 
     def requirements(self, config: Any, current_positions: dict[str, int]) -> AlgorithmRequirements:
         return AlgorithmRequirements(price_symbols=sorted(plan_budgets(self.plan(config))))
 
     def sizing(self, config: Any) -> dict[str, float]:
-        """No cash buffer and no drift thresholds.
+        """No drift thresholds.
 
         ``rebalance_threshold`` is a target-drift concept: applied here it would wrongly
         suppress a small DCA buy that is exactly what the plan asked for. Accrual already
         enforces a per-trade floor through ``min_executable``.
         """
-        return {"cash_buffer": 0.0, "min_trade_dollars": 0.0, "rebalance_threshold": 0.0}
+        return {"min_trade_dollars": 0.0, "rebalance_threshold": 0.0}
 
     # ----------------------------------------------------------------------------------
     # Step 1
@@ -128,7 +139,10 @@ class DCAAlgorithm(BaseAlgorithm):
         account_id = getattr(config, "account_id", "") or ""
         plan = self.plan(config)
         budgets = plan_budgets(plan)
-        now = context.timestamp if context.timestamp.tzinfo else datetime.now(timezone.utc)
+        # A naive timestamp is read as UTC rather than replaced by the wall clock. Substituting
+        # "now" for a historical bar is how a replay ends up accruing a whole backtest's budget
+        # against the moment it was run.
+        now = context.timestamp if context.timestamp.tzinfo else context.timestamp.replace(tzinfo=timezone.utc)
         fractional = broker_supports_fractional_shares(account_id)
         min_trade_dollars = float(getattr(config, "min_trade_dollars", 0.0) or 0.0)
 
@@ -142,7 +156,10 @@ class DCAAlgorithm(BaseAlgorithm):
 
             price = float(context.latest_prices.get(symbol, 0.0) or 0.0)
             floor_dollars = min_executable(price, min_trade_dollars, fractional)
-            trigger = self.trigger(symbol, context, plan)
+            # How many months of budget are sitting undeployed. A variant that waits for a
+            # dip needs this to know when waiting has stopped being a strategy.
+            months_behind = symbol_state.accrued / abs(monthly_budget) if monthly_budget else 0.0
+            trigger = self.trigger(symbol, context, plan, months_behind)
             ready = symbol_state.accrued >= floor_dollars
 
             notional = 0.0
@@ -173,11 +190,16 @@ class DCAAlgorithm(BaseAlgorithm):
             metadata={
                 "allocation_mode": "DCA",
                 "monthly_total": sum(abs(value) for value in budgets.values()),
-                "schedule": describe_schedule(self.schedule),
             },
         )
 
-    def trigger(self, symbol: str, context: AlgorithmContext, plan: dict[str, Any]) -> dict[str, Any]:
+    def trigger(
+        self,
+        symbol: str,
+        context: AlgorithmContext,
+        plan: dict[str, Any],
+        months_behind: float = 0.0,
+    ) -> dict[str, Any]:
         """Steady DCA has no timing condition: accrual alone decides."""
         return {"fires": True, "detail": {}}
 
@@ -207,13 +229,16 @@ class DCAAlgorithm(BaseAlgorithm):
         monthly_total = float(decision.metadata.get("monthly_total") or 0.0)
         summary = [
             {"label": "Mode", "value": str(decision.metadata.get("allocation_mode") or "DCA")},
-            {"label": "Schedule", "value": str(decision.metadata.get("schedule") or "--")},
             # The configured monthly total, not what happens to be deployable this minute.
             {"label": "Planned", "value": f"${monthly_total:.0f}/month"},
             {"label": "Symbols", "value": str(len(leaders))},
         ]
         # A typo in a bucket is otherwise dropped by sanitisation and shows up as nothing at all.
-        unknown = unknown_plan_symbols()
+        from ...api.api_payloads import universe_payload
+
+        unknown = unknown_plan_symbols(
+            raw_plan_from_config(config, self.algorithm_id), universe_payload()["rows"]
+        )
         if unknown:
             summary.append({"label": "Not tradable", "value": ", ".join(unknown)})
         return SignalView(leaders=leaders, summary=summary)
@@ -232,6 +257,12 @@ class DCAAlgorithm(BaseAlgorithm):
         trigger: dict[str, Any],
         ready: bool,
     ) -> str:
+        if state.accrued < 0:
+            # ``settle`` subtracts the filled notional with no floor, so a trade sized above
+            # what had accrued -- which is what Bursty DCA's value averaging does when it is
+            # catching up to the path -- leaves a debt. That is the mechanism that keeps the
+            # long-run spend rate honest, but rendered raw it read as "Accruing ($-450 of $1)".
+            return f"Ahead of plan (repaying ${abs(state.accrued):.0f})"
         if not ready:
             return f"Accruing (${state.accrued:.0f} of ${floor_dollars:.0f})"
         if not trigger["fires"]:
@@ -249,6 +280,7 @@ class DCAAlgorithm(BaseAlgorithm):
         snapshot: PortfolioSnapshot,
         latest_prices: dict[str, float],
         config: Any,
+        as_of: datetime,
     ) -> list[Intent]:
         """Never sell more than is held: a DCA sell trims a position, it does not open a short."""
         refined: list[Intent] = []

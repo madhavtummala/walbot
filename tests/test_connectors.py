@@ -2,11 +2,33 @@ from __future__ import annotations
 
 import logging
 
+import pytest
+
 import pandas as pd
 
 from src.brokerages import alpaca_client
 from src.connectors import service as connectors
+from src.connectors.market import alpaca as market_alpaca
+from src.connectors.market import yfinance as market_yfinance
+from src.connectors.market import finnhub as market_finnhub
+from src.connectors.market import schwab as market_schwab
+from src.connectors.news import stocktwits as news_stocktwits
 from src.core.config import Config
+
+
+
+# The registry is the seam now: a test supplies a provider the same way a deployment would,
+# which means these tests exercise the extension point rather than reaching around it.
+def _use_intraday(monkeypatch, name, fetcher):
+    from src.connectors import registry
+
+    monkeypatch.setitem(registry.INTRADAY_BAR_REGISTRY, name, fetcher)
+
+
+def _use_eod(monkeypatch, name, fetcher):
+    from src.connectors import registry
+
+    monkeypatch.setitem(registry.EOD_BAR_REGISTRY, name, fetcher)
 
 
 def test_market_quote_fetch_falls_back_to_next_provider(monkeypatch, caplog) -> None:
@@ -109,7 +131,7 @@ def test_fresh_cached_bars_rejects_stale_eod_rows() -> None:
 
     fresh = connectors._fresh_cached_bars(
         bars,
-        connectors.EOD_MARKET_CATEGORY,
+        connectors.DAILY_INTERVAL_MINUTES,
         now=pd.Timestamp("2026-06-12T12:00:00-05:00"),
     )
 
@@ -140,8 +162,8 @@ def test_fetch_alpaca_eod_bars_fetches_when_duckdb_rows_are_stale(monkeypatch) -
     )
     calls = []
 
-    monkeypatch.setattr(connectors, "_read_duckdb_bars", lambda *_args, **_kwargs: stale)
-    monkeypatch.setattr(connectors, "_write_duckdb_bars", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(market_alpaca, "_read_duckdb_bars", lambda *_args, **_kwargs: stale)
+    monkeypatch.setattr(market_alpaca, "_write_duckdb_bars", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(alpaca_client, "create_data_client", lambda _config: object())
 
     def fake_historical_daily_bars(symbols, **_kwargs):
@@ -150,7 +172,7 @@ def test_fetch_alpaca_eod_bars_fetches_when_duckdb_rows_are_stale(monkeypatch) -
 
     monkeypatch.setattr(alpaca_client, "get_historical_daily_bars", fake_historical_daily_bars)
 
-    bars = connectors.fetch_alpaca_eod_bars(["SPY"], config, lookback_bars=1)
+    bars = market_alpaca.fetch_alpaca_eod_bars(["SPY"], config, lookback_bars=1)
 
     assert calls == [["SPY"]]
     assert bars["SPY"]["close"].tolist() == [110.5]
@@ -184,13 +206,13 @@ def test_fetch_finnhub_intraday_bars_parses_and_caches_candles(monkeypatch) -> N
             "v": [1000, 2000],
         }
 
-    monkeypatch.setattr(connectors, "_request_json", fake_request)
-    monkeypatch.setattr(connectors, "load_cached_payload", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(connectors, "save_cached_payload", lambda *args, **kwargs: saved.update({"args": args, "kwargs": kwargs}))
-    monkeypatch.setattr(connectors, "_read_duckdb_bars", lambda *_args, **_kwargs: pd.DataFrame())
-    monkeypatch.setattr(connectors, "_write_duckdb_bars", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(market_finnhub, "_request_json", fake_request)
+    monkeypatch.setattr(market_finnhub, "load_cached_payload", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(market_finnhub, "save_cached_payload", lambda *args, **kwargs: saved.update({"args": args, "kwargs": kwargs}))
+    monkeypatch.setattr(market_finnhub, "_read_duckdb_bars", lambda *_args, **_kwargs: pd.DataFrame())
+    monkeypatch.setattr(market_finnhub, "_write_duckdb_bars", lambda *_args, **_kwargs: None)
 
-    bars = connectors.fetch_finnhub_intraday_bars(["SPY"], config, lookback_bars=2, bar_minutes=30)
+    bars = market_finnhub.fetch_finnhub_intraday_bars(["SPY"], config, lookback_minutes=60, bar_minutes=30)
 
     assert bars["SPY"]["close"].tolist() == [100.5, 101.5]
     assert saved["args"][0] == connectors.INTRADAY_MARKET_CATEGORY
@@ -198,32 +220,43 @@ def test_fetch_finnhub_intraday_bars_parses_and_caches_candles(monkeypatch) -> N
     assert saved["kwargs"]["ttl_seconds"] == connectors.INTRADAY_CACHE_TTL_SECONDS
 
 
-def test_fetch_intraday_market_bars_uses_yfinance_provider(monkeypatch) -> None:
+def test_fetch_market_history_uses_yfinance_provider(monkeypatch) -> None:
     calls = {}
     config = Config(intraday_market_data_provider_order=["yfinance"])
 
-    def fake_yfinance(symbols, _config, *, lookback_bars, bar_minutes, force_refresh=False):
+    def fake_yfinance(symbols, _config, *, lookback_minutes, bar_minutes, force_refresh=False):
         calls.update(
             {
                 "symbols": symbols,
-                "lookback_bars": lookback_bars,
+                "lookback_minutes": lookback_minutes,
                 "bar_minutes": bar_minutes,
                 "force_refresh": force_refresh,
             }
         )
-        return {"SPY": pd.DataFrame({"close": [101.0]})}
+        return {"SPY": pd.DataFrame({"timestamp": pd.to_datetime(["2026-06-04T20:00:00Z"]), "close": [101.0]})}
 
-    monkeypatch.setattr(connectors, "fetch_yfinance_intraday_bars", fake_yfinance)
+    _use_intraday(monkeypatch, "yfinance", fake_yfinance)
+    # The window is fully covered by the provider, so no cached back-fill is consulted.
+    monkeypatch.setattr(connectors, "_extend_with_cached_history", lambda bars, *_args: bars)
 
-    bars = connectors.fetch_intraday_market_bars(["SPY"], config, lookback_bars=78, bar_minutes=15, force_refresh=True)
+    bars = connectors.fetch_market_history(["SPY"], config, lookback_minutes=1170, force_refresh=True)
 
     assert bars["SPY"]["close"].iloc[-1] == 101.0
     assert calls == {
         "symbols": ["SPY"],
-        "lookback_bars": 78,
-        "bar_minutes": 15,
+        "lookback_minutes": 1170,
+        # The preferred grid, passed through as asked; the fetcher snaps it to what it serves.
+        "bar_minutes": 5,
         "force_refresh": True,
     }
+
+
+def test_a_provider_that_cannot_serve_the_grid_snaps_to_a_coarser_one() -> None:
+    """Horizons are wall-clock, so a coarser bar still answers them -- never an error."""
+    assert connectors.resolve_bar_minutes("schwab", 5) == 5
+    assert connectors.resolve_bar_minutes("yfinance", 5) == 15
+    # Below everything a provider offers, take its finest rather than refusing.
+    assert connectors.resolve_bar_minutes("yfinance", 1) == 15
 
 
 def test_fetch_eod_market_bars_falls_back_to_next_provider(monkeypatch, caplog) -> None:
@@ -241,8 +274,8 @@ def test_fetch_eod_market_bars_falls_back_to_next_provider(monkeypatch, caplog) 
         assert force_refresh is True
         return {"SPY": pd.DataFrame({"timestamp": pd.to_datetime(["2026-05-01"], utc=True), "close": [101.0]})}
 
-    monkeypatch.setattr(connectors, "fetch_finnhub_eod_bars", failing_finnhub)
-    monkeypatch.setattr(connectors, "fetch_yfinance_eod_bars", working_yfinance)
+    _use_eod(monkeypatch, "finnhub", failing_finnhub)
+    _use_eod(monkeypatch, "yfinance", working_yfinance)
 
     with caplog.at_level(logging.INFO):
         bars = connectors.fetch_eod_market_bars(["SPY"], config, lookback_bars=3, force_refresh=True)
@@ -273,11 +306,11 @@ def test_fetch_schwab_intraday_bars_parses_price_history(monkeypatch) -> None:
             ]
         }
 
-    monkeypatch.setattr(connectors, "_request_json", fake_request)
-    monkeypatch.setattr(connectors, "_read_duckdb_bars", lambda *_args, **_kwargs: pd.DataFrame())
-    monkeypatch.setattr(connectors, "_write_duckdb_bars", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(market_schwab, "_request_json", fake_request)
+    monkeypatch.setattr(market_schwab, "_read_duckdb_bars", lambda *_args, **_kwargs: pd.DataFrame())
+    monkeypatch.setattr(market_schwab, "_write_duckdb_bars", lambda *_args, **_kwargs: None)
 
-    bars = connectors.fetch_schwab_intraday_bars(["SPY"], config, lookback_bars=2, bar_minutes=15)
+    bars = market_schwab.fetch_schwab_intraday_bars(["SPY"], config, lookback_minutes=30, bar_minutes=15)
 
     assert bars["SPY"]["close"].tolist() == [100.5, 101.5]
     assert captured["provider"] == "schwab"
@@ -301,6 +334,9 @@ def test_fetch_schwab_eod_bars_parses_price_history(monkeypatch) -> None:
     )
 
     def fake_request(provider, category, url, params=None, headers=None):
+        # The EOD fetch makes two calls now: dividend metadata, then the price history.
+        if url.endswith("/quotes"):
+            return {"SPY": {"fundamental": {"divAmount": 0.0, "divFreq": 0}}}
         captured.update({"provider": provider, "category": category, "params": params, "headers": headers})
         return {
             "candles": [
@@ -308,11 +344,11 @@ def test_fetch_schwab_eod_bars_parses_price_history(monkeypatch) -> None:
             ]
         }
 
-    monkeypatch.setattr(connectors, "_request_json", fake_request)
-    monkeypatch.setattr(connectors, "_read_duckdb_bars", lambda *_args, **_kwargs: pd.DataFrame())
-    monkeypatch.setattr(connectors, "_write_duckdb_bars", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(market_schwab, "_request_json", fake_request)
+    monkeypatch.setattr(market_schwab, "_read_duckdb_bars", lambda *_args, **_kwargs: pd.DataFrame())
+    monkeypatch.setattr(market_schwab, "_write_duckdb_bars", lambda *_args, **_kwargs: None)
 
-    bars = connectors.fetch_schwab_eod_bars(["SPY"], config, lookback_bars=1)
+    bars = market_schwab.fetch_schwab_eod_bars(["SPY"], config, lookback_bars=1)
 
     assert bars["SPY"]["close"].tolist() == [100.5]
     assert captured["category"] == connectors.EOD_MARKET_CATEGORY
@@ -328,9 +364,9 @@ def test_alpaca_quote_fetch_skips_symbols_without_latest_price(monkeypatch) -> N
         return 50.0
 
     monkeypatch.setattr("src.brokerages.alpaca_client.get_latest_price", fake_latest_price)
-    monkeypatch.setattr(connectors, "record_provider_success", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(market_alpaca, "record_provider_success", lambda *_args, **_kwargs: None)
 
-    quotes = connectors._fetch_alpaca_quotes(["SPY", "QQQ"], Config(), data_client=object())
+    quotes = market_alpaca._fetch_alpaca_quotes(["SPY", "QQQ"], Config(), data_client=object())
 
     assert "SPY" not in quotes
     assert quotes["QQQ"]["price"] == 50.0
@@ -520,9 +556,9 @@ def test_stocktwits_basic_auth_sentiment_endpoint(monkeypatch) -> None:
         captured.update({"provider": provider, "url": url, "headers": headers or {}})
         return {"data": {"sentiment_score": 0.25, "message_volume": 42, "updated_at": "2026-05-21T15:00:00Z"}}
 
-    monkeypatch.setattr(connectors, "_request_json", fake_request)
+    monkeypatch.setattr(news_stocktwits, "_request_json", fake_request)
 
-    records = connectors._fetch_stocktwits_news(["SPY"], config)
+    records = news_stocktwits._fetch_stocktwits_news(["SPY"], config)
 
     assert records[0]["sentiment"] == 0.25
     assert records[0]["mentions"] == 42
@@ -566,3 +602,124 @@ def test_a_symbol_no_provider_can_answer_comes_back_empty() -> None:
 
     assert not bars["AAA"].empty
     assert bars["MISSING"].empty
+
+
+def test_cached_schwab_bars_are_never_dividend_adjusted() -> None:
+    """The price cache holds what the market printed, and nothing else.
+
+    Adjustment used to happen here, which cost more than it bought: it rewrote history every
+    time a payment landed, it made the daily and intraday tiers disagree about the same
+    instant, and it disguised real cash as price appreciation so the replay booked no income
+    at all. Distributions are cash events now -- see ``src.data.dividends``.
+    """
+    import src.connectors.service as service
+
+    assert not hasattr(service, "_apply_dividend_adjustment")
+    assert not hasattr(service, "_schwab_dividend_schedule")
+
+
+def test_provider_bars_default_adjusted_close_to_the_raw_close() -> None:
+    """The column survives for feeds that supply their own, but is never synthesised."""
+    import pandas as pd
+
+    from src.connectors.service import _provider_bars
+
+    bars = pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=3, freq="D", tz="UTC"),
+        "open": [10.0, 11.0, 12.0], "high": [10.0, 11.0, 12.0],
+        "low": [10.0, 11.0, 12.0], "close": [10.0, 11.0, 12.0],
+        "volume": [1.0, 1.0, 1.0],
+    })
+
+    out = _provider_bars(bars, 1440)
+
+    assert out["adjusted_close"].tolist() == out["close"].tolist()
+
+
+def test_schwab_counts_as_configured_without_an_api_key() -> None:
+    """It authenticates with an OAuth token, not a key in the connector config.
+
+    _enabled treated "no api_key" as "not configured", so Schwab was skipped for quotes
+    however high it sat in the provider order -- the watchlist and the prices used to size
+    orders silently kept coming from Alpaca's IEX feed.
+    """
+    from src.connectors.service import EXTERNAL_AUTH_PROVIDERS, MARKET_CATEGORY, _enabled
+
+    config = Config(data_source_configs={"market_data": {"providers": {"schwab": {}}}})
+
+    assert "schwab" in EXTERNAL_AUTH_PROVIDERS
+    assert _enabled(config, MARKET_CATEGORY, "schwab", uses_external_auth=True) is True
+
+
+def test_a_provider_switched_off_explicitly_stays_off() -> None:
+    from src.connectors.service import MARKET_CATEGORY, _enabled
+
+    config = Config(data_source_configs={"market_data": {"providers": {"schwab": {"enabled": False}}}})
+
+    assert _enabled(config, MARKET_CATEGORY, "schwab", uses_external_auth=True) is False
+
+
+def test_a_new_provider_needs_no_edit_to_the_dispatch(monkeypatch) -> None:
+    """The property the connector layer exists to have.
+
+    An earlier version of this abstraction ended up holding a single yfinance wrapper while
+    every real provider stayed as a loose function in ``service.py`` -- so "pluggable" was
+    true of the registry and false of the system. This asserts the registry is the thing the
+    dispatch actually reads.
+    """
+    from src.connectors import registry
+
+    def third_party(symbols, _config, *, lookback_bars, force_refresh=False, **_kwargs):
+        return {
+            symbol: pd.DataFrame({
+                "timestamp": pd.to_datetime(["2026-08-14"], utc=True),
+                "open": [42.0], "high": [42.0], "low": [42.0], "close": [42.0], "volume": [1.0],
+            })
+            for symbol in symbols
+        }
+
+    monkeypatch.setitem(registry.EOD_BAR_REGISTRY, "third_party", third_party)
+
+    bars = connectors.fetch_eod_market_bars(
+        ["SPY"],
+        Config(eod_market_data_provider_order=["third_party"]),
+        lookback_bars=1,
+        force_refresh=True,
+    )
+
+    assert bars["SPY"]["close"].iloc[0] == 42.0
+
+
+def test_importing_connectors_does_not_import_every_provider_dependency() -> None:
+    """A provider's third-party dependency is that provider's problem, not the app's.
+
+    Eager imports meant one unconfigured or uninstalled provider was an import error for
+    everything, and every process paid for every SDK regardless of what it used.
+    """
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-c",
+         "import sys, src.connectors; "
+         "print(int('yfinance' in sys.modules or any(m.startswith('alpaca') for m in sys.modules)))"],
+        capture_output=True, text=True,
+    )
+    assert result.stdout.strip() == "0", result.stdout + result.stderr
+
+
+def test_the_lazy_registry_resolves_under_every_dict_accessor() -> None:
+    """It subclasses ``dict``, so it has to behave like one everywhere, not just on ``[]``.
+
+    Entries start as ``None`` placeholders and resolve on lookup. The inherited ``values()``,
+    ``items()`` and ``copy()`` returned those placeholders -- a mapping that answered ``in``
+    and ``[]`` correctly while reporting ``None`` for anything not yet imported. Nothing in the
+    codebase calls them today, which is exactly why it would have been found late and from a
+    confusing direction.
+    """
+    from src.connectors.registry import EOD_BAR_REGISTRY
+
+    assert all(callable(f) for f in EOD_BAR_REGISTRY.values())
+    assert all(callable(f) for _, f in EOD_BAR_REGISTRY.items())
+    assert all(callable(f) for f in EOD_BAR_REGISTRY.copy().values())
+    assert all(callable(EOD_BAR_REGISTRY[name]) for name in EOD_BAR_REGISTRY)

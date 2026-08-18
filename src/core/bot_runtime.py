@@ -8,8 +8,15 @@ from hashlib import sha256
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from src.core.config import DEFAULT_STRATEGY_ID, get_config
-from ..api.controls import find_binding, load_controls
+from src.core.config import DEFAULT_STRATEGY_ID
+from ..api.controls import (
+    ORIGIN_SCHEDULE,
+    binding_refusal,
+    find_binding,
+    frequency_minutes,
+    load_controls,
+    normalize_frequency,
+)
 from ..algorithms.registry import get_algorithm_class
 from ..core.interfaces import Schedule, schedule_minutes
 from ..execution.live_runner import run_once
@@ -124,22 +131,19 @@ class _RuntimeLoop:
 
 
 def _binding_frequency(binding_id: str) -> str:
-    controls = load_controls()
-    binding = find_binding(controls, binding_id)
-    candidate = str((binding or {}).get("frequency") or "1hr").strip().lower()
-    if candidate in {"15m", "30m", "1hr", "2hr", "1d", "mcp"}:
-        return candidate
-    return "1hr"
+    binding = find_binding(load_controls(), binding_id)
+    return normalize_frequency((binding or {}).get("frequency"))
 
 
 def _binding_enabled(binding_id: str):
-    """Enabled check scoped to one binding, re-read from controls on every tick."""
+    """Enabled check scoped to one binding, re-read from controls on every tick.
+
+    Delegates to ``binding_refusal`` so the scheduler and the MCP tools apply one rule about
+    which origin owns a binding, rather than each carrying its own opinion.
+    """
 
     def enabled(controls: dict[str, Any]) -> bool:
-        binding = find_binding(controls, binding_id)
-        if not binding or not binding.get("enabled"):
-            return False
-        return str((binding or {}).get("frequency") or "1hr").strip().lower() != "mcp"
+        return not binding_refusal(find_binding(controls, binding_id), ORIGIN_SCHEDULE)
 
     return enabled
 
@@ -166,8 +170,8 @@ def _binding_schedule(binding_id: str) -> Schedule:
 
 
 def _frequency_minutes(frequency: str) -> int:
-    mapping = {"15m": 15, "30m": 30, "1hr": 60, "2hr": 120, "1d": 24 * 60}
-    return mapping.get(str(frequency or "1hr").strip().lower(), 60)
+    """Minutes between fires. Only reached for scheduled bindings, so ``mcp`` cannot appear."""
+    return frequency_minutes(frequency) or 60
 
 
 def _binding_run_fn(binding_id: str):
@@ -181,7 +185,8 @@ def _binding_run_fn(binding_id: str):
 def _binding_run_key(binding_id: str):
     def run_key() -> str | None:
         frequency = _binding_frequency(binding_id)
-        if frequency == "mcp":
+        # No cadence means nothing for the clock to bucket -- an agent decides when this runs.
+        if frequency_minutes(frequency) is None:
             return None
         local_now = datetime.now(MARKET_TZ)
         # The binding owns the cadence, the algorithm still owns the session window. Without
@@ -204,32 +209,12 @@ def _binding_run_key(binding_id: str):
 
 def _binding_check_seconds(binding_id: str):
     def check_seconds() -> int:
-        frequency = _binding_frequency(binding_id)
-        if frequency == "mcp":
-            return 300
-        return max(_frequency_minutes(frequency) * 60, 60)
+        minutes = frequency_minutes(_binding_frequency(binding_id))
+        # An agent-driven binding still wakes, but only to re-read controls in case its
+        # frequency changed; there is no cadence of its own to follow.
+        return 300 if minutes is None else max(minutes * 60, 60)
 
     return check_seconds
-
-
-def _options_enabled(controls: dict[str, Any]) -> bool:
-    config = get_config()
-    return (
-        bool(controls.get("options_trading_enabled"))
-        and str(controls.get("options_strategy") or "none") != "none"
-        and not config.kill_switch
-    )
-
-
-def _run_algorithm(account_id: str | None) -> None:
-    run_once(account_id=account_id)
-
-
-def _run_options(account_id: str | None, run_key: str = "") -> None:
-    # run_key is accepted for a uniform runner signature; the options path has no binding.
-    from .algorithms.options.swing import run_options_once
-
-    run_options_once(account_id=account_id)
 
 
 def _active_schedule(controls: dict[str, Any]) -> Schedule:
@@ -281,30 +266,8 @@ def _algorithm_bucket_key(now: datetime, schedule: Schedule) -> str | None:
     return f"algorithm:{bucket.isoformat(timespec='minutes')}"
 
 
-def _algorithm_run_key() -> str | None:
-    return _algorithm_bucket_key(datetime.now(MARKET_TZ), _active_schedule(load_controls()))
-
-
-def _options_run_key() -> str | None:
-    """Options keep the base cadence: the swing algorithm is not in the equities registry, so
-    it has no ``Schedule`` of its own to read."""
-    return _algorithm_bucket_key(datetime.now(MARKET_TZ), Schedule())
-
-
-def _algorithm_check_seconds() -> int:
-    return _active_schedule(load_controls()).check_seconds
-
-
-def _options_check_seconds() -> int:
-    return Schedule().check_seconds
-
-
-def _options_account_id(controls: dict[str, Any]) -> str:
-    return str(controls.get("options_trading_account_id") or controls.get("trading_account_id") or "")
-
-
 class BotRuntime:
-    """One scheduler loop per algorithm binding, plus the options loop.
+    """One scheduler loop per algorithm binding.
 
     Bindings are user-editable at runtime, so the loop set is reconciled against controls
     rather than fixed at construction: adding a binding in the dashboard starts a loop for it,
@@ -315,14 +278,6 @@ class BotRuntime:
         self._lock = threading.Lock()
         self._algorithm_loops: dict[str, _RuntimeLoop] = {}
         self._started = False
-        self.options = _RuntimeLoop(
-            "options",
-            _options_enabled,
-            _run_options,
-            _options_check_seconds,
-            _options_run_key,
-            _options_account_id,
-        )
 
     def _make_loop(self, binding_id: str) -> _RuntimeLoop:
         return _RuntimeLoop(
@@ -359,7 +314,6 @@ class BotRuntime:
             loops = list(self._algorithm_loops.values())
         for loop in loops:
             loop.start()
-        self.options.start()
 
     def stop(self) -> None:
         self._started = False
@@ -367,7 +321,6 @@ class BotRuntime:
             loops = list(self._algorithm_loops.values())
         for loop in loops:
             loop.stop()
-        self.options.stop()
 
     @property
     def algorithm(self) -> _RuntimeLoop:
@@ -386,7 +339,6 @@ class BotRuntime:
         return {
             "bindings": bindings,
             "algorithm": first if first is not None else RuntimeState().__dict__,
-            "options": self.options.snapshot(),
         }
 
 

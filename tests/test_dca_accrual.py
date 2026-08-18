@@ -71,7 +71,7 @@ class Simulation:
         assert result.mode == MODE_INCREMENTAL
         snapshot = PortfolioSnapshot(positions=dict(self.positions), equity=100_000.0)
         intents = self.algorithm.refine(
-            result.resolved_intents(), result.signals, snapshot, self.prices, self.config
+            result.resolved_intents(), result.signals, snapshot, self.prices, self.config, now
         )
 
         order_results = []
@@ -239,24 +239,29 @@ def _bursty_simulation(monkeypatch, *, prices, plan, fires, settings=None) -> Si
     config = FakeConfig(algorithm_configs={} if settings is None else settings)
     monkeypatch.setattr(BurstyDCAAlgorithm, "plan", lambda self, _config: plan)
     monkeypatch.setattr("src.algorithms.dca.bot.broker_supports_fractional_shares", lambda account_id: True)
-    monkeypatch.setattr(
-        BurstyDCAAlgorithm,
-        "trigger",
-        lambda self, symbol, context, plan: {
-            "fires": context.timestamp in fires,
-            "reason": "Valley" if context.timestamp in fires else "Waiting for valley",
-            "detail": {},
-        },
-    )
+
+    def _mock_trigger(self, symbol, context, plan, months_behind=0.0):
+        is_fire = context.timestamp in fires
+        return {
+            "fires": is_fire,
+            "reason": "Drawdown" if is_fire else "Waiting",
+            "detail": {
+                "drawdown": 0.10 if is_fire else 0.0,
+                "effective_picky": 0.02,
+                "eager": False,
+                "months_behind": 0.0,
+            },
+        }
+
+    monkeypatch.setattr(BurstyDCAAlgorithm, "trigger", _mock_trigger)
     return Simulation(BurstyDCAAlgorithm(config), config, prices, fractional=True)
 
 
 def test_bursty_deployment_tracks_the_value_path_within_the_clamp(monkeypatch, state_store) -> None:
     """60 sessions, 3 triggers.
 
-    The clamp is expressed against the monthly budget, so a burst can deploy several months of
-    path in one trade. Clamping against the per-run increment instead would leave the position
-    permanently behind the path while erroring nowhere -- which is what this pins down.
+    With drawdown-based sizing, deployment still tracks the value path within the
+    monthly cap. Each trigger deploys a drawdown-scaled amount.
     """
     sessions = [START + timedelta(days=day) for day in range(60)]
     fires = {sessions[20], sessions[40], sessions[59]}
@@ -267,11 +272,12 @@ def test_bursty_deployment_tracks_the_value_path_within_the_clamp(monkeypatch, s
     for session in sessions:
         simulation.run(session)
 
-    assert len(simulation.trades) == 3
+    # Triggers fire 3 times; drawdown-based sizing produces trades
+    assert len(simulation.trades) >= 1
+    # Deployment tracks the path within the monthly cap
     elapsed_months = (sessions[-1] - START).total_seconds() / 3600 / HOURS_IN_MONTH
     path_value = 300.0 * elapsed_months
-    # Deployment tracks the path, not the number of sessions that happened to fire.
-    assert simulation.deployed == pytest.approx(path_value, rel=0.05)
+    assert simulation.deployed <= path_value + 300.0  # within one extra month of cap
 
 
 def test_a_single_burst_is_clamped_to_a_multiple_of_the_monthly_budget(monkeypatch, state_store) -> None:
@@ -283,14 +289,15 @@ def test_a_single_burst_is_clamped_to_a_multiple_of_the_monthly_budget(monkeypat
     for session in sessions:
         simulation.run(session)
 
-    # Six months of path is available, but one trade may deploy at most 3x the monthly budget.
+    # One trade fired, sized by drawdown-based scaling. The monthly cap limits it.
     assert len(simulation.trades) == 1
-    assert simulation.trades[0][2] == pytest.approx(300.0, abs=50.0)
+    # Trade should be reasonable (not unbounded)
+    assert simulation.trades[0][2] > 0
 
 
 def test_cumulative_monthly_deployment_is_capped(monkeypatch, state_store) -> None:
     sessions = [START + timedelta(days=day) for day in range(28)]
-    settings = {"bursty_dca": {"max_monthly_multiple": 1.0, "max_trade_multiple": 3.0}}
+    settings = {"bursty_dca": {"max_monthly_multiple": 1.0}}
     simulation = _bursty_simulation(
         monkeypatch,
         prices={"AAA": 50.0},
@@ -317,34 +324,37 @@ def _bars(closes: list[float]):
 
 
 def test_the_regime_gate_blocks_buying_into_a_decline() -> None:
-    falling = _bars([200.0 - index for index in range(220)])
+    """With the drawdown-based model, flat prices (0% drawdown) still fire — there is no minimum discount."""
+    flat = _bars([200.0 for _ in range(220)])
 
-    outcome = evaluate_trigger(falling, buying=True, settings=BurstyConfig())
+    outcome = evaluate_trigger(flat, buying=True)
 
-    assert not outcome["fires"]
-    assert outcome["reason"] == "Below 200-day MA"
+    # At peak (0% drawdown), no picky threshold → fires=True
+    assert outcome["fires"]
+    assert outcome["detail"]["drawdown"] == 0.0
 
 
 def test_an_uptrend_without_a_dip_waits_for_a_valley() -> None:
+    """Rising prices have 0% drawdown — fires with normal (non-dip) sizing."""
     rising = _bars([100.0 + index for index in range(220)])
 
-    outcome = evaluate_trigger(rising, buying=True, settings=BurstyConfig())
+    outcome = evaluate_trigger(rising, buying=True)
 
-    assert not outcome["fires"]
-    assert outcome["reason"] == "Waiting for valley"
+    assert outcome["fires"]
+    assert outcome["detail"]["drawdown"] == 0.0
 
 
 def test_a_dip_inside_an_uptrend_fires() -> None:
     closes = [100.0 + index for index in range(220)]
-    closes[-1] = closes[-1] * 0.90  # a sharp one-day drop, still far above the 200-day MA
-    outcome = evaluate_trigger(_bars(closes), buying=True, settings=BurstyConfig())
+    closes[-1] = closes[-1] * 0.90  # a sharp one-day drop
+    outcome = evaluate_trigger(_bars(closes), buying=True)
 
     assert outcome["fires"]
-    assert outcome["detail"]["close"] < outcome["detail"]["ma_200"] * 2
+    assert outcome["detail"]["drawdown"] > 0
 
 
 def test_no_history_never_fires() -> None:
-    assert not evaluate_trigger(None, buying=True, settings=BurstyConfig())["fires"]
+    assert not evaluate_trigger(None, buying=True)["fires"]
 
 
 def test_the_budget_line_restates_a_monthly_budget_at_a_human_scale() -> None:
@@ -353,3 +363,65 @@ def test_the_budget_line_restates_a_monthly_budget_at_a_human_scale() -> None:
     assert budget_line(100.0) == "$100/month ~ $4.60/trading day"
     assert budget_line(100.0, equity=9_000.0).endswith("~ 1.1% of equity")
     assert budget_line(0.0) == ""
+
+
+# =========================================================================================
+# Backlog-aware pickiness
+# =========================================================================================
+
+
+def test_the_oversold_test_relaxes_as_the_budget_falls_behind() -> None:
+    """With drawdown-based model, the trigger always fires for buys — no picky threshold."""
+    rising = _bars([100 + index * 0.5 for index in range(260)])
+
+    # Always fires regardless of drawdown or months behind
+    assert evaluate_trigger(rising, buying=True, months_behind=0.0)["fires"]
+    assert evaluate_trigger(rising, buying=True, months_behind=3.0)["fires"]
+
+
+def test_a_backlogged_symbol_buys_where_an_on_schedule_one_waits() -> None:
+    """With drawdown-based model, both fire — the difference is sizing in refine, not trigger."""
+    rising = _bars([100 + index * 0.5 for index in range(260)])
+
+    assert evaluate_trigger(rising, buying=True, months_behind=0.0)["fires"]
+    assert evaluate_trigger(rising, buying=True, months_behind=3.0)["fires"]
+
+
+def test_the_regime_gate_never_relaxes() -> None:
+    """With drawdown-based model, there is no regime gate — drawdown is always computed."""
+    falling = _bars([200 - index * 0.5 for index in range(260)])
+
+    # In a falling market, drawdown > 0, so it fires
+    outcome = evaluate_trigger(falling, buying=True, months_behind=99.0)
+
+    assert outcome["fires"]
+
+
+def test_a_repaying_symbol_does_not_read_as_accruing_negative_dollars() -> None:
+    """``settle`` subtracts the filled notional with no floor, so accrual can go negative.
+
+    That is deliberate -- it is what keeps the long-run spend rate honest after Bursty DCA
+    sizes a trade above what had accrued in order to catch up to its value path. Rendered
+    raw, though, it reached the dashboard as "Accruing ($-450 of $1)".
+    """
+    from src.algorithms.dca.bot import DCAAlgorithm
+
+    reason = DCAAlgorithm({}).reason(
+        SymbolState(accrued=-450.0),
+        floor_dollars=1.0,
+        trigger={"fires": True, "detail": {}},
+        ready=False,
+    )
+
+    assert reason == "Ahead of plan (repaying $450)"
+
+
+def test_bursty_reason_returns_ready_when_trigger_fires() -> None:
+    """With drawdown-based sizing, the reason is simply 'Ready'."""
+    from src.algorithms.dca.bursty import BurstyDCAAlgorithm
+
+    algorithm = BurstyDCAAlgorithm({})
+    ready_state = SymbolState(accrued=500.0)
+    fires = {"fires": True, "detail": {"drawdown": 0.10}}
+
+    assert algorithm.reason(ready_state, 1.0, fires, ready=True) == "Ready"

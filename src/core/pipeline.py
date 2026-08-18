@@ -8,16 +8,27 @@ from src.algorithms.registry import get_algorithm_class
 from src.brokerages import BROKERAGE_REGISTRY
 from src.core.config import get_account_broker_type
 from src.core.interfaces import (
+    MODE_INCREMENTAL,
     MODE_TARGET,
     AlgorithmDecision,
     AlgorithmResult,
     Brokerage,
+    Intent,
+    OrderRequest,
     PortfolioSnapshot,
     intents_from_weights,
     weights_from_intents,
 )
 from src.core.market_context import build_algorithm_context
-from src.core.orders import plan_share_orders, resolve_target_shares, submit_planned_orders
+from src.core.orders import (
+    FUNDING_GREEDY,
+    FUNDING_PRO_RATA,
+    SHARE_EPSILON,
+    fund_planned_orders,
+    plan_share_orders,
+    resolve_target_shares,
+    submit_planned_orders,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +69,18 @@ def read_snapshot(config, brokerage: Brokerage) -> PortfolioSnapshot:
     equity = sizing_equity(config, account_equity)
     if equity < account_equity:
         logger.info("Algorithm sizing equity capped at %.2f from account equity %.2f", equity, account_equity)
-    return PortfolioSnapshot(positions=brokerage.get_positions(), equity=equity)
+    return PortfolioSnapshot(
+        positions=brokerage.get_positions(),
+        equity=equity,
+        cash=float(account_state.get("cash", 0.0) or 0.0),
+        # Absent is not the same as zero. A brokerage that reports no buying power tells us
+        # nothing about what it will fund, and reading that silence as "no money" would trim
+        # every buy to nothing; fall back to the widest figure it did report instead, which
+        # leaves such a brokerage behaving as it did before funding existed.
+        buying_power=float(
+            account_state.get("buying_power", account_state.get("cash", account_equity)) or 0.0
+        ),
+    )
 
 
 # --------------------------------------------------------------------------------------
@@ -89,6 +111,10 @@ def run_algorithm(strategy: str, config, *, data_client: Any = None) -> Algorith
         latest_prices=latest_prices,
         metadata={**decision.metadata, "requirements": requirements},
         mode=decision.mode,
+        # The moment the context described, which live is now and in a replay is the signal
+        # date. Taking it from the context rather than defaulting to the wall clock is what
+        # lets step 2 measure elapsed time without a clock of its own.
+        as_of=context.timestamp,
     )
 
 
@@ -115,6 +141,131 @@ def weight_diff(
     return sorted(rows, key=lambda row: -abs(row["change"]))
 
 
+def submit_option_intents(
+    brokerage: Brokerage,
+    option_intents: list[Intent],
+    signals: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Submit option buy/sell limit orders for each option intent.
+
+    For each intent, two orders are placed:
+    1. A buy limit at the entry discount price
+    2. A GTC sell limit at the exit target price
+
+    If wrong, the sell limit just sits there -- the user sized for the loss.
+    """
+    results: list[dict[str, Any]] = []
+
+    for intent in option_intents:
+        signal = signals.get(intent.symbol, {})
+        option_type = signal.get("option_type", "call")
+        strike = signal.get("strike", 0.0)
+        dte = signal.get("dte", 0)
+        entry_limit = signal.get("entry_limit", 0.0)
+        exit_limit = signal.get("exit_limit", 0.0)
+        contracts = int(intent.value)
+
+        if contracts <= 0 or entry_limit <= 0:
+            results.append({
+                "symbol": intent.symbol,
+                "action": "buy",
+                "quantity": contracts,
+                "status": "rejected",
+                "reason": f"invalid option parameters: contracts={contracts}, entry_limit={entry_limit}",
+                "option_type": option_type,
+                "strike": strike,
+                "dte": dte,
+            })
+            continue
+
+        buy_request = OrderRequest(
+            symbol=intent.symbol,
+            action="buy",
+            quantity=contracts,
+            order_type="limit",
+            limit_price=entry_limit,
+            extra={
+                "option_type": option_type,
+                "strike": strike,
+                "dte": dte,
+                "position_intent": "buy_to_open",
+            },
+        )
+
+        try:
+            buy_result = brokerage.submit_order(buy_request)
+            results.append({
+                "symbol": intent.symbol,
+                "action": "buy",
+                "quantity": contracts,
+                "status": "submitted",
+                "order_type": "limit",
+                "limit_price": entry_limit,
+                "order_id": buy_result.get("order_id", "unknown"),
+                "option_type": option_type,
+                "strike": strike,
+                "dte": dte,
+            })
+        except Exception as exc:
+            logger.warning("Option buy rejected for %s: %s", intent.symbol, exc)
+            results.append({
+                "symbol": intent.symbol,
+                "action": "buy",
+                "quantity": contracts,
+                "status": "rejected",
+                "reason": str(exc),
+                "option_type": option_type,
+                "strike": strike,
+                "dte": dte,
+            })
+            continue
+
+        if exit_limit > 0:
+            sell_request = OrderRequest(
+                symbol=intent.symbol,
+                action="sell",
+                quantity=contracts,
+                order_type="limit",
+                limit_price=exit_limit,
+                extra={
+                    "option_type": option_type,
+                    "strike": strike,
+                    "dte": dte,
+                    "position_intent": "sell_to_close",
+                    "time_in_force": "gtc",
+                },
+            )
+            try:
+                sell_result = brokerage.submit_order(sell_request)
+                results.append({
+                    "symbol": intent.symbol,
+                    "action": "sell",
+                    "quantity": contracts,
+                    "status": "submitted",
+                    "order_type": "limit",
+                    "time_in_force": "gtc",
+                    "limit_price": exit_limit,
+                    "order_id": sell_result.get("order_id", "unknown"),
+                    "option_type": option_type,
+                    "strike": strike,
+                    "dte": dte,
+                })
+            except Exception as exc:
+                logger.warning("Option sell limit rejected for %s: %s", intent.symbol, exc)
+                results.append({
+                    "symbol": intent.symbol,
+                    "action": "sell",
+                    "quantity": contracts,
+                    "status": "rejected",
+                    "reason": str(exc),
+                    "option_type": option_type,
+                    "strike": strike,
+                    "dte": dte,
+                })
+
+    return results
+
+
 def place_orders(
     result: AlgorithmResult,
     config,
@@ -125,6 +276,7 @@ def place_orders(
     approval_timeout_seconds: int = 300,
     approval_poll_seconds: int = 5,
     max_result_age_seconds: int = DEFAULT_MAX_RESULT_AGE_SECONDS,
+    algorithm: Any = None,
 ) -> dict[str, Any]:
     """Turn a step-1 result into submitted orders, given what the account currently holds.
 
@@ -134,7 +286,10 @@ def place_orders(
     """
     _assert_fresh(result, max_result_age_seconds)
 
-    algorithm = get_algorithm_class(result.strategy).from_config(config)
+    # Re-resolving from the registry is only a convenience for callers holding a bare result.
+    # A caller that already has the instance -- the replay steps the same one through every
+    # date -- passes it, which also lets an unregistered algorithm be driven through step 2.
+    algorithm = algorithm or get_algorithm_class(result.strategy).from_config(config)
     snapshot = read_snapshot(config, brokerage)
     latest_prices = result.latest_prices
 
@@ -145,9 +300,17 @@ def place_orders(
         # An edited weight set is by definition the whole intended portfolio.
         proposed, mode = intents_from_weights(target_weights), MODE_TARGET
 
+    # Separate option intents from share/weight intents.
+    option_intents = [intent for intent in proposed if intent.kind == "option"]
+    share_intents = [intent for intent in proposed if intent.kind != "option"]
+
+    option_results: list[dict[str, Any]] = []
+    if option_intents:
+        option_results = submit_option_intents(brokerage, option_intents, result.signals)
+
     # ``shares`` intents carry their own quantity; everything else has to be priced to size.
     unpriced = sorted(
-        {intent.symbol for intent in proposed if intent.kind != "shares" and latest_prices.get(intent.symbol, 0.0) <= 0}
+        {intent.symbol for intent in share_intents if intent.kind != "shares" and latest_prices.get(intent.symbol, 0.0) <= 0}
     )
     if unpriced:
         raise ValueError(
@@ -156,16 +319,18 @@ def place_orders(
         )
 
     sizing = algorithm.sizing(config)
-    final_intents = algorithm.refine(proposed, result.signals, snapshot, latest_prices, config)
+    final_share_intents = algorithm.refine(
+        share_intents, result.signals, snapshot, latest_prices, config, result.as_of
+    )
 
-    investable_equity = snapshot.equity * max(0.0, min(1.0, 1.0 - sizing["cash_buffer"]))
+    fractional = getattr(brokerage, "supports_fractional_shares", False)
     sized_shares = resolve_target_shares(
-        final_intents,
+        final_share_intents,
         mode,
         snapshot.positions,
         latest_prices,
-        investable_equity,
-        supports_fractional_shares=getattr(brokerage, "supports_fractional_shares", False),
+        snapshot.equity,
+        supports_fractional_shares=fractional,
     )
 
     planned_orders = plan_share_orders(
@@ -175,18 +340,34 @@ def place_orders(
         snapshot.equity,
         min_trade_dollars=sizing["min_trade_dollars"],
         rebalance_threshold=sizing["rebalance_threshold"],
-        supports_fractional_shares=getattr(brokerage, "supports_fractional_shares", False),
-        target_weights=weights_from_intents(final_intents),
+        supports_fractional_shares=fractional,
+        target_weights=weights_from_intents(final_share_intents),
     )
-    order_results = submit_planned_orders(
-        brokerage,
+
+    fundable, unfunded, funding = fund_planned_orders(
         planned_orders,
+        buying_power=snapshot.buying_power,
+        reserve=snapshot.equity * max(0.0, min(1.0, float(getattr(config, "cash_buffer", 0.0) or 0.0))),
+        cash_equivalents=getattr(brokerage, "get_cash_equivalents", dict)(),
+        min_trade_dollars=sizing["min_trade_dollars"],
+        supports_fractional_shares=fractional,
+        policy=FUNDING_GREEDY if mode == MODE_INCREMENTAL else FUNDING_PRO_RATA,
+    )
+
+    share_order_results = submit_planned_orders(
+        brokerage,
+        fundable,
         require_approval=require_approval,
         approval_timeout_seconds=approval_timeout_seconds,
         approval_poll_seconds=approval_poll_seconds,
     )
+    share_order_results.extend(
+        {**order, "action": "skip", "quantity": 0, "status": "unfunded"} for order in unfunded
+    )
 
-    algorithm.settle(config, order_results, final_intents)
+    order_results = option_results + share_order_results
+
+    algorithm.settle(config, order_results, final_share_intents + option_intents)
 
     # A brokerage that keeps its own book (the local paper one) has no price feed, so its
     # equity would stay marked at the last fill until someone traded again.
@@ -195,30 +376,48 @@ def place_orders(
 
     rejected = [order for order in order_results if order.get("status") == "rejected"]
     submitted = [order for order in order_results if order.get("status") == "submitted"]
-    # Reported as the portfolio the sized orders actually land on, so an incremental run --
-    # whose intents describe a change rather than a destination -- reports something meaningful.
     resulting_weights = PortfolioSnapshot(
-        positions={**snapshot.positions, **sized_shares}, equity=snapshot.equity
+        positions=_resulting_positions(snapshot.positions, submitted), equity=snapshot.equity
     ).weights(latest_prices)
+    all_final_intents = final_share_intents + option_intents
     return {
         "strategy": result.strategy,
         "mode": mode,
-        "status": _batch_status(order_results, submitted, rejected),
+        "status": _batch_status(order_results, submitted, rejected, unfunded, funding),
         "equity": snapshot.equity,
         "proposed_weights": weights_from_intents(proposed),
         "final_weights": resulting_weights,
         "final_intents": [
             {"symbol": intent.symbol, "kind": intent.kind, "value": intent.value}
-            for intent in final_intents
+            for intent in all_final_intents
         ],
         "diff": weight_diff(snapshot.weights(latest_prices), resulting_weights),
         "planned_orders": planned_orders,
         "order_results": order_results,
+        "option_results": option_results,
+        "funding": funding,
+        "unfunded": [
+            {"symbol": order["symbol"], "action": order["action"], "reason": order["reason"]}
+            for order in unfunded
+        ],
         "rejected": [
             {"symbol": order["symbol"], "action": order["action"], "reason": order["reason"]}
             for order in rejected
         ],
     }
+
+
+def _resulting_positions(
+    positions: dict[str, float], submitted: list[dict[str, Any]]
+) -> dict[str, float]:
+    """Apply the submitted legs to the held book, at the sizes that were actually sent."""
+    resulting = dict(positions)
+    for order in submitted:
+        quantity = float(order.get("quantity") or 0.0)
+        signed = quantity if order.get("action") == "buy" else -quantity
+        symbol = str(order["symbol"])
+        resulting[symbol] = float(resulting.get(symbol, 0.0)) + signed
+    return {symbol: shares for symbol, shares in resulting.items() if abs(shares) > SHARE_EPSILON}
 
 
 def _assert_fresh(result: AlgorithmResult, max_age_seconds: int) -> None:
@@ -232,9 +431,24 @@ def _assert_fresh(result: AlgorithmResult, max_age_seconds: int) -> None:
         )
 
 
-def _batch_status(order_results, submitted, rejected) -> str:
+#: Every leg went out at the size the plan asked for.
+STATUS_SUBMITTED = "submitted"
+#: The batch was deliberately fitted to available funds. A success, not a failure: an agent
+#: that reads this as a rejection and retries would be re-submitting orders that were trimmed
+#: on purpose, which is exactly what the old ``partial`` reading caused.
+STATUS_SUBMITTED_REDUCED = "submitted_reduced"
+
+
+def _batch_status(order_results, submitted, rejected, unfunded=(), funding=None) -> str:
     if not order_results:
         return "no_orders"
-    if not rejected:
-        return "submitted"
-    return "partial" if submitted else "rejected"
+    # Checked before anything else: a denied approval means nothing was attempted, so reading
+    # the batch for funding or refusals afterwards would describe a submission that never
+    # happened -- which is what reporting it as "submitted" used to do.
+    if any(order.get("approval_status") == "not_approved" for order in order_results):
+        return "not_approved"
+    if rejected:
+        return "partial" if submitted else "rejected"
+    if unfunded or (funding or {}).get("reduced"):
+        return STATUS_SUBMITTED_REDUCED if submitted else "unfunded"
+    return STATUS_SUBMITTED
