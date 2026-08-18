@@ -1,4 +1,4 @@
-"""Detailed 12-month Dual Momentum backtest with per-session and monthly reports."""
+"""Detailed 12-month Rally Rotation backtest with per-session and monthly reports."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 def run_detailed_backtest():
-    strategy = "dual_momentum"
+    strategy = "rally_rotation"
     period = "12m"
     starting_equity = _backtest_starting_equity()
     config = get_config(strategy_id=strategy)
@@ -40,7 +40,7 @@ def run_detailed_backtest():
     print(f"{'='*90}")
     print(f"  Starting equity: ${starting_equity:,.2f}")
     print(f"  Period: 12 months")
-    print(f"  Strategy: Dual Momentum")
+    print(f"  Strategy: Rally Rotation")
     print(f"  Max positions: {getattr(config, 'max_positions', 'N/A')}")
     print(f"{'='*90}")
     print()

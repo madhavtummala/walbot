@@ -116,7 +116,7 @@ def test_replay_never_spends_cash_it_does_not_have() -> None:
 
 def test_replay_state_is_isolated_from_the_live_store() -> None:
     """A backtest replays algorithms that carry state between runs -- DCA's accrued budget,
-    Fast Momentum's intraday risk flag. It starts from a clean slate rather than inheriting
+    Rally Rotation's eligibility history. It starts from a clean slate rather than inheriting
     the live account's state, so a backtest is reproducible instead of depending on whatever
     the account happens to have accrued, and it cannot write back over it either.
     """

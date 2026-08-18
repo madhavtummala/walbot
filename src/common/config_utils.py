@@ -148,8 +148,7 @@ def as_symbol(value: Any, default: str = "") -> str:
 def tuning_section(config: Any, *algorithm_ids: str) -> dict[str, Any]:
     """The saved tuning for an algorithm, from the first id that has any.
 
-    Several ids because an algorithm can be renamed while the config on disk keeps the old key:
-    SPY Rotation is ``spy_rotation`` now and was ``regime_rotation`` and ``invest_spy`` before.
+    Several ids because an algorithm can be renamed while the config on disk keeps the old key.
     Reading them in order is what lets a rename not silently discard someone's tuning.
     """
     sections = getattr(config, "algorithm_configs", None)

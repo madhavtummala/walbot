@@ -1,8 +1,8 @@
-# Configuration exploration: Dual Momentum vs Fast Momentum
+# Configuration exploration: Rally Rotation vs Fast Momentum
 
 Re-run after the market-data corrections (dividends booked as cash, Schwab back-adjusted daily
 bars, total-return signal prices), because the previous conclusion -- that widening the universe
-and raising `max_positions` helped Dual Momentum -- was drawn on price series that under-counted
+and raising `max_positions` helped Rally Rotation -- was drawn on price series that under-counted
 every dividend payer.
 
 ## How it is measured
@@ -29,7 +29,7 @@ flattered, and this universe is full of thematic ETFs (XSD, XBI, XOP, KRE, XRT) 
 spreads are not small. Every row reports turnover as a multiple of the stake and a post-hoc
 drag at 1 and 5 bps; `net_return_5bps` is the honest column.
 
-This matters more than expected. The deployed Dual Momentum config turns over **161x the stake
+This matters more than expected. The deployed Rally Rotation config turns over **161x the stake
 in twelve months** -- about 64% of the book every single session. At 5bps that is 8.1 points of
 return, more than half of the 14.9% gross.
 
@@ -53,7 +53,7 @@ name changes every other name's score, so these are different strategies, not a 
 | `wide` | 20 | plus broad US and quality/value (SPY, IWM, RSP, QUAL, VTV, SCHD, SLV) |
 | `broad` | 29 | plus international, credit, low-vol and income sleeves |
 
-**Dual Momentum** (29 variants): universe, `max_positions` (with entry/exit ranks moving with
+**Rally Rotation** (29 variants): universe, `max_positions` (with entry/exit ranks moving with
 it), `volatility_tilt`, `risk_adjusted_score`, `min_base_score`, `breadth_min`,
 `name_weight_max`, `min_score_delta_to_replace`, `rebalance_weight_threshold`,
 `minimum_trade_nav_fraction`, a combined low-churn setting, the defensive sleeve, and the
@@ -80,7 +80,7 @@ each row's complete tuning dict). Regenerate any ranking with
 `breakeven` is the one-way trading cost that would erase the configuration's entire return --
 the assumption-free version of `net@5bps`.
 
-### Dual Momentum: the deployed config ranks 21st of 29
+### Rally Rotation: the deployed config ranks 21st of 29
 
 | # | variant | gross | net@5bps | vs base | maxDD | Sharpe | turnover | breakeven |
 |---|---|---|---|---|---|---|---|---|
@@ -99,7 +99,7 @@ the assumption-free version of `net@5bps`.
    the Sharpe. `broad` gives back a third of it and doubles drawdown to −12.2%.
 2. **`volatility_tilt` has reversed sign.** Monotone across four levels: −1.0 > 0.0 > 0.5 >
    +1.0 (deployed), and −1.0 also carries the lowest drawdown. This contradicts the note in
-   `dual_momentum/config.py` -- "+1.0 measured best across 6M/4M/3M ... improved return *and*
+   `rally_rotation/config.py` -- "+1.0 measured best across 6M/4M/3M ... improved return *and*
    drawdown together". That measurement predates the dividend and total-return corrections, and
    `+1.0` concentrates in exactly the high-volatility names where the raw-price bias bit
    hardest. **The re-run reversed a documented decision, which is what it was for.**
@@ -123,9 +123,9 @@ the assumption-free version of `net@5bps`.
 | 20 | max_single_weight=0.25 | +17.4% | +9.6% | −2.2 | **−12.5%** | 1.01 | 156× | 11.1bp |
 | 24 | max_positions=8 | +18.4% | +6.2% | −5.6 | −24.1% | 0.81 | 244× | 7.5bp |
 
-1. **Every variant takes 12-25% drawdown**, against Dual Momentum's 4.5-12%.
-2. **It wants the *opposite* universe**: `narrow` (9 names) wins by 12.2pp where Dual Momentum's
-   `narrow` was near-worst. Coherent -- Dual Momentum gates on absolute trend and breadth and can
+1. **Every variant takes 12-25% drawdown**, against Rally Rotation's 4.5-12%.
+2. **It wants the *opposite* universe**: `narrow` (9 names) wins by 12.2pp where Rally Rotation's
+   `narrow` was near-worst. Coherent -- Rally Rotation gates on absolute trend and breadth and can
    sit defensive, so more candidates means more chances to find something that qualifies; Fast
    Momentum always holds its top-N regardless of quality, so diluting the cross-section with
    low-dispersion index names averages the signal away.
@@ -136,7 +136,7 @@ the assumption-free version of `net@5bps`.
 
 ### Head to head
 
-| | Dual Momentum | Fast Momentum |
+| | Rally Rotation | Fast Momentum |
 |---|---|---|
 | baseline net@5bps | +6.9% | **+11.8%** |
 | best net@5bps | **+31.8%** | +24.0% |
@@ -150,7 +150,7 @@ the assumption-free version of `net@5bps`.
 **As deployed**, Fast Momentum earns more but takes three times the drawdown, and is worse
 risk-adjusted on both Sharpe and peak-to-trough.
 
-**Tuned**, Dual Momentum wins decisively: +31.8% net at −7.2% and Sharpe 2.51, against Fast
+**Tuned**, Rally Rotation wins decisively: +31.8% net at −7.2% and Sharpe 2.51, against Fast
 Momentum's best of +24.0% at −21.6% and Sharpe 1.33. Similar return, three times the pain. Fast
 Momentum is also the more fragile to costs -- lower breakeven on higher turnover.
 
@@ -163,7 +163,7 @@ combination as a hypothesis to check on other windows before deploying.
 
 By that standard, what survives scrutiny is:
 
-- **Trustworthy** -- a mechanism *and* a monotone shape. Dual Momentum's `volatility_tilt`
+- **Trustworthy** -- a mechanism *and* a monotone shape. Rally Rotation's `volatility_tilt`
   (four levels, ordered, and it reverses a measurement taken on pre-correction data); Fast
   Momentum's `max_positions` (monotone down past 3); the opposite universe preferences, which
   follow from one algorithm being able to sit defensive and the other not.
@@ -175,14 +175,14 @@ By that standard, what survives scrutiny is:
 Two limits on the window itself:
 
 - The intraday cache begins **2025-11-28**, but this window opens 2025-08-18. Its first ~3.3
-  months resolve the "intraday" horizons from daily bars, which compresses Dual Momentum's four
+  months resolve the "intraday" horizons from daily bars, which compresses Rally Rotation's four
   selection horizons (60/240/1200/4800 market-minutes) toward roughly {1d, 1d, 3d, 12d} and
   makes nano and micro the same number. Coverage reads 1.0 because the *window* was filled --
   by daily bars standing in for intraday ones.
 - Genuinely out-of-sample validation is therefore capped at about **8.5 months**, not 24.
 
-> **Superseded for Dual Momentum.** That 8.5-month cap was a statement about the *intraday*
-> cache, and Dual Momentum no longer reads intraday bars at all -- `required_history_minutes`
+> **Superseded for Rally Rotation.** That 8.5-month cap was a statement about the *intraday*
+> cache, and Rally Rotation no longer reads intraday bars at all -- `required_history_minutes`
 > is 0 and every feature comes from daily bars. The daily store reaches back to **2022-03-28**,
 > so disjoint calendar-year windows are now available to it. Fast Momentum still reads intraday
 > history, so the cap continues to apply there.
@@ -196,7 +196,7 @@ is inside 24M. A configuration "surviving all three" has been confirmed once on 
 data, with the most recent months counted three times.
 
 ```bash
-python -m tools.config_sweep --algorithm dual_momentum --stage confirm \
+python -m tools.config_sweep --algorithm rally_rotation --stage confirm \
   --period 2023-01-01:2023-12-31,2024-01-01:2024-12-31,2025-01-01:2025-12-31
 ```
 
@@ -222,4 +222,4 @@ measured under.
 
 For a book turning over 100x its stake a year this number matters more than the gross return.
 `tools/attribution.py` prints the whole cost curve for one configuration, which is the honest
-form of the question -- Dual Momentum's deployed 2023 run breaks even at roughly **17bps**.
+form of the question -- Rally Rotation's deployed 2023 run breaks even at roughly **17bps**.

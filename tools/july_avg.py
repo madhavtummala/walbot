@@ -8,16 +8,16 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.algorithms.registry import get_algorithm_class
 from src.api.payloads.backtest import _backtest_starting_equity, _fetch_backtest_history, _configured_history_providers
-from src.algorithms.dual_momentum.config import DualMomentumConfig
+from src.algorithms.rally_rotation.config import RallyRotationConfig
 from src.core.config import get_config
 from src.data.duckdb_store import pooled_connections
 from src.execution.replay import replay
 
 def run():
-    strategy = "dual_momentum"
+    strategy = "rally_rotation"
     config = get_config(strategy_id=strategy)
     algorithm = get_algorithm_class(strategy).from_config(config)
-    dm_config = DualMomentumConfig.from_runtime_config(config)
+    dm_config = RallyRotationConfig.from_runtime_config(config)
     schedule = algorithm.schedule
     starting_equity = _backtest_starting_equity()
 

@@ -18,7 +18,7 @@ path, all to decide what ranking the names already said. Selection is per ETF ag
 
 from __future__ import annotations
 
-from .config import EPSILON, TRADING_DAYS, DualMomentumConfig
+from .config import EPSILON, TRADING_DAYS, RallyRotationConfig
 from .scoring import _closes
 
 
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 def universe_data_ok(
     scored: dict[str, dict[str, Any]],
-    config: DualMomentumConfig,
+    config: RallyRotationConfig,
 ) -> dict[str, Any]:
     """Whether enough of the universe can be judged at all. Not a view on the market.
 
@@ -70,7 +70,7 @@ def universe_data_ok(
 # Layer 1: absolute eligibility
 
 
-def eligibility(row: dict[str, Any], config: DualMomentumConfig) -> tuple[bool, str]:
+def eligibility(row: dict[str, Any], config: RallyRotationConfig) -> tuple[bool, str]:
     """Whether one ETF may be held at all, independent of how it ranks.
 
     This is the absolute-momentum half of dual momentum. A name failing here is not ranked,
@@ -86,10 +86,31 @@ def eligibility(row: dict[str, Any], config: DualMomentumConfig) -> tuple[bool, 
         return False, f"{config.etf_abs_return_days}-day return below {config.etf_min_abs_return:+.0%}"
     if float(row.get("fast_return", 0.0)) <= config.etf_min_fast_return:
         return False, f"{config.etf_fast_return_days}-day return below {config.etf_min_fast_return:+.0%}"
+    # Volatility ceiling: reject names that have become too volatile.
+    vol_ceiling = max(config.vol_ceiling, 0.0)
+    if vol_ceiling and float(row.get("annual_volatility", 0.0)) > vol_ceiling:
+        return False, f"Annualized vol {float(row.get('annual_volatility', 0.0)):.0%} exceeds ceiling {vol_ceiling:.0%}"
+    # Rising volatility: reject if short-term vol is running above long-term vol.
+    vol_rising_thresh = max(config.vol_rising_threshold, 0.0)
+    if vol_rising_thresh:
+        vol_5d = float(row.get("vol_5d", 0.0))
+        vol_20d = float(row.get("annual_volatility", 0.0))
+        if vol_20d > 0 and vol_5d > vol_20d * (1.0 + vol_rising_thresh):
+            return False, f"5d vol {vol_5d:.0%} rising above 20d vol {vol_20d:.0%}"
+    # Trend filter: reject names with short-term rally but medium-term downtrend.
+    trend_ma_days = max(config.trend_ma_days, 0)
+    if trend_ma_days and float(row.get("trend_ma_distance", 0.0)) < 0:
+        return False, f"Below {trend_ma_days}-day trend MA"
+    trend_return_days = max(config.trend_return_days, 0)
+    trend_min_ret = float(config.trend_min_return)
+    if trend_return_days and trend_min_ret:
+        trend_ret = float(row.get("trend_return", 0.0))
+        if trend_ret <= trend_min_ret:
+            return False, f"{trend_return_days}-day return {trend_ret:+.2%} below {trend_min_ret:+.2%}"
     return True, ""
 
 
-def crash_stop(row: dict[str, Any], config: DualMomentumConfig) -> tuple[bool, str]:
+def crash_stop(row: dict[str, Any], config: RallyRotationConfig) -> tuple[bool, str]:
     """The one exit that answers to no clock: a single session down ``max_daily_drop``.
 
     Separated from :func:`hold_eligibility` because the two exits are on different cadences.
@@ -104,7 +125,42 @@ def crash_stop(row: dict[str, Any], config: DualMomentumConfig) -> tuple[bool, s
     return True, ""
 
 
-def hold_eligibility(row: dict[str, Any], config: DualMomentumConfig) -> tuple[bool, str]:
+def climax_top(row: dict[str, Any], config: RallyRotationConfig) -> tuple[bool, str]:
+    """Detect a potential climax top: price far above MA + range expansion + volume spike.
+
+    This fires on every run like crash_stop, outside the normal eligibility cadence.
+    The logic: when price is far above its 100-day MA (at a peak, not a discount),
+    the same volume spike + wide range pattern that would be a buy-the-dip signal
+    near the MA becomes an exit signal. The combination means "exhausted buying pressure
+    at a blowoff top."
+    """
+    # Only fire when far above MA (at a peak, not near MA where same pattern is bullish)
+    climax_ma_min = max(config.climax_ma_distance_min, 0.0)
+    if climax_ma_min <= 0:
+        return True, ""
+    ma_distance = float(row.get("ma_distance", 0.0))
+    if ma_distance < climax_ma_min:
+        return True, ""
+
+    # Range expansion: today's range is multiple of 20d average range
+    range_limit = max(config.range_expansion_limit, 0.0)
+    if range_limit <= 0:
+        return True, ""
+    range_expansion = float(row.get("range_expansion", 0.0))
+    if range_expansion < range_limit:
+        return True, ""
+
+    # Volume spike confirms exhaustion
+    vol_ratio_min = max(config.climax_volume_ratio_min, 0.0)
+    if vol_ratio_min > 0:
+        volume_ratio = float(row.get("volume_ratio", 0.0))
+        if volume_ratio < vol_ratio_min:
+            return True, ""
+
+    return False, f"Climax top: {ma_distance:.0%} above MA, range {range_expansion:.1f}x, vol {float(row.get('volume_ratio', 0.0)):.1f}x"
+
+
+def hold_eligibility(row: dict[str, Any], config: RallyRotationConfig) -> tuple[bool, str]:
     """Whether a name already held may stay, on floors widened by ``exit_threshold_slack``.
 
     The counterpart to :func:`eligibility`, which decides entry. Sharing one threshold for
@@ -132,7 +188,7 @@ def hold_eligibility(row: dict[str, Any], config: DualMomentumConfig) -> tuple[b
 # Layer 2: sizing and portfolio volatility
 
 
-def score_to_weights(rows: list[dict[str, Any]], config: DualMomentumConfig) -> dict[str, float]:
+def score_to_weights(rows: list[dict[str, Any]], config: RallyRotationConfig) -> dict[str, float]:
     """Split ``risk_on_gross_max`` between the selected names, in proportion to score.
 
     The score enters as its excess over ``min_base_score``, so a name that only just clears the
@@ -163,7 +219,7 @@ def score_to_weights(rows: list[dict[str, Any]], config: DualMomentumConfig) -> 
 
 def defensive_weights(
     scored: dict[str, dict[str, Any]],
-    config: DualMomentumConfig,
+    config: RallyRotationConfig,
 ) -> dict[str, float]:
     """Where the book sits when risk-on is not permitted.
 
@@ -184,7 +240,7 @@ def defensive_weights(
 def park_residual(
     weights: dict[str, float],
     defensive_book: dict[str, float],
-    config: DualMomentumConfig,
+    config: RallyRotationConfig,
 ) -> dict[str, float]:
     """Put whatever the risk sleeve could not deploy into the defensive sleeve, not into cash.
 
@@ -216,7 +272,7 @@ def park_residual(
 def sentiment_adjusted(
     weights: dict[str, float],
     sentiment_scores: dict[str, float],
-    config: DualMomentumConfig,
+    config: RallyRotationConfig,
 ) -> dict[str, float]:
     """A bounded size modifier, never a reason to hold something price logic rejected.
 

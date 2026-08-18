@@ -90,7 +90,7 @@ def test_algorithm_bucket_key_anchors_to_the_scheduled_start() -> None:
 def test_active_schedule_reads_the_selected_algorithms_class() -> None:
     assert bot_runtime._active_schedule({"active_strategy": "dca"}).weekdays == (0,)
     assert bot_runtime._active_schedule({"active_strategy": "bursty_dca"}) == DAILY_AT_OPEN
-    assert bot_runtime._active_schedule({"active_strategy": "fast_momentum"}).refresh_minutes == 60
+    assert bot_runtime._active_schedule({"active_strategy": "rally_rotation"}) == DAILY_AT_OPEN
 
 
 def test_active_schedule_falls_back_for_an_unknown_strategy() -> None:
@@ -138,7 +138,7 @@ def test_options_enabled_requires_strategy_and_kill_switch_off(monkeypatch) -> N
     assert not bot_runtime._options_enabled({"options_trading_enabled": True, "options_strategy": "covered_call"})
 
 
-def _binding_controls(frequency: str = "1hr", strategy: str = "dual_momentum") -> dict:
+def _binding_controls(frequency: str = "1hr", strategy: str = "rally_rotation") -> dict:
     return {
         "bindings": [{"id": "b1", "strategy": strategy, "account_id": "paper",
                       "enabled": True, "frequency": frequency}],

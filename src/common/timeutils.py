@@ -1,7 +1,7 @@
 """Timestamp parsing shared across layers.
 
 One tolerant ISO reader rather than the three private copies that had accumulated
-(``dual_momentum/stateful._parse_time``, ``dca/accrual._parse_timestamp``, and the inline
+(``rally_rotation/stateful._parse_time``, ``dca/accrual._parse_timestamp``, and the inline
 handling in the connectors).
 """
 

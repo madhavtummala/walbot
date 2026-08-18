@@ -39,7 +39,7 @@ const PAYLOADS = {
   "/api/activity": { account_id: "paper", rows: [], error: "" },
   "/api/algorithm-activity": { strategy: "dca", rows: [{ submitted_at: "2026-08-13T14:00:00+00:00", strategy: "dca", account_id: "paper", symbol: "SPY", side: "buy", quantity: 2, status: "submitted", reason: "" }] },
   "/api/schwab/auth": { configured: false, connector_enabled: true, state: "unconfigured", detail: "Schwab is not configured: missing SCHWAB_APP_KEY." },
-  "/api/algorithm-config": { strategy: "fast_momentum", config_key: "fast_momentum", config: { max_positions: 4 } },
+  "/api/algorithm-config": { strategy: "rally_rotation", config_key: "rally_rotation", config: { max_positions: 3 } },
 };
 global.fetch = async (url) => {
   const path = String(url).split("?")[0];
@@ -54,8 +54,8 @@ require(require("path").resolve(__dirname, "../../web/static/app.js"));
 
 setTimeout(() => {
   console.log("hashchange listener registered:", typeof winListeners.hashchange === "function");
-  const routes = ["#/algo/fast_momentum/overview", "#/algo/fast_momentum/signals",
-                  "#/algo/fast_momentum/tune", "#/algo/dca/tune", "#/algo/fast_momentum/backtest",
+  const routes = ["#/algo/rally_rotation/overview", "#/algo/rally_rotation/signals",
+                  "#/algo/rally_rotation/tune", "#/algo/dca/tune", "#/algo/rally_rotation/backtest",
                   "#/algo/dca/signals", "#/algo/dca/overview", "#/account/paper",
                   "#/account/missing", "#/target/paper", "#/nonsense"];
   for (const hash of routes) {

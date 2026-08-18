@@ -30,7 +30,7 @@ from typing import Any
 
 import pandas as pd
 
-from src.algorithms.dual_momentum.config import DualMomentumConfig
+from src.algorithms.rally_rotation.config import RallyRotationConfig
 from tools.config_sweep import Sweep, deployed_tuning
 
 logger = logging.getLogger(__name__)
@@ -163,13 +163,13 @@ def report(curve: pd.DataFrame, tuning: dict[str, Any], starting_equity: float, 
 
 def _parse_overrides(pairs: list[str]) -> dict[str, Any]:
     """``key=value`` overrides, typed by the dataclass field rather than guessed."""
-    fields = DualMomentumConfig.__dataclass_fields__
+    fields = RallyRotationConfig.__dataclass_fields__
     out: dict[str, Any] = {}
     for pair in pairs:
         key, _, raw = pair.partition("=")
         key = key.strip()
         if key not in fields:
-            raise SystemExit(f"unknown dual_momentum key: {key}")
+            raise SystemExit(f"unknown rally_rotation key: {key}")
         kind = fields[key].type
         if "bool" in str(kind):
             out[key] = raw.strip().lower() in {"1", "true", "yes"}
@@ -194,12 +194,12 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     for noisy in ("src.core.orders", "src.brokerages.providers.paper",
-                  "src.algorithms.dual_momentum.algorithm", "src.data.provider_cache", "src.connectors"):
+                  "src.algorithms.rally_rotation.algorithm", "src.data.provider_cache", "src.connectors"):
         logging.getLogger(noisy).setLevel(logging.ERROR)
 
-    tuning = {**deployed_tuning("dual_momentum"), **_parse_overrides(args.overrides)}
+    tuning = {**deployed_tuning("rally_rotation"), **_parse_overrides(args.overrides)}
     sweep = Sweep([args.period])
-    run = sweep.run("dual_momentum", args.label or "deployed", tuning, args.period)
+    run = sweep.run("rally_rotation", args.label or "deployed", tuning, args.period)
     curve, _coverage = sweep.last_curve
     report(curve, tuning, sweep.starting_equity, f"{run.label}  /  {args.period}")
     return 0

@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from .config import EPSILON, TRADING_DAYS, DualMomentumConfig
+from .config import EPSILON, TRADING_DAYS, RallyRotationConfig
 
 
 
@@ -36,10 +36,21 @@ def _rolling_volatility(closes: pd.Series, window: int) -> float:
     return 0.0 if math.isnan(value) else value
 
 
+def _trend_ma_distance(closes: pd.Series, ma_days: int) -> float:
+    """Signed distance from the trend MA (e.g. 20-day). Returns 0 if insufficient data."""
+    if ma_days <= 0 or len(closes) < ma_days:
+        return 0.0
+    trend_ma = float(closes.tail(ma_days).mean())
+    last = float(closes.iloc[-1])
+    if trend_ma <= 0:
+        return 0.0
+    return last / trend_ma - 1.0
+
+
 def compute_features(
     symbol: str,
     daily_bars: Any,
-    config: DualMomentumConfig,
+    config: RallyRotationConfig,
 ) -> dict[str, Any]:
     """Everything about one symbol that the layers below need, computed once.
 
@@ -76,6 +87,35 @@ def compute_features(
     last_daily = float(daily_closes.iloc[-1]) if not daily_closes.empty else 0.0
     daily_vol = _rolling_volatility(daily_closes, max(config.vol_estimation_days, 2))
 
+    # -- new risk signals for climax detection --
+    # Get high, low, volume columns
+    bars_df = daily_bars if isinstance(daily_bars, pd.DataFrame) else pd.DataFrame()
+    highs = pd.to_numeric(bars_df.get("high", pd.Series()), errors="coerce").dropna() if not bars_df.empty else pd.Series(dtype=float)
+    lows = pd.to_numeric(bars_df.get("low", pd.Series()), errors="coerce").dropna() if not bars_df.empty else pd.Series(dtype=float)
+    volumes = pd.to_numeric(bars_df.get("volume", pd.Series()), errors="coerce").dropna() if not bars_df.empty else pd.Series(dtype=float)
+
+    # 5-day annualized volatility (short-term vol vs 20d)
+    vol_5d = _rolling_volatility(daily_closes, 5) * math.sqrt(TRADING_DAYS)
+
+    # 20-day average intraday range (high-low)/close
+    range_20d_avg = 0.0
+    if len(highs) >= 20 and len(lows) >= 20:
+        recent_range = (highs.tail(20).values - lows.tail(20).values) / highs.tail(20).values
+        range_20d_avg = float(recent_range.mean())
+
+    # Current range expansion: today's range vs 20d average
+    range_expansion = 0.0
+    if len(highs) >= 1 and len(lows) >= 1 and range_20d_avg > 0:
+        today_range = float(highs.iloc[-1] - lows.iloc[-1]) / float(highs.iloc[-1]) if float(highs.iloc[-1]) > 0 else 0.0
+        range_expansion = today_range / range_20d_avg if range_20d_avg > 0 else 0.0
+
+    # Volume ratio: last volume vs 20-day average
+    volume_ratio = 0.0
+    if len(volumes) >= 20:
+        avg_vol = float(volumes.tail(20).mean())
+        if avg_vol > 0:
+            volume_ratio = float(volumes.iloc[-1]) / avg_vol
+
     return {
         "symbol": symbol.upper(),
         "close": float(closes.iloc[-1]) if not closes.empty else last_daily,
@@ -94,8 +134,15 @@ def compute_features(
         "enough_history": bool(enough_history),
         "abs_return": _return_over(daily_closes, config.etf_abs_return_days),
         "fast_return": _return_over(daily_closes, config.etf_fast_return_days),
+        # Trend filter features
+        "trend_ma_distance": _trend_ma_distance(daily_closes, config.trend_ma_days),
+        "trend_return": _return_over(daily_closes, config.trend_return_days),
         # Annualised, because the volatility target is quoted annually.
         "annual_volatility": daily_vol * math.sqrt(TRADING_DAYS),
+        "vol_5d": vol_5d,
+        "range_20d_avg": range_20d_avg,
+        "range_expansion": range_expansion,
+        "volume_ratio": volume_ratio,
         "has_daily": not daily_closes.empty,
         "has_history": not closes.empty,
     }
@@ -145,7 +192,7 @@ def _risk_scales(features_by_symbol: dict[str, dict[str, Any]]) -> dict[str, flo
 
 def base_scores(
     features_by_symbol: dict[str, dict[str, Any]],
-    config: DualMomentumConfig,
+    config: RallyRotationConfig,
 ) -> dict[str, dict[str, Any]]:
     """Slow-weighted composite score, smoothed over ``score_ema_minutes``.
 

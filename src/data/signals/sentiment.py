@@ -1,9 +1,8 @@
 """Normalising raw provider sentiment records into scores.
 
 Lives in the data layer, not in an algorithm. It is a pure transform over already-fetched
-records -- its own docstring said so -- but it sat inside ``fast_momentum``, so
-``core.market_context`` had to reach into a concrete strategy to use it. That import was the
-last cycle in the codebase: base -> market_context -> fast_momentum -> base.
+records -- its own docstring said so -- but it used to sit inside a concrete strategy, so
+``core.market_context`` had to reach into that strategy to use it.
 
 Nothing here knows which algorithm is asking.
 """

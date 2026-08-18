@@ -28,7 +28,7 @@ from src.core.strategy_models import strategy_signal_rows
 logger = logging.getLogger(__name__)
 
 CONTRACT_MULTIPLIER = 100
-SUPPORTED_OPTIONS_STRATEGIES = {"options_swing_dual_momentum", "dual_momentum"}
+SUPPORTED_OPTIONS_STRATEGIES = {"options_swing_rally_rotation", "rally_rotation"}
 
 
 @dataclass(frozen=True)
@@ -142,7 +142,7 @@ def _rank_contract(contract: Any, quote: Any, target_delta: float = 0.5) -> tupl
     return (delta_distance, spread, -open_interest)
 
 
-def dual_momentum_option_signals(config: Config, data_client=None) -> list[dict[str, Any]]:
+def rally_rotation_option_signals(config: Config, data_client=None) -> list[dict[str, Any]]:
     data_client = data_client or create_data_client(config)
     bars_by_symbol = get_historical_daily_bars(
         config.symbols,
@@ -151,7 +151,7 @@ def dual_momentum_option_signals(config: Config, data_client=None) -> list[dict[
         data_client=data_client,
         data_feed=config.alpaca_data_feed,
     )
-    rows = strategy_signal_rows("dual_momentum", bars_by_symbol)
+    rows = strategy_signal_rows("rally_rotation", bars_by_symbol)
     active = [row for row in rows if str(row.get("side")) in {"LONG", "SHORT"}]
     active.sort(key=lambda row: abs(as_float(row.get("score"))), reverse=True)
     return active[: max(int(config.options_swing_max_contracts), 1)]
@@ -247,7 +247,7 @@ def run_options_once(account_id: str | None = None) -> list[dict[str, Any]]:
         return []
 
     selected_account = account_id or str(controls.get("options_trading_account_id") or controls.get("trading_account_id") or "") or None
-    config = get_config(account_id=selected_account, strategy_id="dual_momentum")
+    config = get_config(account_id=selected_account, strategy_id="rally_rotation")
     if config.kill_switch:
         logger.warning("Kill switch is enabled. Exiting options runner without orders.")
         return []
@@ -261,7 +261,7 @@ def run_options_once(account_id: str | None = None) -> list[dict[str, Any]]:
     option_data_client = create_option_data_client(config)
     account_equity = get_account_equity(trading_client)
     current_positions = get_positions(trading_client)
-    signals = dual_momentum_option_signals(config, data_client=data_client)
+    signals = rally_rotation_option_signals(config, data_client=data_client)
     results: list[dict[str, Any]] = []
 
     for signal in signals:

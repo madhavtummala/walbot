@@ -131,7 +131,7 @@ def signal_price(bars: pd.DataFrame) -> pd.Series:
     """The series every horizon is measured on: total return, not raw price.
 
     Momentum compares symbols against each other, and a raw-price series quietly ranks every
-    dividend payer below where it belongs. Measured on the live ``dual_momentum`` universe,
+    dividend payer below where it belongs. Measured on the live ``rally_rotation`` universe,
     ranking on raw price picks a different top-4 on 17.3% of rebalance days, and the tilt runs
     monotonically with yield -- EWJ, VGK and IEMG systematically under-selected, GLD, IBIT and
     USO over-selected. The eligibility gate shows the same one-sided pattern: it flips for

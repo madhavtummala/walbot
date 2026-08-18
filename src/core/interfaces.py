@@ -343,10 +343,9 @@ class Schedule:
     """When an algorithm is allowed to act.
 
     Declared in code on the algorithm class rather than in config, because cadence is a
-    property of the strategy and not of the deployment: Fast Momentum is meaningless at a
-    weekly cadence, and running DCA hourly only burns API calls. Two algorithms that want
-    different cadences cannot share one config knob, which is what the old
-    ``algorithm_market_data_refresh_minutes`` forced them to do.
+    property of the strategy and not of the deployment: running DCA hourly only burns API
+    calls. Two algorithms that want different cadences cannot share one config knob, which
+    is what the old ``algorithm_market_data_refresh_minutes`` forced them to do.
 
     Cadence never controls how much DCA spends -- accrual is wall-clock (see
     ``algorithms/dca/accrual.py``), so this decides only how often a symbol gets the

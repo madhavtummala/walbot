@@ -284,7 +284,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Clear, warm, and verify local market-data cache.")
     scope = parser.add_mutually_exclusive_group()
     scope.add_argument("--symbols", nargs="*", help="Symbols to warm. Defaults to the whole tradable universe.")
-    scope.add_argument("--algorithm", help="Warm only the symbols configured for one algorithm, such as fast_momentum.")
+    scope.add_argument("--algorithm", help="Warm only the symbols configured for one algorithm, such as rally_rotation.")
     parser.add_argument("--provider", default=None, help="Global provider override for both EOD and intraday.")
     parser.add_argument("--eod-provider", help="Provider for EOD data (e.g., alpaca, yfinance).")
     parser.add_argument("--intraday-provider", help="Provider for intraday data (e.g., yfinance).")

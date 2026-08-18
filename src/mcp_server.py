@@ -40,7 +40,7 @@ FastMCPSettings.model_rebuild()
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ALGORITHM = "fast_momentum"
+DEFAULT_ALGORITHM = "rally_rotation"
 
 
 def _result_payload(result: AlgorithmResult) -> dict[str, Any]:

@@ -47,11 +47,9 @@ class BurstyConfig:
     percent_b_threshold: float = 0.0
     rsi_lookback: int = 2
     rsi_threshold: float = 10.0
-    #: Clamp on a single trade, expressed against the **monthly budget**. Expressing it against
-    #: the per-run increment instead makes the position fall permanently behind the value path
-    #: while erroring nowhere, which is why it is stated in months here.
-    max_trade_multiple: float = 3.0
-    #: Cap on cumulative deployment per symbol per month, also in multiples of the budget.
+    #: Cap on cumulative deployment per symbol per month, in multiples of the monthly budget.
+    #: Guards total monthly burn regardless of how many dips fire. A separate per-trade cap is
+    #: not needed: ``dip_scale`` already encodes how much headroom a dip earns.
     max_monthly_multiple: float = 3.0
     value_averaging: bool = True
     #: Months of undeployed budget at which the oversold test stops being picky at all.
@@ -68,6 +66,18 @@ class BurstyConfig:
     #:
     #: 0 disables the whole mechanism, which is the behaviour this had before.
     backlog_relax_months: float = 0.0
+    #: Continuous dip-depth scaling for per-trade size.
+    #:
+    #: effective_cap = budget × (1 + dip_scale × dip_depth)
+    #: where dip_depth = max(0, 1 − percent_b)
+    #:   0  at the upper Bollinger Band
+    #:   1  at the lower band
+    #:  >1  below the lower band (the deepest dips earn the most headroom)
+    #:
+    #: At 0 (default): cap = 1× monthly budget, no scaling.
+    #: At 2 with price 20% below the lower band (dip_depth=1.2): cap = 3.4× budget.
+    #: When only RSI fires and %B is unavailable, dip_depth falls back to 0 (1× baseline).
+    dip_scale: float = 0.0
 
     @classmethod
     def from_runtime_config(cls, config: Any) -> BurstyConfig:
@@ -137,6 +147,9 @@ def evaluate_trigger(
     )
     rsi = _latest(compute_rsi(bars, lookback=settings.rsi_lookback))
     percent_b_threshold, rsi_threshold = relaxed_thresholds(settings, months_behind)
+    # dip_depth drives per-trade sizing in refine(); expose it here so the sizing layer can
+    # read it from signals without recomputing %B a second time.
+    dip_depth = max(0.0, 1.0 - percent_b) if not pd.isna(percent_b) else 0.0
     detail = {
         "close": close,
         "ma_200": round(moving_average, 4),
@@ -144,6 +157,7 @@ def evaluate_trigger(
         "rsi_2": None if pd.isna(rsi) else round(rsi, 2),
         "months_behind": round(months_behind, 2),
         "rsi_threshold": round(rsi_threshold, 2),
+        "dip_depth": round(dip_depth, 4),
     }
 
     if buying:
@@ -270,8 +284,13 @@ class BurstyDCAAlgorithm(DCAAlgorithm):
                 )
                 continue
 
-            # Guard 1: clamp a single trade against the monthly budget.
-            desired = min(desired, settings.max_trade_multiple * budget)
+            # Per-trade cap: one month of budget, scaled up proportionally to dip depth.
+            # The deeper the price is below the lower Bollinger Band, the more budget this
+            # single trade may deploy. dip_depth is pre-computed in evaluate_trigger() and
+            # carried through signals so we do not recompute %B here.
+            dip_depth = float(signals.get(intent.symbol, {}).get("detail", {}).get("dip_depth", 0.0) or 0.0)
+            effective_cap = budget * (1.0 + settings.dip_scale * dip_depth)
+            desired = min(desired, effective_cap)
             # Guard 2: cap cumulative deployment per symbol per month.
             remaining = max((settings.max_monthly_multiple * budget) - symbol_state.deployed_this_month, 0.0)
             desired = min(desired, remaining)

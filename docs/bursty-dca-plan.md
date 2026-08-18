@@ -137,7 +137,7 @@ Sell side is the mirror: sell the excess when position value runs above the path
 growth, covered-call income, cash, and hedges — regime switching, hence the name.
 
 Remove the six `generic:*` strategies (momentum_social, trend_following, mean_reversion,
-breakout, risk_parity, dual_momentum).
+breakout, risk_parity, rally_rotation).
 
 Targets:
 - `src/algorithms/registry.py` — drop the six `generic:*` entries
@@ -148,7 +148,7 @@ Targets:
 - `src/api/api_payloads.py` — the `strategy == "none"` branch and `_dca_signal_payload` become
   the real `dca` algorithm
 - `web/static/app.js` — strategy dropdown and hardcoded ids
-- tests referencing momentum_social / risk_parity / dual_momentum need rewriting
+- tests referencing momentum_social / risk_parity / rally_rotation need rewriting
 
 **Decide first:** renaming `invest_spy` changes its key under `algorithm_configs`, so saved
 tuning silently falls back to defaults. Either read both keys for a release, or keep the id
@@ -251,8 +251,8 @@ still says `invest_spy:`, so saved tuning survives with zero risk.
 `strategy_signal_rows_from_prepared` fallback in `_compute_backtest` was reachable only for
 unregistered names, so it now raises instead. That left `strategy_signal_rows_from_prepared`
 and `weights_from_strategy_rows` with no callers and they were deleted; `strategy_signal_rows`
-stays, because `algorithms/options/swing.py` still uses the `dual_momentum` *rule set* (which is
-not the same thing as the deleted `dual_momentum` strategy). Three tests that backtested deleted
+stays, because `algorithms/options/swing.py` still uses the `rally_rotation` *rule set* (which is
+not the same thing as the deleted `rally_rotation` strategy). Three tests that backtested deleted
 strategies were removed rather than retargeted.
 
 **Fixed alongside, as the plan suggested:** `web_app.py`'s uvicorn module path, and the

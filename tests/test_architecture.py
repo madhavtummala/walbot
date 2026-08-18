@@ -95,7 +95,7 @@ def test_the_source_tree_has_no_import_cycles() -> None:
 def test_the_data_layer_does_not_import_an_algorithm() -> None:
     """Direction of dependency: algorithms read data, never the reverse.
 
-    ``core.market_context`` used to import ``fast_momentum`` for a sentiment helper that was
+    ``core.market_context`` used to import a concrete algorithm for a sentiment helper that was
     pure and generic, which made a core module depend on one concrete strategy.
     """
     _, graph = _module_graph()
@@ -180,9 +180,9 @@ def test_an_algorithm_never_reads_the_clock() -> None:
 
     A backtest is the same code with the clock moved, so a ``datetime.now()`` or
     ``date.today()` buried in an algorithm silently means "today" for every simulated step.
-    That is not a hypothetical: the Fast Momentum drawdown breaker keyed its session on
-    ``date.today()``, so one bad day latched it for an entire backtest and every later date
-    proposed an all-cash book that read as a decision rather than as a bug.
+    That is not a hypothetical: the drawdown breaker keyed its session on ``date.today()``,
+    so one bad day latched it for an entire backtest and every later date proposed an all-cash
+    book that read as a decision rather than as a bug.
     """
     files, _ = _module_graph()
     offenders: list[str] = []
@@ -212,15 +212,15 @@ def test_the_sweep_tool_measures_the_configuration_that_is_deployed() -> None:
     ``config/walbot.yaml`` on six keys, which would have made every "improvement" partly an
     artefact of the transcription.
     """
-    from tools.config_sweep import _dual_baseline, _fast_baseline, dual_axes, fast_axes
+    from tools.config_sweep import _dual_baseline, dual_axes
     from src.common.config_utils import tuning_section
     from src.core.config import get_config
 
-    for algorithm_id, baseline in (("dual_momentum", _dual_baseline()), ("fast_momentum", _fast_baseline())):
+    for algorithm_id, baseline in (("rally_rotation", _dual_baseline()),):
         deployed = tuning_section(get_config(strategy_id=algorithm_id), algorithm_id)
         assert baseline == deployed, algorithm_id
 
-    for axes in (dual_axes(), fast_axes()):
+    for axes in (dual_axes(),):
         labels = [label for label, _ in axes]
         assert labels[0] == "baseline"
         assert len(labels) == len(set(labels)), "two variants share a label, so one would be lost"

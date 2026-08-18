@@ -46,34 +46,14 @@ const STRATEGIES = [
     signals: ["200-day regime gate", "Bollinger %B", "Connors RSI(2)", "Value-averaging path", "Trade and monthly clamps"],
   },
   {
-    key: "fast_momentum",
-    blurb: "Ranks risk-on and defensive ETFs on multi-horizon momentum, then sizes with caps.",
-    name: "Fast Momentum",
-    status: "Live",
-    horizon: "Intraday",
-    risk: "Medium",
-    logic: "Ranks risk-on and defensive ETFs with nano, micro, meso, and macro momentum scores, then sizes selected positions dynamically with caps and rebalance thresholds.",
-    signals: ["Nano momentum", "Micro momentum", "Meso trend", "Macro trend", "Pullback bonus"],
-  },
-  {
-    key: "dual_momentum",
+    key: "rally_rotation",
     blurb: "Relative momentum picks the leaders; absolute momentum decides if it may hold any.",
-    name: "Dual Momentum",
+    name: "Rally Rotation",
     status: "Paper",
     horizon: "Daily",
     risk: "High",
     logic: "Scores every ETF against the others and requires each to clear its own trend and return floors before it is ranked. Holds the top few, re-ranks on its own clock rather than every session, and needs a score margin to displace a sitting position. Sizing is proportional to score with no per-name cap, so a concentrated book is normal; a single-session drop sells outright.",
     signals: ["Absolute eligibility", "Cross-sectional rank", "Replacement margin", "Crash stop"],
-  },
-  {
-    key: "spy_rotation",
-    blurb: "Classifies the SPY regime, then rotates between growth, income, cash, and hedges.",
-    name: "SPY Rotation",
-    status: "Live",
-    horizon: "Intraday",
-    risk: "Medium",
-    logic: "Classifies SPY as growing, flat, falling, or crisis using micro, meso, macro, and sentiment signals, then rotates among growth, covered-call income, cash, and capped hedges.",
-    signals: ["SPY state", "Micro/meso/macro", "Sentiment", "XYLD flat state", "SH/VXX crisis hedge"],
   },
 ];
 
@@ -88,7 +68,7 @@ const state = {
   controls: {
     trading_account_id: "",
     algorithm_enabled: false,
-    active_strategy: "fast_momentum",
+    active_strategy: "rally_rotation",
   },
   accounts: { rows: [] },
   bot: null,
@@ -1288,44 +1268,15 @@ async function loadSignals(strategyKey) {
 }
 
 function formatSignalDetail(strategyKey, row) {
-  if (strategyKey === "fast_momentum") {
-    const components = row.score_components || {};
-    const details = [
-      row.reason || "Signal pending",
-      `Macro ${signedNum(components.price_macro, 2)}`,
-      `Meso ${signedNum(components.price_meso, 2)}`,
-      `Micro ${signedNum(components.price_micro, 2)}`,
-      `Nano ${signedNum(components.price_nano, 2)}`,
-      `Pullback ${signedNum(components.pullback_uptrend, 2)}`,
-      `Sentiment ${signedNum(components.sentiment ?? row.sentiment_component ?? row.sentiment_score ?? row.social_score, 2)}`,
-    ];
-    return details.join(" / ");
-  }
   // Each layer that could have stopped this symbol, in the order it is applied -- the point
   // of the algorithm is that you can see which gate rejected a name, not just its score.
-  if (strategyKey === "dual_momentum") {
+  if (strategyKey === "rally_rotation") {
     const details = [
       row.reason || "Signal pending",
       `Eligible ${row.eligible ? "yes" : "no"}`,
       row.rank ? `Rank ${row.rank}` : "Unranked",
       `Vol ${percent(row.annual_volatility)}`,
     ];
-    if (row.close) details.push(`Close ${money(row.close, 2)}`);
-    return details.join(" / ");
-  }
-  if (strategyKey === "spy_rotation") {
-    const details = [];
-    if (row.reason) details.push(row.reason);
-    if (row.spy_state) details.push(`SPY ${String(row.spy_state).toLowerCase()}`);
-    if (Math.abs(Number(row.pullback_score || 0)) >= 0.01) {
-      details.push(`Pullback ${Number(row.pullback_score) > 0 ? "+" : ""}${num(row.pullback_score, 2)}`);
-    }
-    if (Number(row.sentiment_records || 0) > 0) {
-      const providers = Array.isArray(row.sentiment_providers) && row.sentiment_providers.length
-        ? row.sentiment_providers.join(", ")
-        : "provider";
-      details.push(`Sentiment ${num(row.sentiment_component ?? row.sentiment_score ?? row.social_score, 2)} (${providers})`);
-    }
     if (row.close) details.push(`Close ${money(row.close, 2)}`);
     return details.join(" / ");
   }
@@ -1355,7 +1306,7 @@ function formatSignalHeadline(strategyKey, row) {
     if (row.warning) parts.push(row.warning);
     return parts.filter(Boolean).join(" / ");
   }
-  if (strategyKey === "fast_momentum" || strategyKey === "spy_rotation" || strategyKey === "dual_momentum") {
+  if (strategyKey === "rally_rotation") {
     const parts = [
       row.side || row.signal || "Signal",
       `Score ${num(row.score, 2)}`,

@@ -4,8 +4,8 @@ A sweep ranks configurations; it does not tell you *why* one won. A twenty-point
 out to be one symbol held for six weeks is a different fact from one spread across the book, and
 only the second is a reason to change the deployed config.
 
-    python -m tools.explain_run --algorithm dual_momentum --universe wide --period 12m
-    python -m tools.explain_run --algorithm dual_momentum --from data/config_sweep_12m.csv --label universe=wide
+    python -m tools.explain_run --algorithm rally_rotation --universe wide --period 12m
+    python -m tools.explain_run --algorithm rally_rotation --from data/config_sweep_12m.csv --label universe=wide
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ def report(curve: pd.DataFrame, starting_equity: float) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--algorithm", default="dual_momentum")
+    parser.add_argument("--algorithm", default="rally_rotation")
     parser.add_argument("--period", default="12m")
     parser.add_argument("--universe", choices=sorted(UNIVERSES), default=None)
     parser.add_argument("--from", dest="axes_results", default=None)

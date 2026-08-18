@@ -105,13 +105,11 @@ OPTIONS_SWING_STRIKE_RANGE_PCT = 0.15
 ALGORITHM_IDS = {
     "dca",
     "bursty_dca",
-    "fast_momentum",
-    "dual_momentum",
-    "spy_rotation",
+    "rally_rotation",
 }
 
 #: Used wherever no strategy was selected, and as the fallback for a retired id.
-DEFAULT_STRATEGY_ID = "fast_momentum"
+DEFAULT_STRATEGY_ID = "rally_rotation"
 
 
 #: Stands for "no account was named" -- the value ``Config.account_id`` carries before any
