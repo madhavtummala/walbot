@@ -5,7 +5,7 @@ import pytest
 from src.algorithms.explainers import EXPLAINERS, explainer_for
 from src.api.api_payloads import algorithm_config_payload
 
-ALGORITHMS = ("dca", "bursty_dca", "rally_rotation")
+ALGORITHMS = ("bursty_dca", "rally_rotation")
 
 
 @pytest.mark.parametrize("algorithm_id", ALGORITHMS)

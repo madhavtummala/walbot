@@ -255,30 +255,40 @@ class ReplayContextSource(ContextSource):
         *,
         history: HistoryCache,
         coverage: Coverage,
+        intraday_history: dict[str, pd.DataFrame] | None = None,
+        intraday_as_of: pd.Timestamp | None = None,
     ) -> None:
         self.as_of = as_of
         self.daily_history = daily_history
         self.history = history
         self.coverage = coverage
+        self.intraday_history = intraday_history
+        self.intraday_as_of = intraday_as_of
 
     def timestamp(self) -> datetime:
         return self.as_of.to_pydatetime()
 
     def latest_prices(self, symbols: list[str], config) -> dict[str, float]:
-        return {
-            symbol: float(frame.loc[self.as_of, "close"])
-            for symbol, frame in self.daily_history.items()
-            if self.as_of in frame.index
-        }
+        prices: dict[str, float] = {}
+        # In intraday mode, prefer the intraday close at the exact timestamp.
+        if self.intraday_history and self.intraday_as_of is not None:
+            for symbol in symbols:
+                frame = self.intraday_history.get(symbol)
+                if frame is not None and self.intraday_as_of in frame.index:
+                    prices[symbol] = float(frame.loc[self.intraday_as_of, "close"])
+        # Fall back to daily closes for any symbol not priced intraday.
+        for symbol in symbols:
+            if symbol in prices:
+                continue
+            frame = self.daily_history.get(symbol)
+            if frame is not None and self.as_of in frame.index:
+                prices[symbol] = float(frame.loc[self.as_of, "close"])
+        return prices
 
     def daily_bars(self, symbols: list[str], requirements, config) -> dict[str, Any]:
-        # Already loaded once for the whole replay and sliced per date, rather than refetched:
-        # the depth an algorithm needs is the same on every date, only the right edge moves.
         return _slice_daily(self.daily_history, self.as_of)
 
     def history_bars(self, symbols: list[str], requirements, config) -> dict[str, Any]:
-        # Sliced out of the read the whole replay shares, for the same reason the daily bars
-        # above are: only the right edge of the window moves from one date to the next.
         return self.history.bars_as_of(sorted(self.daily_history), self.as_of, self.coverage)
 
 
@@ -327,8 +337,16 @@ def replay(
     history: "HistoryCache | None" = None,
     open_in: str = "",
     cost_bps: float = 0.0,
+    intraday_history: dict[str, pd.DataFrame] | None = None,
+    intraday_minutes: int = 0,
 ) -> tuple[pd.DataFrame, Coverage]:
     """Step ``algorithm`` through ``trade_dates``, trading at each date's close.
+
+    When ``intraday_minutes > 0`` and ``intraday_history`` is provided, the replay generates
+    intraday timestamps within each trading session (every ``intraday_minutes`` from 09:30 to
+    16:00 ET) and uses them as trade dates instead of daily timestamps. This lets algorithms
+    like intraday_pick that declare ``history_lookback_minutes > 0`` be backtested at their
+    actual execution cadence.
 
     ``daily_history`` is keyed by symbol and indexed by timestamp. ``should_run(date)`` gates
     a date against the algorithm's ``Schedule``; a date that does not run still marks the
@@ -355,10 +373,26 @@ def replay(
     coverage = Coverage()
     records: list[dict[str, Any]] = []
 
+    # When intraday stepping is requested, derive intraday timestamps from the intraday bars.
+    # Each symbol's intraday bar timestamps are unioned to get the master stepping grid.
+    use_intraday = intraday_minutes > 0 and intraday_history and any(
+        not frame.empty for frame in intraday_history.values()
+    )
+    if use_intraday:
+        intraday_stamps: set[pd.Timestamp] = set()
+        for frame in intraday_history.values():
+            if not frame.empty:
+                intraday_stamps.update(frame.index)
+        trade_dates = sorted(intraday_stamps)
+        if not trade_dates:
+            use_intraday = False
+
     # One read per symbol for the whole replay, sliced per date below.
     history = history or HistoryCache(
         sorted(daily_history),
-        trade_dates,
+        trade_dates if not use_intraday else sorted(
+            {ts.normalize() for ts in trade_dates}
+        ),
         providers=history_providers or ["yfinance"],
         lookback_minutes=requirements.history_lookback_minutes,
     )
@@ -367,41 +401,41 @@ def replay(
     pending: list[tuple[pd.Timestamp, str, float]] = []
     dividend_income = 0.0
     contributed = 0.0
-    # Carried between dates rather than reset: on a date the algorithm does not run, the book
-    # is still positioned the way the last decision left it, which is what attributing a day's
-    # P&L to a mode has to mean.
     allocation_mode = ""
 
-    # The book is a real ``PaperBrokerage`` on a throwaway state store, not the configured
-    # local paper account: that account is for live scheduled testing and must never be moved
-    # by a backtest. ``ephemeral_state`` redirects every read and write to an in-memory dict,
-    # so the class, the fills and the accounting are shared while the balances are not.
     with ephemeral_state():
         book = PaperBrokerage(config)
         book.cost_bps = max(float(cost_bps or 0.0), 0.0)
         book.state.update({"cash": float(starting_equity), "positions": {}, "prices": {}})
 
         for index, trade_date in enumerate(trade_dates):
-            closes = {
-                symbol: float(frame.loc[trade_date, "close"])
-                for symbol, frame in daily_history.items()
-                if trade_date in frame.index
-            }
-            # Seeded before anything reads the book, so the opening balance is already in the
-            # sleeve on the first date rather than a day late.
+            # Intraday: use the intraday bar's close. Daily: use the daily bar's close.
+            if use_intraday:
+                closes = {}
+                for symbol, frame in intraday_history.items():
+                    if trade_date in frame.index:
+                        closes[symbol] = float(frame.loc[trade_date, "close"])
+                # Also pull daily closes for symbols not in intraday but held.
+                for symbol, frame in daily_history.items():
+                    day_stamp = trade_date.normalize()
+                    if symbol not in closes and day_stamp in frame.index:
+                        closes[symbol] = float(frame.loc[day_stamp, "close"])
+            else:
+                closes = {
+                    symbol: float(frame.loc[trade_date, "close"])
+                    for symbol, frame in daily_history.items()
+                    if trade_date in frame.index
+                }
+
             if index == 0 and open_in:
                 _open_in_cash_equivalent(book, open_in.upper(), closes, fractional)
             positions = book.get_positions()
 
-            # Entitlement is settled before this date trades: owning the shares through the
-            # previous close is what earns the payment, so a position opened today does not.
             for symbol, amount in schedule.get(trade_date, ()):
                 held = positions.get(symbol, 0.0)
                 if abs(held) > 1e-9:
                     pending.append((_payable_on(trade_date, amount, trade_dates), symbol, held * amount.amount))
 
-            # Cash lands on the payable date, not the ex-date. The gap is a real few days of
-            # drag rather than a rounding detail, so the replay waits it out too.
             still_pending: list[tuple[pd.Timestamp, str, float]] = []
             paid_today = 0.0
             for payable, symbol, value in pending:
@@ -421,31 +455,39 @@ def replay(
             turnover = 0.0
             trades: dict[str, float] = {}
 
-            # index 0 has no prior bar to form a signal from, so it only seeds the clock.
             if index > 0 and should_run(trade_date):
                 signal_date = trade_dates[index - 1]
+                # For intraday stepping, the daily history slice uses the normalized date
+                # so the algorithm always sees daily bars up to the correct trading day.
+                if use_intraday:
+                    daily_as_of = signal_date.normalize()
+                    # Build a daily history snapshot: for each symbol, take the daily bars
+                    # up to and including the signal date's calendar day.
+                    sliced_daily = {
+                        symbol: frame.loc[:daily_as_of]
+                        for symbol, frame in daily_history.items()
+                        if not frame.loc[:daily_as_of].empty
+                    }
+                else:
+                    sliced_daily = None
+
                 context = build_algorithm_context(
                     config,
                     requirements,
                     positions={s: int(v) for s, v in positions.items()},
                     equity=equity,
                     source=ReplayContextSource(
-                        signal_date, daily_history, history=history, coverage=coverage
+                        signal_date,
+                        daily_history if not use_intraday else daily_history,
+                        history=history,
+                        coverage=coverage,
+                        intraday_history=intraday_history if use_intraday else None,
+                        intraday_as_of=signal_date if use_intraday else None,
                     ),
                 )
                 decision = algorithm.analyze(context)
-                # The regime the algorithm believes it is in. Recorded so a result can be
-                # attributed to the states that produced it -- "which mode earned this, and how
-                # long was it in each" is not answerable from an equity curve alone.
                 allocation_mode = str(decision.metadata.get("allocation_mode", "") or allocation_mode)
 
-                # Step 2 exactly as the live runner performs it -- the same sizing, the same
-                # rebalance threshold and minimum trade size, the same brokerage call. The
-                # replay used to size intents itself with a simpler rule, so a backtest was
-                # quietly testing execution logic the runtime does not use.
-                #
-                # ``latest_prices`` is deliberately this date's closes rather than the signal
-                # date's: the decision is made on yesterday's data and filled at today's price.
                 result = AlgorithmResult(
                     strategy=getattr(algorithm, "algorithm_id", ""),
                     intents=[i for i in decision.resolved_intents() if i.kind != "weight" or i.value],
@@ -453,16 +495,12 @@ def replay(
                     latest_prices=closes,
                     metadata={**decision.metadata, "requirements": requirements},
                     mode=decision.mode,
-                    # The signal date, not the wall clock. ``as_of`` is the only clock step 2
-                    # reads, so leaving it to default to ``now`` would tell every stateful
-                    # guard in ``refine`` that the whole backtest happened this instant.
                     as_of=context.timestamp,
                 )
                 outcome = place_orders(
                     result,
                     config,
                     book,
-                    # A historical result is stale by construction; freshness is a live guard.
                     max_result_age_seconds=0,
                     algorithm=algorithm,
                 )
@@ -474,9 +512,6 @@ def replay(
                     buying = str(order.get("action", "")).lower() == "buy"
                     if buying:
                         contributed += value
-                    # Signed, per symbol. The daily total says how much was traded; only the
-                    # per-name breakdown says *why* -- an entry, an exit and a resize are three
-                    # different decisions, and they are indistinguishable once summed.
                     symbol = str(order.get("symbol", "") or "")
                     if symbol:
                         trades[symbol] = trades.get(symbol, 0.0) + (value if buying else -value)
@@ -494,13 +529,9 @@ def replay(
                     "positions": {s: positions.get(s, 0.0) * p for s, p in closes.items()
                                   if abs(positions.get(s, 0.0) * p) > 0.005},
                     "dca_contributions": contributed,
-                    # Reported in its own right rather than only inside equity: income and
-                    # price appreciation are different things, and a strategy that earns its
-                    # return by holding T-bills should be legible as doing exactly that.
                     "dividend_income": dividend_income,
                     "dividends_paid": paid_today,
                     "turnover": turnover,
-                    # Signed traded notional per symbol, for turnover attribution. See above.
                     "trades": trades,
                     "order_count": order_count,
                     "allocation_mode": allocation_mode,

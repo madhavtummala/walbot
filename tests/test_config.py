@@ -292,7 +292,6 @@ data_sources:
 def test_get_config_reads_split_bot_and_universe_files(tmp_path, monkeypatch) -> None:
     algorithm_bot_path = tmp_path / "algorithm_bot.yaml"
     algorithms_path = tmp_path / "algorithms.yaml"
-    options_bot_path = tmp_path / "options_bot.yaml"
     dca_bot_path = tmp_path / "dca_bot.yaml"
     universe_path = tmp_path / "universe.yaml"
     accounts_path = tmp_path / "accounts.yaml"
@@ -317,13 +316,6 @@ algorithms:
 """,
         encoding="utf-8",
     )
-    options_bot_path.write_text(
-        """
-options:
-  swing_dte_min: 35
-""",
-        encoding="utf-8",
-    )
     dca_bot_path.write_text("dca_bot: {}\n", encoding="utf-8")
     universe_path.write_text(
         """
@@ -340,7 +332,6 @@ tradable_universe:
     connectors_path.write_text("data_sources: {}\n", encoding="utf-8")
     monkeypatch.setenv("TRADING_ALGORITHM_BOT_FILE", str(algorithm_bot_path))
     monkeypatch.setenv("TRADING_ALGORITHMS_FILE", str(algorithms_path))
-    monkeypatch.setenv("TRADING_OPTIONS_BOT_FILE", str(options_bot_path))
     monkeypatch.setenv("TRADING_DCA_BOT_FILE", str(dca_bot_path))
     monkeypatch.setenv("TRADING_UNIVERSE_FILE", str(universe_path))
     monkeypatch.setenv("TRADING_ACCOUNTS_FILE", str(accounts_path))
@@ -355,7 +346,6 @@ tradable_universe:
     assert config.require_trade_approval is True
     assert config.trade_approval_timeout_seconds == 120
     assert config.trade_approval_poll_seconds == 2
-    assert config.options_swing_dte_min == 35
 
 
 def test_the_kill_switch_is_an_environment_brake_not_a_config_key(tmp_path, monkeypatch) -> None:

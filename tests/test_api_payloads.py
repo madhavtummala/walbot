@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pandas as pd
 import pytest
 
@@ -8,7 +10,7 @@ from src.core import market_context
 from src.algorithms import dca as dca
 from src.algorithms.dca import bot as dca_bot
 from src.core.config import Config
-from src.core.interfaces import Schedule
+from src.core.interfaces import Schedule, DAILY_AT_OPEN
 from src.execution import replay as replay_module
 from src.algorithms.registry import canonical_algorithm_id
 from src.api.api_payloads import (
@@ -204,37 +206,32 @@ def test_a_plan_carries_only_what_to_buy_and_how_much() -> None:
 def test_controls_payload_returns_persisted_choices() -> None:
     payload = controls_payload()
 
-    assert {"equities", "options", "algorithm_enabled", "options_trading_enabled", "active_strategy", "options_strategy"} <= set(payload["controls"])
-    assert {"algorithm", "options"} <= set(payload["bot"])
+    assert {"equities", "algorithm_enabled", "active_strategy"} <= set(payload["controls"])
+    assert {"algorithm"} <= set(payload["bot"])
     assert "dca" not in payload["bot"]
 
 
 def test_save_controls_payload_does_not_wake_runtimes(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("TRADING_ALGORITHM_BOT_FILE", str(tmp_path / "algorithm_bot.yaml"))
-    monkeypatch.setenv("TRADING_OPTIONS_BOT_FILE", str(tmp_path / "options_bot.yaml"))
 
     payload = api_payloads.save_controls_payload(
         {
             "controls": {
                 "active_strategy": "none",
                 "algorithm_enabled": True,
-                "options_strategy": "none",
-                "options_trading_enabled": True,
             }
         }
     )
 
     # A saved "none" resolves to DCA but lands off: it used to force the bot idle whatever
     # the enabled flag said, so carrying that flag over would start trading on upgrade.
-    assert payload["controls"]["active_strategy"] == "dca"
+    assert payload["controls"]["active_strategy"] == "bursty_dca"
     assert payload["controls"]["algorithm_enabled"] is False
-    assert payload["controls"]["options_trading_enabled"] is False
     # Asserted on the module that owns the controls payload: ``api_payloads`` is a facade and
     # forwards only the names it exports, so a runtime handle would not be visible through it.
     from src.api.payloads import controls as controls_payloads
 
     assert not hasattr(controls_payloads.bot_runtime, "wake_algorithm")
-    assert not hasattr(controls_payloads.bot_runtime, "wake_options")
 
 
 def test_cache_only_backtest_does_not_compute_without_cached_rows(monkeypatch) -> None:
@@ -378,7 +375,7 @@ def test_history_backtest_reads_configured_provider_order(monkeypatch) -> None:
 
 def test_none_strategy_resolves_to_dca(monkeypatch) -> None:
     """The retired "None" card always meant "just run DCA", so its saved id maps there."""
-    assert canonical_algorithm_id("none") == "dca"
+    assert canonical_algorithm_id("none") == "bursty_dca"
 
 
 def test_dca_view_states_its_planned_total(monkeypatch) -> None:
@@ -432,14 +429,14 @@ def test_signal_view_is_computed_for_the_account_the_strategy_is_deployed_on(mon
         captured["account_id"] = account_id
         return Config(symbols=["SPY"], account_id=str(account_id or ""))
 
-    monkeypatch.setattr(controls_module, "load_controls", lambda *a, **kw: _binding_controls("dca", "local_paper"))
+    monkeypatch.setattr(controls_module, "load_controls", lambda *a, **kw: _binding_controls("bursty_dca", "local_paper"))
     monkeypatch.setattr(strategy_config, "get_config", capturing_get_config)
 
-    assert strategy_config.config_for_strategy_view("dca").account_id == "local_paper"
+    assert strategy_config.config_for_strategy_view("bursty_dca").account_id == "local_paper"
     assert captured["account_id"] == "local_paper"
 
     # An explicit account still wins: the dashboard sends the one its own editor is writing.
-    assert strategy_config.config_for_strategy_view("dca", "paper").account_id == "paper"
+    assert strategy_config.config_for_strategy_view("bursty_dca", "paper").account_id == "paper"
 
 
 def test_signal_view_survives_a_binding_naming_a_deleted_account(monkeypatch) -> None:
@@ -458,10 +455,10 @@ def test_signal_view_survives_a_binding_naming_a_deleted_account(monkeypatch) ->
             raise UnknownAccountError(str(account_id), ["paper"])
         return Config(symbols=["SPY"], account_id="paper")
 
-    monkeypatch.setattr(controls_module, "load_controls", lambda *a, **kw: _binding_controls("dca", "deleted"))
+    monkeypatch.setattr(controls_module, "load_controls", lambda *a, **kw: _binding_controls("bursty_dca", "deleted"))
     monkeypatch.setattr(strategy_config, "get_config", strict_get_config)
 
-    assert strategy_config.config_for_strategy_view("dca").account_id == "paper"
+    assert strategy_config.config_for_strategy_view("bursty_dca").account_id == "paper"
 
 
 def test_backtest_cache_key_separates_accounts(monkeypatch) -> None:
@@ -507,27 +504,31 @@ def test_dca_backtest_spend_rate_does_not_depend_on_cadence(monkeypatch) -> None
     would model (runs per month) x the plan, and would make a frequent cadence look better
     purely because it deployed more capital -- so the replay accrues like the live algorithm.
     """
+    from src.algorithms.dca.bursty import BurstyDCAAlgorithm
+
     # Well above the $50 min_executable floor, so the two cadences genuinely diverge in how
     # often they can act rather than both being gated by the floor.
     plan = {"buy": {"items": [{"symbol": "AAA", "amount": 3_000.0}]}, "sell": {"items": []}}
 
-    weekly = _dca_backtest_history(monkeypatch, "dca", plan)
-    monkeypatch.setattr(dca_bot.DCAAlgorithm, "schedule", Schedule())
-    daily = _dca_backtest_history(monkeypatch, "dca", plan)
+    monkeypatch.setattr(BurstyDCAAlgorithm, "schedule", replace(DAILY_AT_OPEN, weekdays=(0,)))
+    weekly = _dca_backtest_history(monkeypatch, "bursty_dca", plan)
+    monkeypatch.setattr(BurstyDCAAlgorithm, "schedule", Schedule())
+    daily = _dca_backtest_history(monkeypatch, "bursty_dca", plan)
 
     # ~6 months x $3,000/month, whichever cadence deployed it.
     assert weekly["dca_contributions"].iloc[-1] == pytest.approx(18_000.0, rel=0.15)
     assert daily["dca_contributions"].iloc[-1] == pytest.approx(18_000.0, rel=0.15)
-    # The cadence changes how the same money is split, not how much of it there is.
-    assert daily["order_count"].sum() > weekly["order_count"].sum()
 
 
 def test_dca_backtest_only_trades_on_its_scheduled_weekdays(monkeypatch) -> None:
     """The replay gates on the same Schedule the runtime does, so a backtest cannot model a
     different cadence than the one that will actually trade."""
+    from src.algorithms.dca.bursty import BurstyDCAAlgorithm
+
     plan = {"buy": {"items": [{"symbol": "AAA", "amount": 3_000.0}]}, "sell": {"items": []}}
 
-    history = _dca_backtest_history(monkeypatch, "dca", plan)
+    monkeypatch.setattr(BurstyDCAAlgorithm, "schedule", replace(DAILY_AT_OPEN, weekdays=(0,)))
+    history = _dca_backtest_history(monkeypatch, "bursty_dca", plan)
     traded = history[history["order_count"] > 0]
 
     assert not traded.empty

@@ -20,9 +20,6 @@ class AlpacaBrokerage(BaseBrokerage):
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        # Assuming config is a dict with keys like 'alpaca_api_key', etc.
-        # or it might be a Config object. alpaca_client functions expect Config object or similar.
-        # For now, let's pass config as is.
         self.client = create_trading_client(config)
         self._config = config
 
@@ -70,20 +67,21 @@ class AlpacaBrokerage(BaseBrokerage):
                 side=request.action,
                 qty=request.quantity
             )
-        elif request.order_type == "limit" and "to_open" in (request.extra or {}).get("position_intent", ""):
-            # Handle options/limit orders if needed
+        elif request.order_type == "limit":
+            position_intent = (request.extra or {}).get("position_intent", "buy_to_open")
+            time_in_force = (request.extra or {}).get("time_in_force", "day")
             order = submit_option_limit_order(
                 self.client,
                 symbol=request.symbol,
                 side=request.action,
                 qty=request.quantity,
                 limit_price=request.limit_price,
-                position_intent=request.extra.get("position_intent")
+                position_intent=position_intent,
+                time_in_force=time_in_force,
             )
         else:
-            # Fallback or other order types
             raise NotImplementedError(f"Order type {request.order_type} not implemented for Alpaca")
-            
+
         return {
             "order_id": str(order.id),
             "client_order_id": str(order.client_order_id),

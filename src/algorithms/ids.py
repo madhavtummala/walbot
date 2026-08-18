@@ -12,16 +12,15 @@ module depends on nothing.
 
 from __future__ import annotations
 
-DEFAULT_STRATEGY_ID = "dca"
+DEFAULT_STRATEGY_ID = "bursty_dca"
 
 #: Retired ids that still appear in saved controls, tuning sections, and cached backtests.
-#: ``none`` is here because the deck used to carry a "None" card that meant "no algorithm, DCA
-#: keeps running underneath". DCA is a selectable algorithm now, so that card is gone and the
-#: id it saved resolves to the thing it always actually did. Whether the bot trades at all is
-#: ``algorithm_enabled``, not a sentinel strategy id.
+#: ``none`` is here because the deck used to carry a "None" card that meant "no algorithm".
+#: ``dca`` is retired in favour of ``bursty_dca``, which can be tuned to behave identically.
 ALGORITHM_ALIASES = {
-    "dca_bot": "dca",
-    "none": "dca",
+    "dca_bot": "bursty_dca",
+    "none": "bursty_dca",
+    "dca": "bursty_dca",
 }
 
 

@@ -25,6 +25,7 @@ import pandas as pd
 
 
 from ...data import fetch_daily_bars
+from ...data.bars import TRADING_MINUTES_PER_DAY
 from ...execution.metrics import calculate_performance_metrics
 from ...data.duckdb_store import pooled_connections
 from ...execution.replay import replay
@@ -336,6 +337,62 @@ def _fetch_backtest_history(strategy: str, period: str, config) -> dict[str, pd.
     return daily_history
 
 
+def _fetch_intraday_backtest_history(
+    strategy: str, period: str, config, daily_history: dict[str, pd.DataFrame]
+) -> dict[str, pd.DataFrame]:
+    """Fetch intraday bars for algorithms that need them (e.g. intraday_pick).
+
+    Returns a dict keyed by symbol, indexed by intraday timestamps. Each frame has
+    OHLCV columns. Falls back to an empty dict if no intraday data is available.
+    """
+    from ...data.bars import read_history
+
+    algorithm = get_algorithm_class(strategy).from_config(config)
+    requirements = algorithm.requirements(config, {})
+    bar_minutes = requirements.preferred_bar_minutes or 15
+    lookback_minutes = requirements.history_lookback_minutes or 0
+    if lookback_minutes <= 0:
+        return {}
+
+    symbols = sorted(daily_history)
+    start = _period_start(period)
+    # Fetch enough history to cover the lookback + the period itself.
+    span_days = max((pd.Timestamp.now(tz="UTC") - start).days + 10, 30)
+    span_minutes = span_days * TRADING_MINUTES_PER_DAY + lookback_minutes
+
+    intraday_history: dict[str, pd.DataFrame] = {}
+    providers = _configured_history_providers(config)
+    for symbol in symbols:
+        best = pd.DataFrame()
+        for provider in [*providers, None]:
+            try:
+                bars = read_history(
+                    symbol,
+                    lookback_minutes=span_minutes,
+                    end=pd.Timestamp.now(tz="UTC"),
+                    provider=provider,
+                )
+            except Exception as exc:
+                logger.debug("Intraday fetch failed provider=%s symbol=%s: %s", provider, symbol, exc)
+                continue
+            if bars.empty:
+                continue
+            # Filter to the desired bar resolution.
+            if "interval_minutes" in bars.columns:
+                bars = bars[bars["interval_minutes"] == bar_minutes]
+            if bars.empty:
+                continue
+            stamps = pd.DatetimeIndex(pd.to_datetime(bars["timestamp"], utc=True))
+            work = bars.copy()
+            work.index = stamps
+            work = work.sort_index()
+            if best.empty or len(work) > len(best):
+                best = work
+        if not best.empty:
+            intraday_history[symbol] = best[["open", "high", "low", "close", "volume"]].copy()
+    return intraday_history
+
+
 def _configured_history_providers(config) -> list[str]:
     providers = [
         str(provider).strip().lower()
@@ -360,6 +417,7 @@ def _compute_backtest(strategy: str, period: str, account_id: str = "") -> dict[
     config = config_for_strategy_view(strategy, account_id)
     algorithm = get_algorithm_class(strategy).from_config(config)
     schedule = algorithm.schedule
+    requirements = algorithm.requirements(config, {})
 
     # The fetch happens outside any pooled connection. It is network I/O that writes provider
     # bars into the cache, and holding the database file open across minutes of provider calls
@@ -369,6 +427,14 @@ def _compute_backtest(strategy: str, period: str, account_id: str = "") -> dict[
     if not daily_history:
         raise RuntimeError("No historical bars were available for the backtest.")
 
+    # Detect intraday algorithms: those that declare history_lookback_minutes > 0
+    # get intraday bars and the replay steps at intraday intervals instead of daily.
+    intraday_minutes = 0
+    intraday_history: dict[str, pd.DataFrame] | None = None
+    if requirements.history_lookback_minutes > 0:
+        intraday_minutes = requirements.preferred_bar_minutes or 15
+        intraday_history = _fetch_intraday_backtest_history(strategy, period, config, daily_history)
+
     start = _period_start(period)
     trade_dates = sorted(set.intersection(*(set(df.index) for df in daily_history.values())))
     in_period = [date for date in trade_dates if date >= start]
@@ -376,10 +442,6 @@ def _compute_backtest(strategy: str, period: str, account_id: str = "") -> dict[
     if len(trade_dates) < 2:
         raise RuntimeError("No common trading dates were available for the backtest period.")
 
-    # The replay issues thousands of cache reads but never writes, so it gets the read-only
-    # pool: a held read-write connection would lock other processes out for the whole replay,
-    # while read-only connections let every other process keep reading -- see
-    # ``pooled_connections``.
     with pooled_connections(read_only=True):
         history_df, coverage = replay(
             algorithm,
@@ -389,6 +451,8 @@ def _compute_backtest(strategy: str, period: str, account_id: str = "") -> dict[
             should_run=lambda date: int(date.dayofweek) in schedule.weekdays,
             starting_equity=starting_equity,
             history_providers=_configured_history_providers(config),
+            intraday_history=intraday_history,
+            intraday_minutes=intraday_minutes,
         )
     payload = _backtest_response(
         history_df,

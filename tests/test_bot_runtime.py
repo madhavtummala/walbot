@@ -88,8 +88,10 @@ def test_algorithm_bucket_key_anchors_to_the_scheduled_start() -> None:
 
 
 def test_active_schedule_reads_the_selected_algorithms_class() -> None:
-    assert bot_runtime._active_schedule({"active_strategy": "dca"}).weekdays == (0,)
-    assert bot_runtime._active_schedule({"active_strategy": "bursty_dca"}) == DAILY_AT_OPEN
+    from src.algorithms.dca.bursty import BurstyDCAAlgorithm
+
+    assert bot_runtime._active_schedule({"active_strategy": "dca"}).weekdays == (0, 1, 2, 3, 4)
+    assert bot_runtime._active_schedule({"active_strategy": "bursty_dca"}) == BurstyDCAAlgorithm.schedule
     assert bot_runtime._active_schedule({"active_strategy": "rally_rotation"}) == DAILY_AT_OPEN
 
 
@@ -99,7 +101,7 @@ def test_active_schedule_falls_back_for_an_unknown_strategy() -> None:
 
 
 def test_active_schedule_treats_a_saved_none_as_dca() -> None:
-    assert bot_runtime._active_schedule({"active_strategy": "none"}).weekdays == (0,)
+    assert bot_runtime._active_schedule({"active_strategy": "none"}).weekdays == (0, 1, 2, 3, 4)
 
 
 def test_dca_is_rarer_than_bursty_dca() -> None:
@@ -115,27 +117,13 @@ def test_runtime_has_no_dca_loop_of_its_own() -> None:
     """Two schedulers driving one accrual state was the hazard this collapse removes."""
     assert not hasattr(bot_runtime.bot_runtime, "dca")
     # "algorithm" mirrors the first binding for callers that predate the binding list.
-    assert set(bot_runtime.bot_runtime.snapshot()) == {"bindings", "algorithm", "options"}
+    assert set(bot_runtime.bot_runtime.snapshot()) == {"bindings", "algorithm"}
 
 
 def test_describe_schedule_renders_the_cadence_for_the_dashboard() -> None:
     assert describe_schedule(replace(DAILY_AT_OPEN, weekdays=(0,))) == "Mondays at 08:30"
     assert describe_schedule(DAILY_AT_OPEN) == "Weekdays at 08:30"
     assert describe_schedule(Schedule()) == "Weekdays, every 60m from 08:30 to 15:00"
-
-
-def test_options_enabled_requires_strategy_and_kill_switch_off(monkeypatch) -> None:
-    class Config:
-        kill_switch = False
-
-    monkeypatch.setattr(bot_runtime, "get_config", lambda: Config())
-
-    assert bot_runtime._options_enabled({"options_trading_enabled": True, "options_strategy": "covered_call"})
-    assert not bot_runtime._options_enabled({"options_trading_enabled": True, "options_strategy": "none"})
-
-    Config.kill_switch = True
-
-    assert not bot_runtime._options_enabled({"options_trading_enabled": True, "options_strategy": "covered_call"})
 
 
 def _binding_controls(frequency: str = "1hr", strategy: str = "rally_rotation") -> dict:

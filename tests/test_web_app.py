@@ -26,7 +26,7 @@ def test_universe_payload_returns_configured_rows() -> None:
 def test_controls_payload_returns_switches() -> None:
     payload = controls_payload()
 
-    assert {"algorithm_enabled", "options_trading_enabled"} <= set(payload["controls"])
+    assert {"algorithm_enabled"} <= set(payload["controls"])
 
 
 def _assets():
@@ -165,11 +165,11 @@ def test_every_unbounded_list_panel_scrolls_inside_its_card() -> None:
     without bound."""
     app_js, app_css, _ = _assets()
 
-    assert app_js.count('class="tableWrap is-scroll"') == 4
+    assert app_js.count('class="tableWrap is-scroll"') == 5
     assert ".tableWrap.is-scroll {" in app_css
     # One shared cap, so signals and the tables cut off at the same height.
     assert "--panel-scroll: min(46vh, 420px);" in app_css
-    assert app_css.count("max-height: var(--panel-scroll);") == 2
+    assert app_css.count("max-height: var(--panel-scroll);") == 1
     # A scrolling table keeps its header visible.
     assert ".tableWrap.is-scroll thead th {" in app_css
 

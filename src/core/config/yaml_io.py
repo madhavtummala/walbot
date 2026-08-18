@@ -14,7 +14,7 @@ try:
 except ImportError:  # pragma: no cover - exercised when PyYAML is not installed.
     yaml = None
 
-from .paths import LEGACY_CONFIG_FILES, config_file_path, accounts_file_path, algorithm_bot_file_path, algorithms_file_path, connectors_file_path, dca_config_file_path, options_bot_file_path, universe_file_path
+from .paths import LEGACY_CONFIG_FILES, config_file_path, accounts_file_path, algorithm_bot_file_path, algorithms_file_path, connectors_file_path, dca_config_file_path, universe_file_path
 
 
 
@@ -43,10 +43,6 @@ def load_algorithms_config(path: str | None = None) -> dict[str, Any]:
 
 def load_algorithm_bot_config(path: str | None = None) -> dict[str, Any]:
     return _load_yaml_file(algorithm_bot_file_path(path))
-
-
-def load_options_bot_config(path: str | None = None) -> dict[str, Any]:
-    return _load_yaml_file(options_bot_file_path(path))
 
 
 def load_dca_config(path: str | None = None) -> dict[str, Any]:
@@ -94,10 +90,6 @@ def save_accounts_config(config: dict[str, Any], path: str | None = None) -> Pat
 
 def save_algorithms_config(config: dict[str, Any], path: str | None = None) -> Path:
     return _save_yaml_config(config, algorithms_file_path(path))
-
-
-def save_options_bot_config(config: dict[str, Any], path: str | None = None) -> Path:
-    return _save_yaml_config(config, options_bot_file_path(path))
 
 
 def save_universe_config(config: dict[str, Any], path: str | None = None) -> Path:

@@ -13,8 +13,8 @@ from ...data.universe import load_tradable_names
 
 from ...common.config_utils import direct_or_env
 from .coercion import _algorithm_sections, _config_value, _normalize_data_sources, _parse_symbols, _provider_credential, _provider_secret, _section, _str_to_bool, reader
-from .defaults import ALGORITHM_EQUITY_CAP, ALPACA_BASE_URL, ALPACA_DATA_FEED, ALPHA_VANTAGE_MAX_SYMBOLS, ALPHA_VANTAGE_NEWS_CSV, ALPHA_VANTAGE_NEWS_LIMIT, ALPHA_VANTAGE_NEWS_LOOKBACK_DAYS, ALPHA_VANTAGE_REQUEST_DELAY_SECONDS, BACKTEST_PERIOD, BACKTEST_STARTING_EQUITY, CASH_BUFFER, CASH_EQUIVALENTS, DEFAULT_STRATEGY_ID, DIVIDEND_PROVIDER_ORDER, EOD_MARKET_DATA_CACHE_TTL_SECONDS, EOD_MARKET_DATA_PROVIDER_ORDER, HISTORY_EXTRA_BUFFER_DAYS, INTRADAY_MARKET_DATA_CACHE_TTL_SECONDS, INTRADAY_MARKET_DATA_PROVIDER_ORDER, KILL_SWITCH, LONG_MA_DAYS, MARKET_DATA_BAR_MINUTES, MARKET_DATA_CACHE_TTL_SECONDS, MARKET_DATA_PROVIDER_ORDER, MAX_LONGS, MAX_PORTFOLIO_EXPOSURE, MAX_WEIGHT_PER_SYMBOL, MIN_COMPOSITE_SCORE, MIN_TRADE_DOLLARS, MOMENTUM_LOOKBACK_DAYS, NEWS_SENTIMENT_CACHE_TTL_SECONDS, NEWS_SENTIMENT_PROVIDER_ORDER, OPTIONS_SWING_DTE_MAX, OPTIONS_SWING_DTE_MIN, OPTIONS_SWING_MAX_CONTRACTS, OPTIONS_SWING_MAX_DELTA, OPTIONS_SWING_MAX_PREMIUM, OPTIONS_SWING_MAX_SPREAD_PCT, OPTIONS_SWING_MIN_DELTA, OPTIONS_SWING_MIN_OPEN_INTEREST, OPTIONS_SWING_STRIKE_RANGE_PCT, PRICE_MOMENTUM_WEIGHT, REBALANCE_THRESHOLD, REQUIRE_TRADE_APPROVAL, SHORT_MOMENTUM_LOOKBACK_DAYS, SOCIAL_LOOKBACK_DAYS, SOCIAL_MOMENTUM_WEIGHT, SYMBOLS, TARGET_ANNUAL_VOL, TRADABLES_CSV, TRADE_APPROVAL_POLL_SECONDS, TRADE_APPROVAL_TIMEOUT_SECONDS, TRANSACTION_COST_BPS, UNNAMED_ACCOUNT_ID, VOLUME_LOOKBACK_DAYS, VOLUME_MOMENTUM_WEIGHT
-from .yaml_io import load_accounts_config, load_algorithm_bot_config, load_algorithms_config, load_connectors_config, load_options_bot_config, load_universe_config
+from .defaults import ALGORITHM_EQUITY_CAP, ALPACA_BASE_URL, ALPACA_DATA_FEED, ALPHA_VANTAGE_MAX_SYMBOLS, ALPHA_VANTAGE_NEWS_CSV, ALPHA_VANTAGE_NEWS_LIMIT, ALPHA_VANTAGE_NEWS_LOOKBACK_DAYS, ALPHA_VANTAGE_REQUEST_DELAY_SECONDS, BACKTEST_PERIOD, BACKTEST_STARTING_EQUITY, CASH_BUFFER, CASH_EQUIVALENTS, DEFAULT_STRATEGY_ID, DIVIDEND_PROVIDER_ORDER, EOD_MARKET_DATA_CACHE_TTL_SECONDS, EOD_MARKET_DATA_PROVIDER_ORDER, HISTORY_EXTRA_BUFFER_DAYS, INTRADAY_MARKET_DATA_CACHE_TTL_SECONDS, INTRADAY_MARKET_DATA_PROVIDER_ORDER, KILL_SWITCH, LONG_MA_DAYS, MARKET_DATA_BAR_MINUTES, MARKET_DATA_CACHE_TTL_SECONDS, MARKET_DATA_PROVIDER_ORDER, MAX_LONGS, MAX_PORTFOLIO_EXPOSURE, MAX_WEIGHT_PER_SYMBOL, MIN_COMPOSITE_SCORE, MIN_TRADE_DOLLARS, MOMENTUM_LOOKBACK_DAYS, NEWS_SENTIMENT_CACHE_TTL_SECONDS, NEWS_SENTIMENT_PROVIDER_ORDER, PRICE_MOMENTUM_WEIGHT, REBALANCE_THRESHOLD, REQUIRE_TRADE_APPROVAL, SHORT_MOMENTUM_LOOKBACK_DAYS, SOCIAL_LOOKBACK_DAYS, SOCIAL_MOMENTUM_WEIGHT, SYMBOLS, TARGET_ANNUAL_VOL, TRADABLES_CSV, TRADE_APPROVAL_POLL_SECONDS, TRADE_APPROVAL_TIMEOUT_SECONDS, TRANSACTION_COST_BPS, UNNAMED_ACCOUNT_ID, VOLUME_LOOKBACK_DAYS, VOLUME_MOMENTUM_WEIGHT
+from .yaml_io import load_accounts_config, load_algorithm_bot_config, load_algorithms_config, load_connectors_config, load_universe_config
 
 from .accounts import UnknownAccountError, _normalize_accounts_config
 
@@ -90,15 +90,6 @@ class Config:
     require_trade_approval: bool = REQUIRE_TRADE_APPROVAL
     trade_approval_timeout_seconds: int = TRADE_APPROVAL_TIMEOUT_SECONDS
     trade_approval_poll_seconds: int = TRADE_APPROVAL_POLL_SECONDS
-    options_swing_dte_min: int = OPTIONS_SWING_DTE_MIN
-    options_swing_dte_max: int = OPTIONS_SWING_DTE_MAX
-    options_swing_min_delta: float = OPTIONS_SWING_MIN_DELTA
-    options_swing_max_delta: float = OPTIONS_SWING_MAX_DELTA
-    options_swing_max_contracts: int = OPTIONS_SWING_MAX_CONTRACTS
-    options_swing_max_premium: float = OPTIONS_SWING_MAX_PREMIUM
-    options_swing_min_open_interest: int = OPTIONS_SWING_MIN_OPEN_INTEREST
-    options_swing_max_spread_pct: float = OPTIONS_SWING_MAX_SPREAD_PCT
-    options_swing_strike_range_pct: float = OPTIONS_SWING_STRIKE_RANGE_PCT
 
 
 def get_config(account_id: str | None = None, strategy_id: str | None = None) -> Config:
@@ -149,8 +140,6 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
             }
         },
     }
-    raw_options_bot_config = load_options_bot_config()
-    options = _section(raw_options_bot_config, "options")
     social = _section(raw_algorithm_bot_config, "social")
     alpha_vantage = _section(raw_algorithm_bot_config, "alpha_vantage")
     raw_connectors_config = load_connectors_config()
@@ -172,7 +161,6 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
     read_intraday_market_sources = reader(intraday_market_sources)
     read_market_sources = reader(market_sources)
     read_news_sources = reader(news_sources)
-    read_options = reader(options)
     read_runtime = reader(runtime)
     read_sentiment_sources = reader(sentiment_sources)
 
@@ -301,13 +289,4 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
         require_trade_approval=read_runtime("require_trade_approval", REQUIRE_TRADE_APPROVAL),
         trade_approval_timeout_seconds=read_runtime("trade_approval_timeout_seconds", TRADE_APPROVAL_TIMEOUT_SECONDS),
         trade_approval_poll_seconds=read_runtime("trade_approval_poll_seconds", TRADE_APPROVAL_POLL_SECONDS),
-        options_swing_dte_min=read_options("swing_dte_min", OPTIONS_SWING_DTE_MIN, env="OPTIONS_SWING_DTE_MIN"),
-        options_swing_dte_max=read_options("swing_dte_max", OPTIONS_SWING_DTE_MAX, env="OPTIONS_SWING_DTE_MAX"),
-        options_swing_min_delta=read_options("swing_min_delta", OPTIONS_SWING_MIN_DELTA, env="OPTIONS_SWING_MIN_DELTA"),
-        options_swing_max_delta=read_options("swing_max_delta", OPTIONS_SWING_MAX_DELTA, env="OPTIONS_SWING_MAX_DELTA"),
-        options_swing_max_contracts=read_options("swing_max_contracts", OPTIONS_SWING_MAX_CONTRACTS, env="OPTIONS_SWING_MAX_CONTRACTS"),
-        options_swing_max_premium=read_options("swing_max_premium", OPTIONS_SWING_MAX_PREMIUM, env="OPTIONS_SWING_MAX_PREMIUM"),
-        options_swing_min_open_interest=read_options("swing_min_open_interest", OPTIONS_SWING_MIN_OPEN_INTEREST, env="OPTIONS_SWING_MIN_OPEN_INTEREST"),
-        options_swing_max_spread_pct=read_options("swing_max_spread_pct", OPTIONS_SWING_MAX_SPREAD_PCT, env="OPTIONS_SWING_MAX_SPREAD_PCT"),
-        options_swing_strike_range_pct=read_options("swing_strike_range_pct", OPTIONS_SWING_STRIKE_RANGE_PCT, env="OPTIONS_SWING_STRIKE_RANGE_PCT"),
     )

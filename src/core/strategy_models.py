@@ -19,9 +19,9 @@ from src.data.bars import signal_price
 from src.data.signals.signals import compute_social_trend_score
 
 STRATEGY_LABELS = {
-    "dca": "DCA",
     "bursty_dca": "Bursty DCA",
     "rally_rotation": "Rally Rotation",
+    "intraday_pick": "Intraday Pick",
 }
 
 

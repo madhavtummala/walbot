@@ -1,16 +1,9 @@
-"""Bursty DCA: the same monthly budget as DCA, deployed only when the market cooperates.
+"""Bursty DCA: daily buys sized proportionally to drawdown from peak.
 
-The two algorithms accrue identically and differ in exactly one predicate:
+  drawdown = max(0, (peak - price) / peak)
+  size = budget × (1 + drawdown × scaling_factor)
 
-===========  ================================================
-DCA          executes when ``accrued >= min_executable``
-Bursty DCA   ...and a signal fires
-===========  ================================================
-
-The signals are established rules rather than a bespoke percentile: a 200-day moving-average
-regime gate, Bollinger %B or Connors RSI(2) for timing, and value averaging for sizing. The
-regime gate is the component that stops the strategy accumulating into a genuine decline,
-which is this design's main failure mode.
+Buys at 11 AM, sells at 3 PM (requires ``frequency: 1hr`` on the dashboard).
 """
 
 from __future__ import annotations
@@ -23,61 +16,34 @@ from typing import Any
 import pandas as pd
 
 from ...core.interfaces import (
-    DAILY_AT_OPEN,
+    Schedule,
+    SignalView,
     AlgorithmContext,
     AlgorithmRequirements,
     Intent,
     PortfolioSnapshot,
 )
-from ...data.signals.signals import compute_bollinger_percent_b, compute_rsi
-from .accrual import SymbolState, load_accrual_state, path_months
+from .accrual import SymbolState, load_accrual_state
 from .bot import DCAAlgorithm, plan_budgets
+from . import unknown_plan_symbols, raw_plan_from_config
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class BurstyConfig:
-    """Tuning for the trigger and the two guards. Both guards are required, not optional."""
+    """Tuning for the drawdown-based sizing model."""
 
-    regime_ma_days: int = 200
-    percent_b_lookback: int = 20
-    percent_b_num_std: float = 2.0
-    #: %B below zero means the close is under the lower band.
-    percent_b_threshold: float = 0.0
-    rsi_lookback: int = 2
-    rsi_threshold: float = 10.0
+    #: How much to scale buy size per unit of drawdown.
+    #: size = budget × (1 + drawdown × scaling_factor)
+    scaling_factor: float = 10.0
     #: Cap on cumulative deployment per symbol per month, in multiples of the monthly budget.
-    #: Guards total monthly burn regardless of how many dips fire. A separate per-trade cap is
-    #: not needed: ``dip_scale`` already encodes how much headroom a dip earns.
     max_monthly_multiple: float = 3.0
-    value_averaging: bool = True
-    #: Months of undeployed budget at which the oversold test stops being picky at all.
-    #:
-    #: Waiting for a dip is the strategy; waiting *forever* is not. In a market that only ever
-    #: rises, %B never breaks the lower band and RSI(2) never reaches 10, so the budget accrues
-    #: and the eventual entry happens at a higher price than any of the ones declined -- the
-    #: opposite of the intent. This relaxes the two oversold thresholds in proportion to how far
-    #: behind the budget has fallen, reaching "buy on anything" at this many months.
-    #:
-    #: The regime gate is deliberately *not* relaxed. That is the component stopping the
-    #: strategy accumulating into a genuine decline, which is this design's main failure mode;
-    #: loosening it would trade a small problem for the large one.
-    #:
-    #: 0 disables the whole mechanism, which is the behaviour this had before.
-    backlog_relax_months: float = 0.0
-    #: Continuous dip-depth scaling for per-trade size.
-    #:
-    #: effective_cap = budget × (1 + dip_scale × dip_depth)
-    #: where dip_depth = max(0, 1 − percent_b)
-    #:   0  at the upper Bollinger Band
-    #:   1  at the lower band
-    #:  >1  below the lower band (the deepest dips earn the most headroom)
-    #:
-    #: At 0 (default): cap = 1× monthly budget, no scaling.
-    #: At 2 with price 20% below the lower band (dip_depth=1.2): cap = 3.4× budget.
-    #: When only RSI fires and %B is unavailable, dip_depth falls back to 0 (1× baseline).
-    dip_scale: float = 0.0
+    #: Reference period for peak calculation (rolling high-water mark).
+    regime_ma_days: int = 150
+    #: How much to scale the monthly cap with drawdown.
+    #: effective_cap = max_monthly_multiple × budget × (1 + drawdown × cap_boost)
+    cap_boost: float = 0.0
 
     @classmethod
     def from_runtime_config(cls, config: Any) -> BurstyConfig:
@@ -94,7 +60,7 @@ class BurstyConfig:
 
     @property
     def required_daily_bars(self) -> int:
-        return max(self.regime_ma_days, self.percent_b_lookback, self.rsi_lookback) + 30
+        return self.regime_ma_days + 30
 
 
 def _latest(series: pd.Series) -> float:
@@ -107,30 +73,12 @@ def _latest(series: pd.Series) -> float:
         return float("nan")
 
 
-def relaxed_thresholds(settings: BurstyConfig, months_behind: float) -> tuple[float, float]:
-    """The oversold thresholds to use, given how much budget is waiting to be deployed.
-
-    Each is interpolated toward the value at which it always fires -- %B at 1.0, RSI at 100 --
-    so a symbol that is on schedule keeps the configured pickiness and one that is months behind
-    stops declining entries. Linear rather than a step, so there is no month where behaviour
-    jumps.
-    """
-    if settings.backlog_relax_months <= 0:
-        return settings.percent_b_threshold, settings.rsi_threshold
-    fraction = min(max(months_behind, 0.0) / settings.backlog_relax_months, 1.0)
-    return (
-        settings.percent_b_threshold + fraction * (1.0 - settings.percent_b_threshold),
-        settings.rsi_threshold + fraction * (100.0 - settings.rsi_threshold),
-    )
-
-
 def evaluate_trigger(
     bars: pd.DataFrame | None,
     buying: bool,
-    settings: BurstyConfig,
     months_behind: float = 0.0,
 ) -> dict[str, Any]:
-    """Decide whether now is a moment to act on ``bars``, and say why in plain words."""
+    """Compute drawdown from peak and decide whether to buy."""
     if bars is None or bars.empty or "close" not in bars:
         return {"fires": False, "reason": "No price history", "detail": {}}
 
@@ -139,54 +87,115 @@ def evaluate_trigger(
         return {"fires": False, "reason": "No price history", "detail": {}}
 
     close = float(closes.iloc[-1])
-    moving_average = float(closes.rolling(settings.regime_ma_days, min_periods=1).mean().iloc[-1])
-    percent_b = _latest(
-        compute_bollinger_percent_b(
-            bars, lookback=settings.percent_b_lookback, num_std=settings.percent_b_num_std
-        )
-    )
-    rsi = _latest(compute_rsi(bars, lookback=settings.rsi_lookback))
-    percent_b_threshold, rsi_threshold = relaxed_thresholds(settings, months_behind)
-    # dip_depth drives per-trade sizing in refine(); expose it here so the sizing layer can
-    # read it from signals without recomputing %B a second time.
-    dip_depth = max(0.0, 1.0 - percent_b) if not pd.isna(percent_b) else 0.0
+    peak = float(closes.cummax().iloc[-1])
+
+    drawdown = max(0.0, (peak - close) / peak) if peak > 0 else 0.0
+
     detail = {
         "close": close,
-        "ma_200": round(moving_average, 4),
-        "percent_b": None if pd.isna(percent_b) else round(percent_b, 4),
-        "rsi_2": None if pd.isna(rsi) else round(rsi, 2),
+        "peak": round(peak, 4),
+        "drawdown": round(drawdown, 4),
         "months_behind": round(months_behind, 2),
-        "rsi_threshold": round(rsi_threshold, 2),
-        "dip_depth": round(dip_depth, 4),
     }
 
     if buying:
-        if close < moving_average:
-            return {"fires": False, "reason": f"Below {settings.regime_ma_days}-day MA", "detail": detail}
-        oversold = (not pd.isna(percent_b) and percent_b < percent_b_threshold) or (
-            not pd.isna(rsi) and rsi < rsi_threshold
-        )
-        if not oversold:
-            return {"fires": False, "reason": "Waiting for valley", "detail": detail}
-        behind = f" (relaxed, {months_behind:.1f}m behind)" if months_behind and settings.backlog_relax_months else ""
-        return {"fires": True, "reason": f"Valley{behind}", "detail": detail}
+        return {"fires": True, "reason": f"Drawdown {drawdown*100:.1f}%", "detail": detail}
 
-    # Sell side is the mirror: trim into a peak rather than accumulate into a decline.
-    overbought = (not pd.isna(percent_b) and percent_b > (1.0 - percent_b_threshold)) or (
-        not pd.isna(rsi) and rsi > (100.0 - rsi_threshold)
-    )
-    if not overbought:
-        return {"fires": False, "reason": "Waiting for peak", "detail": detail}
-    return {"fires": True, "reason": "Peak", "detail": detail}
+    if drawdown > 0:
+        return {"fires": False, "reason": f"Still below peak (-{drawdown*100:.1f}%)", "detail": detail}
+    return {"fires": True, "reason": "At peak", "detail": detail}
+
+
+def _rsi(series: pd.Series, period: int = 2) -> float:
+    if len(series) < period + 1:
+        return float("nan")
+    deltas = series.diff().dropna()
+    gains = deltas.clip(lower=0)
+    losses = (-deltas.clip(upper=0))
+    avg_gain = gains.rolling(period).mean().iloc[-1]
+    avg_loss = losses.rolling(period).mean().iloc[-1]
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return float(100.0 - (100.0 / (1.0 + rs)))
+
+
+def _percent_b(close: float, sma_20: float, std_20: float) -> float:
+    if std_20 <= 0:
+        return float("nan")
+    upper = sma_20 + 2 * std_20
+    lower = sma_20 - 2 * std_20
+    band_width = upper - lower
+    if band_width <= 0:
+        return float("nan")
+    return float((close - lower) / band_width)
+
+
+def _compute_indicators(bars: pd.DataFrame | None, settings: BurstyConfig) -> dict[str, Any]:
+    """Compute technical indicators from daily bars for the signal view."""
+    result: dict[str, Any] = {}
+    if bars is None or bars.empty or "close" not in bars:
+        return result
+
+    closes = pd.to_numeric(bars["close"], errors="coerce").dropna()
+    if closes.empty:
+        return result
+
+    close = float(closes.iloc[-1])
+    result["close"] = round(close, 2)
+
+    # RSI(2)
+    rsi2 = _rsi(closes, 2)
+    result["rsi_2"] = round(rsi2, 1) if not pd.isna(rsi2) else None
+
+    # Bollinger %B (20-day)
+    if len(closes) >= 20:
+        sma_20 = float(closes.rolling(20).mean().iloc[-1])
+        std_20 = float(closes.rolling(20).std().iloc[-1])
+        pct_b = _percent_b(close, sma_20, std_20)
+        result["pct_b"] = round(pct_b, 3) if not pd.isna(pct_b) else None
+        result["sma_20"] = round(sma_20, 2)
+    else:
+        result["pct_b"] = None
+        result["sma_20"] = None
+
+    # 150-day MA distance
+    ma_period = settings.regime_ma_days
+    if len(closes) >= ma_period:
+        ma = float(closes.rolling(ma_period).mean().iloc[-1])
+        result["ma_distance"] = round((close - ma) / ma, 4) if ma > 0 else None
+        result[f"ma_{ma_period}"] = round(ma, 2)
+    else:
+        result["ma_distance"] = None
+        result[f"ma_{ma_period}"] = None
+
+    # Peak and drawdown
+    peak = float(closes.cummax().iloc[-1])
+    drawdown = max(0.0, (peak - close) / peak) if peak > 0 else 0.0
+    result["peak"] = round(peak, 2)
+    result["drawdown"] = round(drawdown, 4)
+
+    # Realized volatility (20-day annualized)
+    if len(closes) >= 21:
+        daily_ret = closes.pct_change().dropna()
+        vol = float(daily_ret.rolling(20).std().iloc[-1]) * (252 ** 0.5)
+        result["volatility"] = round(vol, 4)
+    else:
+        result["volatility"] = None
+
+    return result
 
 
 class BurstyDCAAlgorithm(DCAAlgorithm):
     algorithm_id = "bursty_dca"
 
-    #: Daily rather than DCA's weekly. The budget is identical either way, but a dip that the
-    #: trigger would have fired on can open and close inside a week, so a weekly look would
-    #: leave the accrued budget sitting through exactly the entries this variant exists for.
-    schedule = DAILY_AT_OPEN
+    #: Buys at 11 AM, sells at 3 PM.  Requires ``frequency: 1hr`` on the dashboard.
+    schedule = Schedule(
+        start_time="11:00",
+        end_time="15:30",
+        refresh_minutes=240,
+        jitter_minutes=15,
+    )
 
     def requirements(self, config: Any, current_positions: dict[str, int]) -> AlgorithmRequirements:
         settings = BurstyConfig.from_runtime_config(config)
@@ -203,12 +212,8 @@ class BurstyDCAAlgorithm(DCAAlgorithm):
         plan: dict[str, Any],
         months_behind: float = 0.0,
     ) -> dict[str, Any]:
-        settings = BurstyConfig.from_runtime_config(context.config)
         buying = plan_budgets(plan).get(symbol, 0.0) >= 0
-        result = evaluate_trigger(context.bars_by_symbol.get(symbol), buying, settings, months_behind)
-        # Carried so ``reason`` can tell the dashboard that step 2 still gets a say. See there.
-        result.setdefault("detail", {})["value_averaged"] = settings.value_averaging
-        return result
+        return evaluate_trigger(context.bars_by_symbol.get(symbol), buying, months_behind)
 
     def reason(
         self,
@@ -217,17 +222,47 @@ class BurstyDCAAlgorithm(DCAAlgorithm):
         trigger: dict[str, Any],
         ready: bool,
     ) -> str:
-        """Never promise a trade that value averaging can still veto.
+        return super().reason(state, floor_dollars, trigger, ready)
 
-        The signal view is built from ``analyze``, which is step 1; the value-averaging sizing
-        below happens in ``refine``, which is step 2 and is the first point that can see the
-        position. A symbol already at or above its value path is dropped there, so a bare
-        "Ready" was telling the reader a trade was coming that would never be placed.
-        """
-        text = super().reason(state, floor_dollars, trigger, ready)
-        if text == "Ready" and trigger.get("detail", {}).get("value_averaged"):
-            return "Ready (sized to value path)"
-        return text
+    def signal_view(self, config: Any, *, data_client: Any = None) -> SignalView:
+        from ...core.market_context import build_algorithm_context
+        from ...api.api_payloads import universe_payload
+        from .bot import plan_budgets
+
+        context = build_algorithm_context(config, self.requirements(config, {}), data_client=data_client)
+        decision = self.analyze(context)
+
+        settings = BurstyConfig.from_runtime_config(config)
+
+        leaders = []
+        for symbol, values in decision.signals.items():
+            bars = context.bars_by_symbol.get(symbol)
+            indicators = _compute_indicators(bars, settings)
+
+            leaders.append({
+                **values,
+                "symbol": symbol,
+                "signal": "LONG" if float(values.get("monthly_budget") or 0.0) >= 0 else "SHORT",
+                "side": "LONG" if float(values.get("monthly_budget") or 0.0) >= 0 else "SHORT",
+                "target_weight": None,
+                **indicators,
+            })
+
+        leaders.sort(key=lambda row: (row["reason"] != "Ready", row["symbol"]))
+        monthly_total = float(decision.metadata.get("monthly_total") or 0.0)
+        summary = [
+            {"label": "Mode", "value": str(decision.metadata.get("allocation_mode") or "DCA")},
+            {"label": "Planned", "value": f"${monthly_total:.0f}/month"},
+            {"label": "Symbols", "value": str(len(leaders))},
+            {"label": "Scaling", "value": f"{settings.scaling_factor}x"},
+            {"label": "Cap", "value": f"{settings.max_monthly_multiple}x monthly"},
+        ]
+        unknown = unknown_plan_symbols(
+            raw_plan_from_config(config, self.algorithm_id), universe_payload()["rows"]
+        )
+        if unknown:
+            summary.append({"label": "Not tradable", "value": ", ".join(unknown)})
+        return SignalView(leaders=leaders, summary=summary)
 
     def refine(
         self,
@@ -238,18 +273,22 @@ class BurstyDCAAlgorithm(DCAAlgorithm):
         config: Any,
         as_of: datetime,
     ) -> list[Intent]:
-        """Size the trade by value averaging, then apply both guards.
+        """Size trades proportionally to drawdown from peak.
 
-        Value averaging needs the position's current value, which step 1 cannot see, so this
-        is the first point where the trade size can be known at all.
+        size = budget × (1 + drawdown × scaling_factor)
 
-        How far along the value path a symbol should be is a question about elapsed time, so it
-        is measured from ``as_of`` rather than from the wall clock. Reading the clock here put
-        the path wherever the machine happened to be -- months out, in a replay.
+        Buys execute at 11 AM, sells at 3 PM.
         """
+        hour = as_of.hour
+        buy_hour = 11
+        sell_hour = 15
+        # When hour is 0 (backtest with date-only timestamps) or outside the buy/sell
+        # windows, process all intents.  At 11 AM only buys, at 3 PM only sells.
+        is_live_buy = hour == buy_hour
+        is_live_sell = hour == sell_hour
+        filter_by_hour = hour in (buy_hour, sell_hour)
+
         settings = BurstyConfig.from_runtime_config(config)
-        if not settings.value_averaging:
-            return super().refine(intents, signals, snapshot, latest_prices, config, as_of)
 
         account_id = getattr(config, "account_id", "") or ""
         state = load_accrual_state(self.algorithm_id, account_id)
@@ -264,38 +303,25 @@ class BurstyDCAAlgorithm(DCAAlgorithm):
                 continue
             symbol_state = state.get(intent.symbol, SymbolState())
 
-            elapsed_months = path_months(symbol_state, as_of)
-            path_value = budget * elapsed_months
-            held_value = float(snapshot.positions.get(intent.symbol, 0.0)) * price
-            gap = path_value - held_value
-
             buying = intent.value >= 0
-            desired = gap if buying else -gap
-            if desired <= 0:
-                # Not an error: the position is already at or past where the value path says it
-                # should be. Logged because it is otherwise invisible -- step 1 reported the
-                # symbol as ready and no order appears, with nothing in between to explain it.
-                logger.info(
-                    "%s: value path satisfied, no trade. path=$%.2f held=$%.2f months=%.2f",
-                    intent.symbol,
-                    path_value,
-                    held_value,
-                    elapsed_months,
-                )
+
+            # Buys at 11 AM, sells at 3 PM only (skip filter in backtest where hour=0)
+            if filter_by_hour and buying and not is_live_buy:
+                continue
+            if filter_by_hour and not buying and not is_live_sell:
                 continue
 
-            # Per-trade cap: one month of budget, scaled up proportionally to dip depth.
-            # The deeper the price is below the lower Bollinger Band, the more budget this
-            # single trade may deploy. dip_depth is pre-computed in evaluate_trigger() and
-            # carried through signals so we do not recompute %B here.
-            dip_depth = float(signals.get(intent.symbol, {}).get("detail", {}).get("dip_depth", 0.0) or 0.0)
-            effective_cap = budget * (1.0 + settings.dip_scale * dip_depth)
-            desired = min(desired, effective_cap)
-            # Guard 2: cap cumulative deployment per symbol per month.
-            remaining = max((settings.max_monthly_multiple * budget) - symbol_state.deployed_this_month, 0.0)
+            # Drawdown-based sizing
+            sig = signals.get(intent.symbol, {})
+            drawdown = float(sig.get("drawdown", 0.0) or 0.0)
+            desired = budget * (1.0 + settings.scaling_factor * drawdown)
+
+            # Monthly cap: scales continuously with drawdown
+            effective_cap = settings.max_monthly_multiple * (1.0 + settings.cap_boost * drawdown)
+            remaining = max((effective_cap * budget) - symbol_state.deployed_this_month, 0.0)
             desired = min(desired, remaining)
             if not buying:
-                desired = min(desired, held_value)
+                desired = min(desired, float(snapshot.positions.get(intent.symbol, 0.0)) * price)
             if desired <= 0:
                 continue
 

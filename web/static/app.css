@@ -312,9 +312,6 @@ select.ctl {
 .signalRows {
   display: grid;
   gap: 10px;
-  overflow-y: auto;
-  padding-right: 2px;
-  max-height: 220px;
 }
 
 .signalRows article {
@@ -488,6 +485,46 @@ select.ctl {
 
 .signalRows strong {
   overflow-wrap: anywhere;
+}
+
+/* -- signal table (compact per-symbol row) ---------------------------------- */
+
+.signalTable {
+  font-size: 11px;
+}
+
+.signalTable th {
+  font-size: 9px;
+}
+
+.signalTable td {
+  padding: 4px 6px;
+}
+
+.signalStatus {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 750;
+  max-width: 260px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.signalMa.pos {
+  color: var(--good);
+}
+
+.signalMa.neg {
+  color: var(--bad);
+}
+
+.signalRow--held td {
+  background: rgba(220, 252, 231, 0.12);
+}
+
+.signalRow--rejected td {
+  background: rgba(254, 226, 226, 0.10);
 }
 
 .metricGrid {
@@ -1680,8 +1717,7 @@ h2 {
 }
 
 .tabBody .signalRows {
-  max-height: var(--panel-scroll);
-  overflow-y: auto;
+  /* The table inside handles its own scrolling via .tableWrap.is-scroll. */
 }
 
 

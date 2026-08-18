@@ -48,12 +48,12 @@ def test_journalling_never_raises_on_a_bad_payload() -> None:
 
 def test_activity_payload_is_scoped_to_one_algorithm() -> None:
     with ephemeral_state():
-        record_orders("dca", "paper", [{"symbol": "SPY", "action": "buy", "quantity": 1, "status": "submitted"}])
+        record_orders("bursty_dca", "paper", [{"symbol": "SPY", "action": "buy", "quantity": 1, "status": "submitted"}])
         record_orders("rally_rotation", "paper", [{"symbol": "QQQ", "action": "buy", "quantity": 1, "status": "submitted"}])
 
-        payload = algorithm_activity_payload(strategy="dca", limit=10)
+        payload = algorithm_activity_payload(strategy="bursty_dca", limit=10)
 
-        assert payload["strategy"] == "dca"
+        assert payload["strategy"] == "bursty_dca"
         assert [row["symbol"] for row in payload["rows"]] == ["SPY"]
 
 

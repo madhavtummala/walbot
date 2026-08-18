@@ -82,6 +82,7 @@ def build_signals(
             "signal": 1 if weight > 0 else 0,
             "score": float(row.get("base_score", 0.0)),
             "base_score": float(row.get("base_score", 0.0)),
+            "score_unsmoothed": float(row.get("score_unsmoothed", 0.0)),
             "score_components": {key: float(value) for key, value in (row.get("score_components") or {}).items()},
             "rank": int(row.get("rank") or 0),
             "eligible": 1 if row.get("eligible") else 0,
@@ -103,9 +104,18 @@ def build_signals(
             "defensive_weight": float(defensive_book.get(symbol, 0.0)),
             "social_score": float(row.get("sentiment_score", 0.0)),
             "close": float(row.get("close", 0.0)),
+            # Trend context for the dashboard: the actual MA value, not just the distance.
+            "moving_average": float(row.get("moving_average", 0.0)),
+            "daily_bars": int(row.get("daily_bars", 0)),
             # Consumed by the dashboard row subtitle; without it every row renders "Inactive".
             "trend_ok": 1 if row.get("above_moving_average") else 0,
             "ma_distance": float(row.get("ma_distance", 0.0)),
+            # Intermediate gate inputs: vol, range, volume, trend signals.
+            "vol_5d": float(row.get("vol_5d", 0.0)),
+            "range_expansion": float(row.get("range_expansion", 0.0)),
+            "volume_ratio": float(row.get("volume_ratio", 0.0)),
+            "trend_ma_distance": float(row.get("trend_ma_distance", 0.0)),
+            "trend_return": float(row.get("trend_return", 0.0)),
             "reason": _selection_reason(row, weight, data, config),
             # -- run-level, repeated per row so refine can read them ---------------------
             "data_ok": 1 if data.get("data_ok") else 0,

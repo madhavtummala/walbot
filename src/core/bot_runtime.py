@@ -8,7 +8,7 @@ from hashlib import sha256
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from src.core.config import DEFAULT_STRATEGY_ID, get_config
+from src.core.config import DEFAULT_STRATEGY_ID
 from ..api.controls import (
     ORIGIN_SCHEDULE,
     binding_refusal,
@@ -217,22 +217,6 @@ def _binding_check_seconds(binding_id: str):
     return check_seconds
 
 
-def _options_enabled(controls: dict[str, Any]) -> bool:
-    config = get_config()
-    return (
-        bool(controls.get("options_trading_enabled"))
-        and str(controls.get("options_strategy") or "none") != "none"
-        and not config.kill_switch
-    )
-
-
-def _run_options(account_id: str | None, run_key: str = "") -> None:
-    # run_key is accepted for a uniform runner signature; the options path has no binding.
-    from .algorithms.options.swing import run_options_once
-
-    run_options_once(account_id=account_id)
-
-
 def _active_schedule(controls: dict[str, Any]) -> Schedule:
     """The selected algorithm's declared cadence.
 
@@ -282,22 +266,8 @@ def _algorithm_bucket_key(now: datetime, schedule: Schedule) -> str | None:
     return f"algorithm:{bucket.isoformat(timespec='minutes')}"
 
 
-def _options_run_key() -> str | None:
-    """Options keep the base cadence: the swing algorithm is not in the equities registry, so
-    it has no ``Schedule`` of its own to read."""
-    return _algorithm_bucket_key(datetime.now(MARKET_TZ), Schedule())
-
-
-def _options_check_seconds() -> int:
-    return Schedule().check_seconds
-
-
-def _options_account_id(controls: dict[str, Any]) -> str:
-    return str(controls.get("options_trading_account_id") or controls.get("trading_account_id") or "")
-
-
 class BotRuntime:
-    """One scheduler loop per algorithm binding, plus the options loop.
+    """One scheduler loop per algorithm binding.
 
     Bindings are user-editable at runtime, so the loop set is reconciled against controls
     rather than fixed at construction: adding a binding in the dashboard starts a loop for it,
@@ -308,14 +278,6 @@ class BotRuntime:
         self._lock = threading.Lock()
         self._algorithm_loops: dict[str, _RuntimeLoop] = {}
         self._started = False
-        self.options = _RuntimeLoop(
-            "options",
-            _options_enabled,
-            _run_options,
-            _options_check_seconds,
-            _options_run_key,
-            _options_account_id,
-        )
 
     def _make_loop(self, binding_id: str) -> _RuntimeLoop:
         return _RuntimeLoop(
@@ -352,7 +314,6 @@ class BotRuntime:
             loops = list(self._algorithm_loops.values())
         for loop in loops:
             loop.start()
-        self.options.start()
 
     def stop(self) -> None:
         self._started = False
@@ -360,7 +321,6 @@ class BotRuntime:
             loops = list(self._algorithm_loops.values())
         for loop in loops:
             loop.stop()
-        self.options.stop()
 
     @property
     def algorithm(self) -> _RuntimeLoop:
@@ -379,7 +339,6 @@ class BotRuntime:
         return {
             "bindings": bindings,
             "algorithm": first if first is not None else RuntimeState().__dict__,
-            "options": self.options.snapshot(),
         }
 
 

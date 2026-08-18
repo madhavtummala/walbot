@@ -67,7 +67,7 @@ MODE_TARGET = "target"
 #: Only the listed symbols are touched; every other holding is left alone.
 MODE_INCREMENTAL = "incremental"
 
-INTENT_KINDS = ("weight", "notional", "shares")
+INTENT_KINDS = ("weight", "notional", "shares", "option")
 
 
 @dataclass(frozen=True)
@@ -75,13 +75,14 @@ class Intent:
     """One symbol's worth of what an algorithm wants, in whichever unit it thinks in.
 
     Allocation strategies speak ``weight`` ("hold 44% BBC"); DCA speaks ``notional``
-    ("buy $200 of VTI"). Step 2 resolves either against the portfolio, which is what lets
-    DCA be an ordinary algorithm rather than a separate submission path.
+    ("buy $200 of VTI").  ``option`` intents carry contract metadata in ``extra`` so
+    the pipeline can route them to the options order path.
     """
 
     symbol: str
     kind: str = "weight"
     value: float = 0.0
+    extra: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.kind not in INTENT_KINDS:
