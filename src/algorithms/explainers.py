@@ -17,54 +17,23 @@ from __future__ import annotations
 from typing import Any
 
 EXPLAINERS: dict[str, dict[str, Any]] = {
-    "dca": {
-        "summary": (
-            "Buys a fixed dollar amount per symbol per month, spread continuously rather than "
-            "in one lump. Each symbol accrues budget against elapsed wall-clock time and buys "
-            "as soon as the accrued amount can clear the broker's minimum trade size."
-        ),
-        "formula": [
-            "accrued = monthly_budget x (hours_since_last_buy / 730.5)",
-            "min_executable = max(min_trade_dollars, one whole share if fractional shares are unavailable)",
-            "buy when accrued >= min_executable, for the accrued amount",
-        ],
-        "behavior": (
-            "Runs Mondays inside the trading window. Between runs the budget keeps accruing, so "
-            "a missed run is not a missed contribution -- the next one simply buys more. A symbol "
-            "whose accrued amount is still under the minimum trade size does nothing and keeps "
-            "accruing, which is why small budgets on expensive shares buy infrequently."
-        ),
-        "parameters": {
-            "plan": {
-                "what": "The monthly dollar budget for each symbol, set on the bubble board.",
-                "effect": (
-                    "Higher budget accrues faster, so it trades more often and in larger size. "
-                    "The bubble area is proportional to the dollar amount."
-                ),
-            },
-        },
-    },
     "bursty_dca": {
         "summary": (
-            "Accrues exactly the same monthly budget as DCA, but refuses to spend it at an "
-            "arbitrary moment. It waits for a dip inside an uptrend, then deploys the backlog. "
-            "The spend rate over a month is the same; the timing is not."
+            "Accrues exactly the same monthly budget as DCA, but sizes each buy proportionally "
+            "to how far the price has fallen from its peak. Deeper dips get bigger buys. "
+            "Buys at 11 AM, sells at 3 PM (requires ``frequency: 1hr`` on the dashboard)."
         ),
         "formula": [
-            "regime gate: close >= SMA(regime_ma_days)",
-            "oversold: %B(percent_b_lookback, percent_b_num_std) < percent_b_threshold  OR  RSI(rsi_lookback) < rsi_threshold",
-            "buy fires only when regime gate AND oversold are both true",
-            "sell mirrors it: %B > (1 - percent_b_threshold) OR RSI > (100 - rsi_threshold)",
-            "size (value averaging): gap = monthly_budget x elapsed_months - held_value",
-            "clamped per trade to max_trade_multiple x monthly_budget",
-            "clamped per month to max_monthly_multiple x monthly_budget (cumulative)",
+            "drawdown = max(0, (peak - price) / peak)",
+            "size = monthly_budget × (1 + drawdown × scaling_factor)",
+            "cap = max_monthly_multiple × monthly_budget × (1 + drawdown × cap_boost)",
+            "buys execute at 11 AM, sells execute at 3 PM",
         ],
         "behavior": (
-            "Runs daily at the open rather than weekly, because a dip worth buying can open and "
-            "close inside a week. On days when the trigger does not fire it buys nothing and the "
-            "budget keeps accruing, so the next qualifying dip buys a larger amount. In a market "
-            "that never dips below the bands it can sit out for weeks by design -- that backlog "
-            "is the strategy, not a failure."
+            "Runs twice per day: buys at 11 AM when spreads are tightest, sells at 3 PM when "
+            "institutional liquidity peaks. Deeper dips produce larger buys automatically. "
+            "The monthly cap scales with drawdown via cap_boost, so crash months can deploy "
+            "more capital without a hard threshold."
         ),
         "parameters": {
             "plan": {
@@ -76,75 +45,33 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
                 ),
             },
             "regime_ma_days": {
-                "what": "Length of the moving average that defines 'uptrend'. Price must be above it to buy.",
+                "what": "Reference moving average period used to compute drawdown from peak.",
                 "effect": (
-                    "Longer (300) means a slower, stickier trend filter that keeps buying through "
-                    "corrections. Shorter (50) turns the gate off sooner in a decline, so it stops "
-                    "buying earlier but also resumes earlier."
+                    "Longer (300) uses a longer lookback for the peak reference. Shorter (50) "
+                    "uses a shorter lookback, making the peak recency-sensitive."
                 ),
             },
-            "percent_b_lookback": {
-                "what": "Bollinger Band window used to compute %B, the position of price within the bands.",
-                "effect": "Longer smooths the bands so only larger dips register. Shorter makes it twitchier.",
-            },
-            "percent_b_num_std": {
-                "what": "How many standard deviations wide the Bollinger Bands are.",
-                "effect": "Wider (2.5) means only deeper dips reach the lower band. Narrower (1.5) fires more often.",
-            },
-            "percent_b_threshold": {
-                "what": "%B below this counts as oversold. 0.0 is exactly the lower band.",
+            "scaling_factor": {
+                "what": "How much to scale buy size per unit of drawdown.",
                 "effect": (
-                    "Raise toward 0.2 to buy shallower dips more frequently. Push negative to demand "
-                    "price break below the band before buying at all."
+                    "size = budget × (1 + scaling_factor × drawdown). At 20 and 5% drawdown: "
+                    "2× budget. At 20 and 10% drawdown: 3× budget. Higher values concentrate "
+                    "more budget into deep dips."
                 ),
             },
-            "rsi_lookback": {
-                "what": "RSI period. 2 is the Connors-style very short RSI, not the classic 14.",
-                "effect": "Longer makes RSI sluggish and rarely extreme, which effectively disables this leg of the trigger.",
-            },
-            "rsi_threshold": {
-                "what": "RSI below this counts as oversold. It is an OR with the %B test, so either one fires the buy.",
-                "effect": "Raise toward 20 to fire more often. Lower toward 5 to demand a sharper flush.",
+            "cap_boost": {
+                "what": "How much to scale the monthly cap with drawdown.",
+                "effect": (
+                    "cap = max_monthly_multiple × budget × (1 + cap_boost × drawdown). "
+                    "At 1 and 10% drawdown: cap doubles. At 1 and 20% drawdown: cap triples. "
+                    "Set to 0 for a fixed cap regardless of drawdown."
+                ),
             },
             "max_monthly_multiple": {
                 "what": "Ceiling on total deployment per symbol per month, in multiples of the monthly budget.",
                 "effect": (
                     "Bounds how far ahead of schedule it can get. At 3.0 a month of repeated dips can "
                     "spend three months of budget. Set to 1.0 to never exceed the plan rate."
-                ),
-            },
-            "backlog_relax_months": {
-                "what": (
-                    "Months of undeployed budget at which the two oversold tests stop being picky. "
-                    "The regime gate is deliberately not relaxed."
-                ),
-                "effect": (
-                    "Waiting for a dip is the strategy; waiting forever is not. At 0 the trigger never "
-                    "gives up, so a market that only rises leaves the budget accruing and the eventual "
-                    "entry happens higher than every price it declined. Lower to fire sooner once "
-                    "behind; 1.0 clears the backlog within a month of falling behind."
-                ),
-            },
-            "value_averaging": {
-                "what": "When on, trade size targets a value path rather than a fixed contribution.",
-                "effect": (
-                    "On, it buys more after the position has fallen behind its path and less after it "
-                    "has run ahead. Off, it falls back to plain accrued-amount buying."
-                ),
-            },
-            "dip_scale": {
-                "what": (
-                    "Scales the per-trade size cap proportionally to how deep the price is below the "
-                    "lower Bollinger Band. "
-                    "effective_cap = budget \u00d7 (1 + dip_scale \u00d7 dip_depth), "
-                    "where dip_depth = max(0, 1 \u2212 percent_b)."
-                ),
-                "effect": (
-                    "At 0 (default) every qualifying trade is capped at one month of budget -- no "
-                    "scaling at all. At 1, a price sitting exactly on the lower band doubles the cap; "
-                    "a price 20% below it gives 2.2\u00d7. At 2 the same dip gives 3.4\u00d7. "
-                    "Raise to concentrate more budget into deep dips; leave at 0 for flat-sized buys. "
-                    "max_monthly_multiple still limits total monthly deployment regardless."
                 ),
             },
         },
@@ -264,6 +191,54 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "minimum_trade_notional": {"what": "Floor on the dollar size of any single order.", "effect": "Stops trivial orders whose costs exceed their benefit."},
             "minimum_trade_nav_fraction": {"what": "The same floor as a fraction of equity.", "effect": "The larger of the two applies, so the minimum scales with the account."},
             "defensive_max_positions": {"what": "How many defensive names to hold in risk-off.", "effect": "One is a pure cash-equivalent stance; two splits between, say, bills and gold."},
+        },
+    },
+    "intraday_pick": {
+        "summary": (
+            "Directional options: the macro trend on the benchmark determines whether to buy "
+            "calls (bull) or puts (bear). The highest-scoring candidate from the tradable "
+            "universe gets a buy limit entry at a discount to fair value, and a GTC sell "
+            "limit at the target exit price. If wrong, the sell limit just sits there -- "
+            "the user sized the position for the loss."
+        ),
+        "formula": [
+            "macro = bull if price > SMA(trend_ma_period) and recent_return > 0",
+            "        bear if price < SMA(trend_ma_period) and recent_return < 0",
+            "        flat otherwise (no trade)",
+            "",
+            "score(symbol) = vol_regime + range_expansion + direction_aligned",
+            "                 + range_budget_remaining + volume_ratio",
+            "",
+            "vol_regime = realized_vol(short_window) / realized_vol(long_window)",
+            "range_expansion = today_range / ATR(atr_period)",
+            "direction_aligned = momentum aligned with macro AND above/below VWAP",
+            "",
+            "option_type = call if macro == bull, put if macro == bear",
+            "entry_limit = fair_value * (1 - entry_discount_pct)",
+            "exit_limit = fair_value * (1 + exit_target_pct)",
+            "",
+            "Two orders placed simultaneously:",
+            "  1. BUY N contracts at entry_limit (limit, day)",
+            "  2. SELL N contracts at exit_limit (limit, GTC)",
+        ],
+        "behavior": (
+            "Runs intraday on a configurable schedule (default every 15 minutes during market "
+            "hours). Each cycle: detect macro trend on the benchmark, score candidates, and "
+            "if a qualifying name is found, place entry and exit limit orders. The GTC exit "
+            "order persists until filled or cancelled. Lost trades are accepted -- the user "
+            "controls risk via contracts_per_signal and max_notional_per_trade."
+        ),
+        "parameters": {
+            "benchmark_symbol": {"what": "Symbol used to determine macro trend direction.", "effect": "SPY for broad market, QQQ for tech-heavy, IWM for small-caps."},
+            "trend_ma_period": {"what": "Moving average period for the macro trend filter.", "effect": "Longer = slower to switch direction, fewer false signals."},
+            "trend_lookback_days": {"what": "Days of recent return to confirm trend direction.", "effect": "Higher = needs more sustained trend to trade."},
+            "vol_short_window": {"what": "Short window for volatility regime ratio.", "effect": "Lower = more responsive to recent vol spikes."},
+            "vol_long_window": {"what": "Long window for volatility regime ratio.", "effect": "Higher = smoother baseline, more meaningful ratio."},
+            "range_expansion_threshold": {"what": "Minimum today_range/ATR to consider a candidate.", "effect": "Higher = only trade on high-range days."},
+            "entry_discount_pct": {"what": "How far below fair value to place the buy limit.", "effect": "Higher = cheaper fill but lower fill probability."},
+            "exit_target_pct": {"what": "How far above fair value to place the sell limit.", "effect": "Higher = bigger win per trade but lower fill probability."},
+            "contracts_per_signal": {"what": "Number of option contracts per trade.", "effect": "Directly controls risk per trade."},
+            "max_notional_per_trade": {"what": "Maximum dollar cost per trade.", "effect": "Hard cap on position size."},
         },
     },
 }

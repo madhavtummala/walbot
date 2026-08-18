@@ -25,8 +25,8 @@ PLAN_KEY = "plan"
 #: silently changes the spend rate.
 DCA_MAX_ITEM_AMOUNT = 5_000.0
 
-#: Which variant runs the plan. Both accrue identically; Bursty adds a signal to the predicate.
-DCA_ALGORITHMS = ("dca", "bursty_dca")
+#: Which variant runs the plan. Both accrue identically; Bursty adds signal-based sizing.
+DCA_ALGORITHMS = ("bursty_dca",)
 
 #: The plan carries **what to buy and how much**, and nothing else. Cadence lives on the
 #: algorithm class as a ``Schedule``, and whether it runs at all is ``algorithm_enabled``

@@ -9,3 +9,5 @@ runtime/
 data/*
 !data/tradable_etfs.csv
 .DS_Store
+.claude/
+tmp/

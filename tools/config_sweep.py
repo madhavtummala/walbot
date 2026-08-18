@@ -395,9 +395,9 @@ def deployed_tuning(algorithm_id: str) -> dict[str, Any]:
     file quietly disagreed with the deployed file on six keys.
 
     Every id the algorithm has had, in the same order the algorithm itself reads them. Asking
-    for only the current one silently returned ``{}`` for SPY Rotation, whose tuning is still
-    filed under ``invest_spy`` -- so its whole sweep ran against code defaults while reporting
-    them as the deployed baseline.
+    for only the current one could silently return ``{}`` for a renamed algorithm whose tuning
+    is still filed under its old id -- so its whole sweep would run against code defaults
+    while reporting them as the deployed baseline.
     """
     ids = [algorithm_id, *LEGACY_ALGORITHM_IDS.get(algorithm_id, [])]
     return dict(tuning_section(get_config(strategy_id=algorithm_id), *ids))
@@ -475,7 +475,7 @@ def dual_wide() -> list[tuple[str, dict[str, Any]]]:
 
 
 def bursty_axes() -> list[tuple[str, dict[str, Any]]]:
-    """Bursty DCA's trigger, plus the backlog relaxation.
+    """Bursty DCA's sizing parameters.
 
     For DCA the headline metric is not return but ``deployed``: the plan states a monthly
     contribution, and a trigger picky enough to skip it is not timing the market, it is
@@ -485,22 +485,14 @@ def bursty_axes() -> list[tuple[str, dict[str, Any]]]:
     base = deployed_tuning("bursty_dca")
     variants = [("baseline", dict(base))]
 
-    # Both directions, because "increase the RSI" is ambiguous: raising the *threshold* fires on
-    # shallower dips (less picky), while raising the *lookback* makes RSI sluggish and rarely
-    # extreme, which quietly disables that leg of the trigger.
-    for threshold in (5.0, 20.0, 30.0):
-        variants.append(_axis(base, f"rsi_threshold={threshold:.0f}", rsi_threshold=threshold))
-    for lookback in (3, 5, 14):
-        variants.append(_axis(base, f"rsi_lookback={lookback}", rsi_lookback=lookback))
-    for threshold in (-0.1, 0.1, 0.2):
-        variants.append(_axis(base, f"percent_b_threshold={threshold}", percent_b_threshold=threshold))
-    for days in (100, 300):
+    for factor in (5.0, 20.0, 30.0):
+        variants.append(_axis(base, f"scaling_factor={factor:.0f}", scaling_factor=factor))
+    for days in (50, 150, 300):
         variants.append(_axis(base, f"regime_ma_days={days}", regime_ma_days=days))
-    for months in (1.0, 2.0, 3.0, 6.0):
-        variants.append(_axis(base, f"backlog_relax={months:.0f}m", backlog_relax_months=months))
-    variants.append(_axis(base, "value_averaging=False", value_averaging=False))
-    for multiple in (1.0, 6.0):
-        variants.append(_axis(base, f"max_trade_multiple={multiple:.0f}", max_trade_multiple=multiple))
+    for multiple in (1.0, 3.0, 6.0):
+        variants.append(_axis(base, f"max_monthly_multiple={multiple:.0f}", max_monthly_multiple=multiple))
+    for boost in (0.0, 0.5, 1.0):
+        variants.append(_axis(base, f"cap_boost={boost}", cap_boost=boost))
     # A variant that equals the deployed baseline is not an axis, it is a restatement, and it
     # reads as a tie rather than as the same run twice. ``rsi_threshold=5`` is exactly that
     # today, and any of these can become one when the deployed config moves.
@@ -508,8 +500,11 @@ def bursty_axes() -> list[tuple[str, dict[str, Any]]]:
 
 
 def dca_axes() -> list[tuple[str, dict[str, Any]]]:
-    """Plain DCA, as the benchmark Bursty has to beat. It has no trigger to tune."""
-    return [("baseline", dict(deployed_tuning("dca")))]
+    """Plain DCA as baseline: scaling_factor=0, cap_boost=0."""
+    base = deployed_tuning("bursty_dca")
+    base["scaling_factor"] = 0
+    base["cap_boost"] = 0
+    return [("baseline", dict(base))]
 
 
 def dual_wide_churn() -> list[tuple[str, dict[str, Any]]]:

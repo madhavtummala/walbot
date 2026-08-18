@@ -256,6 +256,7 @@ def resolve_positions(
     held: set[str],
     ranked: list[dict[str, Any]],
     config: RallyRotationConfig,
+    as_of: str = "",
 ) -> set[str]:
     """Which ETFs the book holds: keep what still ranks, fill free slots, then displace.
 
@@ -305,8 +306,8 @@ def resolve_positions(
         if score.get(symbol, 0.0) <= score.get(weakest, 0.0) + delta:
             continue
         logger.info(
-            "Rally Rotation replacing %s (%.2f) with %s (%.2f)",
-            weakest, score.get(weakest, 0.0), symbol, score.get(symbol, 0.0),
+            "[%s] Rally Rotation replacing %s (%.2f) with %s (%.2f)",
+            as_of[:10] if as_of else "--------", weakest, score.get(weakest, 0.0), symbol, score.get(symbol, 0.0),
         )
         selection.discard(weakest)
         selection.add(symbol)

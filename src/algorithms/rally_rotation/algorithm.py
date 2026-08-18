@@ -157,7 +157,7 @@ class RallyRotationAlgorithm(BaseAlgorithm):
 
         if not facts["data_ok"]:
             # Not a bearish reading -- an unusable one. See ``universe_data_ok``.
-            logger.warning("Rally Rotation holding the defensive sleeve: %s", facts["data_detail"])
+            logger.warning("[%s] Rally Rotation holding the defensive sleeve: %s", stamp[:10], facts["data_detail"])
             return settle(book)
 
         risk_rows = {symbol: row for symbol, row in rows.items() if symbol not in defensive}
@@ -185,7 +185,7 @@ class RallyRotationAlgorithm(BaseAlgorithm):
         }
         for symbol in crashed:
             logger.warning(
-                "Rally Rotation crash stop on %s: %s", symbol,
+                "[%s] Rally Rotation crash stop on %s: %s", stamp[:10], symbol,
                 crash_stop(rows.get(symbol, {}), strategy_config)[1],
             )
 
@@ -196,7 +196,7 @@ class RallyRotationAlgorithm(BaseAlgorithm):
         }
         for symbol in climax_exits:
             logger.warning(
-                "Rally Rotation climax top exit on %s: %s", symbol,
+                "[%s] Rally Rotation climax top exit on %s: %s", stamp[:10], symbol,
                 climax_top(rows.get(symbol, {}), strategy_config)[1],
             )
 
@@ -218,13 +218,13 @@ class RallyRotationAlgorithm(BaseAlgorithm):
                 # that as "ineligible" would sell everything on the first run.
                 if watched_long_enough(symbol) and days <= strategy_config.exit_max_eligible_days:
                     logger.info(
-                        "Rally Rotation exiting %s: eligible on only %d of the last %d runs",
-                        symbol, days, window,
+                        "[%s] Rally Rotation exiting %s: eligible on only %d of the last %d runs",
+                        stamp[:10], symbol, days, window,
                     )
                     continue
                 stays, why = hold_eligibility(row, strategy_config)
                 if not stays:
-                    logger.info("Rally Rotation exiting %s: %s", symbol, why)
+                    logger.info("[%s] Rally Rotation exiting %s: %s", stamp[:10], symbol, why)
                     continue
                 keep.add(symbol)
 
@@ -248,7 +248,7 @@ class RallyRotationAlgorithm(BaseAlgorithm):
             ]
             for position, row in enumerate(candidates, start=1):
                 row["rank"] = position
-            selection = resolve_positions(keep, candidates, strategy_config)
+            selection = resolve_positions(keep, candidates, strategy_config, as_of=stamp)
             chosen = [row for row in candidates if str(row["symbol"]) in selection]
             weights = score_to_weights(chosen, strategy_config) if chosen else {}
 

@@ -61,8 +61,6 @@ def complete_schwab_auth_payload(code: str, state: str) -> dict[str, Any]:
 
 def save_controls_payload(body: dict[str, Any]) -> dict[str, Any]:
     raw_controls = body.get("controls", body)
-    if str(raw_controls.get("options_strategy") or "none") == "none":
-        raw_controls = {**raw_controls, "options_trading_enabled": False}
     controls = save_controls(raw_controls)
     return {
         "controls": controls,

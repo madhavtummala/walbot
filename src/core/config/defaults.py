@@ -70,7 +70,6 @@ ACCOUNTS_FILE = "config/accounts.yaml"
 CONNECTORS_FILE = "config/connectors.yaml"
 ALGORITHMS_FILE = "config/algorithms.yaml"
 ALGORITHM_BOT_FILE = "config/algorithm_bot.yaml"
-OPTIONS_BOT_FILE = "config/options_bot.yaml"
 DCA_BOT_FILE = "config/dca_bot.yaml"
 UNIVERSE_FILE = "config/universe.yaml"
 MARKET_DATA_PROVIDER_ORDER: list[str] = []
@@ -93,19 +92,10 @@ NEWS_SENTIMENT_CACHE_TTL_SECONDS = 1800
 REQUIRE_TRADE_APPROVAL = False
 TRADE_APPROVAL_TIMEOUT_SECONDS = 300
 TRADE_APPROVAL_POLL_SECONDS = 5
-OPTIONS_SWING_DTE_MIN = 30
-OPTIONS_SWING_DTE_MAX = 60
-OPTIONS_SWING_MIN_DELTA = 0.35
-OPTIONS_SWING_MAX_DELTA = 0.65
-OPTIONS_SWING_MAX_CONTRACTS = 1
-OPTIONS_SWING_MAX_PREMIUM = 500.0
-OPTIONS_SWING_MIN_OPEN_INTEREST = 100
-OPTIONS_SWING_MAX_SPREAD_PCT = 0.20
-OPTIONS_SWING_STRIKE_RANGE_PCT = 0.15
 ALGORITHM_IDS = {
-    "dca",
     "bursty_dca",
     "rally_rotation",
+    "intraday_pick",
 }
 
 #: Used wherever no strategy was selected, and as the fallback for a retired id.

@@ -10,19 +10,15 @@ from .base import BaseAlgorithm
 from .ids import ALGORITHM_ALIASES, LEGACY_ALGORITHM_IDS, canonical_algorithm_id  # noqa: F401
 
 ALGORITHM_MODULES = {
-    # Not to be confused with the "rally_rotation" *scoring model* in core/strategy_models.py,
-    # which is a daily-bar row builder used by the options swing algorithm. This id is the
-    # algorithm; that string is a signal-row style.
     "rally_rotation": "src.algorithms.rally_rotation",
-    "dca": "src.algorithms.dca",
     "bursty_dca": "src.algorithms.dca",
-    "options_swing": "src.algorithms.options.swing",
+    "intraday_pick": "src.algorithms.intraday_pick",
 }
 
 ALGORITHM_REGISTRY: dict[str, str | Type[BaseAlgorithm]] = {
-    "dca": "src.algorithms.dca.bot:DCAAlgorithm",
     "bursty_dca": "src.algorithms.dca.bursty:BurstyDCAAlgorithm",
     "rally_rotation": "src.algorithms.rally_rotation:RallyRotationAlgorithm",
+    "intraday_pick": "src.algorithms.intraday_pick:IntradayPickAlgorithm",
 }
 
 def get_algorithm_module(algorithm_id: str) -> ModuleType:

@@ -13,6 +13,8 @@ from src.core.interfaces import (
     AlgorithmDecision,
     AlgorithmResult,
     Brokerage,
+    Intent,
+    OrderRequest,
     PortfolioSnapshot,
     intents_from_weights,
     weights_from_intents,
@@ -139,6 +141,131 @@ def weight_diff(
     return sorted(rows, key=lambda row: -abs(row["change"]))
 
 
+def submit_option_intents(
+    brokerage: Brokerage,
+    option_intents: list[Intent],
+    signals: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Submit option buy/sell limit orders for each option intent.
+
+    For each intent, two orders are placed:
+    1. A buy limit at the entry discount price
+    2. A GTC sell limit at the exit target price
+
+    If wrong, the sell limit just sits there -- the user sized for the loss.
+    """
+    results: list[dict[str, Any]] = []
+
+    for intent in option_intents:
+        signal = signals.get(intent.symbol, {})
+        option_type = signal.get("option_type", "call")
+        strike = signal.get("strike", 0.0)
+        dte = signal.get("dte", 0)
+        entry_limit = signal.get("entry_limit", 0.0)
+        exit_limit = signal.get("exit_limit", 0.0)
+        contracts = int(intent.value)
+
+        if contracts <= 0 or entry_limit <= 0:
+            results.append({
+                "symbol": intent.symbol,
+                "action": "buy",
+                "quantity": contracts,
+                "status": "rejected",
+                "reason": f"invalid option parameters: contracts={contracts}, entry_limit={entry_limit}",
+                "option_type": option_type,
+                "strike": strike,
+                "dte": dte,
+            })
+            continue
+
+        buy_request = OrderRequest(
+            symbol=intent.symbol,
+            action="buy",
+            quantity=contracts,
+            order_type="limit",
+            limit_price=entry_limit,
+            extra={
+                "option_type": option_type,
+                "strike": strike,
+                "dte": dte,
+                "position_intent": "buy_to_open",
+            },
+        )
+
+        try:
+            buy_result = brokerage.submit_order(buy_request)
+            results.append({
+                "symbol": intent.symbol,
+                "action": "buy",
+                "quantity": contracts,
+                "status": "submitted",
+                "order_type": "limit",
+                "limit_price": entry_limit,
+                "order_id": buy_result.get("order_id", "unknown"),
+                "option_type": option_type,
+                "strike": strike,
+                "dte": dte,
+            })
+        except Exception as exc:
+            logger.warning("Option buy rejected for %s: %s", intent.symbol, exc)
+            results.append({
+                "symbol": intent.symbol,
+                "action": "buy",
+                "quantity": contracts,
+                "status": "rejected",
+                "reason": str(exc),
+                "option_type": option_type,
+                "strike": strike,
+                "dte": dte,
+            })
+            continue
+
+        if exit_limit > 0:
+            sell_request = OrderRequest(
+                symbol=intent.symbol,
+                action="sell",
+                quantity=contracts,
+                order_type="limit",
+                limit_price=exit_limit,
+                extra={
+                    "option_type": option_type,
+                    "strike": strike,
+                    "dte": dte,
+                    "position_intent": "sell_to_close",
+                    "time_in_force": "gtc",
+                },
+            )
+            try:
+                sell_result = brokerage.submit_order(sell_request)
+                results.append({
+                    "symbol": intent.symbol,
+                    "action": "sell",
+                    "quantity": contracts,
+                    "status": "submitted",
+                    "order_type": "limit",
+                    "time_in_force": "gtc",
+                    "limit_price": exit_limit,
+                    "order_id": sell_result.get("order_id", "unknown"),
+                    "option_type": option_type,
+                    "strike": strike,
+                    "dte": dte,
+                })
+            except Exception as exc:
+                logger.warning("Option sell limit rejected for %s: %s", intent.symbol, exc)
+                results.append({
+                    "symbol": intent.symbol,
+                    "action": "sell",
+                    "quantity": contracts,
+                    "status": "rejected",
+                    "reason": str(exc),
+                    "option_type": option_type,
+                    "strike": strike,
+                    "dte": dte,
+                })
+
+    return results
+
+
 def place_orders(
     result: AlgorithmResult,
     config,
@@ -173,9 +300,17 @@ def place_orders(
         # An edited weight set is by definition the whole intended portfolio.
         proposed, mode = intents_from_weights(target_weights), MODE_TARGET
 
+    # Separate option intents from share/weight intents.
+    option_intents = [intent for intent in proposed if intent.kind == "option"]
+    share_intents = [intent for intent in proposed if intent.kind != "option"]
+
+    option_results: list[dict[str, Any]] = []
+    if option_intents:
+        option_results = submit_option_intents(brokerage, option_intents, result.signals)
+
     # ``shares`` intents carry their own quantity; everything else has to be priced to size.
     unpriced = sorted(
-        {intent.symbol for intent in proposed if intent.kind != "shares" and latest_prices.get(intent.symbol, 0.0) <= 0}
+        {intent.symbol for intent in share_intents if intent.kind != "shares" and latest_prices.get(intent.symbol, 0.0) <= 0}
     )
     if unpriced:
         raise ValueError(
@@ -184,15 +319,13 @@ def place_orders(
         )
 
     sizing = algorithm.sizing(config)
-    final_intents = algorithm.refine(
-        proposed, result.signals, snapshot, latest_prices, config, result.as_of
+    final_share_intents = algorithm.refine(
+        share_intents, result.signals, snapshot, latest_prices, config, result.as_of
     )
 
     fractional = getattr(brokerage, "supports_fractional_shares", False)
-    # Sized against the whole book. What the account can afford is a separate question, asked
-    # once below against buying power rather than smuggled in here as a haircut on targets.
     sized_shares = resolve_target_shares(
-        final_intents,
+        final_share_intents,
         mode,
         snapshot.positions,
         latest_prices,
@@ -208,39 +341,33 @@ def place_orders(
         min_trade_dollars=sizing["min_trade_dollars"],
         rebalance_threshold=sizing["rebalance_threshold"],
         supports_fractional_shares=fractional,
-        target_weights=weights_from_intents(final_intents),
+        target_weights=weights_from_intents(final_share_intents),
     )
 
     fundable, unfunded, funding = fund_planned_orders(
         planned_orders,
         buying_power=snapshot.buying_power,
-        # A fraction of the book, not of buying power: on a margin account the latter is an
-        # inflated number and a percentage of it would reserve an arbitrary amount.
         reserve=snapshot.equity * max(0.0, min(1.0, float(getattr(config, "cash_buffer", 0.0) or 0.0))),
-        # Optional on the brokerage, like ``mark_prices``: one that cannot value its holdings
-        # simply funds from buying power alone.
         cash_equivalents=getattr(brokerage, "get_cash_equivalents", dict)(),
         min_trade_dollars=sizing["min_trade_dollars"],
         supports_fractional_shares=fractional,
-        # An incremental batch is a set of independent commitments; a target batch is one
-        # portfolio. See the policy constants in ``orders``.
         policy=FUNDING_GREEDY if mode == MODE_INCREMENTAL else FUNDING_PRO_RATA,
     )
 
-    order_results = submit_planned_orders(
+    share_order_results = submit_planned_orders(
         brokerage,
         fundable,
         require_approval=require_approval,
         approval_timeout_seconds=approval_timeout_seconds,
         approval_poll_seconds=approval_poll_seconds,
     )
-    # Recorded as results rather than dropped, so a caller can tell a leg that was deliberately
-    # left out for want of funds from one that never existed.
-    order_results.extend(
+    share_order_results.extend(
         {**order, "action": "skip", "quantity": 0, "status": "unfunded"} for order in unfunded
     )
 
-    algorithm.settle(config, order_results, final_intents)
+    order_results = option_results + share_order_results
+
+    algorithm.settle(config, order_results, final_share_intents + option_intents)
 
     # A brokerage that keeps its own book (the local paper one) has no price feed, so its
     # equity would stay marked at the last fill until someone traded again.
@@ -249,12 +376,10 @@ def place_orders(
 
     rejected = [order for order in order_results if order.get("status") == "rejected"]
     submitted = [order for order in order_results if order.get("status") == "submitted"]
-    # Built from what was actually submitted rather than from the pre-funding targets, so a
-    # trimmed, unfunded, or broker-rejected leg is reflected instead of being reported as
-    # though it had filled at full size.
     resulting_weights = PortfolioSnapshot(
         positions=_resulting_positions(snapshot.positions, submitted), equity=snapshot.equity
     ).weights(latest_prices)
+    all_final_intents = final_share_intents + option_intents
     return {
         "strategy": result.strategy,
         "mode": mode,
@@ -264,13 +389,12 @@ def place_orders(
         "final_weights": resulting_weights,
         "final_intents": [
             {"symbol": intent.symbol, "kind": intent.kind, "value": intent.value}
-            for intent in final_intents
+            for intent in all_final_intents
         ],
         "diff": weight_diff(snapshot.weights(latest_prices), resulting_weights),
         "planned_orders": planned_orders,
         "order_results": order_results,
-        # How the batch was paid for, so a caller can explain a trim rather than just report
-        # one -- and tell a deliberate downsizing apart from a refusal it should react to.
+        "option_results": option_results,
         "funding": funding,
         "unfunded": [
             {"symbol": order["symbol"], "action": order["action"], "reason": order["reason"]}

@@ -9,9 +9,7 @@ from src.common.config_utils import as_bool
 from src.core.config import (
     DEFAULT_STRATEGY_ID,
     load_algorithm_bot_config,
-    load_options_bot_config,
     save_algorithm_bot_config,
-    save_options_bot_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,11 +58,6 @@ DEFAULT_BINDING: dict[str, Any] = {
 DEFAULT_CONTROLS: dict[str, Any] = {
     "trading_account_id": "",
     "bindings": [],
-    "options": {
-        "enabled": False,
-        "strategy": "none",
-        "account_id": "",
-    },
 }
 
 
@@ -129,26 +122,15 @@ def sanitize_controls(controls: dict[str, Any] | None) -> dict[str, Any]:
     raw = deepcopy(DEFAULT_CONTROLS)
     if controls:
         raw.update(
-            {key: value for key, value in controls.items() if key not in {"options", "options_trading", "bindings"}}
+            {key: value for key, value in controls.items() if key not in {"bindings"}}
         )
-        if isinstance(controls.get("options"), dict):
-            raw["options"].update(controls["options"])
-        if "options_strategy" in controls:
-            raw["options"]["strategy"] = controls.get("options_strategy")
-        if "options_trading_enabled" in controls:
-            raw["options"]["enabled"] = controls.get("options_trading_enabled")
-        if "options_trading_account_id" in controls:
-            raw["options"]["account_id"] = controls.get("options_trading_account_id")
         raw["bindings"] = controls.get("bindings", raw["bindings"])
 
     bindings = _bindings_from_raw({**raw, "bindings": raw.get("bindings")})
     if not bindings:
         bindings = [sanitize_binding(None, set(), str(raw.get("trading_account_id") or ""))]
 
-    options_strategy = str(raw["options"].get("strategy") or DEFAULT_CONTROLS["options"]["strategy"])[:80]
-    options_enabled = as_bool(raw["options"].get("enabled"), default=False) and options_strategy != "none"
     trading_account_id = str(raw.get("trading_account_id") or bindings[0]["account_id"] or "")[:80]
-    options_account_id = str(raw["options"].get("account_id") or trading_account_id or "")[:80]
 
     # The first binding is mirrored onto the pre-binding keys so anything still reading a single
     # strategy -- saved backtests, the live runner's default, older callers -- keeps working.
@@ -156,16 +138,6 @@ def sanitize_controls(controls: dict[str, Any] | None) -> dict[str, Any]:
     return {
         "trading_account_id": trading_account_id,
         "bindings": bindings,
-        "options": {
-            "enabled": options_enabled,
-            "strategy": options_strategy,
-            "account_id": options_account_id,
-        },
-        "options_trading": {
-            "enabled": options_enabled,
-            "strategy": options_strategy,
-            "account_id": options_account_id,
-        },
         "equities": {
             "enabled": primary["enabled"],
             "strategy": primary["strategy"],
@@ -176,9 +148,6 @@ def sanitize_controls(controls: dict[str, Any] | None) -> dict[str, Any]:
         },
         "algorithm_enabled": primary["enabled"],
         "active_strategy": primary["strategy"],
-        "options_trading_enabled": options_enabled,
-        "options_strategy": options_strategy,
-        "options_trading_account_id": options_account_id,
     }
 
 
@@ -297,10 +266,8 @@ def resolve_binding_for_origin(
 
 def _raw_controls_from_bot_configs(path: str | None = None) -> dict[str, Any]:
     algorithm_config = load_algorithm_bot_config(path)
-    options_config = load_options_bot_config(path)
     raw: dict[str, Any] = {}
     algorithm_bot = algorithm_config.get("algorithm_bot") if isinstance(algorithm_config.get("algorithm_bot"), dict) else {}
-    options_bot = options_config.get("options_bot") if isinstance(options_config.get("options_bot"), dict) else {}
     if algorithm_bot:
         raw["trading_account_id"] = algorithm_bot.get("trading_account_id", "")
         if isinstance(algorithm_bot.get("bindings"), list) and algorithm_bot["bindings"]:
@@ -310,12 +277,6 @@ def _raw_controls_from_bot_configs(path: str | None = None) -> dict[str, Any]:
                 "enabled": algorithm_bot.get("enabled", False),
                 "strategy": algorithm_bot.get("strategy", DEFAULT_STRATEGY_ID),
             }
-    if options_bot:
-        raw["options"] = {
-            "enabled": options_bot.get("enabled", False),
-            "strategy": options_bot.get("strategy", "none"),
-            "account_id": options_bot.get("account_id", raw.get("trading_account_id", "")),
-        }
     return raw
 
 
@@ -343,18 +304,4 @@ def save_controls(controls: dict[str, Any], path: str | None = None) -> dict[str
         }
     )
     save_algorithm_bot_config(algorithm_config, path)
-
-    options_config = load_options_bot_config(path)
-    options_bot = options_config.setdefault("options_bot", {})
-    if not isinstance(options_bot, dict):
-        options_bot = {}
-        options_config["options_bot"] = options_bot
-    options_bot.update(
-        {
-            "enabled": sanitized["options"]["enabled"],
-            "strategy": sanitized["options"]["strategy"],
-            "account_id": sanitized["options"]["account_id"],
-        }
-    )
-    save_options_bot_config(options_config, path)
     return sanitized

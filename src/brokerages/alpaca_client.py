@@ -381,6 +381,7 @@ def submit_option_limit_order(
     qty: int,
     limit_price: float,
     position_intent: str = "buy_to_open",
+    time_in_force: str = "day",
 ):
     if side.lower() not in {"buy", "sell"}:
         raise ValueError("side must be 'buy' or 'sell'")
@@ -389,12 +390,13 @@ def submit_option_limit_order(
     if limit_price <= 0:
         raise ValueError("limit_price must be positive")
     intent = PositionIntent(position_intent)
+    tif = TimeInForce.GTC if time_in_force.lower() == "gtc" else TimeInForce.DAY
     order = LimitOrderRequest(
         symbol=symbol,
         qty=qty,
         side=OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL,
         type=OrderType.LIMIT,
-        time_in_force=TimeInForce.DAY,
+        time_in_force=tif,
         limit_price=round(float(limit_price), 2),
         position_intent=intent,
     )

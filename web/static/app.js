@@ -1,7 +1,7 @@
 const SVG_NS = "http://www.w3.org/2000/svg";
 const BUCKET_NAMES = ["buy", "sell"];
 const MAX_AMOUNT = 2000;
-const DCA_ALGORITHM_KEYS = ["dca", "bursty_dca"];
+const DCA_ALGORITHM_KEYS = ["bursty_dca"];
 const WHEEL_STEP = 25;
 //: Vertical offset of a bubble's amount label from its centre. Shared so the typing caret
 //: lands on the number it is editing rather than near it.
@@ -26,24 +26,14 @@ const DISABLED_COLORS = {
 
 const STRATEGIES = [
   {
-    key: "dca",
-    blurb: "Buys each symbol's monthly budget as soon as it clears the broker minimum.",
-    name: "DCA",
-    status: "Live",
-    horizon: "Continuous",
-    risk: "Lower",
-    logic: "Accrues each symbol's monthly budget against elapsed wall-clock time and buys as soon as the accrued amount can clear a broker minimum, so the schedule controls only when it may act, never how much it spends.",
-    signals: ["Monthly budget", "Accrued amount", "Minimum executable trade", "Whole-share threshold"],
-  },
-  {
     key: "bursty_dca",
-    blurb: "Same monthly budget as DCA, but only deployed into a dip above the 200-day.",
+    blurb: "Buys sized proportionally to drawdown from peak. Deeper dips get bigger buys.",
     name: "Bursty DCA",
     status: "Live",
     horizon: "Continuous",
     risk: "Medium",
-    logic: "Accrues the same monthly budget as DCA but only deploys it into a dip: price must be above its 200-day moving average, and Bollinger %B or Connors RSI(2) must be stretched. Trade size follows a value-averaging path, clamped per trade and per month.",
-    signals: ["200-day regime gate", "Bollinger %B", "Connors RSI(2)", "Value-averaging path", "Trade and monthly clamps"],
+    logic: "Accrues a monthly budget per symbol and sizes each buy proportionally to how far the price has fallen from its peak. Monthly cap scales with drawdown so crash months deploy more capital. Sells at peak.",
+    signals: ["Drawdown from peak", "Scaling factor", "Monthly cap with cap_boost", "Picky threshold"],
   },
   {
     key: "rally_rotation",
@@ -55,10 +45,20 @@ const STRATEGIES = [
     logic: "Scores every ETF against the others and requires each to clear its own trend and return floors before it is ranked. Holds the top few, re-ranks on its own clock rather than every session, and needs a score margin to displace a sitting position. Sizing is proportional to score with no per-name cap, so a concentrated book is normal; a single-session drop sells outright.",
     signals: ["Absolute eligibility", "Cross-sectional rank", "Replacement margin", "Crash stop"],
   },
+  {
+    key: "intraday_pick",
+    blurb: "Macro trend picks direction; intraday setup picks the option. Limit entry, GTC limit exit.",
+    name: "Intraday Pick",
+    status: "Paper",
+    horizon: "Intraday",
+    risk: "High",
+    logic: "Detects the macro trend from the SPY 50-day moving average, then scores each candidate on volatility regime, range expansion, and momentum. Buys calls in bull trends, puts in bear trends. Entry is a buy limit below fair value; exit is a GTC sell limit above.",
+    signals: ["Macro trend (SPY 50-day MA)", "Vol regime", "Range expansion", "Intraday momentum", "VWAP alignment"],
+  },
 ];
 
 //: A saved strategy id that is unknown (or the retired "none") lands here.
-const DEFAULT_ALGORITHM_KEY = "dca";
+const DEFAULT_ALGORITHM_KEY = "bursty_dca";
 
 //: Strategies driven by the DCA plan, so a plan edit invalidates their cached views.
 
@@ -1267,55 +1267,69 @@ async function loadSignals(strategyKey) {
   }
 }
 
-function formatSignalDetail(strategyKey, row) {
-  // Each layer that could have stopped this symbol, in the order it is applied -- the point
-  // of the algorithm is that you can see which gate rejected a name, not just its score.
-  if (strategyKey === "rally_rotation") {
-    const details = [
-      row.reason || "Signal pending",
-      `Eligible ${row.eligible ? "yes" : "no"}`,
-      row.rank ? `Rank ${row.rank}` : "Unranked",
-      `Vol ${percent(row.annual_volatility)}`,
-    ];
-    if (row.close) details.push(`Close ${money(row.close, 2)}`);
-    return details.join(" / ");
-  }
-  if (row.reason) {
-    const close = row.close ? ` / Close ${money(row.close, 2)}` : "";
-    return `${row.reason}${close}`;
-  }
-  if (DCA_ALGORITHM_KEYS.includes(strategyKey)) {
-    const budget = `${money(row.monthly_budget, 0)}/month`;
-    return `${budget} / Accrued ${money(row.accrued, 2)} of ${money(row.min_executable, 2)}`;
-  }
-  if (row.close) {
-    return `Close ${money(row.close, 2)}`;
-  }
-  return "Live feed pending";
+function signalRowColor(row) {
+  if (row.eligible !== undefined && !row.eligible) return "signalRow--rejected";
+  if (row.target_weight > 0) return "signalRow--held";
+  return "";
 }
 
-function signedNum(value, digits = 2) {
-  const parsed = Number(value || 0);
-  return `${parsed > 0 ? "+" : ""}${num(parsed, digits)}`;
-}
+function renderSignalTable(leaders) {
+  const hasScore = leaders.some((r) => r.score !== undefined && r.score !== null);
+  const hasRank = leaders.some((r) => r.rank !== undefined && r.rank !== null && r.rank !== 0);
+  const hasWeight = leaders.some((r) => r.target_weight !== undefined && r.target_weight !== null);
+  const hasMA = leaders.some((r) => r.moving_average > 0);
+  const hasVol5d = leaders.some((r) => r.vol_5d > 0);
+  const hasVolRatio = leaders.some((r) => r.volume_ratio > 0);
+  const hasBudget = leaders.some((r) => r.monthly_budget !== undefined && r.monthly_budget !== null);
 
-function formatSignalHeadline(strategyKey, row) {
-  if (DCA_ALGORITHM_KEYS.includes(strategyKey)) {
-    const parts = [row.side || row.signal || "Signal", row.reason || ""];
-    if (row.close) parts.push(`Close ${money(row.close, 2)}`);
-    if (row.warning) parts.push(row.warning);
-    return parts.filter(Boolean).join(" / ");
+  const extraHeaders = [];
+
+  if (hasScore) extraHeaders.push('<th class="num">Score</th>');
+  if (hasRank) extraHeaders.push('<th class="num">Rank</th>');
+  if (hasWeight) extraHeaders.push('<th class="num">Wt</th>');
+  if (hasMA) extraHeaders.push('<th class="num">100d MA</th>');
+  if (hasVol5d) extraHeaders.push('<th class="num">5d Vol</th>');
+  if (hasVolRatio) extraHeaders.push('<th class="num">Vol Ratio</th>');
+  if (hasBudget) {
+    extraHeaders.push('<th class="num">Budget</th>');
+    extraHeaders.push('<th class="num">Accrued</th>');
   }
-  if (strategyKey === "rally_rotation") {
-    const parts = [
-      row.side || row.signal || "Signal",
-      `Score ${num(row.score, 2)}`,
-      `Weight ${percent(row.target_weight)}`,
-    ];
-    if (row.close) parts.push(`Close ${money(row.close, 2)}`);
-    return parts.join(" / ");
-  }
-  return `${row.side || row.signal} / Score ${num(row.score, 2)} / Weight ${percent(row.target_weight)}`;
+
+  const rows = leaders.map((row) => {
+    const rowCls = signalRowColor(row);
+    const maCls = row.ma_distance > 0 ? "pos" : row.ma_distance < 0 ? "neg" : "";
+
+    let extra = "";
+    if (hasScore) extra += `<td class="num">${escapeHtml(num(row.score, 2))}</td>`;
+    if (hasRank) extra += `<td class="num">${row.rank ? escapeHtml(String(row.rank)) : "--"}</td>`;
+    if (hasWeight) extra += `<td class="num">${row.target_weight !== undefined && row.target_weight !== null ? escapeHtml(percent(row.target_weight)) : "--"}</td>`;
+    if (hasMA) extra += `<td class="num signalMa ${maCls}">${row.moving_average ? escapeHtml(money(row.moving_average, 2)) : "--"}</td>`;
+    if (hasVol5d) extra += `<td class="num">${escapeHtml(percent(row.vol_5d))}</td>`;
+    if (hasVolRatio) extra += `<td class="num">${row.volume_ratio ? escapeHtml(num(row.volume_ratio, 1)) + "x" : "--"}</td>`;
+    if (hasBudget) {
+      extra += `<td class="num">${row.monthly_budget !== undefined ? escapeHtml(money(row.monthly_budget, 0)) : "--"}</td>`;
+      extra += `<td class="num">${row.accrued !== undefined ? escapeHtml(money(row.accrued, 2)) : "--"}</td>`;
+    }
+
+    return `<tr class="${rowCls}">
+      <td><strong>${escapeHtml(row.symbol)}</strong></td>
+      <td><span class="side ${row.target_weight > 0 ? "is-buy" : row.side === "FLAT" ? "" : "is-sell"}">${escapeHtml(row.side || row.signal || "--")}</span></td>
+      <td class="num">${row.close ? escapeHtml(money(row.close, 2)) : "--"}</td>
+      ${extra}
+      <td class="signalStatus">${escapeHtml(row.reason || row.eligibility_reason || "—")}</td>
+    </tr>`;
+  }).join("");
+
+  return `<div class="tableWrap is-scroll"><table class="dataTable signalTable">
+    <thead><tr>
+      <th>Symbol</th>
+      <th>Side</th>
+      <th class="num">Price</th>
+      ${extraHeaders.join("")}
+      <th>Status</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>`;
 }
 
 function backtestStatusLabel(backtest, loading) {
@@ -1349,7 +1363,7 @@ function backtestOrderText(backtest) {
   const plannedText = planned > traded + 0.01
     ? ` / ${money(planned)} planned / ${money(skipped)} skipped`
     : "";
-  const tradingLabel = backtest.source === "dca" ? "filled" : "cumulative turnover";
+  const tradingLabel = "cumulative turnover";
   const peakText = cashCap
     ? ` / peak invested ${money(peakInvested)} of ${money(cashCap)} cap`
     : ` / peak invested ${money(peakInvested)}`;
@@ -2334,12 +2348,7 @@ function renderSignalsTab(body, strategy) {
             : payload?.error
               ? `<p class="emptyState">${escapeHtml(payload.error)}</p>`
               : leaders.length
-                ? leaders.map((row) => `
-                  <article>
-                    <strong>${escapeHtml(row.symbol)}</strong>
-                    <span>${escapeHtml(formatSignalHeadline(strategy.key, row))}</span>
-                    <span>${escapeHtml(formatSignalDetail(strategy.key, row))}</span>
-                  </article>`).join("")
+                ? renderSignalTable(leaders)
                 : renderSignalFallbackRows(strategy, payload, (strategy.signals || []).slice(0, 5))}
       </div>
     </section>`;

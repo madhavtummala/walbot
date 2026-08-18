@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .defaults import ACCOUNTS_FILE, ALGORITHMS_FILE, ALGORITHM_BOT_FILE, CONFIG_FILE, CONNECTORS_FILE, DCA_BOT_FILE, OPTIONS_BOT_FILE, UNIVERSE_FILE
+from .defaults import ACCOUNTS_FILE, ALGORITHMS_FILE, ALGORITHM_BOT_FILE, CONFIG_FILE, CONNECTORS_FILE, DCA_BOT_FILE, UNIVERSE_FILE
 
 
 
@@ -62,10 +62,6 @@ def algorithm_bot_file_path(path: str | None = None) -> Path:
     return _sibling_config_path(path, "TRADING_ALGORITHM_BOT_FILE", ALGORITHM_BOT_FILE)
 
 
-def options_bot_file_path(path: str | None = None) -> Path:
-    return _sibling_config_path(path, "TRADING_OPTIONS_BOT_FILE", OPTIONS_BOT_FILE)
-
-
 def dca_config_file_path(path: str | None = None) -> Path:
     return _sibling_config_path(path, "TRADING_DCA_BOT_FILE", DCA_BOT_FILE)
 
@@ -82,5 +78,4 @@ LEGACY_CONFIG_FILES = (
     ALGORITHM_BOT_FILE,
     ALGORITHMS_FILE,
     DCA_BOT_FILE,
-    OPTIONS_BOT_FILE,
 )

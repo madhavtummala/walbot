@@ -409,12 +409,12 @@ def fund_planned_orders(
         unfunded: list[dict[str, str | int | float]] = []
     else:
         if liquidation:
-            logger.info(
+            logger.warning(
                 "Batch needs $%.2f of buys against $%.2f available (after liquidation); fitting by %s",
                 requested, budget, policy,
             )
         else:
-            logger.warning(
+            logger.debug(
                 "Batch needs $%.2f of buys against $%.2f available; fitting by %s", requested, budget, policy
             )
         funded, unfunded = _fit_buys_to_budget(
