@@ -38,7 +38,7 @@ def _normalize_data_sources(raw: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(sources, dict):
         return {}
     normalized: dict[str, Any] = {}
-    for category in ("market_data", "intraday_market_data", "eod_market_data", "interday_market_data", "news_sentiment", "sentiment_data", "dividends"):
+    for category in ("market_data", "intraday_market_data", "eod_market_data", "interday_market_data", "streaming_market_data", "news_sentiment", "sentiment_data", "dividends"):
         section = sources.get(category, {})
         if not isinstance(section, dict):
             normalized[category] = {"provider_order": [], "providers": {}}

@@ -45,6 +45,9 @@ _EXPORTS = {
     "load_latest_prices": "src.connectors.service",
     "prices_from_store": "src.connectors.service",
     "fetch_latest_news_sentiment": "src.connectors.service",
+    "ensure_stream": "src.connectors.streaming",
+    "stream_status": "src.connectors.streaming",
+    "stream_store": "src.connectors.streaming",
     "fetch_schwab_eod_bars": "src.connectors.market.schwab",
     "fetch_schwab_intraday_bars": "src.connectors.market.schwab",
 }

@@ -77,6 +77,9 @@ class Config:
     market_data_provider_order: list[str] = field(default_factory=lambda: list(MARKET_DATA_PROVIDER_ORDER))
     intraday_market_data_provider_order: list[str] = field(default_factory=lambda: list(INTRADAY_MARKET_DATA_PROVIDER_ORDER))
     eod_market_data_provider_order: list[str] = field(default_factory=lambda: list(EOD_MARKET_DATA_PROVIDER_ORDER))
+    # Streaming is opt-in per deployment: an empty order means no websocket is ever opened
+    # and every price path behaves exactly as before.
+    streaming_market_data_provider_order: list[str] = field(default_factory=list)
     news_sentiment_provider_order: list[str] = field(default_factory=lambda: list(NEWS_SENTIMENT_PROVIDER_ORDER))
     sentiment_data_provider_order: list[str] = field(default_factory=lambda: list(NEWS_SENTIMENT_PROVIDER_ORDER))
     dividend_provider_order: list[str] = field(default_factory=lambda: list(DIVIDEND_PROVIDER_ORDER))
@@ -147,6 +150,7 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
     market_sources = _section(data_sources, "market_data")
     intraday_market_sources = _section(data_sources, "intraday_market_data")
     eod_market_sources = _section(data_sources, "eod_market_data")
+    streaming_market_sources = _section(data_sources, "streaming_market_data")
     news_sources = _section(data_sources, "news_sentiment")
     dividend_sources = _section(data_sources, "dividends")
     sentiment_sources = _section(data_sources, "sentiment_data")
@@ -158,6 +162,7 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
     read_alpha_vantage = reader(alpha_vantage)
     read_dividend_sources = reader(dividend_sources)
     read_eod_market_sources = reader(eod_market_sources)
+    read_streaming_sources = reader(streaming_market_sources)
     read_intraday_market_sources = reader(intraday_market_sources)
     read_market_sources = reader(market_sources)
     read_news_sources = reader(news_sources)
@@ -276,6 +281,7 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
         market_data_provider_order=read_market_sources("provider_order", MARKET_DATA_PROVIDER_ORDER, env="MARKET_DATA_PROVIDER_ORDER"),
         intraday_market_data_provider_order=read_intraday_market_sources("provider_order", INTRADAY_MARKET_DATA_PROVIDER_ORDER, env="INTRADAY_MARKET_DATA_PROVIDER_ORDER"),
         eod_market_data_provider_order=read_eod_market_sources("provider_order", EOD_MARKET_DATA_PROVIDER_ORDER, env="EOD_MARKET_DATA_PROVIDER_ORDER"),
+        streaming_market_data_provider_order=read_streaming_sources("provider_order", [], env="STREAMING_MARKET_DATA_PROVIDER_ORDER"),
         news_sentiment_provider_order=read_news_sources("provider_order", NEWS_SENTIMENT_PROVIDER_ORDER, env="NEWS_SENTIMENT_PROVIDER_ORDER"),
         sentiment_data_provider_order=read_sentiment_sources("provider_order", NEWS_SENTIMENT_PROVIDER_ORDER, env="SENTIMENT_DATA_PROVIDER_ORDER"),
         dividend_provider_order=read_dividend_sources("provider_order", DIVIDEND_PROVIDER_ORDER, env="DIVIDEND_PROVIDER_ORDER"),

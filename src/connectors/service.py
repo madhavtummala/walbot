@@ -310,6 +310,67 @@ def fetch_eod_market_bars(
     )
 
 
+#: A stream quote older than this is treated as absent: real-time means seconds, not
+#: "whenever the socket last spoke".
+STREAM_QUOTE_MAX_AGE_SECONDS = 15.0
+
+
+def _stream_quote_payload(symbol: str, quote: dict[str, Any]) -> dict[str, Any] | None:
+    """One store entry -> the quote dict shape the REST providers produce.
+
+    Price prefers the last trade and falls back to the bid/ask mid, so a symbol quoting
+    without trading still prices. Bid/ask ride along either way -- that is data only the
+    stream has, and what spread-aware consumers actually want.
+    """
+    bid = quote.get("bid")
+    ask = quote.get("ask")
+    try:
+        bid = float(bid) if bid else None
+        ask = float(ask) if ask else None
+    except (TypeError, ValueError):
+        bid = ask = None
+    last = quote.get("last")
+    try:
+        last = float(last) if last else None
+    except (TypeError, ValueError):
+        last = None
+    mid = (bid + ask) / 2 if bid and ask else None
+    price = last or mid
+    if not price or price <= 0:
+        return None
+    stamp_ms = quote.get("trade_time") or quote.get("quote_time")
+    try:
+        stamp = datetime.fromtimestamp(float(stamp_ms) / 1000, tz=timezone.utc)
+    except (TypeError, ValueError, OSError, OverflowError):
+        stamp = datetime.fromtimestamp(float(quote.get("received_at") or 0), tz=timezone.utc)
+    return {
+        "symbol": symbol,
+        "price": price,
+        "current": True,
+        "provider": "schwab_stream",
+        "timestamp": stamp.isoformat(),
+        **({"bid": bid, "ask": ask, "spread": round(ask - bid, 6)} if bid and ask else {}),
+        "raw": {"source": "schwab_stream", "total_volume": quote.get("total_volume")},
+    }
+
+
+def _stream_quotes(symbols: list[str], config: Config) -> dict[str, dict[str, Any]]:
+    """Fresh quotes from the shared stream, starting it if config enables it."""
+    from .streaming import ensure_stream, stream_store
+
+    ensure_stream(config, symbols)
+    store = stream_store()
+    if store is None:
+        return {}
+    fresh = store.fresh_quotes(symbols, STREAM_QUOTE_MAX_AGE_SECONDS)
+    payloads: dict[str, dict[str, Any]] = {}
+    for symbol, quote in fresh.items():
+        payload = _stream_quote_payload(symbol, quote)
+        if payload:
+            payloads[symbol] = payload
+    return payloads
+
+
 def load_current_prices(
     symbols: list[str],
     config: Config,
@@ -322,9 +383,15 @@ def load_current_prices(
     The live leg of :func:`load_latest_prices` -- no market-hours gating, no bar-store
     fallback. Each quote is written through to the payload cache as it is fetched, so a
     later off-hours read has something to degrade to.
+
+    When the Schwab stream is running, its quotes answer first: they are already on the
+    wire, carry the bid/ask the REST snapshot lacks, and cost no rate-limit budget. Only
+    symbols the stream cannot answer freshly fall through to the provider walk.
     """
     wanted = [symbol.upper() for symbol in symbols]
     quotes: dict[str, dict[str, Any]] = {}
+    if not force_refresh:
+        quotes.update(_stream_quotes(wanted, config))
     providers = [item.lower() for item in config.market_data_provider_order]
 
     has_enabled_provider = any(

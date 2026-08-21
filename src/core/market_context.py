@@ -106,6 +106,7 @@ class LiveContextSource(ContextSource):
         self._data_client = data_client or (create_data_client(config) if config is not None else None)
         self._as_of = as_of
         self._price_quotes: dict[str, dict[str, Any]] = {}
+        self._price_symbols: list[str] = []
 
     @property
     def data_client(self) -> Any:
@@ -117,6 +118,7 @@ class LiveContextSource(ContextSource):
     def latest_prices(self, symbols: list[str], config) -> dict[str, float]:
         from ..connectors import load_latest_prices, prices_from_store
 
+        self._price_symbols = [symbol.upper() for symbol in symbols]
         if self._as_of is not None:
             quotes = prices_from_store([symbol.upper() for symbol in symbols])
         else:
@@ -162,7 +164,19 @@ class LiveContextSource(ContextSource):
         return load_sentiment_scores(symbols, config)
 
     def extra(self) -> dict[str, Any]:
-        return {"data_client": self._data_client, "price_quotes": self._price_quotes}
+        extra: dict[str, Any] = {"data_client": self._data_client, "price_quotes": self._price_quotes}
+        from ..connectors.streaming import stream_status, stream_store
+
+        # Real-time microstructure, when the stream is running: the book and the trade
+        # prints behind the latest bar. An algorithm that never reads these pays nothing,
+        # and a replay (no live stream) sees neither.
+        store = stream_store()
+        if store is not None:
+            symbols = self._price_symbols or None
+            extra["order_books"] = store.snapshot_books(symbols)
+            extra["stream_trades"] = store.snapshot_trades(symbols)
+        extra["stream_status"] = stream_status()
+        return extra
 
 
 def build_algorithm_context(
