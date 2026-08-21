@@ -241,6 +241,9 @@ class PaperBrokerage(BaseBrokerage):
         prices = self.state.get("prices", {})
         return {symbol: float(prices[symbol]) for symbol in symbols if float(prices.get(symbol, 0.0) or 0.0) > 0}
 
+    def get_position_details(self) -> list:
+        return self.book().get("rows", [])
+
     def mark_prices(self, latest_prices: Dict[str, float]) -> None:
         """Update marks so equity reflects current prices rather than last fill prices."""
         self.state.setdefault("prices", {}).update({s: float(p) for s, p in latest_prices.items() if p > 0})

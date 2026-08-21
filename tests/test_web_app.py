@@ -104,37 +104,6 @@ def test_controls_are_not_stretched_by_the_base_button_rule() -> None:
     assert "grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));" in app_css
 
 
-def test_sidebar_no_longer_carries_a_watchlist() -> None:
-    app_js, app_css, index_html = _assets()
-
-    assert 'id="watchlist"' not in index_html
-    assert 'id="addWatchButton"' not in index_html
-    assert 'id="targetNav"' not in index_html
-    assert 'id="globalStats"' not in index_html
-    assert "function renderWatchlist" not in app_js
-    assert "function addWatchTicker" not in app_js
-    assert "function removeWatchTicker" not in app_js
-    assert "/api/watchlist" not in app_js
-    assert ".watchRow {" not in app_css
-
-
-def test_watchlist_round_trips_through_the_state_store() -> None:
-    from src.api.api_payloads import DEFAULT_WATCHLIST, save_watchlist_payload, watchlist_payload
-    from src.data.state_store import ephemeral_state
-
-    with ephemeral_state():
-        assert [row["symbol"] for row in watchlist_payload()["rows"]] == DEFAULT_WATCHLIST
-        saved = save_watchlist_payload(["spy", " qqq ", "SPY", ""])
-        # Upper-cased, de-duplicated, blanks dropped.
-        assert saved["symbols"] == ["SPY", "QQQ"]
-
-    with ephemeral_state():
-        import pytest
-
-        with pytest.raises(ValueError):
-            save_watchlist_payload("SPY")
-
-
 def test_broker_holdings_and_orders_live_on_the_account_page() -> None:
     """The broker reports per account and cannot attribute a fill to an algorithm.
 
@@ -270,14 +239,6 @@ def test_a_deferred_repaint_is_not_silently_dropped() -> None:
 
     assert "renderDeferred = true;" in app_js
     assert 'addEventListener("focusout"' in app_js
-
-
-def test_watchlist_drag_reorder_left_with_the_watchlist() -> None:
-    app_js, app_css, _ = _assets()
-
-    assert "function reorderWatchlist" not in app_js
-    assert "function wireWatchlistDrag" not in app_js
-    assert ".watchRow.is-dragging {" not in app_css
 
 
 def test_tune_tab_renders_the_right_editor_per_algorithm() -> None:

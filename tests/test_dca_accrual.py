@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import pandas as pd
 import pytest
 
 from src.algorithms.dca import accrual
@@ -425,3 +426,52 @@ def test_bursty_reason_returns_ready_when_trigger_fires() -> None:
     fires = {"fires": True, "detail": {"drawdown": 0.10}}
 
     assert algorithm.reason(ready_state, 1.0, fires, ready=True) == "Ready"
+
+
+def test_planned_order_size_matches_the_refine_math() -> None:
+    """The dashboard preview and step 2 must agree on what a run would order.
+
+    size = |budget| × (1 + scaling_factor × drawdown), clamped to the month's remaining
+    cap room -- the same formula ``refine`` applies, so the Next-order column cannot
+    drift from what actually reaches the market.
+    """
+    from src.algorithms.dca.bursty import BurstyConfig, planned_order_size
+
+    settings = BurstyConfig(scaling_factor=10.0, max_monthly_multiple=3.0)
+
+    assert planned_order_size(100.0, 0.0, 0.0, settings) == 100.0
+    # A 5% drawdown scales the buy to 1.5x budget.
+    assert planned_order_size(100.0, 0.05, 0.0, settings) == 150.0
+    # Deep drawdowns clamp at the monthly cap (3x).
+    assert planned_order_size(100.0, 0.50, 0.0, settings) == 300.0
+    # Cap room is what is left after this month's deployments.
+    assert planned_order_size(100.0, 0.50, 250.0, settings) == 50.0
+    # Sells size off the absolute budget too.
+    assert planned_order_size(-100.0, 0.05, 0.0, settings) == 150.0
+
+
+def test_analyze_signals_expose_the_gates_verbatim(monkeypatch, state_store) -> None:
+    """``ready`` and ``fires`` let the dashboard show why nothing traded without parsing prose."""
+    config = FakeConfig()
+    plan = _plan(monthly_budget=25.0)
+    monkeypatch.setattr(BurstyDCAAlgorithm, "plan", lambda self, _config: plan)
+    monkeypatch.setattr("src.algorithms.dca.bot.broker_supports_fractional_shares", lambda account_id: True)
+
+    algorithm = BurstyDCAAlgorithm(config)
+    bars = pd.DataFrame({"close": [100.0, 101.0, 102.0]})
+    decision = algorithm.analyze(
+        AlgorithmContext(
+            config=config,
+            latest_prices={"AAA": 100.0},
+            daily_bars_by_symbol={"AAA": bars},
+            positions={},
+            equity=0.0,
+            account_id="test",
+            timestamp=START,
+        )
+    )
+
+    row = decision.signals["AAA"]
+    # First run only seeds the clock: nothing accrued, so not ready -- but a buy trigger fires.
+    assert row["ready"] is False
+    assert row["fires"] is True

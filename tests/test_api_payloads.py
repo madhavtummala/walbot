@@ -393,7 +393,6 @@ def test_dca_view_states_its_planned_total(monkeypatch) -> None:
     monkeypatch.setattr(dca_bot.DCAAlgorithm, "plan", lambda self, config: plan)
     monkeypatch.setattr(dca_bot, "unknown_plan_symbols", lambda *a, **kw: [])
     monkeypatch.setattr(market_context, "create_data_client", lambda config: object())
-    monkeypatch.setattr(market_context, "load_latest_prices", lambda symbols, config, client: {"SPY": 500.0})
 
     payload = strategy_signals_payload("dca")
 

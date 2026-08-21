@@ -310,18 +310,22 @@ def fetch_eod_market_bars(
     )
 
 
-def fetch_latest_market_quotes(
+def load_current_prices(
     symbols: list[str],
     config: Config,
     *,
     data_client=None,
     force_refresh: bool = False,
 ) -> dict[str, dict[str, Any]]:
+    """Fresh quotes from the enabled providers, in configured order.
+
+    The live leg of :func:`load_latest_prices` -- no market-hours gating, no bar-store
+    fallback. Each quote is written through to the payload cache as it is fetched, so a
+    later off-hours read has something to degrade to.
+    """
     wanted = [symbol.upper() for symbol in symbols]
     quotes: dict[str, dict[str, Any]] = {}
     providers = [item.lower() for item in config.market_data_provider_order]
-
-    from src.brokerages.alpaca_client import create_trading_client, is_market_open
 
     has_enabled_provider = any(
         provider in MARKET_FETCHERS
@@ -329,124 +333,166 @@ def fetch_latest_market_quotes(
         for provider in providers
     )
 
-    # Check if we should even try live providers
+    for index, provider in enumerate(providers):
+        if provider not in MARKET_FETCHERS:
+            continue
+        next_provider = _next_provider_name(providers, index, MARKET_FETCHERS, config, MARKET_CATEGORY, EXTERNAL_AUTH_PROVIDERS)
+        if provider_is_limited(provider):
+            log = logger.info if next_provider else logger.warning
+            log(
+                "Market data provider %s is marked rate-limited%s",
+                provider,
+                _fallback_suffix(next_provider),
+            )
+            continue
+        if not _enabled(config, MARKET_CATEGORY, provider, uses_external_auth=(provider in EXTERNAL_AUTH_PROVIDERS)):
+            continue
+
+        missing = [symbol for symbol in wanted if symbol not in quotes]
+        if not missing:
+            break
+
+        if not force_refresh:
+            for symbol in list(missing):
+                cached = load_cached_payload(MARKET_CATEGORY, provider, _quote_cache_key(symbol))
+                if cached:
+                    quotes[symbol] = {**cached, "cached": True}
+            missing = [symbol for symbol in wanted if symbol not in quotes]
+            if not missing:
+                break
+
+        try:
+            if provider == "alpaca":
+                fresh = MARKET_FETCHERS[provider](missing, config, data_client)
+            else:
+                fresh = MARKET_FETCHERS[provider](missing, config)
+        except ProviderRateLimited as exc:
+            log = logger.info if next_provider else logger.warning
+            log(
+                "Market data provider %s hit its rate limit%s: %s",
+                provider,
+                _fallback_suffix(next_provider),
+                exc,
+            )
+            continue
+        except ProviderUnavailable as exc:
+            log = logger.info if next_provider else logger.warning
+            log(
+                "Market data provider %s unavailable%s: %s",
+                provider,
+                _fallback_suffix(next_provider),
+                exc,
+            )
+            continue
+        except Exception as exc:
+            log = logger.info if next_provider else logger.warning
+            log(
+                "Market data provider %s failed%s: %s",
+                provider,
+                _fallback_suffix(next_provider),
+                exc,
+            )
+            continue
+
+        for symbol, quote in fresh.items():
+            quotes[symbol] = quote
+            save_cached_payload(
+                MARKET_CATEGORY,
+                provider,
+                _quote_cache_key(symbol),
+                quote,
+                ttl_seconds=config.market_data_cache_ttl_seconds,
+            )
+
+    still_missing = [symbol for symbol in wanted if symbol not in quotes]
+    if still_missing and not has_enabled_provider:
+        logger.warning("No market data provider is enabled; quotes must come from stored bars")
+    return quotes
+
+
+def prices_from_store(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    """Closest stored price per symbol, finest cached interval first.
+
+    The last resort of :func:`load_latest_prices`, and the only price source for
+    point-in-time (``as_of``) contexts, where a live call would describe the wrong
+    moment. A recent minute bar stands in for a quote better than yesterday's daily
+    close -- but either beats having no price at all.
+    """
+    from ..data.duckdb_store import available_intervals, read_bars
+
+    prices: dict[str, dict[str, Any]] = {}
+    for symbol in symbols:
+        # Best-effort by construction: a store that is locked or missing must leave the
+        # symbol unpriced rather than raise. The caller drops unpriced symbols; letting
+        # this throw would fail the whole run.
+        try:
+            intervals = available_intervals(symbol)
+        except Exception as exc:
+            logger.debug("Stored-price fallback unavailable for %s: %s", symbol, exc)
+            continue
+        for interval in intervals:
+            try:
+                df = read_bars(symbol, interval_minutes=interval, limit=1)
+            except Exception:
+                continue
+            if df.empty:
+                continue
+            prices[symbol] = {
+                "symbol": symbol,
+                "price": float(df["close"].iloc[-1]),
+                "timestamp": df["timestamp"].iloc[-1].isoformat(),
+                "provider": "duckdb_cache",
+                "interval_minutes": int(interval),
+                "cached": True,
+                "current": False,
+            }
+            break
+    return prices
+
+
+def load_latest_prices(
+    symbols: list[str],
+    config: Config,
+    *,
+    data_client=None,
+    force_refresh: bool = False,
+) -> dict[str, dict[str, Any]]:
+    """The one price entry point.
+
+    Within market hours (or on ``force_refresh``) quotes come from
+    :func:`load_current_prices`; every quote it returns is a live print and is marked
+    ``current``. Off hours, or for any symbol the providers could not price, the chain
+    degrades -- payload cache, then :func:`prices_from_store` -- and those quotes are
+    marked ``current: False`` so the dashboard can say so rather than pass a stale
+    number off as live.
+    """
+    wanted = [symbol.upper() for symbol in symbols]
+
     provider_fetch_allowed = force_refresh
     if not force_refresh:
         try:
             # Use a cached market status if possible to avoid excessive clock calls
+            from src.brokerages.alpaca_client import create_trading_client, is_market_open
+
             trading_client = create_trading_client(config)
             provider_fetch_allowed = is_market_open(trading_client)
         except Exception:
             provider_fetch_allowed = True
 
+    quotes: dict[str, dict[str, Any]] = {}
     if provider_fetch_allowed:
-        for index, provider in enumerate(providers):
-            if provider not in MARKET_FETCHERS:
-                continue
-            next_provider = _next_provider_name(providers, index, MARKET_FETCHERS, config, MARKET_CATEGORY, EXTERNAL_AUTH_PROVIDERS)
-            if provider_is_limited(provider):
-                log = logger.info if next_provider else logger.warning
-                log(
-                    "Market data provider %s is marked rate-limited%s",
-                    provider,
-                    _fallback_suffix(next_provider),
-                )
-                continue
-            if not _enabled(config, MARKET_CATEGORY, provider, uses_external_auth=(provider in EXTERNAL_AUTH_PROVIDERS)):
-                continue
-
-            missing = [symbol for symbol in wanted if symbol not in quotes]
-            if not missing:
-                break
-
-            if not force_refresh:
-                for symbol in list(missing):
-                    cached = load_cached_payload(MARKET_CATEGORY, provider, _quote_cache_key(symbol))
-                    if cached:
-                        quotes[symbol] = {**cached, "cached": True}
-                missing = [symbol for symbol in wanted if symbol not in quotes]
-                if not missing:
-                    break
-
-            try:
-                if provider == "alpaca":
-                    fresh = MARKET_FETCHERS[provider](missing, config, data_client)
-                else:
-                    fresh = MARKET_FETCHERS[provider](missing, config)
-            except ProviderRateLimited as exc:
-                log = logger.info if next_provider else logger.warning
-                log(
-                    "Market data provider %s hit its rate limit%s: %s",
-                    provider,
-                    _fallback_suffix(next_provider),
-                    exc,
-                )
-                continue
-            except ProviderUnavailable as exc:
-                log = logger.info if next_provider else logger.warning
-                log(
-                    "Market data provider %s failed%s: %s",
-                    provider,
-                    _fallback_suffix(next_provider),
-                    exc,
-                )
-                continue
-            except Exception as exc:
-                log = logger.info if next_provider else logger.warning
-                log(
-                    "Market data provider %s failed%s: %s",
-                    provider,
-                    _fallback_suffix(next_provider),
-                    exc,
-                )
-                continue
-
-            for symbol, quote in fresh.items():
-                quotes[symbol] = quote
-                save_cached_payload(
-                    MARKET_CATEGORY,
-                    provider,
-                    _quote_cache_key(symbol),
-                    quote,
-                    ttl_seconds=config.market_data_cache_ttl_seconds,
-                )
+        quotes = load_current_prices(wanted, config, data_client=data_client, force_refresh=force_refresh)
+        for quote in quotes.values():
+            quote["current"] = True
 
     still_missing = [symbol for symbol in wanted if symbol not in quotes]
-    if still_missing and has_enabled_provider:
-        # Final fallback: the last close the shared bar store holds, at whatever resolution.
-        # Finest first, since a recent minute bar is a better stand-in for a quote than
-        # yesterday's daily close -- but either beats having no price at all.
-        from ..data.duckdb_store import available_intervals, read_bars
-
-        for symbol in still_missing:
-            # Best-effort by construction: every provider has already declined this symbol, so
-            # a store that is locked or missing must leave it unpriced rather than raise. The
-            # caller drops unpriced symbols; letting this throw would fail the whole run.
-            try:
-                intervals = available_intervals(symbol)
-            except Exception as exc:
-                logger.debug("Cached-price fallback unavailable for %s: %s", symbol, exc)
-                continue
-            for interval in intervals:
-                try:
-                    df = read_bars(symbol, interval_minutes=interval, limit=1)
-                except Exception:
-                    continue
-                if df.empty:
-                    continue
-                quotes[symbol] = {
-                    "symbol": symbol,
-                    "price": float(df["close"].iloc[-1]),
-                    "timestamp": df["timestamp"].iloc[-1].isoformat(),
-                    "provider": "duckdb_cache",
-                    "cached": True,
-                }
-                break
+    if still_missing:
+        quotes.update(prices_from_store(still_missing))
 
     still_missing = [symbol for symbol in wanted if symbol not in quotes]
     if still_missing:
         logger.warning(
-            "Market data providers returned quotes for only %s/%s symbols; %s still missing",
+            "Price sources returned quotes for only %s/%s symbols; %s still missing",
             len(quotes),
             len(wanted),
             len(still_missing),

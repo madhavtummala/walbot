@@ -70,12 +70,104 @@ def test_market_quote_fetch_falls_back_to_next_provider(monkeypatch, caplog) -> 
     monkeypatch.setattr(connectors, "save_cached_payload", lambda *args, **_kwargs: saved.append(args))
 
     with caplog.at_level(logging.INFO):
-        quotes = connectors.fetch_latest_market_quotes(["SPY"], config)
+        quotes = connectors.load_latest_prices(["SPY"], config)
 
     assert calls == ["finnhub", "alpha_vantage"]
     assert quotes["SPY"]["price"] == 101.0
+    assert quotes["SPY"]["current"] is True
     assert saved[0][1] == "alpha_vantage"
     assert "Market data provider finnhub hit its rate limit; falling back to alpha_vantage" in caplog.text
+
+
+def _quote_config() -> Config:
+    return Config(
+        market_data_provider_order=["schwab"],
+        data_source_configs={
+            "market_data": {"providers": {"schwab": {"enabled": True}}}
+        },
+    )
+
+
+def test_load_latest_prices_marks_live_prints_and_skips_the_store(monkeypatch) -> None:
+    """Within market hours a provider quote is 'current'; stored bars are not consulted."""
+    monkeypatch.setattr(
+        "src.brokerages.alpaca_client.create_trading_client", lambda _config: object()
+    )
+    monkeypatch.setattr("src.brokerages.alpaca_client.is_market_open", lambda _client: True)
+    monkeypatch.setattr(
+        connectors,
+        "load_current_prices",
+        lambda symbols, _config, **_kwargs: {
+            symbol: {"symbol": symbol, "price": 500.0, "timestamp": "2026-08-12T15:00:00+00:00", "provider": "schwab"}
+            for symbol in symbols
+        },
+    )
+
+    def _fail(_symbols):
+        raise AssertionError("store fallback consulted while live quotes were available")
+
+    monkeypatch.setattr(connectors, "prices_from_store", _fail)
+
+    quotes = connectors.load_latest_prices(["SPY"], _quote_config())
+
+    assert quotes["SPY"]["price"] == 500.0
+    assert quotes["SPY"]["current"] is True
+
+
+def test_load_latest_prices_degrades_to_stored_bars_off_hours(monkeypatch) -> None:
+    """Off hours the chain reads the bar store and marks the price as not current."""
+    monkeypatch.setattr(
+        "src.brokerages.alpaca_client.create_trading_client", lambda _config: object()
+    )
+    monkeypatch.setattr("src.brokerages.alpaca_client.is_market_open", lambda _client: False)
+
+    def _fail(*_args, **_kwargs):
+        raise AssertionError("live providers contacted while the market was closed")
+
+    monkeypatch.setattr(connectors, "load_current_prices", _fail)
+    monkeypatch.setattr(
+        connectors,
+        "prices_from_store",
+        lambda symbols: {
+            symbol: {
+                "symbol": symbol,
+                "price": 498.0,
+                "timestamp": "2026-08-11T20:00:00+00:00",
+                "provider": "duckdb_cache",
+                "cached": True,
+                "current": False,
+            }
+            for symbol in symbols
+        },
+    )
+
+    quotes = connectors.load_latest_prices(["SPY"], _quote_config())
+
+    assert quotes["SPY"]["price"] == 498.0
+    assert quotes["SPY"]["current"] is False
+
+
+def test_prices_from_store_reads_the_finest_cached_interval(monkeypatch) -> None:
+    from src.data import duckdb_store
+
+    monkeypatch.setattr(duckdb_store, "available_intervals", lambda _symbol: [5, 1440])
+    reads = []
+
+    def fake_read_bars(symbol, interval_minutes, limit):
+        reads.append(interval_minutes)
+        if interval_minutes == 1440:
+            return pd.DataFrame({"close": [499.0], "timestamp": pd.Timestamp("2026-08-11", tz="UTC")})
+        return pd.DataFrame({"close": [500.25], "timestamp": pd.Timestamp("2026-08-12", tz="UTC")})
+
+    monkeypatch.setattr(duckdb_store, "read_bars", fake_read_bars)
+
+    prices = connectors.prices_from_store(["SPY"])
+
+    # Finest first: the 5-minute bar answers before the daily bar is ever read.
+    assert reads == [5]
+    assert prices["SPY"]["price"] == 500.25
+    assert prices["SPY"]["interval_minutes"] == 5
+    assert prices["SPY"]["current"] is False
 
 
 def test_append_latest_quotes_to_bars_adds_intraday_row() -> None:
@@ -536,8 +628,9 @@ def test_provider_order_does_not_enable_missing_provider_section(monkeypatch) ->
         data_source_configs={"market_data": {"providers": {}}},
     )
     monkeypatch.setitem(connectors.MARKET_FETCHERS, "alpaca", lambda *_args, **_kwargs: {"SPY": {}})
+    monkeypatch.setattr(connectors, "prices_from_store", lambda _symbols: {})
 
-    assert connectors.fetch_latest_market_quotes(["SPY"], config) == {}
+    assert connectors.load_latest_prices(["SPY"], config) == {}
 
 
 def test_stocktwits_basic_auth_sentiment_endpoint(monkeypatch) -> None:

@@ -89,6 +89,31 @@ class SchwabBrokerage(BaseBrokerage):
                 marks[symbol] = market_value / quantity
         return marks
 
+    def get_position_details(self) -> List[Dict[str, Any]]:
+        account = self._account_payload(fields="positions")
+        rows: List[Dict[str, Any]] = []
+        for pos in account.get("positions", []) or []:
+            symbol = str((pos.get("instrument") or {}).get("symbol", "")).upper()
+            if not symbol:
+                continue
+            qty = float(pos.get("longQuantity", 0.0) or 0.0) - float(pos.get("shortQuantity", 0.0) or 0.0)
+            if not qty:
+                continue
+            market_value = float(pos.get("marketValue", 0.0) or 0.0)
+            avg_entry = float(pos.get("averagePrice", 0.0) or 0.0)
+            unrealized_pl = float(pos.get("currentDayProfitLoss", 0.0) or 0.0)
+            unrealized_plpc = (market_value / (avg_entry * abs(qty)) - 1.0) if avg_entry and qty else 0.0
+            rows.append({
+                "symbol": symbol,
+                "qty": qty,
+                "avg_entry_price": avg_entry,
+                "market_value": market_value,
+                "unrealized_pl": unrealized_pl,
+                "unrealized_plpc": unrealized_plpc,
+            })
+        rows.sort(key=lambda row: abs(row["market_value"]), reverse=True)
+        return rows
+
     def get_dividend_activity(self, start=None, end=None) -> List[Dict[str, Any]]:
         """Cash distributions credited to this account, from ``/accounts/{hash}/transactions``.
 

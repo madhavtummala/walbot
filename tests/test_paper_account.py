@@ -175,9 +175,20 @@ def test_a_non_alpaca_account_is_not_reported_from_alpaca(monkeypatch) -> None:
         def get_positions(self):
             return {"SPY": 3.0}
 
+        def get_position_details(self):
+            return [
+                {
+                    "symbol": "SPY",
+                    "qty": 3.0,
+                    "avg_entry_price": 0.0,
+                    "market_value": 300.0,
+                    "unrealized_pl": 0.0,
+                    "unrealized_plpc": 0.0,
+                }
+            ]
+
     _patch_payloads(monkeypatch, "get_account_broker_type", lambda _account: "schwab")
     monkeypatch.setattr("src.core.pipeline.resolve_brokerage", lambda _config: FakeBrokerage())
-    _patch_payloads(monkeypatch, "load_latest_prices", lambda symbols, config, client: {"SPY": 100.0})
 
     def fail(*_args, **_kwargs):
         raise AssertionError("the Alpaca client must not be used for a Schwab account")
@@ -190,8 +201,7 @@ def test_a_non_alpaca_account_is_not_reported_from_alpaca(monkeypatch) -> None:
     assert payload["cash"] == 321.0
     assert [row["symbol"] for row in payload["rows"]] == ["SPY"]
     assert payload["rows"][0]["market_value"] == 300.0
-    # The interface carries no cost basis, so P/L stays absent rather than a misleading zero.
-    assert payload["total_pl"] is None
+    assert payload["total_pl"] == 0.0
 
 
 def test_config_resolves_real_files_from_the_repo_root() -> None:

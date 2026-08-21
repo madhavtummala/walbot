@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from src.core.config import DEFAULT_STRATEGY_ID
 from ..api.controls import (
@@ -18,13 +17,12 @@ from ..api.controls import (
     normalize_frequency,
 )
 from ..algorithms.registry import get_algorithm_class
-from ..core.interfaces import Schedule, schedule_minutes
+from ..core.interfaces import MARKET_TZ, Schedule, schedule_minutes
 from ..execution.live_runner import run_once
 
 logger = logging.getLogger(__name__)
-MARKET_TZ = ZoneInfo("America/Chicago")
-MARKET_OPEN_MINUTE = (8 * 60) + 30
-MARKET_CLOSE_MINUTE = 15 * 60
+MARKET_OPEN_MINUTE = (9 * 60) + 30
+MARKET_CLOSE_MINUTE = 16 * 60
 
 @dataclass
 class RuntimeState:
@@ -169,11 +167,6 @@ def _binding_schedule(binding_id: str) -> Schedule:
         return Schedule()
 
 
-def _frequency_minutes(frequency: str) -> int:
-    """Minutes between fires. Only reached for scheduled bindings, so ``mcp`` cannot appear."""
-    return frequency_minutes(frequency) or 60
-
-
 def _binding_run_fn(binding_id: str):
     def run(account_id: str | None, run_key: str = "") -> None:
         # Resolved per run, so switching a binding's strategy takes effect on the next tick.
@@ -188,31 +181,28 @@ def _binding_run_key(binding_id: str):
         # No cadence means nothing for the clock to bucket -- an agent decides when this runs.
         if frequency_minutes(frequency) is None:
             return None
+        # The algorithm's own schedule owns *when*: buckets are anchored to its declared
+        # start time and refresh interval, with deterministic jitter, so a daily binding on
+        # Bursty DCA fires at 11:00 and again at 15:00 market time -- not "sometime in the
+        # hour after a drifting wake". The frequency only separates scheduled bindings from
+        # agent-driven ones.
         local_now = datetime.now(MARKET_TZ)
-        # The binding owns the cadence, the algorithm still owns the session window. Without
-        # this a 1hr binding fires at 03:00 on a Sunday: run_once bails at the market-closed
-        # check, but only after a full data fetch, and it still stamps "last run" with a time
-        # the market was shut.
-        if not _is_regular_market_hours(local_now, _binding_schedule(binding_id)):
+        bucket = _algorithm_bucket_key(local_now, _binding_schedule(binding_id))
+        if bucket is None:
             return None
-        minutes = _frequency_minutes(frequency)
-        if minutes >= 24 * 60:
-            bucket = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-        else:
-            bucket_minute = ((local_now.hour * 60) + local_now.minute) // minutes * minutes
-            bucket_hour, minute = divmod(bucket_minute, 60)
-            bucket = local_now.replace(hour=bucket_hour, minute=minute, second=0, microsecond=0)
-        return f"{binding_id}:{bucket.isoformat(timespec='minutes')}"
+        return f"{binding_id}:{bucket}"
 
     return run_key
 
 
 def _binding_check_seconds(binding_id: str):
     def check_seconds() -> int:
-        minutes = frequency_minutes(_binding_frequency(binding_id))
-        # An agent-driven binding still wakes, but only to re-read controls in case its
-        # frequency changed; there is no cadence of its own to follow.
-        return 300 if minutes is None else max(minutes * 60, 60)
+        # Wake often regardless of binding frequency. Run keys are wall-clock buckets
+        # anchored to the algorithm's schedule, so a loop that wakes once a day could
+        # drift past its own fire time; a cheap five-minute poll is what makes the
+        # 11:00 and 15:00 runs land within minutes of their slot. An agent-driven
+        # binding wakes on the same clock purely to re-read controls.
+        return 300
 
     return check_seconds
 

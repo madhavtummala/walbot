@@ -350,7 +350,7 @@ def _fetch_intraday_backtest_history(
     algorithm = get_algorithm_class(strategy).from_config(config)
     requirements = algorithm.requirements(config, {})
     bar_minutes = requirements.preferred_bar_minutes or 15
-    lookback_minutes = requirements.history_lookback_minutes or 0
+    lookback_minutes = requirements.intraday_lookback_minutes or 0
     if lookback_minutes <= 0:
         return {}
 
@@ -427,11 +427,11 @@ def _compute_backtest(strategy: str, period: str, account_id: str = "") -> dict[
     if not daily_history:
         raise RuntimeError("No historical bars were available for the backtest.")
 
-    # Detect intraday algorithms: those that declare history_lookback_minutes > 0
+    # Detect intraday algorithms: those that declare intraday_lookback_minutes > 0
     # get intraday bars and the replay steps at intraday intervals instead of daily.
     intraday_minutes = 0
     intraday_history: dict[str, pd.DataFrame] | None = None
-    if requirements.history_lookback_minutes > 0:
+    if requirements.intraday_lookback_minutes > 0:
         intraday_minutes = requirements.preferred_bar_minutes or 15
         intraday_history = _fetch_intraday_backtest_history(strategy, period, config, daily_history)
 

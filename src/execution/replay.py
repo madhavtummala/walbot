@@ -288,7 +288,7 @@ class ReplayContextSource(ContextSource):
     def daily_bars(self, symbols: list[str], requirements, config) -> dict[str, Any]:
         return _slice_daily(self.daily_history, self.as_of)
 
-    def history_bars(self, symbols: list[str], requirements, config) -> dict[str, Any]:
+    def intraday_bars(self, symbols: list[str], requirements, config) -> dict[str, Any]:
         return self.history.bars_as_of(sorted(self.daily_history), self.as_of, self.coverage)
 
 
@@ -345,7 +345,7 @@ def replay(
     When ``intraday_minutes > 0`` and ``intraday_history`` is provided, the replay generates
     intraday timestamps within each trading session (every ``intraday_minutes`` from 09:30 to
     16:00 ET) and uses them as trade dates instead of daily timestamps. This lets algorithms
-    like intraday_pick that declare ``history_lookback_minutes > 0`` be backtested at their
+    like intraday_pick that declare ``intraday_lookback_minutes > 0`` be backtested at their
     actual execution cadence.
 
     ``daily_history`` is keyed by symbol and indexed by timestamp. ``should_run(date)`` gates
@@ -394,7 +394,7 @@ def replay(
             {ts.normalize() for ts in trade_dates}
         ),
         providers=history_providers or ["yfinance"],
-        lookback_minutes=requirements.history_lookback_minutes,
+        lookback_minutes=requirements.intraday_lookback_minutes,
     )
 
     schedule = dividend_schedule(sorted(daily_history), trade_dates, dividends)

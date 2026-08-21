@@ -42,10 +42,10 @@ class RallyRotationAlgorithm(BaseAlgorithm):
             price_symbols=sorted(set(strategy_config.symbols) | set(current_positions)),
             daily_lookback_days=strategy_config.required_daily_bars,
             daily_ma_days=strategy_config.etf_ma_days,
-            # Nothing intraday: every feature comes from the daily bars above. Asking for a
-            # history window would make the live path fetch one on each run and the replay
+            # Nothing intraday: every feature comes from the daily bars above. Asking for an
+            # intraday window would make the live path fetch one on each run and the replay
             # build a HistoryCache over it, both for data no layer reads.
-            history_lookback_minutes=strategy_config.required_history_minutes,
+            intraday_lookback_minutes=strategy_config.required_history_minutes,
             needs_sentiment=strategy_config.uses_sentiment,
             # Unproven: keep it on paper until walk-forward results say otherwise.
             paper_only=True,

@@ -26,7 +26,6 @@ from src.api.api_payloads import (
     delete_account_payload,
     save_account_payload,
     save_algorithm_config_payload,
-    save_watchlist_payload,
     schwab_auth_payload,
     positions_payload,
     social_payload,
@@ -34,7 +33,6 @@ from src.api.api_payloads import (
     status_payload,
     strategy_signals_payload,
     universe_payload,
-    watchlist_payload,
 )
 from ..brokerages.schwab_client import SchwabAuthError
 from ..core.bot_runtime import bot_runtime
@@ -145,19 +143,6 @@ def refresh_social(body: dict[str, Any]) -> dict[str, Any]:
 @app.post("/api/backtest")
 def backtest(body: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
     return backtest_payload(body)
-
-
-@app.get("/api/watchlist")
-def watchlist() -> dict[str, Any]:
-    return watchlist_payload()
-
-
-@app.post("/api/watchlist")
-def save_watchlist(body: dict[str, Any]) -> dict[str, Any]:
-    try:
-        return save_watchlist_payload(body.get("symbols"))
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @app.get("/api/accounts")

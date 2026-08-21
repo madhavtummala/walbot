@@ -10,76 +10,80 @@ HOURLY = Schedule()
 HALF_HOURLY = Schedule(refresh_minutes=30, jitter_minutes=0)
 
 
-def test_regular_market_hours_are_central_weekdays() -> None:
-    assert bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 8, 30), HOURLY)
-    assert bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 14, 59), HOURLY)
-    assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 8, 29), HOURLY)
-    assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 15, 0), HOURLY)
+def test_regular_market_hours_are_eastern_weekdays() -> None:
+    assert bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 9, 30), HOURLY)
+    assert bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 15, 59), HOURLY)
+    assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 9, 29), HOURLY)
+    assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 16, 0), HOURLY)
     assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 23, 10, 0), HOURLY)
 
 
 def test_regular_market_hours_honor_the_schedule_window() -> None:
-    window = Schedule(refresh_minutes=30, jitter_minutes=0, start_time="09:30", end_time="14:00")
-    assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 9, 29), window)
-    assert bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 9, 30), window)
-    assert bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 13, 59), window)
-    assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 14, 0), window)
+    window = Schedule(refresh_minutes=30, jitter_minutes=0, start_time="10:30", end_time="15:00")
+    assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 10, 29), window)
+    assert bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 10, 30), window)
+    assert bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 14, 59), window)
+    assert not bot_runtime._is_regular_market_hours(datetime(2026, 5, 22, 15, 0), window)
 
 
 def test_schedule_weekdays_gate_the_run() -> None:
     """The part ``refresh_minutes`` cannot express: a cadence coarser than daily."""
     mondays = replace(DAILY_AT_OPEN, jitter_minutes=0, weekdays=(0,))
-    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 18, 9, 0), mondays)  # Monday
-    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 19, 9, 0), mondays) is None  # Tuesday
-    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 0), mondays) is None  # Friday
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 18, 10, 0), mondays)  # Monday
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 19, 10, 0), mondays) is None  # Tuesday
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 10, 0), mondays) is None  # Friday
 
 
 def test_daily_at_open_yields_one_bucket_per_session() -> None:
     """A refresh at or above the session length collapses to a single run per day."""
     daily = replace(DAILY_AT_OPEN, jitter_minutes=0)
-    morning = bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 0), daily)
-    afternoon = bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 14, 30), daily)
-    assert morning == afternoon == "algorithm:2026-05-22T08:30-05:00"
+    morning = bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 10, 0), daily)
+    afternoon = bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 15, 30), daily)
+    assert morning == afternoon == "algorithm:2026-05-22T09:30-04:00"
 
 
 def test_algorithm_bucket_key_uses_refresh_window() -> None:
-    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 8, 31), HALF_HOURLY) == (
-        "algorithm:2026-05-22T08:30-05:00"
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 31), HALF_HOURLY) == (
+        "algorithm:2026-05-22T09:30-04:00"
     )
-    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 8, 59), HALF_HOURLY) == (
-        "algorithm:2026-05-22T08:30-05:00"
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 59), HALF_HOURLY) == (
+        "algorithm:2026-05-22T09:30-04:00"
     )
-    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 0), HALF_HOURLY) == (
-        "algorithm:2026-05-22T09:00-05:00"
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 10, 0), HALF_HOURLY) == (
+        "algorithm:2026-05-22T10:00-04:00"
     )
-    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 23, 9, 0), HALF_HOURLY) is None
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 23, 10, 0), HALF_HOURLY) is None
 
 
 def test_algorithm_bucket_key_anchors_to_market_open_for_hourly_runs() -> None:
+    """Hourly buckets anchor to the session start, so they land on the half hour."""
     hourly = Schedule(jitter_minutes=0)
-    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 0), hourly) == (
-        "algorithm:2026-05-22T08:30-05:00"
-    )
     assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 30), hourly) == (
-        "algorithm:2026-05-22T09:30-05:00"
+        "algorithm:2026-05-22T09:30-04:00"
+    )
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 10, 29), hourly) == (
+        "algorithm:2026-05-22T09:30-04:00"
+    )
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 10, 30), hourly) == (
+        "algorithm:2026-05-22T10:30-04:00"
     )
 
 
 def test_algorithm_bucket_key_waits_for_jitter_offset(monkeypatch) -> None:
     monkeypatch.setattr(bot_runtime, "_algorithm_jitter_offset_minutes", lambda *_args: 4)
 
-    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 8, 33), HOURLY) is None
-    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 8, 34), HOURLY) == (
-        "algorithm:2026-05-22T08:30-05:00"
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 33), HOURLY) is None
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 34), HOURLY) == (
+        "algorithm:2026-05-22T09:30-04:00"
     )
 
 
 def test_algorithm_bucket_key_anchors_to_the_scheduled_start() -> None:
-    window = Schedule(refresh_minutes=30, jitter_minutes=0, start_time="09:30", end_time="14:00")
-    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 45), window) == (
-        "algorithm:2026-05-22T09:30-05:00"
+    window = Schedule(refresh_minutes=30, jitter_minutes=0, start_time="10:30", end_time="15:00")
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 10, 45), window) == (
+        "algorithm:2026-05-22T10:30-04:00"
     )
-    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 9, 29), window) is None
+    assert bot_runtime._algorithm_bucket_key(datetime(2026, 5, 22, 10, 29), window) is None
 
 
 # --------------------------------------------------------------------------------------
@@ -121,9 +125,9 @@ def test_runtime_has_no_dca_loop_of_its_own() -> None:
 
 
 def test_describe_schedule_renders_the_cadence_for_the_dashboard() -> None:
-    assert describe_schedule(replace(DAILY_AT_OPEN, weekdays=(0,))) == "Mondays at 08:30"
-    assert describe_schedule(DAILY_AT_OPEN) == "Weekdays at 08:30"
-    assert describe_schedule(Schedule()) == "Weekdays, every 60m from 08:30 to 15:00"
+    assert describe_schedule(replace(DAILY_AT_OPEN, weekdays=(0,))) == "Mondays at 09:30"
+    assert describe_schedule(DAILY_AT_OPEN) == "Weekdays at 09:30"
+    assert describe_schedule(Schedule()) == "Weekdays, every 60m from 09:30 to 16:00"
 
 
 def _binding_controls(frequency: str = "1hr", strategy: str = "rally_rotation") -> dict:
@@ -157,19 +161,34 @@ def test_a_binding_fires_inside_the_session(monkeypatch) -> None:
     assert key is not None and key.startswith("b1:")
 
 
-def test_the_frequency_sets_the_bucket_size(monkeypatch) -> None:
-    """Two runs inside one bucket dedupe; the next bucket is a new key."""
-    monkeypatch.setattr(bot_runtime, "load_controls", lambda: _binding_controls("15m"))
-    first = datetime(2026, 8, 12, 12, 0, tzinfo=bot_runtime.MARKET_TZ)
-    monkeypatch.setattr(bot_runtime, "datetime", _FrozenClock(first))
-    key_at_noon = bot_runtime._binding_run_key("b1")()
-    monkeypatch.setattr(bot_runtime, "datetime", _FrozenClock(first.replace(minute=7)))
-    key_at_seven_past = bot_runtime._binding_run_key("b1")()
-    monkeypatch.setattr(bot_runtime, "datetime", _FrozenClock(first.replace(minute=15)))
-    key_at_quarter_past = bot_runtime._binding_run_key("b1")()
+def test_the_algorithms_schedule_sets_the_fire_times(monkeypatch) -> None:
+    """Bursty DCA on a daily binding runs twice: the 11:00 buy run and the 15:00 sell run.
 
-    assert key_at_noon == key_at_seven_past
-    assert key_at_quarter_past != key_at_noon
+    The binding's frequency no longer buckets the day -- the algorithm's declared schedule
+    does -- so ``1d`` still lands on both fixed run times rather than one arbitrary hour.
+    """
+    from src.algorithms.dca.bursty import BurstyDCAAlgorithm
+
+    assert BurstyDCAAlgorithm.schedule.refresh_minutes == 240
+    monkeypatch.setattr(bot_runtime, "load_controls", lambda: _binding_controls("1d", "bursty_dca"))
+    monkeypatch.setattr(bot_runtime, "_algorithm_jitter_offset_minutes", lambda *_args: 0)
+
+    def key_at(hour: int, minute: int) -> str | None:
+        moment = datetime(2026, 8, 12, hour, minute, tzinfo=bot_runtime.MARKET_TZ)
+        monkeypatch.setattr(bot_runtime, "datetime", _FrozenClock(moment))
+        return bot_runtime._binding_run_key("b1")()
+
+    before_first_run = key_at(10, 59)
+    buy_run = key_at(11, 0)
+    still_the_buy_bucket = key_at(13, 0)
+    sell_run = key_at(15, 0)
+    after_the_session = key_at(15, 31)
+
+    assert before_first_run is None
+    assert buy_run is not None
+    assert still_the_buy_bucket == buy_run, "one run per bucket: wakes inside it dedupe"
+    assert sell_run != buy_run
+    assert after_the_session is None
 
 
 def test_an_mcp_binding_is_never_scheduled(monkeypatch) -> None:

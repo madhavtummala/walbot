@@ -176,6 +176,10 @@ class DCAAlgorithm(BaseAlgorithm):
                 "deployed_this_month": round(symbol_state.deployed_this_month, 2),
                 "min_executable": round(floor_dollars, 2),
                 "notional": round(notional, 2),
+                # The two gates a run applies, verbatim, so the dashboard can show *why*
+                # nothing traded instead of making the reader parse the reason string.
+                "ready": ready,
+                "fires": bool(trigger["fires"]),
                 "reason": self.reason(symbol_state, floor_dollars, trigger, ready),
                 "warning": self.whole_share_warning(symbol, monthly_budget, price, fractional),
                 "budget_line": budget_line(monthly_budget),

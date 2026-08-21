@@ -287,7 +287,7 @@ class TestIntradayPickAlgorithm:
         benchmark = _make_bars([100] * 60)
         context = AlgorithmContext(
             config=IntradayPickConfig(benchmark_symbol="SPY", trend_ma_period=50),
-            bars_by_symbol={"SPY": benchmark},
+            daily_bars_by_symbol={"SPY": benchmark},
         )
         decision = algo.analyze(context)
         assert decision.intents == []
@@ -310,8 +310,8 @@ class TestIntradayPickAlgorithm:
                 min_price=10,
                 max_price=500,
             ),
-            bars_by_symbol={"SPY": benchmark, "AAPL": candidate},
-            history_bars_by_symbol={"AAPL": intraday},
+            daily_bars_by_symbol={"SPY": benchmark, "AAPL": candidate},
+            intraday_bars_by_symbol={"AAPL": intraday},
         )
         decision = algo.analyze(context)
         if decision.intents:
@@ -336,8 +336,8 @@ class TestIntradayPickAlgorithm:
                 min_price=10,
                 max_price=500,
             ),
-            bars_by_symbol={"SPY": benchmark, "AAPL": candidate},
-            history_bars_by_symbol={"AAPL": intraday},
+            daily_bars_by_symbol={"SPY": benchmark, "AAPL": candidate},
+            intraday_bars_by_symbol={"AAPL": intraday},
         )
         decision = algo.analyze(context)
         if decision.intents:
@@ -348,7 +348,7 @@ class TestIntradayPickAlgorithm:
         algo = IntradayPickAlgorithm({})
         context = AlgorithmContext(
             config=IntradayPickConfig(benchmark_symbol="SPY"),
-            bars_by_symbol={},
+            daily_bars_by_symbol={},
         )
         decision = algo.analyze(context)
         assert decision.metadata.get("macro") == "flat"
@@ -366,7 +366,7 @@ class TestIntradayPickAlgorithm:
             IntradayPickConfig(intraday_bar_minutes=15, intraday_momentum_bars=4),
             {},
         )
-        assert reqs.history_lookback_minutes > 0
+        assert reqs.intraday_lookback_minutes > 0
         assert reqs.preferred_bar_minutes == 15
 
     def test_sizing_returns_zero_thresholds(self) -> None:

@@ -264,7 +264,7 @@ class Sweep:
             should_run=lambda date: int(date.dayofweek) in algorithm.schedule.weekdays,
             starting_equity=self.starting_equity,
             history_providers=self.providers,
-            history=self._history_for(period, symbols, requirements.history_lookback_minutes),
+            history=self._history_for(period, symbols, requirements.intraday_lookback_minutes),
             open_in=self.open_in,
             cost_bps=self.cost_bps,
         )

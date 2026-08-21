@@ -59,6 +59,20 @@ class AlpacaBrokerage(BaseBrokerage):
         marks = get_position_marks(self.client)
         return {symbol: marks[symbol] for symbol in symbols if symbol in marks}
 
+    def get_position_details(self) -> List[Dict[str, Any]]:
+        rows = []
+        for position in self.client.get_all_positions():
+            rows.append({
+                "symbol": str(getattr(position, "symbol", "")),
+                "qty": float(getattr(position, "qty", 0.0) or 0.0),
+                "avg_entry_price": float(getattr(position, "avg_entry_price", 0.0) or 0.0),
+                "market_value": float(getattr(position, "market_value", 0.0) or 0.0),
+                "unrealized_pl": float(getattr(position, "unrealized_pl", 0.0) or 0.0),
+                "unrealized_plpc": float(getattr(position, "unrealized_plpc", 0.0) or 0.0),
+            })
+        rows.sort(key=lambda row: abs(row["market_value"]), reverse=True)
+        return rows
+
     def submit_order(self, request: OrderRequest) -> Dict[str, Any]:
         if request.order_type == "market":
             order = submit_market_order(

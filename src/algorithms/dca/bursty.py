@@ -3,7 +3,7 @@
   drawdown = max(0, (peak - price) / peak)
   size = budget × (1 + drawdown × scaling_factor)
 
-Buys at 11 AM, sells at 3 PM (requires ``frequency: 1hr`` on the dashboard).
+Two fixed runs per day, US Eastern: buys on the 11:00 run, sells on the 15:00 run.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from typing import Any
 import pandas as pd
 
 from ...core.interfaces import (
+    MARKET_TZ,
     Schedule,
     SignalView,
     AlgorithmContext,
@@ -106,6 +107,28 @@ def evaluate_trigger(
     return {"fires": True, "reason": "At peak", "detail": detail}
 
 
+def planned_order_size(
+    monthly_budget: float,
+    drawdown: float,
+    deployed_this_month: float,
+    settings: BurstyConfig,
+) -> float:
+    """Dollar size ``refine`` would place for one symbol, before position/broker clamps.
+
+    size = |budget| × (1 + scaling_factor × drawdown), clamped to the month's remaining
+    cap room. Shared by step 2 and the live-signal view so the dashboard previews exactly
+    what a run would order rather than a parallel approximation of it.
+    """
+    budget = abs(float(monthly_budget))
+    if budget <= 0:
+        return 0.0
+    drawdown = max(float(drawdown), 0.0)
+    desired = budget * (1.0 + settings.scaling_factor * drawdown)
+    effective_cap = settings.max_monthly_multiple * (1.0 + settings.cap_boost * drawdown)
+    remaining = max(effective_cap * budget - max(float(deployed_this_month), 0.0), 0.0)
+    return min(desired, remaining)
+
+
 def _rsi(series: pd.Series, period: int = 2) -> float:
     if len(series) < period + 1:
         return float("nan")
@@ -189,7 +212,9 @@ def _compute_indicators(bars: pd.DataFrame | None, settings: BurstyConfig) -> di
 class BurstyDCAAlgorithm(DCAAlgorithm):
     algorithm_id = "bursty_dca"
 
-    #: Buys at 11 AM, sells at 3 PM.  Requires ``frequency: 1hr`` on the dashboard.
+    #: Two fixed runs per day, US Eastern: the 11:00 run places buys, the 15:00 run places
+    #: sells. ``refresh_minutes=240`` from the 11:00 start yields exactly those two buckets,
+    #: so a binding on any scheduled frequency (``1d`` included) fires at both times.
     schedule = Schedule(
         start_time="11:00",
         end_time="15:30",
@@ -213,7 +238,7 @@ class BurstyDCAAlgorithm(DCAAlgorithm):
         months_behind: float = 0.0,
     ) -> dict[str, Any]:
         buying = plan_budgets(plan).get(symbol, 0.0) >= 0
-        return evaluate_trigger(context.bars_by_symbol.get(symbol), buying, months_behind)
+        return evaluate_trigger(context.daily_bars_by_symbol.get(symbol), buying, months_behind)
 
     def reason(
         self,
@@ -233,19 +258,36 @@ class BurstyDCAAlgorithm(DCAAlgorithm):
         decision = self.analyze(context)
 
         settings = BurstyConfig.from_runtime_config(config)
+        quote_meta = dict(context.extra.get("price_quotes") or {})
 
         leaders = []
         for symbol, values in decision.signals.items():
-            bars = context.bars_by_symbol.get(symbol)
+            bars = context.daily_bars_by_symbol.get(symbol)
             indicators = _compute_indicators(bars, settings)
 
+            monthly_budget = float(values.get("monthly_budget") or 0.0)
+            drawdown = float(indicators.get("drawdown") or 0.0)
+            size = planned_order_size(
+                monthly_budget,
+                drawdown,
+                float(values.get("deployed_this_month") or 0.0),
+                settings,
+            )
+            quote = quote_meta.get(symbol) or {}
             leaders.append({
                 **values,
                 "symbol": symbol,
-                "signal": "LONG" if float(values.get("monthly_budget") or 0.0) >= 0 else "SHORT",
-                "side": "LONG" if float(values.get("monthly_budget") or 0.0) >= 0 else "SHORT",
+                "signal": "LONG" if monthly_budget >= 0 else "SHORT",
+                "side": "LONG" if monthly_budget >= 0 else "SHORT",
                 "target_weight": None,
                 **indicators,
+                # What a run would order right now: the refine math applied to the same
+                # state the dashboard is looking at, signed like the budget.
+                "next_order": round(size if monthly_budget >= 0 else -size, 2),
+                # Provenance of the price this row is priced at, so a stored-bar
+                # fallback never masquerades as a live print.
+                "price_time": quote.get("timestamp"),
+                "price_current": bool(quote.get("current")),
             })
 
         leaders.sort(key=lambda row: (row["reason"] != "Ready", row["symbol"]))
@@ -257,6 +299,12 @@ class BurstyDCAAlgorithm(DCAAlgorithm):
             {"label": "Scaling", "value": f"{settings.scaling_factor}x"},
             {"label": "Cap", "value": f"{settings.max_monthly_multiple}x monthly"},
         ]
+        if quote_meta:
+            stale = sorted(symbol for symbol, quote in quote_meta.items() if not quote.get("current"))
+            summary.append({
+                "label": "Prices",
+                "value": "live" if not stale else f"delayed: {', '.join(stale)}",
+            })
         unknown = unknown_plan_symbols(
             raw_plan_from_config(config, self.algorithm_id), universe_payload()["rows"]
         )
@@ -277,16 +325,20 @@ class BurstyDCAAlgorithm(DCAAlgorithm):
 
         size = budget × (1 + drawdown × scaling_factor)
 
-        Buys execute at 11 AM, sells at 3 PM.
+        Buys execute on the 11:00 ET run, sells on the 15:00 ET run.
         """
-        hour = as_of.hour
+        # ``as_of`` is a UTC instant from the context; the buy/sell split is stated in
+        # market time, so convert before comparing hours. A naive timestamp (backtest
+        # date-only bars) is taken as market time already, which keeps hour at 0 and
+        # disables the filter there.
+        local_hour = (as_of.astimezone(MARKET_TZ) if as_of.tzinfo else as_of).hour
         buy_hour = 11
         sell_hour = 15
-        # When hour is 0 (backtest with date-only timestamps) or outside the buy/sell
-        # windows, process all intents.  At 11 AM only buys, at 3 PM only sells.
-        is_live_buy = hour == buy_hour
-        is_live_sell = hour == sell_hour
-        filter_by_hour = hour in (buy_hour, sell_hour)
+        # Outside the two run windows -- backtests, or an off-schedule manual run --
+        # process all intents rather than dropping them.
+        is_live_buy = local_hour == buy_hour
+        is_live_sell = local_hour == sell_hour
+        filter_by_hour = local_hour in (buy_hour, sell_hour)
 
         settings = BurstyConfig.from_runtime_config(config)
 
@@ -314,12 +366,7 @@ class BurstyDCAAlgorithm(DCAAlgorithm):
             # Drawdown-based sizing
             sig = signals.get(intent.symbol, {})
             drawdown = float(sig.get("drawdown", 0.0) or 0.0)
-            desired = budget * (1.0 + settings.scaling_factor * drawdown)
-
-            # Monthly cap: scales continuously with drawdown
-            effective_cap = settings.max_monthly_multiple * (1.0 + settings.cap_boost * drawdown)
-            remaining = max((effective_cap * budget) - symbol_state.deployed_this_month, 0.0)
-            desired = min(desired, remaining)
+            desired = planned_order_size(budget, drawdown, symbol_state.deployed_this_month, settings)
             if not buying:
                 desired = min(desired, float(snapshot.positions.get(intent.symbol, 0.0)) * price)
             if desired <= 0:

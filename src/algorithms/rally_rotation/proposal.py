@@ -143,7 +143,7 @@ def analyze_universe(context: AlgorithmContext, config: RallyRotationConfig) -> 
     features = {
         symbol: compute_features(
             symbol,
-            context.bars_by_symbol.get(symbol, pd.DataFrame()),
+            context.daily_bars_by_symbol.get(symbol, pd.DataFrame()),
             config,
         )
         for symbol in config.symbols

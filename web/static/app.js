@@ -1273,14 +1273,29 @@ function signalRowColor(row) {
   return "";
 }
 
+//: A price that is not a live print gets an age badge, so a stored-bar fallback can never
+//: read as a fresh quote. Live prices (price_current true) stay unbadged.
+function priceAgeBadge(row) {
+  if (row.price_current !== false || !row.price_time) return "";
+  const fetched = Date.parse(row.price_time);
+  if (Number.isNaN(fetched)) return "";
+  const ageMinutes = Math.max(0, Math.round((Date.now() - fetched) / 60000));
+  const ageText = ageMinutes >= 1440 ? `${Math.round(ageMinutes / 1440)}d` : ageMinutes >= 60 ? `${Math.round(ageMinutes / 60)}h` : `${ageMinutes}m`;
+  return ` <span class="tableNote" title="Not a live print — closest stored price">(${escapeHtml(ageText)} old)</span>`;
+}
+
 function renderSignalTable(leaders) {
-  const hasScore = leaders.some((r) => r.score !== undefined && r.score !== null);
+  const hasBudget = leaders.some((r) => r.monthly_budget !== undefined && r.monthly_budget !== null);
+  // On DCA rows Score is the accrued budget, which the Budget/Accrued columns already show.
+  const hasScore = !hasBudget && leaders.some((r) => r.score !== undefined && r.score !== null);
   const hasRank = leaders.some((r) => r.rank !== undefined && r.rank !== null && r.rank !== 0);
   const hasWeight = leaders.some((r) => r.target_weight !== undefined && r.target_weight !== null);
   const hasMA = leaders.some((r) => r.moving_average > 0);
   const hasVol5d = leaders.some((r) => r.vol_5d > 0);
   const hasVolRatio = leaders.some((r) => r.volume_ratio > 0);
-  const hasBudget = leaders.some((r) => r.monthly_budget !== undefined && r.monthly_budget !== null);
+  const hasPeak = leaders.some((r) => r.peak > 0);
+  const hasDrawdown = leaders.some((r) => r.drawdown !== undefined && r.drawdown !== null);
+  const hasNextOrder = leaders.some((r) => r.next_order !== undefined && r.next_order !== null);
 
   const extraHeaders = [];
 
@@ -1288,33 +1303,46 @@ function renderSignalTable(leaders) {
   if (hasRank) extraHeaders.push('<th class="num">Rank</th>');
   if (hasWeight) extraHeaders.push('<th class="num">Wt</th>');
   if (hasMA) extraHeaders.push('<th class="num">100d MA</th>');
+  if (hasPeak) extraHeaders.push('<th class="num" title="Rolling high-water mark the drawdown is measured from">Peak</th>');
+  if (hasDrawdown) extraHeaders.push('<th class="num" title="How far price is below its peak — drives bursty order size">DD</th>');
   if (hasVol5d) extraHeaders.push('<th class="num">5d Vol</th>');
   if (hasVolRatio) extraHeaders.push('<th class="num">Vol Ratio</th>');
   if (hasBudget) {
     extraHeaders.push('<th class="num">Budget</th>');
     extraHeaders.push('<th class="num">Accrued</th>');
   }
+  if (hasNextOrder) extraHeaders.push('<th class="num" title="Order a run would place now, after drawdown sizing and the monthly cap">Next order</th>');
 
   const rows = leaders.map((row) => {
     const rowCls = signalRowColor(row);
     const maCls = row.ma_distance > 0 ? "pos" : row.ma_distance < 0 ? "neg" : "";
+    const actionable = row.ready !== false && row.fires !== false;
 
     let extra = "";
     if (hasScore) extra += `<td class="num">${escapeHtml(num(row.score, 2))}</td>`;
     if (hasRank) extra += `<td class="num">${row.rank ? escapeHtml(String(row.rank)) : "--"}</td>`;
     if (hasWeight) extra += `<td class="num">${row.target_weight !== undefined && row.target_weight !== null ? escapeHtml(percent(row.target_weight)) : "--"}</td>`;
     if (hasMA) extra += `<td class="num signalMa ${maCls}">${row.moving_average ? escapeHtml(money(row.moving_average, 2)) : "--"}</td>`;
+    if (hasPeak) extra += `<td class="num">${row.peak ? escapeHtml(money(row.peak, 2)) : "--"}</td>`;
+    if (hasDrawdown) extra += `<td class="num ${row.drawdown > 0 ? "neg" : ""}">${escapeHtml(percent(row.drawdown || 0))}</td>`;
     if (hasVol5d) extra += `<td class="num">${escapeHtml(percent(row.vol_5d))}</td>`;
     if (hasVolRatio) extra += `<td class="num">${row.volume_ratio ? escapeHtml(num(row.volume_ratio, 1)) + "x" : "--"}</td>`;
     if (hasBudget) {
       extra += `<td class="num">${row.monthly_budget !== undefined ? escapeHtml(money(row.monthly_budget, 0)) : "--"}</td>`;
       extra += `<td class="num">${row.accrued !== undefined ? escapeHtml(money(row.accrued, 2)) : "--"}</td>`;
     }
+    if (hasNextOrder) {
+      const size = Number(row.next_order || 0);
+      const cls = size > 0 ? "pos" : size < 0 ? "neg" : "";
+      const text = size !== 0 && actionable ? money(Math.abs(size), 0) : "--";
+      const why = actionable ? "" : "Not executable yet";
+      extra += `<td class="num ${cls}" title="${escapeHtml(why)}">${escapeHtml(text)}</td>`;
+    }
 
     return `<tr class="${rowCls}">
       <td><strong>${escapeHtml(row.symbol)}</strong></td>
       <td><span class="side ${row.target_weight > 0 ? "is-buy" : row.side === "FLAT" ? "" : "is-sell"}">${escapeHtml(row.side || row.signal || "--")}</span></td>
-      <td class="num">${row.close ? escapeHtml(money(row.close, 2)) : "--"}</td>
+      <td class="num">${row.close ? escapeHtml(money(row.close, 2)) : "--"}${priceAgeBadge(row)}</td>
       ${extra}
       <td class="signalStatus">${escapeHtml(row.reason || row.eligibility_reason || "—")}</td>
     </tr>`;

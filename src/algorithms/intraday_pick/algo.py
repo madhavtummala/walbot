@@ -310,7 +310,7 @@ class IntradayPickAlgorithm(BaseAlgorithm):
             price_symbols=symbols,
             daily_lookback_days=cfg.required_daily_bars,
             daily_ma_days=cfg.trend_ma_period,
-            history_lookback_minutes=cfg.required_intraday_bars * cfg.intraday_bar_minutes,
+            intraday_lookback_minutes=cfg.required_intraday_bars * cfg.intraday_bar_minutes,
             preferred_bar_minutes=cfg.intraday_bar_minutes,
             paper_only=True,
         )
@@ -318,7 +318,7 @@ class IntradayPickAlgorithm(BaseAlgorithm):
     def analyze(self, context: AlgorithmContext) -> AlgorithmDecision:
         cfg = IntradayPickConfig.from_runtime_config(context.config)
 
-        benchmark_bars = context.bars_by_symbol.get(cfg.benchmark_symbol)
+        benchmark_bars = context.daily_bars_by_symbol.get(cfg.benchmark_symbol)
         if benchmark_bars is None or benchmark_bars.empty:
             return AlgorithmDecision(
                 metadata={"reason": f"no data for benchmark {cfg.benchmark_symbol}", "macro": "flat"},
@@ -332,15 +332,15 @@ class IntradayPickAlgorithm(BaseAlgorithm):
 
         candidates = []
         allowed = set(cfg.candidate_symbols) if cfg.candidate_symbols else None
-        for symbol in context.bars_by_symbol:
+        for symbol in context.daily_bars_by_symbol:
             if symbol == cfg.benchmark_symbol:
                 continue
             if symbol in context.positions:
                 continue
             if allowed is not None and symbol not in allowed:
                 continue
-            daily_bars = context.bars_by_symbol[symbol]
-            intraday_bars = context.history_bars_by_symbol.get(symbol)
+            daily_bars = context.daily_bars_by_symbol[symbol]
+            intraday_bars = context.intraday_bars_by_symbol.get(symbol)
             result = score_candidate(daily_bars, intraday_bars, cfg, macro)
             result["symbol"] = symbol
             candidates.append(result)

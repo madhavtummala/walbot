@@ -93,7 +93,7 @@ def test_replay_never_lets_a_decision_see_the_price_it_trades_at() -> None:
     for index, context in enumerate(algorithm.contexts, start=1):
         assert pd.Timestamp(context.timestamp) == DATES[index - 1]
         # The context's bars stop at the signal date, not the trade date.
-        assert context.bars_by_symbol["AAA"]["timestamp"].max() == DATES[index - 1]
+        assert context.daily_bars_by_symbol["AAA"]["timestamp"].max() == DATES[index - 1]
 
 
 def test_replay_calls_settle_with_what_actually_filled() -> None:
@@ -302,7 +302,7 @@ def test_the_replay_reads_the_bar_store_once_per_symbol_not_once_per_date(monkey
     class _NeedsHistory(_Recorder):
         def requirements(self, config, positions) -> AlgorithmRequirements:
             return AlgorithmRequirements(
-                price_symbols=["AAA"], daily_lookback_days=30, history_lookback_minutes=780
+                price_symbols=["AAA"], daily_lookback_days=30, intraday_lookback_minutes=780
             )
 
     algorithm = _NeedsHistory()

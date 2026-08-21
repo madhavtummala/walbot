@@ -67,8 +67,8 @@ class Runtime:
 def context_for(config: Runtime, daily: dict, intraday: dict, timestamp: datetime | None = None) -> AlgorithmContext:
     return AlgorithmContext(
         config=config,
-        bars_by_symbol=daily,
-        history_bars_by_symbol=intraday,
+        daily_bars_by_symbol=daily,
+        intraday_bars_by_symbol=intraday,
         latest_prices={symbol: float(frame["close"].iloc[-1]) for symbol, frame in daily.items()},
         timestamp=timestamp or datetime(2026, 6, 5, 15, 0, tzinfo=timezone.utc),
     )
@@ -553,7 +553,7 @@ def test_the_algorithm_is_registered_and_declares_what_it_needs() -> None:
 
     assert "ZZZ" in requirements.price_symbols, "held positions are priced too"
     # No intraday window at all: every feature is computed from the daily bars below.
-    assert requirements.history_lookback_minutes == 0
+    assert requirements.intraday_lookback_minutes == 0
     assert requirements.daily_lookback_days >= 100
     assert requirements.paper_only is True
     assert requirements.needs_sentiment is False, "sentiment is off until it is phased in"

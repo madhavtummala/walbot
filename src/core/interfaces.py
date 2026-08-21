@@ -4,7 +4,13 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 import pandas as pd
+
+#: Every Schedule time-of-day is stated in this zone -- the market's own, so "11:00" means
+#: the NYSE morning and DST shifts move scheduled runs with the session rather than away
+#: from it. Step 2 clocks (`refine`'s hour gates) must convert to this zone before comparing.
+MARKET_TZ = ZoneInfo("America/New_York")
 
 @dataclass(frozen=True)
 class AlgorithmContext:
@@ -19,11 +25,11 @@ class AlgorithmContext:
     config: Any
     #: Daily OHLCV per symbol, already truncated to what the algorithm may see. Kept distinct
     #: because the moving-average and regime gates are statements about daily closes.
-    bars_by_symbol: Dict[str, pd.DataFrame] = field(default_factory=dict)
-    #: Timestamped OHLCV per symbol covering ``AlgorithmRequirements.history_lookback_minutes``,
+    daily_bars_by_symbol: Dict[str, pd.DataFrame] = field(default_factory=dict)
+    #: Timestamped OHLCV per symbol covering ``AlgorithmRequirements.intraday_lookback_minutes``,
     #: at whatever resolution was available -- possibly blending fine bars recently with
     #: coarser ones further back. Read it through ``src/data/bars.py``, never by position.
-    history_bars_by_symbol: Dict[str, pd.DataFrame] = field(default_factory=dict)
+    intraday_bars_by_symbol: Dict[str, pd.DataFrame] = field(default_factory=dict)
     #: Per-symbol sentiment score, plus the universe-wide average.
     sentiment_scores: Dict[str, float] = field(default_factory=dict)
     market_sentiment: float = 0.0
@@ -48,13 +54,13 @@ class AlgorithmRequirements:
     daily_ma_days: int = 0
     daily_extra_buffer_days: int = 0
     include_latest_daily: bool = True
-    #: How far back the algorithm needs timestamped bars, in minutes the market was open --
+    #: How far back the algorithm needs intraday bars, in minutes the market was open --
     #: 4800 is about twelve sessions, not three and a bit days. Stated in minutes rather than
     #: bars because a bar count only means a span of time once the grid is known, and the grid
     #: is now the feed's business: Schwab serves 1/5/10/15/30-minute bars where yfinance served
     #: 15. The lookback resolves against whichever resolution the cache holds -- down to daily,
     #: at the far end of a long window. See ``src/data/bars.py``.
-    history_lookback_minutes: int = 0
+    intraday_lookback_minutes: int = 0
     #: The finest grid the algorithm would like, when it has a preference. 0 takes the
     #: configured default. A provider that cannot serve it supplies its nearest coarser grid
     #: rather than failing, because the horizons no longer depend on getting an exact one.
@@ -287,6 +293,29 @@ class Brokerage(ABC):
         """
         return {}
 
+    def get_position_details(self) -> List[Dict[str, Any]]:
+        """Full position data per symbol: qty, avg_entry_price, market_value, unrealized_pl, unrealized_plpc.
+
+        The single source for the accounts page.  Defaults to reading ``get_positions`` +
+        ``get_marks`` and filling the rest as zeros, which is what the non-Alpaca path did
+        by hand before this existed.
+        """
+        holdings = self.get_positions()
+        if not holdings:
+            return []
+        marks = self.get_marks(sorted(holdings))
+        return [
+            {
+                "symbol": symbol,
+                "qty": float(shares),
+                "avg_entry_price": 0.0,
+                "market_value": float(shares) * float(marks.get(symbol, 0.0)),
+                "unrealized_pl": 0.0,
+                "unrealized_plpc": 0.0,
+            }
+            for symbol, shares in holdings.items()
+        ]
+
     def cash_equivalent_symbols(self) -> List[str]:
         """Symbols this account treats as cash. See ``BaseBrokerage`` for the config-backed one."""
         return []
@@ -359,9 +388,10 @@ class Schedule:
     #: Spread runs deterministically within the bucket, so every deployment does not hit the
     #: market data provider on the same minute.
     jitter_minutes: int = 5
-    #: Market-local window, as ``HH:MM``.
-    start_time: str = "08:30"
-    end_time: str = "15:00"
+    #: Market-local (``MARKET_TZ``, US Eastern) window, as ``HH:MM``. The regular NYSE
+    #: session is 09:30-16:00, and these defaults are clamped to it by the runtime.
+    start_time: str = "09:30"
+    end_time: str = "16:00"
     #: Weekdays the algorithm may run at all, ``0`` being Monday. This is the part
     #: ``refresh_minutes`` cannot express: bucketing happens inside a session, so without it
     #: the coarsest possible cadence would be daily.
@@ -388,7 +418,7 @@ def schedule_minutes(value: str, default: int = 0) -> int:
 
 
 def describe_schedule(schedule: Schedule) -> str:
-    """Render a schedule for the dashboard, e.g. ``"Mondays at 08:30"``.
+    """Render a schedule for the dashboard, e.g. ``"Mondays at 09:30"``.
 
     Deliberately not shown in the live signal view: cadence is set per binding on the
     dashboard and every algorithm runs inside the trading session regardless, so a Schedule

@@ -67,8 +67,8 @@ def test_a_history_requirement_needs_no_grid_to_be_meaningful() -> None:
     """A lookback in minutes states its own span, so no bar size has to accompany it."""
     from src.core.interfaces import AlgorithmRequirements
 
-    wanted = AlgorithmRequirements(price_symbols=["SPY"], history_lookback_minutes=1170)
-    assert wanted.history_lookback_minutes == 1170
+    wanted = AlgorithmRequirements(price_symbols=["SPY"], intraday_lookback_minutes=1170)
+    assert wanted.intraday_lookback_minutes == 1170
     # Naming a grid stays optional, and means "prefer this fidelity", not "count in these".
     assert wanted.preferred_bar_minutes == 0
 

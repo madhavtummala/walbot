@@ -28,7 +28,6 @@ from ...core.config import (
 )
 from ...common.config_utils import json_number
 from ...data.order_journal import load_order_journal
-from ...core.market_context import load_latest_prices
 
 logger = logging.getLogger(__name__)
 
@@ -95,24 +94,10 @@ def positions_payload(account_id: str = "") -> dict[str, Any]:
         if last_equity:
             payload["day_pl"] = equity - last_equity
             payload["day_pl_percent"] = (equity - last_equity) / last_equity
-        rows = []
-        total_pl = 0.0
-        for position in client.get_all_positions():
-            unrealized = float(getattr(position, "unrealized_pl", 0.0) or 0.0)
-            total_pl += unrealized
-            rows.append(
-                {
-                    "symbol": str(getattr(position, "symbol", "")),
-                    "qty": float(getattr(position, "qty", 0.0) or 0.0),
-                    "avg_entry_price": float(getattr(position, "avg_entry_price", 0.0) or 0.0),
-                    "market_value": float(getattr(position, "market_value", 0.0) or 0.0),
-                    "unrealized_pl": unrealized,
-                    "unrealized_plpc": float(getattr(position, "unrealized_plpc", 0.0) or 0.0),
-                }
-            )
-        rows.sort(key=lambda row: abs(row["market_value"]), reverse=True)
+        from ...brokerages.providers.alpaca import AlpacaBrokerage
+        rows = AlpacaBrokerage(config).get_position_details()
         payload["rows"] = rows
-        payload["total_pl"] = total_pl
+        payload["total_pl"] = sum(float(row["unrealized_pl"]) for row in rows) if rows else 0.0
     except Exception as error:  # noqa: BLE001 - a broker outage must not blank the dashboard
         logger.warning("Could not load positions for %s: %s", config.account_id, error)
         payload["error"] = str(error)
@@ -254,52 +239,36 @@ def _paper_positions(config: Any) -> dict[str, Any]:
     would put a number on the dashboard that nothing backs.
     """
     try:
-        book = PaperBrokerage(config).book()
+        brokerage = PaperBrokerage(config)
+        state = brokerage.get_account_state()
+        rows = brokerage.get_position_details()
     except Exception as error:  # noqa: BLE001 - a corrupt book must not blank the page
         logger.warning("Could not read the paper book for %s: %s", config.account_id, error)
         return {"error": str(error)}
-    rows = book.get("rows") or []
     return {
-        "equity": float(book.get("equity") or 0.0),
-        "cash": float(book.get("cash") or 0.0),
-        "total_pl": sum(float(row["unrealized_pl"]) for row in rows),
+        "equity": float(state.get("equity") or 0.0),
+        "cash": float(state.get("cash") or 0.0),
+        "total_pl": sum(float(row["unrealized_pl"]) for row in rows) if rows else 0.0,
         "rows": rows,
     }
 
 
 def _brokerage_positions(config: Any, broker: str) -> dict[str, Any]:
-    """Holdings and cash for any brokerage that is not Alpaca, through the shared interface.
-
-    The interface reports shares and account balances but no cost basis, so unrealised P/L is
-    left as None rather than filled with a zero that would read as break-even.
-    """
+    """Holdings and cash for any non-Alpaca brokerage, through the shared interface."""
     from ...core.pipeline import resolve_brokerage
 
     try:
         brokerage = resolve_brokerage(config)
         state = brokerage.get_account_state()
-        holdings = brokerage.get_positions()
+        rows = brokerage.get_position_details()
     except Exception as error:  # noqa: BLE001 - an unreachable broker must not blank the page
         logger.warning("Could not read %s positions for %s: %s", broker, config.account_id, error)
         return {"error": str(error)}
 
-    prices = load_latest_prices(sorted(holdings), config, None) if holdings else {}
-    rows = [
-        {
-            "symbol": symbol,
-            "qty": float(shares),
-            "avg_entry_price": 0.0,
-            "market_value": float(shares) * float(prices.get(symbol, 0.0)),
-            "unrealized_pl": 0.0,
-            "unrealized_plpc": 0.0,
-        }
-        for symbol, shares in holdings.items()
-    ]
-    rows.sort(key=lambda row: abs(row["market_value"]), reverse=True)
     return {
         "equity": float(state.get("equity") or 0.0),
         "cash": float(state.get("cash") or 0.0),
-        "total_pl": None,
+        "total_pl": sum(float(row["unrealized_pl"]) for row in rows) if rows else None,
         "rows": rows,
     }
 
@@ -380,9 +349,3 @@ def account_activity_payload(account_id: str = "", limit: int = 40) -> dict[str,
 
 def _enum_value(value: Any) -> str:
     return str(getattr(value, "value", value) or "")
-
-
-#: Watchlist symbols live in the state store, not a config file: it is a per-user view
-#: preference rather than something that changes how an algorithm trades.
-WATCHLIST_STATE_KEY = "watchlist"
-DEFAULT_WATCHLIST = ["SPY", "QQQ", "GLD", "TLT"]

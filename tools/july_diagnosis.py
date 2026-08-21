@@ -46,7 +46,7 @@ def run():
         sorted(daily_history),
         trade_dates,
         providers=["yfinance"],
-        lookback_minutes=requirements.history_lookback_minutes,
+        lookback_minutes=requirements.intraday_lookback_minutes,
     )
 
     schedule = algorithm.schedule
