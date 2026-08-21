@@ -506,10 +506,9 @@ def test_news_sentiment_fetch_falls_back_to_stocktwits(monkeypatch, caplog) -> N
 
     with caplog.at_level(logging.INFO):
         records = connectors.fetch_latest_news_sentiment(["SPY"], config)
-    frames = connectors.news_records_to_social_frames(records)
 
     assert records[0]["provider"] == "stocktwits"
-    assert frames["SPY"]["sentiment"].iloc[-1] == 1.0
+    assert records[0]["sentiment"] == 1.0
     assert "News/sentiment provider marketaux hit its rate limit; falling back to stocktwits" in caplog.text
 
 
@@ -606,7 +605,7 @@ def test_sentiment_data_alias_uses_new_provider_order(monkeypatch) -> None:
     monkeypatch.setattr(connectors, "_read_duckdb_bars", lambda *_args, **_kwargs: pd.DataFrame())
     monkeypatch.setattr(connectors, "_write_duckdb_bars", lambda *_args, **_kwargs: None)
 
-    records = connectors.fetch_latest_sentiment_data(["SPY"], config)
+    records = connectors.fetch_latest_news_sentiment(["SPY"], config)
 
     assert records[0]["provider"] == "newsapi"
     assert records[0]["sentiment"] == 0.2

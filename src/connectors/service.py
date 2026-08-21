@@ -624,48 +624,4 @@ def fetch_latest_news_sentiment(
     return all_records
 
 
-def fetch_latest_sentiment_data(
-    symbols: list[str],
-    config: Config,
-    *,
-    force_refresh: bool = False,
-    provider: str | None = None,
-) -> list[dict[str, Any]]:
-    return fetch_latest_news_sentiment(symbols, config, force_refresh=force_refresh, provider=provider)
 
-
-def news_records_to_social_frames(records: list[dict[str, Any]]) -> dict[str, pd.DataFrame]:
-    by_symbol: dict[str, list[dict[str, Any]]] = {}
-    for record in records:
-        by_symbol.setdefault(str(record["symbol"]).upper(), []).append(record)
-    frames: dict[str, pd.DataFrame] = {}
-    for symbol, rows in by_symbol.items():
-        frame = pd.DataFrame(rows)
-        frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
-        frames[symbol] = frame.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-    return frames
-
-
-def merge_social_frames(
-    base: dict[str, pd.DataFrame],
-    fresh: dict[str, pd.DataFrame],
-) -> dict[str, pd.DataFrame]:
-    merged = {
-        symbol: frame.copy()
-        for symbol, frame in base.items()
-        if isinstance(frame, pd.DataFrame)
-    }
-    for symbol, frame in fresh.items():
-        current = merged.get(symbol, pd.DataFrame())
-        combined = pd.concat([current, frame], ignore_index=True)
-        if combined.empty:
-            merged[symbol] = combined
-            continue
-        combined["timestamp"] = pd.to_datetime(combined["timestamp"], utc=True, errors="coerce")
-        merged[symbol] = (
-            combined.dropna(subset=["timestamp"])
-            .sort_values("timestamp")
-            .drop_duplicates(subset=["timestamp", "symbol", "title"], keep="last")
-            .reset_index(drop=True)
-        )
-    return merged

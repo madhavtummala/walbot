@@ -45,17 +45,8 @@ _EXPORTS = {
     "load_latest_prices": "src.connectors.service",
     "prices_from_store": "src.connectors.service",
     "fetch_latest_news_sentiment": "src.connectors.service",
-    "fetch_latest_sentiment_data": "src.connectors.service",
-    "merge_social_frames": "src.connectors.service",
-    "news_records_to_social_frames": "src.connectors.service",
-    "fetch_alpaca_eod_bars": "src.connectors.market.alpaca",
-    "fetch_alpaca_intraday_bars": "src.connectors.market.alpaca",
-    "fetch_finnhub_eod_bars": "src.connectors.market.finnhub",
-    "fetch_finnhub_intraday_bars": "src.connectors.market.finnhub",
     "fetch_schwab_eod_bars": "src.connectors.market.schwab",
     "fetch_schwab_intraday_bars": "src.connectors.market.schwab",
-    "fetch_yfinance_eod_bars": "src.connectors.market.yfinance",
-    "fetch_yfinance_intraday_bars": "src.connectors.market.yfinance",
 }
 
 
