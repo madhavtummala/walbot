@@ -10,7 +10,7 @@ from __future__ import annotations
 from .strategy_config import config_for_strategy_view
 
 from ...algorithms.registry import canonical_algorithm_id
-from ...brokerages.alpaca_client import create_data_client
+from ...brokerages.alpaca.client import create_data_client
 from ...algorithms.registry import get_algorithm_class
 from ...data.universe import resolve_project_path
 
@@ -25,6 +25,7 @@ import pandas as pd
 
 
 from ...data import fetch_daily_bars
+from ...core.cron import parse_cron
 from ...data.bars import TRADING_MINUTES_PER_DAY
 from ...execution.metrics import calculate_performance_metrics
 from ...data.duckdb_store import pooled_connections
@@ -45,7 +46,15 @@ BACKTEST_CACHE_PATH = "data/backtest_cache.json"
 
 BACKTEST_CACHE_STATE_KEY = "backtest_cache"
 
-BACKTEST_CACHE_VERSION = 9
+#: Bumped whenever the shape of a cached payload changes. ``_load_backtest_cache`` throws away
+#: any cache whose version differs, which is the only thing stopping a row written under an
+#: older schema from being served to a frontend that no longer understands it.
+#:
+#: 10: row timestamps carry the time of day.
+#: 11: rows carry ``trade_shares`` beside ``trades``.
+#: 12: the paper book fills whole shares only, so cached curves priced in fractional fills
+#:     are stale.
+BACKTEST_CACHE_VERSION = 12
 
 BACKTEST_STARTING_EQUITY = 10_000.0
 
@@ -178,10 +187,19 @@ def _cache_key(strategy: str, period: str, account_id: str = "") -> str:
 
 
 def _json_backtest_rows(history_df: pd.DataFrame) -> list[dict[str, Any]]:
+    """The replay's rows as JSON, timestamps and all.
+
+    ISO 8601 rather than the ``%Y-%m-%d`` this used to emit. A daily replay is unaffected --
+    its bars land at midnight, so the frontend's ``new Date`` reads the same instant either way
+    -- but an intraday one was destroyed by the old format: every bar in a session formatted to
+    the same date string, so Options Flip's ~14,000 rows plotted at 179 distinct x-positions
+    with ~78 points stacked on each. The equity line was drawn through whichever of them came
+    last, and no marker or tooltip could ever address a single bar.
+    """
     rows_df = history_df.reset_index().copy()
     for column in rows_df.columns:
         if pd.api.types.is_datetime64_any_dtype(rows_df[column]):
-            rows_df[column] = pd.to_datetime(rows_df[column], utc=True).dt.strftime("%Y-%m-%d")
+            rows_df[column] = pd.to_datetime(rows_df[column], utc=True).dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     return json.loads(rows_df.to_json(orient="records"))
 
 
@@ -340,7 +358,7 @@ def _fetch_backtest_history(strategy: str, period: str, config) -> dict[str, pd.
 def _fetch_intraday_backtest_history(
     strategy: str, period: str, config, daily_history: dict[str, pd.DataFrame]
 ) -> dict[str, pd.DataFrame]:
-    """Fetch intraday bars for algorithms that need them (e.g. intraday_pick).
+    """Fetch intraday bars for algorithms that need them (e.g. options_flip).
 
     Returns a dict keyed by symbol, indexed by intraday timestamps. Each frame has
     OHLCV columns. Falls back to an empty dict if no intraday data is available.
@@ -350,7 +368,7 @@ def _fetch_intraday_backtest_history(
     algorithm = get_algorithm_class(strategy).from_config(config)
     requirements = algorithm.requirements(config, {})
     bar_minutes = requirements.preferred_bar_minutes or 15
-    lookback_minutes = requirements.history_lookback_minutes or 0
+    lookback_minutes = requirements.intraday_lookback_minutes or 0
     if lookback_minutes <= 0:
         return {}
 
@@ -416,7 +434,10 @@ def _compute_backtest(strategy: str, period: str, account_id: str = "") -> dict[
     starting_equity = _backtest_starting_equity()
     config = config_for_strategy_view(strategy, account_id)
     algorithm = get_algorithm_class(strategy).from_config(config)
-    schedule = algorithm.schedule
+    # The class default, not a binding's cron: a backtest describes the strategy, and running
+    # the same period against two bindings' schedules would produce two curves for one strategy
+    # under a cache key that does not distinguish them.
+    cron = parse_cron(algorithm.cron)
     requirements = algorithm.requirements(config, {})
 
     # The fetch happens outside any pooled connection. It is network I/O that writes provider
@@ -427,11 +448,11 @@ def _compute_backtest(strategy: str, period: str, account_id: str = "") -> dict[
     if not daily_history:
         raise RuntimeError("No historical bars were available for the backtest.")
 
-    # Detect intraday algorithms: those that declare history_lookback_minutes > 0
+    # Detect intraday algorithms: those that declare intraday_lookback_minutes > 0
     # get intraday bars and the replay steps at intraday intervals instead of daily.
     intraday_minutes = 0
     intraday_history: dict[str, pd.DataFrame] | None = None
-    if requirements.history_lookback_minutes > 0:
+    if requirements.intraday_lookback_minutes > 0:
         intraday_minutes = requirements.preferred_bar_minutes or 15
         intraday_history = _fetch_intraday_backtest_history(strategy, period, config, daily_history)
 
@@ -448,7 +469,9 @@ def _compute_backtest(strategy: str, period: str, account_id: str = "") -> dict[
             config,
             daily_history=daily_history,
             trade_dates=trade_dates,
-            should_run=lambda date: int(date.dayofweek) in schedule.weekdays,
+            # Date-level only: the replay steps one bar per day and trades at its close, so
+            # there is no clock time for the minute and hour fields to match against.
+            should_run=lambda date: cron.matches_date(date),
             starting_equity=starting_equity,
             history_providers=_configured_history_providers(config),
             intraday_history=intraday_history,

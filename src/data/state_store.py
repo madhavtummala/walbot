@@ -19,6 +19,18 @@ STATE_DUCKDB_PATH = DUCKDB_STATE_PATH
 _EPHEMERAL_STATE: ContextVar[dict[str, Any] | None] = ContextVar("ephemeral_state", default=None)
 
 
+def algorithm_state_key(algorithm_id: str, account_id: str) -> str:
+    """Where one binding's algorithm state lives.
+
+    Keyed on the pair, because a binding is an algorithm *and* an account: the runtime drives
+    several at once, and two accounts running the same algorithm are two separate books. A key
+    without the account would let fills in one draw down the other's accrued budget and share
+    its cooldowns. Built here rather than by each algorithm, which is what left the codebase
+    with two hand-rolled key formats for one concept.
+    """
+    return f"algorithm_state:{algorithm_id}:{account_id or 'default'}"
+
+
 @contextmanager
 def ephemeral_state(initial: dict[str, Any] | None = None) -> Iterator[dict[str, Any]]:
     """Redirect all state reads and writes to a throwaway dict for the duration of the block."""

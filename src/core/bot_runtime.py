@@ -3,28 +3,23 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
-from hashlib import sha256
+from datetime import date, datetime, timezone
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from src.core.config import DEFAULT_STRATEGY_ID
 from ..api.controls import (
     ORIGIN_SCHEDULE,
+    algorithm_default_cron,
     binding_refusal,
     find_binding,
-    frequency_minutes,
     load_controls,
-    normalize_frequency,
+    normalize_cron,
 )
-from ..algorithms.registry import get_algorithm_class
-from ..core.interfaces import Schedule, schedule_minutes
+from ..core.cron import CronError, cron_fire_key, parse_cron
+from ..core.interfaces import MARKET_TZ
 from ..execution.live_runner import run_once
 
 logger = logging.getLogger(__name__)
-MARKET_TZ = ZoneInfo("America/Chicago")
-MARKET_OPEN_MINUTE = (8 * 60) + 30
-MARKET_CLOSE_MINUTE = 15 * 60
 
 @dataclass
 class RuntimeState:
@@ -130,9 +125,11 @@ class _RuntimeLoop:
                 self._state.last_finished_at = datetime.now(timezone.utc).isoformat()
 
 
-def _binding_frequency(binding_id: str) -> str:
-    binding = find_binding(load_controls(), binding_id)
-    return normalize_frequency((binding or {}).get("frequency"))
+def _binding_cron(binding_id: str) -> str:
+    """This binding's schedule as saved, re-read every tick so an edit takes effect at once."""
+    controls = load_controls()
+    binding = find_binding(controls, binding_id)
+    return normalize_cron((binding or {}).get("cron"), _binding_strategy(binding_id, controls))
 
 
 def _binding_enabled(binding_id: str):
@@ -162,18 +159,6 @@ def _binding_strategy(binding_id: str, controls: dict[str, Any] | None = None) -
     return str((binding or {}).get("strategy") or DEFAULT_STRATEGY_ID)
 
 
-def _binding_schedule(binding_id: str) -> Schedule:
-    try:
-        return get_algorithm_class(_binding_strategy(binding_id)).schedule
-    except (KeyError, ValueError, TypeError):
-        return Schedule()
-
-
-def _frequency_minutes(frequency: str) -> int:
-    """Minutes between fires. Only reached for scheduled bindings, so ``mcp`` cannot appear."""
-    return frequency_minutes(frequency) or 60
-
-
 def _binding_run_fn(binding_id: str):
     def run(account_id: str | None, run_key: str = "") -> None:
         # Resolved per run, so switching a binding's strategy takes effect on the next tick.
@@ -183,87 +168,42 @@ def _binding_run_fn(binding_id: str):
 
 
 def _binding_run_key(binding_id: str):
+    """The fire time this tick belongs to, used once and then remembered as ``last_run_key``.
+
+    Keyed on the *scheduled* minute rather than the current one, so every poll inside a fire's
+    grace window yields the same key and the loop runs it exactly once.
+    """
+
     def run_key() -> str | None:
-        frequency = _binding_frequency(binding_id)
-        # No cadence means nothing for the clock to bucket -- an agent decides when this runs.
-        if frequency_minutes(frequency) is None:
+        cron = _binding_cron(binding_id)
+        # An empty cron is not a cadence the clock failed to parse -- it is a binding that
+        # says an agent decides when it runs.
+        if not cron:
             return None
-        local_now = datetime.now(MARKET_TZ)
-        # The binding owns the cadence, the algorithm still owns the session window. Without
-        # this a 1hr binding fires at 03:00 on a Sunday: run_once bails at the market-closed
-        # check, but only after a full data fetch, and it still stamps "last run" with a time
-        # the market was shut.
-        if not _is_regular_market_hours(local_now, _binding_schedule(binding_id)):
+        try:
+            spec = parse_cron(cron)
+        except CronError:
+            # Saving is validated, so reaching here means a hand-edited config. Refusing to
+            # fire is the safe reading: a schedule nobody can parse must not be guessed at.
+            logger.warning("Binding %s has an unusable schedule %r; not running it", binding_id, cron)
             return None
-        minutes = _frequency_minutes(frequency)
-        if minutes >= 24 * 60:
-            bucket = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-        else:
-            bucket_minute = ((local_now.hour * 60) + local_now.minute) // minutes * minutes
-            bucket_hour, minute = divmod(bucket_minute, 60)
-            bucket = local_now.replace(hour=bucket_hour, minute=minute, second=0, microsecond=0)
-        return f"{binding_id}:{bucket.isoformat(timespec='minutes')}"
+        fired_at = cron_fire_key(spec, datetime.now(MARKET_TZ))
+        if fired_at is None:
+            return None
+        return f"{binding_id}:{fired_at}"
 
     return run_key
 
 
-def _binding_check_seconds(binding_id: str):
+def _binding_check_seconds(binding_id: str) -> Any:
     def check_seconds() -> int:
-        minutes = frequency_minutes(_binding_frequency(binding_id))
-        # An agent-driven binding still wakes, but only to re-read controls in case its
-        # frequency changed; there is no cadence of its own to follow.
-        return 300 if minutes is None else max(minutes * 60, 60)
+        # Wake far more often than any schedule fires. A cron names a minute, and a loop that
+        # slept until roughly the next one would drift past it; polling cheaply and testing the
+        # expression is what makes an 11:00 run land at 11:00. GRACE_MINUTES is the slack that
+        # keeps a slow tick from missing its own fire time entirely.
+        return 300
 
     return check_seconds
-
-
-def _active_schedule(controls: dict[str, Any]) -> Schedule:
-    """The selected algorithm's declared cadence.
-
-    Cadence is a property of the strategy, not of the deployment, so it is read off the class
-    rather than from config. An unknown strategy falls back to the base default, which only
-    matters for how often the idle loop wakes to re-read controls.
-    """
-    strategy = str(controls.get("active_strategy") or DEFAULT_STRATEGY_ID)
-    try:
-        return get_algorithm_class(strategy).schedule
-    except (KeyError, ValueError, TypeError):
-        return Schedule()
-
-
-def _is_regular_market_hours(now: datetime, schedule: Schedule) -> bool:
-    local_now = now.astimezone(MARKET_TZ) if now.tzinfo else now.replace(tzinfo=MARKET_TZ)
-    if local_now.weekday() not in schedule.weekdays:
-        return False
-    minute_of_day = (local_now.hour * 60) + local_now.minute
-    start_minute = max(schedule_minutes(schedule.start_time, MARKET_OPEN_MINUTE), MARKET_OPEN_MINUTE)
-    end_minute = min(schedule_minutes(schedule.end_time, MARKET_CLOSE_MINUTE), MARKET_CLOSE_MINUTE)
-    return start_minute <= minute_of_day < end_minute
-
-
-def _algorithm_jitter_offset_minutes(bucket: datetime, refresh_minutes: int, jitter_minutes: int) -> int:
-    jitter_minutes = max(int(jitter_minutes or 0), 0)
-    if jitter_minutes <= 0:
-        return 0
-    seed = f"{bucket.date().isoformat()}:{bucket.hour:02d}:{bucket.minute:02d}:{refresh_minutes}".encode("utf-8")
-    return int.from_bytes(sha256(seed).digest()[:4], "big") % (jitter_minutes + 1)
-
-
-def _algorithm_bucket_key(now: datetime, schedule: Schedule) -> str | None:
-    if not _is_regular_market_hours(now, schedule):
-        return None
-    refresh_minutes = max(int(schedule.refresh_minutes or 30), 1)
-    local_now = now.astimezone(MARKET_TZ) if now.tzinfo else now.replace(tzinfo=MARKET_TZ)
-    minute_of_day = (local_now.hour * 60) + local_now.minute
-    start_minute = max(schedule_minutes(schedule.start_time, MARKET_OPEN_MINUTE), MARKET_OPEN_MINUTE)
-    bucket_minute = start_minute + (((minute_of_day - start_minute) // refresh_minutes) * refresh_minutes)
-    bucket_hour, bucket_minute = divmod(bucket_minute, 60)
-    bucket = local_now.replace(hour=bucket_hour, minute=bucket_minute, second=0, microsecond=0)
-    jitter_offset = _algorithm_jitter_offset_minutes(bucket, refresh_minutes, schedule.jitter_minutes)
-    scheduled = bucket + timedelta(minutes=jitter_offset)
-    if local_now < scheduled:
-        return None
-    return f"algorithm:{bucket.isoformat(timespec='minutes')}"
 
 
 class BotRuntime:

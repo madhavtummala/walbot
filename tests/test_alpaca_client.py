@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from src.brokerages.alpaca_client import (
+from src.brokerages.alpaca.client import (
     create_trading_client,
     get_historical_daily_bars,
     get_historical_intraday_bars,
@@ -86,7 +86,7 @@ def test_create_trading_client_uses_configured_endpoint_without_paper_mode(monke
         def __init__(self, **kwargs) -> None:
             captured.update(kwargs)
 
-    monkeypatch.setattr("src.brokerages.alpaca_client.TradingClient", FakeTradingClient)
+    monkeypatch.setattr("src.brokerages.alpaca.client.TradingClient", FakeTradingClient)
 
     create_trading_client(
         Config(

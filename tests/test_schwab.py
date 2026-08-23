@@ -5,9 +5,9 @@ from typing import Any
 
 import pytest
 
-from src.brokerages.providers.schwab import SchwabBrokerage
-from src.brokerages.schwab_client import SchwabAuthError, SchwabSession
-from src.connectors.market.schwab import _fetch_schwab_quotes
+from src.brokerages.schwab.brokerage import SchwabBrokerage
+from src.brokerages.schwab.client import SchwabAuthError, SchwabSession
+from src.connectors.market.schwab import Schwab
 from src.core.config import Config
 from src.core.interfaces import OrderRequest
 
@@ -174,7 +174,7 @@ def test_quotes_fall_back_from_last_to_mid_to_close(monkeypatch) -> None:
         },
     )
 
-    quotes = _fetch_schwab_quotes(["AAA", "BBB", "CCC", "DDD"], _config())
+    quotes = Schwab(_config()).fetch_price(["AAA", "BBB", "CCC", "DDD"])
 
     assert quotes["AAA"]["price"] == 10.0
     assert quotes["BBB"]["price"] == 5.0

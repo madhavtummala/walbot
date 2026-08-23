@@ -2,10 +2,8 @@ from __future__ import annotations
 import logging
 from math import ceil, floor
 from typing import Any
-from uuid import uuid4
 
 from src.core.interfaces import MODE_INCREMENTAL, MODE_TARGET, Brokerage, Intent, OrderRequest
-from src.notifications.service import request_trade_approval
 
 logger = logging.getLogger(__name__)
 
@@ -445,47 +443,17 @@ def _order_quantity(quantity: Any) -> float | int:
     return int(value) if value.is_integer() else round(value, FRACTIONAL_SHARE_PRECISION)
 
 
-def _approval_skips(planned_orders: list[dict[str, str | int | float]], approval_id: str) -> list[dict[str, str | int | float]]:
-    return [
-        {
-            **planned_order,
-            "action": "skip",
-            "quantity": 0,
-            "approval_id": approval_id,
-            "approval_status": "not_approved",
-        }
-        for planned_order in planned_orders
-    ]
-
-
 def submit_planned_orders(
     brokerage: Brokerage,
     planned_orders: list[dict[str, str | int | float]],
-    *,
-    require_approval: bool = False,
-    approval_id: str | None = None,
-    approval_timeout_seconds: int = 300,
-    approval_poll_seconds: int = 5,
 ) -> list[dict[str, str | int | float]]:
-    """Submit already-planned market orders, optionally gated on trade approval.
+    """Submit already-planned market orders.
 
-    Skips (and records) short sales the brokerage reports as infeasible. Shared by the
-    algorithm rebalancer and the DCA runtime so there is a single order-submission path.
+    Skips (and records) short sales the brokerage reports as infeasible. The single
+    order-submission path, shared by every algorithm.
     """
     if not planned_orders:
         return []
-
-    if require_approval:
-        approval_id = approval_id or uuid4().hex[:10]
-        approved = request_trade_approval(
-            planned_orders,
-            approval_id=approval_id,
-            timeout_seconds=approval_timeout_seconds,
-            poll_seconds=approval_poll_seconds,
-        )
-        if not approved:
-            logger.warning("Trade approval %s was denied or timed out; skipping %s planned order(s)", approval_id, len(planned_orders))
-            return _approval_skips(planned_orders, approval_id)
 
     order_results: list[dict[str, str | int | float]] = []
     for desired_order in planned_orders:

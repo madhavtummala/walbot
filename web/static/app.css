@@ -323,9 +323,12 @@ select.ctl {
   background: rgba(255, 255, 255, 0.52);
 }
 
+/* Scoped to the fallback *articles*, not to the container. Unscoped, this reached every span
+   in the signal table and forced the action badges and gate pips to display:block -- which is
+   why a 7px pip rendered as a 2px sliver. */
 .signalSummary span,
-.signalRows span,
-.signalRows strong {
+.signalRows article span,
+.signalRows article strong {
   display: block;
   color: var(--muted);
   font-size: 11px;
@@ -447,7 +450,7 @@ select.ctl {
 }
 
 .signalSummary span,
-.signalRows span {
+.signalRows article span {
   display: block;
   color: var(--muted);
   font-size: 11px;
@@ -495,36 +498,239 @@ select.ctl {
 
 .signalTable th {
   font-size: 9px;
+  padding-left: 10px;
+  padding-right: 10px;
 }
 
 .signalTable td {
-  padding: 4px 6px;
+  padding: 6px 10px;
 }
 
-.signalStatus {
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 750;
-  max-width: 260px;
+/* Why the run did what it did. The action badge carries the decision, the gate strip carries
+   the evidence, and the expanded panel carries the measurements. */
+
+/* Sized rather than left to the browser: with auto layout the numeric columns claimed a
+   quarter of the table each while Why -- the column that carries the decision -- was clipped.
+   Every column except Why is pinned to its own content (``width: 1%`` under auto layout means
+   "as narrow as you can be"), which is what makes the gap between any two columns the same
+   20px of cell padding on every algorithm's page. Leaving the metric columns unpinned shared
+   the table's slack out among them instead, and because each algorithm publishes a different
+   set of metrics the slack landed differently every time: Bursty DCA's Price column came out
+   114px against Rally Rotation's Vol at 68px, and Why swung from 301px to 916px between the
+   two. All of it now goes to Why, the one column with prose to put in it. */
+/* Scoped to ``.signalRow`` rather than to the table. Unscoped, ``td:last-child`` also matched
+   the expanded detail row's single colspan cell and gave the whole gate list nowrap, so every
+   measurement overflowed its grid track and printed over the threshold beside it. */
+.signalTable th:nth-child(2),
+.signalTable th:nth-child(3),
+.signalTable th.num,
+.signalTable th:last-child,
+.signalRow > td:nth-child(2),
+.signalRow > td:nth-child(3),
+.signalRow > td.num,
+.signalRow > td:last-child {
+  width: 1%;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
-.signalMa.pos {
-  color: var(--good);
+.signalRow {
+  cursor: pointer;
 }
 
-.signalMa.neg {
+.signalRow:hover td,
+.signalRow:focus-visible td {
+  background: rgba(17, 24, 39, 0.05);
+}
+
+/* A row with nothing to expand. It keeps its data but drops the affordances that promise a
+   detail view -- the pointer, the caret and the hover highlight all say "click me", and there
+   is nothing behind the click. */
+.signalRow.is-ungated {
+  cursor: default;
+}
+
+.signalRow.is-ungated:hover td {
+  background: transparent;
+}
+
+.signalToggle {
+  width: 14px;
+  color: var(--muted);
+  user-select: none;
+}
+
+/* Wraps rather than truncating. An ellipsed reason is the one thing this column must never
+   be: "Ranked in the top 5 for long..." tells a reader strictly less than nothing. */
+.signalWhy {
+  /* The declared home for the table's slack, so which column absorbs it is a decision here
+     rather than whatever auto layout happened to pick from the metrics on this page. */
+  width: 100%;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+/* Capped by the inner block -- ``max-width`` on the cell itself is ignored under auto table
+   layout. The ceiling sits well above every headline the algorithms emit -- the longest live
+   one measures ~330px against a cell that runs ~650px wide -- so a reading only wraps when
+   the words genuinely need it, not while the row still has slack to spare. */
+.signalWhy .whyText {
+  display: block;
+  max-width: 52ch;
+}
+
+.actionBadge {
+  display: inline-block;
+  white-space: nowrap;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  border: 1px solid currentColor;
+}
+
+/* Entering and exiting are the two that changed something, so they are the two that carry
+   colour. A book that holds four names and touches none should read as quiet. */
+.actionBadge.is-enter { color: var(--good); background: rgba(5, 122, 85, 0.10); }
+.actionBadge.is-exit { color: var(--bad); background: rgba(180, 35, 24, 0.10); }
+.actionBadge.is-hold { color: var(--ink); background: rgba(17, 24, 39, 0.05); }
+.actionBadge.is-blocked { color: #b45309; background: rgba(180, 83, 9, 0.10); }
+.actionBadge.is-idle { color: var(--muted); border-color: var(--line); }
+
+.signalRow.is-enter td,
+.signalRow.is-exit td {
+  background: rgba(84, 116, 255, 0.05);
+}
+
+.signalRow.is-open td {
+  background: rgba(84, 116, 255, 0.08);
+}
+
+.gateStrip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.gateStrip.is-empty {
+  color: var(--muted);
+}
+
+.gatePip {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1px solid var(--muted);
+  cursor: help;
+}
+
+.gatePip.is-pass { background: var(--good); border-color: var(--good); }
+/* Hollow, not red: a failed gate on a name that was never a candidate is information, and
+   colouring all of them makes the one that actually decided the outcome impossible to find. */
+.gatePip.is-fail { background: transparent; border-color: var(--muted); }
+.gatePip.is-blocking { background: var(--bad); border-color: var(--bad); }
+
+.gateCount {
+  margin-left: 4px;
+  font-size: 9px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Indented and ruled, so the panel reads as belonging to the row above rather than as another
+   row. The ``!important`` earns its keep: ``.dataTable td:first-child`` zeroes left padding to
+   keep the table flush with the card, and the detail cell is always a first child. */
+.signalDetailRow > td {
+  padding: 2px 6px 8px 22px !important;
+  border-top: 0;
+  background: rgba(84, 116, 255, 0.05);
+  box-shadow: inset 2px 0 0 rgba(84, 116, 255, 0.35);
+}
+
+.gateList {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 6px 0 0;
+  list-style: none;
+}
+
+.gateItem {
+  display: grid;
+  /* Fixed rather than fractional: on a wide viewport 1.6fr pushed "260 bars" halfway across
+     the page, so the measurement no longer read as belonging to the gate beside it.
+     The measurement track is wide enough for the longest measurement any algorithm publishes;
+     at 22em it wrapped Bursty DCA's onto two lines with 300px of the row still empty beside
+     it. Do not reach for min()/max() here: a math function may not contain an intrinsic
+     keyword like max-content, so `minmax(160px, min(max-content, 26em))` is invalid, and the
+     whole declaration is dropped -- which silently collapses the gates to a single stacked
+     column rather than failing visibly. */
+  grid-template-columns: 40px minmax(160px, 26em) minmax(90px, 16em) minmax(80px, 18em);
+  gap: 8px;
+  justify-content: start;
+  align-items: baseline;
+  font-size: 10px;
+  padding: 2px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.gateItem:last-child {
+  border-bottom: 0;
+}
+
+.gateVerdict {
+  font-weight: 800;
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.gateItem.is-pass .gateVerdict { color: var(--good); }
+.gateItem.is-fail .gateVerdict { color: var(--muted); }
+.gateItem.is-blocking .gateVerdict { color: var(--bad); }
+/* The gate that decided it is the one a reader is looking for, so it is the only bold line. */
+.gateItem.is-blocking { font-weight: 750; }
+
+/* Every cell must be able to shrink and wrap. A grid child defaults to min-width:auto, so a
+   long measurement -- "+4% above average, range 1.0x, volume 1.0x" -- overran its track and
+   printed on top of the threshold in the column beside it. */
+.gateLabel,
+.gateValue,
+.gateLimit {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.gateValue,
+.gateLimit {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.gateItem.is-blocking .gateValue {
   color: var(--bad);
 }
 
-.signalRow--held td {
-  background: rgba(220, 252, 231, 0.12);
+.gateEmpty,
+.tableWrap > .tableNote {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 750;
+  margin: 6px 0 0;
 }
 
-.signalRow--rejected td {
-  background: rgba(254, 226, 226, 0.10);
+@media (max-width: 720px) {
+  .gateItem {
+    grid-template-columns: 36px 1fr;
+    row-gap: 0;
+  }
+
+  .gateValue,
+  .gateLimit {
+    grid-column: 2;
+  }
 }
 
 .metricGrid {
@@ -808,7 +1014,12 @@ label {
   cursor: pointer;
 }
 
-label input {
+/* Checkboxes and radios only. Unscoped, this matched every text input inside a label -- and
+   ``.configField`` is a label -- so each one was pinned to an 18px box. ``width`` was masked by
+   a later 100% rule, which left only the height leaking and made it look like cramped padding
+   rather than a fixed size: raising the padding just ate into the same 18px. */
+label input[type="checkbox"],
+label input[type="radio"] {
   accent-color: #3457d5;
   cursor: pointer;
   width: 18px;
@@ -911,6 +1122,37 @@ h2 {
   stroke-width: 3;
   stroke-linecap: round;
 }
+
+/* When the strategy traded. The equity line alone cannot say: the replay emits a row for every
+   step whether or not it ran, so a flat stretch and a rotation that happened to net out look
+   identical. */
+.trade-marker {
+  /* Decoration, not a target. The hover overlay is a single hitbox across the whole plot and
+     these are drawn under it; letting them take pointer events would punch holes in the
+     crosshair wherever the strategy happened to trade. */
+  pointer-events: none;
+  /* A halo, because the line is drawn in one of the same two colours: green when the period
+     made money, red when it lost. Without it a green buy mark dissolves into a winning curve
+     wherever a steep segment passes close to one. Opaque white rather than ``--panel``, which
+     is translucent and would let the line show through the very gap the halo opens. */
+  stroke: #ffffff;
+  stroke-width: 1.5;
+  /* Stroke first, so the halo sits behind the fill instead of eating half of a 9px triangle. */
+  paint-order: stroke;
+}
+
+.trade-marker.is-buy { fill: var(--good); }
+.trade-marker.is-sell { fill: var(--bad); }
+
+/* Bought and sold on the same step -- a rotation, which is one decision rather than two. The
+   same amber the blocked action badge uses, so "neither plainly good nor plainly bad" reads the
+   same way on the chart as it does in the signal table. */
+.trade-marker.is-rotation { fill: #b45309; }
+
+/* Traded, but the row does not record which way -- rows written before the backtest published
+   its per-symbol notionals. Grey, because guessing a direction would be worse than admitting
+   there is none. */
+.trade-marker.is-flat { fill: var(--muted); }
 
 .chart-label,
 .empty-chart {
@@ -1595,9 +1837,13 @@ h2 {
   font-size: 11px;
 }
 
+/* ``auto-fit`` collapses the empty tracks and shares the whole width between whatever is left,
+   so a two-chip strip gave each one half the page -- "Macro / Flat" in a 549px box, against a
+   sensible 177px when six chips share the same row. ``auto-fill`` keeps the empty tracks, so a
+   chip is the same size whether an algorithm publishes two of them or six. */
 .metricRow {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
   gap: 9px;
   margin-bottom: 12px;
 }
@@ -1678,11 +1924,16 @@ h2 {
   gap: 12px;
 }
 
-/* Full page to work with, so stop squeezing values into a 74px column. */
+/* Full page to work with, so stop squeezing values into a 74px column.
+   Flex rather than grid, so the input below can claim the leftover height: the cards in a row
+   are stretched to the tallest, but their contents packed from the top, which left every input
+   sitting wherever its own description happened to end -- three different heights across one
+   row of five. The field a reader is aiming for should be on one line across the row. */
 .tuneBody .configField {
-  grid-template-columns: minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 4px;
-  align-items: start;
+  align-items: stretch;
   padding: var(--tile-pad);
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -1694,10 +1945,24 @@ h2 {
   font-size: 11px;
 }
 
+/* ``margin-top: auto`` is what does the aligning: it pushes the control to the bottom of a
+   card stretched to its row's height. Taller than the compact form's 3px too -- these sit
+   beside 30px header controls, and an 18px box reads as disabled next to them. */
 .tuneBody .configField input,
 .tuneBody .configField textarea {
-  padding: 6px 8px;
+  margin-top: auto;
+  padding: 7px 9px;
   font-size: 13px;
+  /* Flex items shrink by default, and these are the shortest thing in a card whose height is
+     set by the tallest card in its row -- so the padding above was applied and then squeezed
+     straight back out, leaving an 18px box however much was asked for. */
+  flex: 0 0 auto;
+}
+
+/* Except a checkbox, which has a fixed box and would be stretched into a rectangle. */
+.tuneBody .configField input[type="checkbox"] {
+  margin-top: auto;
+  align-self: start;
 }
 
 .tuneBody .configField input[type="checkbox"] {
@@ -1835,7 +2100,10 @@ h2 {
 .deployControl {
   display: flex;
   gap: 5px;
-  align-items: center;
+  /* Top, not centre. The schedule field is two rows tall -- the input with its reading beneath
+     -- and centring the row against it lifted the input 7px clear of the power button and the
+     account picker it is supposed to sit level with. */
+  align-items: flex-start;
 }
 
 .deployTarget {
@@ -1843,6 +2111,55 @@ h2 {
   align-items: center;
   text-decoration: none;
   font-weight: 850;
+}
+
+/* Monospaced, because a cron expression is read by column and a proportional font makes a
+   step field and a spaced-out one look the same.
+   Do not write a literal step field in a CSS comment: the slash after the asterisk closes the
+   comment early, and everything after it -- including this whole rule -- is discarded. That is
+   exactly what happened here, which is why the box rendered proportional and auto-width. */
+.cronInput {
+  /* Fills the width its wrapper states, so the box and the prose under it share one edge. */
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-ligatures: none;
+}
+
+/* Input and its reading stack, so the meaning sits under the expression it belongs to rather
+   than trailing off to the right of an unrelated account picker. Also the only place an empty
+   schedule can announce itself: with no placeholder claiming the box, "Agent-driven (MCP)"
+   below it is what says a blank field is a deliberate state and not an unfilled one. */
+.cronField {
+  /* The width is stated once here and both children take it, rather than each being sized on
+     its own: the box reads its content as monospace and the hint as small proportional type,
+     so any width expressed in ``ch`` or left to the content would resolve to two different
+     numbers and the prose would stop short of the edge it is meant to share. Pinned in pixels
+     for the same reason. Wide enough for the longest expression the presets produce
+     ("15 10-14 * * 1-5") at this control's font, padding and border. */
+  --cron-width: 164px;
+  display: inline-flex;
+  /* Holds the stated width inside ``.deployControl``'s flex row, which would otherwise shrink
+     it whenever the account picker beside it wanted the space. */
+  flex: 0 0 auto;
+  width: var(--cron-width);
+  flex-direction: column;
+  /* ``stretch``, not ``flex-start``: that is what hands the full width to both children. */
+  align-items: stretch;
+  gap: 2px;
+}
+
+.cronHint {
+  font-size: 10px;
+  font-weight: 750;
+  color: var(--muted);
+  /* Wraps within the box's full width rather than spilling past it or stopping early. */
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  padding-left: 2px;
+}
+
+.cronHint.is-bad {
+  color: var(--bad);
 }
 
 

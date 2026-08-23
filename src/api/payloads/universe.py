@@ -7,7 +7,7 @@ unrelated domains. The public names are unchanged and still importable from ``ap
 
 from __future__ import annotations
 
-from ...brokerages.alpaca_client import create_data_client
+from ...brokerages.alpaca.client import create_data_client
 from ...data.universe import load_tradable_names
 
 import logging

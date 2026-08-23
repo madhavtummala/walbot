@@ -1,8 +1,11 @@
 """Alpaca market data.
 
-Extracted verbatim from ``service.py``: this is the same code, in a file named after the
-provider it belongs to. Adding a provider is now a new module plus a registry line, rather
-than an edit to the module that dispatches to every provider.
+Bars come back batched -- one call for every missing symbol -- because Alpaca's endpoint takes a
+symbol list. The base hands ``fetch_bars`` exactly the symbols the cache could not answer, so
+that batching survives intact.
+
+Daily bars are dividend-adjusted at the source (``Adjustment.ALL``), which is why SGOV shows its
+yield here rather than a flat sawtooth.
 """
 
 from __future__ import annotations
@@ -13,129 +16,71 @@ from typing import Any
 
 import pandas as pd
 
-from ...core.config import Config
-from ..support import (
-    EOD_CACHE_TTL_SECONDS, INTRADAY_CACHE_TTL_SECONDS, MARKET_CATEGORY,
-    _empty_bars, _fresh_cached_bars, _normalize_quote, _provider_bars,
-    _read_duckdb_bars, _write_duckdb_bars,
-    bars_for_minutes, default_bar_minutes, DAILY_INTERVAL_MINUTES, normalize_intraday_frame, record_provider_success,
-    resolve_bar_minutes,
-)
+from ...data.duckdb_store import DAILY_INTERVAL_MINUTES
+from ...data.provider_cache import record_provider_success
+from ..base import MarketDataProvider
+from ..frames import _normalize_quote
+from ..sources import MARKET_CATEGORY
 
 logger = logging.getLogger(__name__)
 
 
-def _fetch_alpaca_quotes(symbols: list[str], config: Config, data_client=None) -> dict[str, dict[str, Any]]:
-    from src.brokerages.alpaca_client import create_data_client, get_latest_price
+class Alpaca(MarketDataProvider):
+    name = "alpaca"
 
-    client = data_client or create_data_client(config)
-    quotes: dict[str, dict[str, Any]] = {}
-    for symbol in symbols:
-        try:
-            price = get_latest_price(symbol, client, data_feed=config.alpaca_data_feed)
-        except Exception as exc:
-            logger.info("Alpaca latest price unavailable for %s: %s", symbol, exc)
-            continue
-        quote = _normalize_quote("alpaca", symbol, price, {"price": price, "feed": config.alpaca_data_feed})
-        if quote:
-            quotes[symbol.upper()] = quote
-    if quotes:
-        record_provider_success(MARKET_CATEGORY, "alpaca")
-    return quotes
+    def fetch_price(self, symbols: list[str], *, data_client=None, **extra: Any) -> dict[str, dict[str, Any]]:
+        from src.brokerages.alpaca.client import create_data_client, get_latest_price
 
+        client = data_client or create_data_client(self.config)
+        feed = self.config.alpaca_data_feed
+        quotes: dict[str, dict[str, Any]] = {}
+        for symbol in symbols:
+            try:
+                price = get_latest_price(symbol, client, data_feed=feed)
+            except Exception as exc:  # noqa: BLE001 - one symbol must not fail the batch
+                logger.info("Alpaca latest price unavailable for %s: %s", symbol, exc)
+                continue
+            quote = _normalize_quote(self.name, symbol, price, {"price": price, "feed": feed})
+            if quote:
+                quotes[symbol.upper()] = quote
+        if quotes:
+            record_provider_success(MARKET_CATEGORY, self.name)
+        return quotes
 
-def fetch_alpaca_intraday_bars(
-    symbols: list[str],
-    config: Config,
-    *,
-    lookback_minutes: int,
-    bar_minutes: int | None = None,
-    force_refresh: bool = False,
-    data_client=None,
-    start_date: datetime | None = None,
-    end_date: datetime | None = None,
-) -> dict[str, pd.DataFrame]:
-    from src.brokerages.alpaca_client import create_data_client, get_historical_intraday_bars
-
-    interval_minutes = resolve_bar_minutes("alpaca", bar_minutes or default_bar_minutes(config))
-    lookback_bars = bars_for_minutes(lookback_minutes, interval_minutes)
-    ttl_seconds = int(getattr(config, "intraday_market_data_cache_ttl_seconds", INTRADAY_CACHE_TTL_SECONDS))
-    bars_by_symbol: dict[str, pd.DataFrame] = {}
-    missing: list[str] = []
-    for symbol in [item.upper() for item in symbols]:
-        cached = (
-            _empty_bars()
-            if force_refresh
-            else _fresh_cached_bars(
-                _read_duckdb_bars("alpaca", symbol, interval_minutes, limit=lookback_bars),
-                interval_minutes,
-            )
+    def fetch_bars(
+        self,
+        symbols: list[str],
+        *,
+        interval_minutes: int,
+        lookback_bars: int,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        data_client=None,
+        **extra: Any,
+    ) -> dict[str, pd.DataFrame]:
+        from src.brokerages.alpaca.client import (
+            create_data_client,
+            get_historical_daily_bars,
+            get_historical_intraday_bars,
         )
-        if not cached.empty:
-            bars_by_symbol[symbol] = cached.tail(lookback_bars).reset_index(drop=True)
-        else:
-            missing.append(symbol)
-    if missing:
-        client = data_client or create_data_client(config)
-        fresh = get_historical_intraday_bars(
-            missing,
+
+        client = data_client or create_data_client(self.config)
+        if interval_minutes >= DAILY_INTERVAL_MINUTES:
+            return get_historical_daily_bars(
+                symbols,
+                lookback_days=lookback_bars,
+                extra_buffer_days=0,
+                data_client=client,
+                start_date=start_date,
+                end_date=end_date,
+                data_feed=self.config.alpaca_data_feed,
+            )
+        return get_historical_intraday_bars(
+            symbols,
             lookback_bars=lookback_bars,
             bar_minutes=interval_minutes,
             data_client=client,
             start_date=start_date,
             end_date=end_date,
-            data_feed=config.alpaca_data_feed,
+            data_feed=self.config.alpaca_data_feed,
         )
-        for symbol, bars in fresh.items():
-            normalized = _provider_bars(normalize_intraday_frame(bars), interval_minutes,
-                                        start_date=start_date, end_date=end_date, limit=lookback_bars)
-            _write_duckdb_bars("alpaca", symbol, interval_minutes, normalized, ttl_seconds=ttl_seconds)
-            bars_by_symbol[symbol.upper()] = normalized
-    return bars_by_symbol
-
-
-def fetch_alpaca_eod_bars(
-    symbols: list[str],
-    config: Config,
-    *,
-    lookback_bars: int,
-    force_refresh: bool = False,
-    data_client=None,
-    start_date: datetime | None = None,
-    end_date: datetime | None = None,
-) -> dict[str, pd.DataFrame]:
-    from src.brokerages.alpaca_client import create_data_client, get_historical_daily_bars
-
-    ttl_seconds = int(getattr(config, "eod_market_data_cache_ttl_seconds", EOD_CACHE_TTL_SECONDS))
-    bars_by_symbol: dict[str, pd.DataFrame] = {}
-    missing: list[str] = []
-    for symbol in [item.upper() for item in symbols]:
-        cached = (
-            _empty_bars()
-            if force_refresh
-            else _fresh_cached_bars(
-                _read_duckdb_bars("alpaca", symbol, DAILY_INTERVAL_MINUTES, limit=lookback_bars),
-                DAILY_INTERVAL_MINUTES,
-            )
-        )
-        if not cached.empty:
-            bars_by_symbol[symbol] = cached.tail(lookback_bars).reset_index(drop=True)
-        else:
-            missing.append(symbol)
-    if missing:
-        client = data_client or create_data_client(config)
-        fresh = get_historical_daily_bars(
-            missing,
-            lookback_days=lookback_bars,
-            extra_buffer_days=0,
-            data_client=client,
-            start_date=start_date,
-            end_date=end_date,
-            data_feed=config.alpaca_data_feed,
-        )
-        for symbol, bars in fresh.items():
-            normalized = _provider_bars(normalize_intraday_frame(bars), DAILY_INTERVAL_MINUTES,
-                                        start_date=start_date, end_date=end_date, limit=lookback_bars)
-            _write_duckdb_bars("alpaca", symbol, DAILY_INTERVAL_MINUTES, normalized, ttl_seconds=ttl_seconds)
-            bars_by_symbol[symbol.upper()] = normalized
-    return bars_by_symbol

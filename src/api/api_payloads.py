@@ -1,7 +1,7 @@
 """Dashboard payload builders.
 
 A facade. The implementations live in ``src/api/payloads/`` -- one module per domain -- after
-this file reached 1253 lines spanning accounts, universe, DCA, algorithms, watchlist, controls,
+this file reached 1253 lines spanning accounts, universe, DCA, algorithms, controls,
 social, backtests and process status. Every name it used to export is still importable from
 here, resolved on attribute access so importing one domain does not drag in the other eight.
 """
@@ -18,10 +18,8 @@ _EXPORTS = {
     "BACKTEST_CACHE_STATE_KEY": "backtest",
     "BACKTEST_CACHE_VERSION": "backtest",
     "BACKTEST_STARTING_EQUITY": "backtest",
-    "DEFAULT_WATCHLIST": "watchlist",
     "DIVIDEND_ACTIVITY_DAYS": "accounts",
     "PROJECT_ROOT": "system",
-    "WATCHLIST_STATE_KEY": "watchlist",
     "_account_items": "accounts",
     "_backtest_order_summary": "backtest",
     "_backtest_response": "backtest",
@@ -46,7 +44,6 @@ _EXPORTS = {
     "_period_start": "backtest",
     "_redact": "system",
     "_save_backtest_cache": "backtest",
-    "_watchlist_symbols": "watchlist",
     "account_activity_payload": "accounts",
     "accounts_payload": "accounts",
     "algorithm_activity_payload": "algorithms",
@@ -62,14 +59,12 @@ _EXPORTS = {
     "save_account_payload": "accounts",
     "save_algorithm_config_payload": "algorithms",
     "save_controls_payload": "controls",
-    "save_watchlist_payload": "watchlist",
     "schwab_auth_payload": "controls",
     "social_payload": "social",
     "start_schwab_auth_payload": "controls",
     "status_payload": "system",
     "strategy_signals_payload": "algorithms",
     "universe_payload": "universe",
-    "watchlist_payload": "watchlist",
 }
 
 

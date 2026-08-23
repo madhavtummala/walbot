@@ -15,29 +15,19 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any, Callable
 
-#: Latest-price fetchers, by provider name. Signature: ``(symbols, config) -> {symbol: quote}``,
-#: except Alpaca which also accepts a preconstructed ``data_client``.
-QUOTE_FETCHERS: dict[str, str] = {
-    "alpaca": "src.connectors.market.alpaca:_fetch_alpaca_quotes",
-    "schwab": "src.connectors.market.schwab:_fetch_schwab_quotes",
-    "finnhub": "src.connectors.market.finnhub:_fetch_finnhub_quotes",
-    "alpha_vantage": "src.connectors.market.alpha_vantage:_fetch_alpha_vantage_quotes",
-}
+from ..common.registry import Registry
+from .base import MarketDataProvider
 
-#: Fine-grained bar fetchers, by provider name.
-INTRADAY_BAR_FETCHERS: dict[str, str] = {
-    "yfinance": "src.connectors.market.yfinance:fetch_yfinance_intraday_bars",
-    "alpaca": "src.connectors.market.alpaca:fetch_alpaca_intraday_bars",
-    "schwab": "src.connectors.market.schwab:fetch_schwab_intraday_bars",
-    "finnhub": "src.connectors.market.finnhub:fetch_finnhub_intraday_bars",
-}
-
-#: Daily bar fetchers, by provider name.
-EOD_BAR_FETCHERS: dict[str, str] = {
-    "yfinance": "src.connectors.market.yfinance:fetch_yfinance_eod_bars",
-    "alpaca": "src.connectors.market.alpaca:fetch_alpaca_eod_bars",
-    "schwab": "src.connectors.market.schwab:fetch_schwab_eod_bars",
-    "finnhub": "src.connectors.market.finnhub:fetch_finnhub_eod_bars",
+#: Market-data providers. One class per vendor, answering both questions -- price and bars --
+#: with the read-through cache supplied by :class:`~src.connectors.base.MarketDataProvider`.
+#: There is no separate intraday and EOD registry any more: they were never two kinds of data,
+#: only two grids, so a provider is registered once and asked for whichever resolution is wanted.
+MARKET_PROVIDERS: dict[str, str] = {
+    "alpaca": "src.connectors.market.alpaca:Alpaca",
+    "schwab": "src.connectors.market.schwab:Schwab",
+    "yfinance": "src.connectors.market.yfinance:YFinance",
+    "finnhub": "src.connectors.market.finnhub:Finnhub",
+    "alpha_vantage": "src.connectors.market.alpha_vantage:AlphaVantage",
 }
 
 #: Headline sentiment fetchers, by provider name.
@@ -93,22 +83,20 @@ class _LazyFetchers(dict):
         return dict(self.items())
 
 
-QUOTE_FETCHER_REGISTRY = _LazyFetchers(QUOTE_FETCHERS)
-INTRADAY_BAR_REGISTRY = _LazyFetchers(INTRADAY_BAR_FETCHERS)
-EOD_BAR_REGISTRY = _LazyFetchers(EOD_BAR_FETCHERS)
 NEWS_FETCHER_REGISTRY = _LazyFetchers(NEWS_FETCHERS_PATHS)
 
-
-def register_quote_fetcher(name: str, fetcher: Callable[..., Any] | str) -> None:
-    _register(QUOTE_FETCHER_REGISTRY, name, fetcher)
-
-
-def register_intraday_fetcher(name: str, fetcher: Callable[..., Any] | str) -> None:
-    _register(INTRADAY_BAR_REGISTRY, name, fetcher)
+MARKET_DATA: Registry[MarketDataProvider] = Registry(
+    "market data provider", MarketDataProvider, MARKET_PROVIDERS
+)
 
 
-def register_eod_fetcher(name: str, fetcher: Callable[..., Any] | str) -> None:
-    _register(EOD_BAR_REGISTRY, name, fetcher)
+def market_provider(name: str, config) -> MarketDataProvider:
+    """The provider registered under ``name``, constructed against ``config``."""
+    return MARKET_DATA.create(name, config)
+
+
+def register_market_provider(name: str, provider: type[MarketDataProvider] | str) -> None:
+    MARKET_DATA.register(name, provider)
 
 
 def register_news_fetcher(name: str, fetcher: Callable[..., Any] | str) -> None:

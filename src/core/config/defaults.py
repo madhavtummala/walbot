@@ -89,13 +89,10 @@ EOD_MARKET_DATA_CACHE_TTL_SECONDS = 1800
 #: answers them. Providers that cannot serve it fall back to their nearest coarser grid.
 MARKET_DATA_BAR_MINUTES = 5
 NEWS_SENTIMENT_CACHE_TTL_SECONDS = 1800
-REQUIRE_TRADE_APPROVAL = False
-TRADE_APPROVAL_TIMEOUT_SECONDS = 300
-TRADE_APPROVAL_POLL_SECONDS = 5
 ALGORITHM_IDS = {
     "bursty_dca",
     "rally_rotation",
-    "intraday_pick",
+    "options_flip",
 }
 
 #: Used wherever no strategy was selected, and as the fallback for a retired id.

@@ -12,7 +12,6 @@ ALGORITHMS = ("bursty_dca", "rally_rotation")
 def test_every_algorithm_has_an_explanation(algorithm_id: str) -> None:
     entry = explainer_for(algorithm_id)
     assert entry["summary"], algorithm_id
-    assert entry["behavior"], algorithm_id
     assert entry["formula"], algorithm_id
 
 
@@ -24,9 +23,10 @@ def _config_fields(algorithm_id: str) -> set[str]:
     """
     from dataclasses import fields
 
-    from src.algorithms.dca import DCA_ALGORITHMS, PLAN_KEY
-    from src.algorithms.dca.bursty import BurstyConfig
-    from src.algorithms.rally_rotation import RallyRotationConfig
+    from src.algorithms.bursty_dca.config import PLAN_KEY
+    from src.algorithms.bursty_dca.config import BurstyConfig
+    from src.algorithms.rally_rotation.config import RallyRotationConfig
+    from src.algorithms.registry import get_algorithm_class
 
     dataclasses = {
         "bursty_dca": BurstyConfig,
@@ -34,9 +34,10 @@ def _config_fields(algorithm_id: str) -> set[str]:
     }
     cls = dataclasses.get(algorithm_id)
     known = {field.name for field in fields(cls)} if cls else set()
-    if algorithm_id in DCA_ALGORITHMS:
-        # DCA's budgets are a knob the algorithm reads straight out of its config section
-        # rather than through a dataclass, so a dataclass-only view calls the plan stale.
+    if getattr(get_algorithm_class(algorithm_id), "tune_editor", None) == "budgets":
+        # The budgets are a knob the algorithm reads straight out of its config section rather
+        # than through a dataclass, so a dataclass-only view calls the plan stale. Asked of the
+        # class for the same reason the dashboard asks: it is the algorithm's own declaration.
         known.add(PLAN_KEY)
     return known
 
@@ -87,12 +88,15 @@ _PROSE_ALLOWANCES = {
     # accrual's own intermediate terms: elapsed time, and the smallest trade that can reach
     # the market. Both are computed, never configured.
     "hours_since_last_buy", "min_executable",
+    # Bursty DCA's two sizing inputs: the reference the valuation z-score is measured against,
+    # and the accrued balance expressed in months of budget. Both computed per run.
+    "moving_average", "backlog_months",
 }
 
 
 @pytest.mark.parametrize("algorithm_id", ALGORITHMS)
 def test_the_prose_does_not_describe_knobs_that_no_longer_exist(algorithm_id: str) -> None:
-    """The summary, formula and behaviour text drift silently; the parameter dict does not.
+    """The summary and formula text drift silently; the parameter dict does not.
 
     ``test_documented_knobs_still_exist_on_the_algorithm`` only checks the keys, so an
     explainer can pass every other test here while its prose describes a completely different
@@ -113,7 +117,6 @@ def test_the_prose_does_not_describe_knobs_that_no_longer_exist(algorithm_id: st
 
     prose = " ".join([
         str(explainer.get("summary", "")),
-        str(explainer.get("behavior", "")),
         " ".join(explainer.get("formula", [])),
         # Each knob's own description may name other knobs, and those go stale the same way.
         " ".join(f"{item.get('what', '')} {item.get('effect', '')}"

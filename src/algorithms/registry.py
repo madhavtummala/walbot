@@ -1,60 +1,38 @@
+"""Which algorithms exist, and how to reach one without loading the others.
+
+Every algorithm lives at ``<package>.algorithm:<Class>`` -- the same path for all of them, so
+this file states which algorithms exist rather than where each one hid its class.
+"""
+
 from __future__ import annotations
 
-from importlib import import_module
-from types import ModuleType
 from typing import Type
 
+from ..common.registry import Registry
 from .base import BaseAlgorithm
 # Identity lives in ``ids``, which imports nothing, so the config loader can canonicalise a
 # strategy id without importing this module and closing a cycle back through it.
 from .ids import ALGORITHM_ALIASES, LEGACY_ALGORITHM_IDS, canonical_algorithm_id  # noqa: F401
 
-ALGORITHM_MODULES = {
-    "rally_rotation": "src.algorithms.rally_rotation",
-    "bursty_dca": "src.algorithms.dca",
-    "intraday_pick": "src.algorithms.intraday_pick",
-}
+ALGORITHMS: Registry[BaseAlgorithm] = Registry(
+    "algorithm",
+    BaseAlgorithm,
+    {
+        "bursty_dca": "src.algorithms.bursty_dca.algorithm:BurstyDCAAlgorithm",
+        "rally_rotation": "src.algorithms.rally_rotation.algorithm:RallyRotationAlgorithm",
+        "options_flip": "src.algorithms.options_flip.algorithm:OptionsFlipAlgorithm",
+    },
+)
 
-ALGORITHM_REGISTRY: dict[str, str | Type[BaseAlgorithm]] = {
-    "bursty_dca": "src.algorithms.dca.bursty:BurstyDCAAlgorithm",
-    "rally_rotation": "src.algorithms.rally_rotation:RallyRotationAlgorithm",
-    "intraday_pick": "src.algorithms.intraday_pick:IntradayPickAlgorithm",
-}
-
-def get_algorithm_module(algorithm_id: str) -> ModuleType:
-    normalized = canonical_algorithm_id(algorithm_id)
-    module_path = ALGORITHM_MODULES.get(normalized)
-    if not module_path:
-        raise KeyError(f"Unknown algorithm: {algorithm_id}")
-    return import_module(module_path)
+for _retired, _current in ALGORITHM_ALIASES.items():
+    ALGORITHMS.alias(_retired, _current)
 
 
 def register_algorithm(algorithm_id: str, cls: Type[BaseAlgorithm]) -> None:
-    normalized = str(algorithm_id or "").strip().lower()
-    if not normalized:
-        raise ValueError("algorithm_id is required")
-    ALGORITHM_REGISTRY[normalized] = cls
-
-
-def _load_algorithm_class(path: str) -> Type[BaseAlgorithm]:
-    module_path, _, class_name = path.partition(":")
-    if not module_path or not class_name:
-        raise ValueError(f"Invalid algorithm class path: {path}")
-    module = import_module(module_path)
-    cls = getattr(module, class_name)
-    if not isinstance(cls, type) or not issubclass(cls, BaseAlgorithm):
-        raise TypeError(f"{path} is not an AlgorithmPlugin class")
-    return cls
+    """Add an algorithm at runtime. Used by tests to register a stub subject."""
+    ALGORITHMS.register(algorithm_id, cls)
 
 
 def get_algorithm_class(algorithm_id: str) -> Type[BaseAlgorithm]:
-    normalized = canonical_algorithm_id(algorithm_id)
-    entry = ALGORITHM_REGISTRY.get(normalized)
-    if entry is None:
-        raise KeyError(f"Unknown algorithm: {algorithm_id}")
-    if isinstance(entry, str):
-        cls = _load_algorithm_class(entry)
-        ALGORITHM_REGISTRY[normalized] = cls
-        return cls
-    cls = entry
-    return cls
+    """The class registered under ``algorithm_id``, importing its module on first use."""
+    return ALGORITHMS.get(algorithm_id)

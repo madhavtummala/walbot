@@ -1,10 +1,13 @@
 """Backtest by replaying an algorithm, rather than by reimplementing it.
 
-Every algorithm already exposes the two-step contract the live runner uses: ``analyze``
-proposes from market data alone, ``refine`` adjusts for what is held, ``settle`` records what
-filled. If ``analyze`` is a pure function of its ``AlgorithmContext`` -- which is the whole
-point of ``AlgorithmRequirements`` -- then a backtest is that same loop with the context built
-from history and the brokerage replaced by a fill simulator.
+Every algorithm already exposes the contract the live runner uses: ``plan`` decides from a
+context, ``execute`` places and records. If ``plan`` is a pure function of its
+``AlgorithmContext`` -- which is the whole point of ``AlgorithmRequirements`` -- then a
+backtest is that same loop with the context built from history and the brokerage replaced by
+a fill simulator.
+
+``ephemeral_state`` wraps the loop, so the algorithm state a replay reads and writes lives in
+a throwaway dict: a backtest must not read, let alone overwrite, the live account's memory.
 
 This replaces two hand-written backtests that each reimplemented a strategy's scoring logic
 and could silently drift from the algorithm they claimed to test. Adding an algorithm now
@@ -19,16 +22,16 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import pandas as pd
 
-from ..brokerages.providers.paper import PaperBrokerage
-from ..core.interfaces import AlgorithmPlugin, AlgorithmResult, CashDividend, OrderRequest
+from ..brokerages.paper.brokerage import PaperBrokerage
+from ..algorithms.base import BaseAlgorithm
+from ..core.interfaces import CashDividend, OrderRequest
 from ..core.market_context import ContextSource, build_algorithm_context
 from ..core.orders import round_shares
-from ..core.pipeline import place_orders
 from ..data.bars import TRADING_MINUTES_PER_DAY, calendar_days_for, coverage_minutes, read_history
 from ..data.state_store import ephemeral_state
 
@@ -288,7 +291,7 @@ class ReplayContextSource(ContextSource):
     def daily_bars(self, symbols: list[str], requirements, config) -> dict[str, Any]:
         return _slice_daily(self.daily_history, self.as_of)
 
-    def history_bars(self, symbols: list[str], requirements, config) -> dict[str, Any]:
+    def intraday_bars(self, symbols: list[str], requirements, config) -> dict[str, Any]:
         return self.history.bars_as_of(sorted(self.daily_history), self.as_of, self.coverage)
 
 
@@ -324,7 +327,7 @@ def _open_in_cash_equivalent(
 
 
 def replay(
-    algorithm: AlgorithmPlugin,
+    algorithm: BaseAlgorithm,
     config: Any,
     *,
     daily_history: dict[str, pd.DataFrame],
@@ -332,7 +335,10 @@ def replay(
     should_run,
     starting_equity: float,
     history_providers: list[str] | None = None,
-    fractional: bool = True,
+    # Whole shares, matching the ``PaperBrokerage`` this replay executes through: the opening
+    # buy is submitted straight to the book rather than sized through ``place_orders``, so it
+    # has to obey the same rounding the brokerage declares.
+    fractional: bool = False,
     dividends: dict[str, list[CashDividend]] | None = None,
     history: "HistoryCache | None" = None,
     open_in: str = "",
@@ -345,7 +351,7 @@ def replay(
     When ``intraday_minutes > 0`` and ``intraday_history`` is provided, the replay generates
     intraday timestamps within each trading session (every ``intraday_minutes`` from 09:30 to
     16:00 ET) and uses them as trade dates instead of daily timestamps. This lets algorithms
-    like intraday_pick that declare ``history_lookback_minutes > 0`` be backtested at their
+    like options_flip that declare ``intraday_lookback_minutes > 0`` be backtested at their
     actual execution cadence.
 
     ``daily_history`` is keyed by symbol and indexed by timestamp. ``should_run(date)`` gates
@@ -394,7 +400,7 @@ def replay(
             {ts.normalize() for ts in trade_dates}
         ),
         providers=history_providers or ["yfinance"],
-        lookback_minutes=requirements.history_lookback_minutes,
+        lookback_minutes=requirements.intraday_lookback_minutes,
     )
 
     schedule = dividend_schedule(sorted(daily_history), trade_dates, dividends)
@@ -454,56 +460,44 @@ def replay(
             order_count = 0
             turnover = 0.0
             trades: dict[str, float] = {}
+            # Alongside the notional rather than instead of it. Dollars are what the chart sizes
+            # and totals against; shares are what a reader recognises -- "+1" against a $498 ETF
+            # is a fact about the order, where "$498" could as easily be a price as a quantity.
+            trade_shares: dict[str, float] = {}
 
             if index > 0 and should_run(trade_date):
                 signal_date = trade_dates[index - 1]
-                # For intraday stepping, the daily history slice uses the normalized date
-                # so the algorithm always sees daily bars up to the correct trading day.
-                if use_intraday:
-                    daily_as_of = signal_date.normalize()
-                    # Build a daily history snapshot: for each symbol, take the daily bars
-                    # up to and including the signal date's calendar day.
-                    sliced_daily = {
-                        symbol: frame.loc[:daily_as_of]
-                        for symbol, frame in daily_history.items()
-                        if not frame.loc[:daily_as_of].empty
-                    }
-                else:
-                    sliced_daily = None
-
                 context = build_algorithm_context(
                     config,
                     requirements,
+                    algorithm_id=getattr(algorithm, "algorithm_id", ""),
                     positions={s: int(v) for s, v in positions.items()},
                     equity=equity,
+                    # The source does the slicing, for both grids: it answers strictly as of
+                    # ``signal_date`` and nothing here needs to pre-truncate anything.
                     source=ReplayContextSource(
                         signal_date,
-                        daily_history if not use_intraday else daily_history,
+                        daily_history,
                         history=history,
                         coverage=coverage,
                         intraday_history=intraday_history if use_intraday else None,
                         intraday_as_of=signal_date if use_intraday else None,
                     ),
                 )
-                decision = algorithm.analyze(context)
-                allocation_mode = str(decision.metadata.get("allocation_mode", "") or allocation_mode)
-
-                result = AlgorithmResult(
+                proposed = algorithm.plan(context)
+                plan = replace(
+                    proposed,
                     strategy=getattr(algorithm, "algorithm_id", ""),
-                    intents=[i for i in decision.resolved_intents() if i.kind != "weight" or i.value],
-                    signals=decision.signals,
+                    # Priced off the replay's own closes, not the context's: the book is
+                    # marked at these, and sizing against anything else would have the
+                    # backtest trade at a price it never records.
                     latest_prices=closes,
-                    metadata={**decision.metadata, "requirements": requirements},
-                    mode=decision.mode,
                     as_of=context.timestamp,
+                    intents=[i for i in proposed.intents if i.kind != "weight" or i.value],
                 )
-                outcome = place_orders(
-                    result,
-                    config,
-                    book,
-                    max_result_age_seconds=0,
-                    algorithm=algorithm,
-                )
+                allocation_mode = str(plan.metadata.get("allocation_mode", "") or allocation_mode)
+
+                outcome = algorithm.execute(plan, config, book)
                 filled = [o for o in outcome["order_results"] if o.get("status") == "submitted"]
                 order_count = len(filled)
                 for order in filled:
@@ -514,7 +508,9 @@ def replay(
                         contributed += value
                     symbol = str(order.get("symbol", "") or "")
                     if symbol:
+                        shares = abs(float(order.get("quantity", 0.0) or 0.0))
                         trades[symbol] = trades.get(symbol, 0.0) + (value if buying else -value)
+                        trade_shares[symbol] = trade_shares.get(symbol, 0.0) + (shares if buying else -shares)
 
                 book.mark_prices(closes)
                 account = book.get_account_state()
@@ -533,6 +529,7 @@ def replay(
                     "dividends_paid": paid_today,
                     "turnover": turnover,
                     "trades": trades,
+                    "trade_shares": trade_shares,
                     "order_count": order_count,
                     "allocation_mode": allocation_mode,
                 }

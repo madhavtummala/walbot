@@ -6,15 +6,15 @@ from typing import Any
 
 import pytest
 
-from src.brokerages import schwab_auth
-from src.brokerages.schwab_auth import (
+from src.brokerages.schwab import auth as schwab_auth
+from src.brokerages.schwab.auth import (
     PENDING_STATE_KEY,
     REFRESH_TOKEN_TTL_SECONDS,
     auth_status,
     begin_authorization,
     complete_authorization,
 )
-from src.brokerages.schwab_client import TOKEN_STATE_KEY, SchwabAuthError, SchwabSession
+from src.brokerages.schwab.client import TOKEN_STATE_KEY, SchwabAuthError, SchwabSession
 from src.core.config import Config
 from src.data.state_store import ephemeral_state
 

@@ -8,8 +8,12 @@ guards that by checking every documented parameter still exists in the saved con
 Each entry is:
   summary   -- one paragraph on what the algorithm is trying to do
   formula   -- the actual arithmetic, in the same terms the code uses
-  behavior  -- what it does across a day/month, including when it deliberately does nothing
   parameters -- per knob: what it is, and which direction to move it for which effect
+
+There was a fourth, ``behavior``: a closing paragraph on what the algorithm does across a day
+or a month. It is gone because it could only ever restate its neighbours -- the summary above
+it and the formula between them already say what runs, when, and in what order, so the third
+telling read as filler on a card a person opens to find one knob.
 """
 
 from __future__ import annotations
@@ -19,59 +23,73 @@ from typing import Any
 EXPLAINERS: dict[str, dict[str, Any]] = {
     "bursty_dca": {
         "summary": (
-            "Accrues exactly the same monthly budget as DCA, but sizes each buy proportionally "
-            "to how far the price has fallen from its peak. Deeper dips get bigger buys. "
-            "Buys at 11 AM, sells at 3 PM (requires ``frequency: 1hr`` on the dashboard)."
+            "Accrues a monthly budget per symbol, then sizes each order by two things at once: "
+            "how far the price sits from its moving average, and how far ahead of or behind its "
+            "plan that symbol already is. Cheap names buy more, rich names buy less or sell, "
+            "and a symbol that has already overspent resists spending again until it catches "
+            "up. Runs on the schedule its binding states — by default once a weekday at 11 AM."
         ),
         "formula": [
-            "drawdown = max(0, (peak - price) / peak)",
-            "size = monthly_budget × (1 + drawdown × scaling_factor)",
-            "cap = max_monthly_multiple × monthly_budget × (1 + drawdown × cap_boost)",
-            "buys execute at 11 AM, sells execute at 3 PM",
+            "z = (moving_average − price) / stdev, clamped to ±3σ",
+            "conviction  = max(0, 1 + scaling_factor × (z if buying else −z))",
+            "willingness = 1 + relax_depth × tanh(backlog_months / relax_months)",
+            "allowance   = monthly_budget × (backlog_months + relax_months × conviction)",
+            "size = min(monthly_budget × conviction × willingness, allowance, cap room)",
+            "cap = max_monthly_multiple × monthly_budget",
+            "if size < one share, but the accrued balance covers one, send exactly one",
         ],
-        "behavior": (
-            "Runs twice per day: buys at 11 AM when spreads are tightest, sells at 3 PM when "
-            "institutional liquidity peaks. Deeper dips produce larger buys automatically. "
-            "The monthly cap scales with drawdown via cap_boost, so crash months can deploy "
-            "more capital without a hard threshold."
-        ),
         "parameters": {
             "plan": {
                 "what": "The monthly dollar budget for each symbol, set on the bubble board.",
                 "effect": (
-                    "Its own plan, separate from DCA's: the two accrue the same way but deploy "
-                    "on different terms, so they are tuned independently. Higher budget accrues "
-                    "faster, so a qualifying dip buys more."
+                    "The rate the budget accrues at, per symbol, and the base every multiple "
+                    "is applied to. A higher budget accrues faster, so a dislocation buys more."
                 ),
             },
             "regime_ma_days": {
-                "what": "Reference moving average period used to compute drawdown from peak.",
+                "what": "Window for the moving average and for the standard deviation that normalizes distance from it.",
                 "effect": (
-                    "Longer (300) uses a longer lookback for the peak reference. Shorter (50) "
-                    "uses a shorter lookback, making the peak recency-sensitive."
+                    "Longer (300) measures dislocation against a slower average, so it reads a "
+                    "multi-month decline as cheap. Shorter (50) reacts to recent moves and will "
+                    "call a symbol fairly priced sooner after it falls."
                 ),
             },
             "scaling_factor": {
-                "what": "How much to scale buy size per unit of drawdown.",
+                "what": "Extra multiples of the monthly budget per standard deviation of favourable dislocation.",
                 "effect": (
-                    "size = budget × (1 + scaling_factor × drawdown). At 20 and 5% drawdown: "
-                    "2× budget. At 20 and 10% drawdown: 3× budget. Higher values concentrate "
-                    "more budget into deep dips."
+                    "size multiple = 1 + scaling_factor × z. At 0.5 and 1σ below the average: "
+                    "1.5× budget. At 0.5 and 2σ: 2×. Measured in sigma rather than percent, so "
+                    "one setting works for both a broad bond ETF and a volatile single name. "
+                    "Above 1/3 the buy side reaches zero before −3σ and stops buying rich names "
+                    "entirely."
                 ),
             },
-            "cap_boost": {
-                "what": "How much to scale the monthly cap with drawdown.",
+            "relax_months": {
+                "what": (
+                    "Width of the backlog resistance curve, and the overdraft a neutral price "
+                    "may borrow — both in months of budget."
+                ),
                 "effect": (
-                    "cap = max_monthly_multiple × budget × (1 + cap_boost × drawdown). "
-                    "At 1 and 10% drawdown: cap doubles. At 1 and 20% drawdown: cap triples. "
-                    "Set to 0 for a fixed cap regardless of drawdown."
+                    "Longer (6) makes backlog matter slowly and lets a symbol run months ahead "
+                    "of plan. Shorter (0.5) pulls hard toward the plan rate and makes it behave "
+                    "much more like straight DCA. This is the knob that governs the long-run "
+                    "spend rate; max_monthly_multiple only bounds a single month."
+                ),
+            },
+            "relax_depth": {
+                "what": "How far the backlog factor swings either side of 1.0 as the backlog saturates.",
+                "effect": (
+                    "At 0.7 a symbol months overspent deploys 0.3× and one months behind "
+                    "deploys 1.7×. Set to 0 to disable backlog resistance and size on valuation "
+                    "alone. Values near 1 let an overspent symbol stop trading almost entirely."
                 ),
             },
             "max_monthly_multiple": {
                 "what": "Ceiling on total deployment per symbol per month, in multiples of the monthly budget.",
                 "effect": (
-                    "Bounds how far ahead of schedule it can get. At 3.0 a month of repeated dips can "
-                    "spend three months of budget. Set to 1.0 to never exceed the plan rate."
+                    "A backstop rather than the main control — relax_months governs the pacing. "
+                    "At 3.0 a month of repeated dislocations can spend three months of budget. "
+                    "Set to 1.0 to never exceed the plan rate within a month."
                 ),
             },
         },
@@ -108,16 +126,6 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "whatever is left undeployed, and anything held when nothing qualifies, sits in",
             "  the defensive universe rather than in cash",
         ],
-        "behavior": (
-            "Runs once per session on daily bars, but only re-ranks every rerank_interval_days: "
-            "the rate at which it looks and the rate at which it acts are separate, and the "
-            "score's slowest horizon is twelve sessions, so asking it for a new answer daily "
-            "mostly buys noise. The exception is the crash stop, which runs every session. "
-            "It holds the defensive sleeve rather than the least-bad risk-on ETF, and fewer "
-            "qualifying names means holding less, never a lower bar. Entry and exit are "
-            "deliberately asymmetric: a name that would not be bought today is not thereby "
-            "worth selling."
-        ),
         "parameters": {
             "risk_on_universe": {"what": "The ETFs it may hold.", "effect": "Scores are cross-sectional, so adding or removing a name changes every other name's z-score."},
             "defensive_universe": {"what": "Where the book sits when nothing qualifies, and where undeployed gross is parked.", "effect": "Short-duration choices (BIL) make risk-off flat; TLT or GLD make it an active macro bet."},
@@ -193,7 +201,7 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "defensive_max_positions": {"what": "How many defensive names to hold in risk-off.", "effect": "One is a pure cash-equivalent stance; two splits between, say, bills and gold."},
         },
     },
-    "intraday_pick": {
+    "options_flip": {
         "summary": (
             "Directional options: the macro trend on the benchmark determines whether to buy "
             "calls (bull) or puts (bear). The highest-scoring candidate from the tradable "
@@ -221,13 +229,6 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "  1. BUY N contracts at entry_limit (limit, day)",
             "  2. SELL N contracts at exit_limit (limit, GTC)",
         ],
-        "behavior": (
-            "Runs intraday on a configurable schedule (default every 15 minutes during market "
-            "hours). Each cycle: detect macro trend on the benchmark, score candidates, and "
-            "if a qualifying name is found, place entry and exit limit orders. The GTC exit "
-            "order persists until filled or cancelled. Lost trades are accepted -- the user "
-            "controls risk via contracts_per_signal and max_notional_per_trade."
-        ),
         "parameters": {
             "benchmark_symbol": {"what": "Symbol used to determine macro trend direction.", "effect": "SPY for broad market, QQQ for tech-heavy, IWM for small-caps."},
             "trend_ma_period": {"what": "Moving average period for the macro trend filter.", "effect": "Longer = slower to switch direction, fewer false signals."},
@@ -248,5 +249,5 @@ def explainer_for(algorithm_id: str) -> dict[str, Any]:
     """Explanation for one algorithm, with an empty shape when none is written yet."""
     entry = EXPLAINERS.get(str(algorithm_id or ""))
     if not entry:
-        return {"summary": "", "formula": [], "behavior": "", "parameters": {}}
+        return {"summary": "", "formula": [], "parameters": {}}
     return entry

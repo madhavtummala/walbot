@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from src.api.api_payloads import account_activity_payload, accounts_payload, positions_payload
-from src.brokerages.providers.paper import PaperBrokerage
+from src.brokerages.paper.brokerage import PaperBrokerage
 from src.core.config import (
     UNNAMED_ACCOUNT_ID,
     Config,
@@ -72,6 +72,21 @@ def test_the_book_tracks_average_entry_so_it_can_report_pl() -> None:
         row = next(row for row in brokerage.book()["rows"] if row["symbol"] == "SPY")
         assert row["unrealized_pl"] == 400.0
         assert round(row["unrealized_plpc"], 4) == 0.1818
+
+
+def test_the_paper_book_is_whole_share_only() -> None:
+    """Sizing reads whole-share off the class, and a fractional order is refused outright.
+
+    Backtests execute through this same class, so the flag moves both paths at once -- and
+    refusing in ``submit_order`` is what stops anything bypassing the sizer from filling.
+    """
+    assert PaperBrokerage.supports_fractional_shares is False
+
+    with ephemeral_state():
+        brokerage = PaperBrokerage(get_config(account_id=LOCAL))
+        with pytest.raises(ValueError, match="whole shares only"):
+            brokerage.submit_order(_order("SPY", "buy", 10.5, 100.0))
+        assert brokerage.get_positions() == {}
 
 
 def test_selling_part_of_a_position_leaves_the_basis_alone() -> None:
@@ -175,9 +190,20 @@ def test_a_non_alpaca_account_is_not_reported_from_alpaca(monkeypatch) -> None:
         def get_positions(self):
             return {"SPY": 3.0}
 
+        def get_position_details(self):
+            return [
+                {
+                    "symbol": "SPY",
+                    "qty": 3.0,
+                    "avg_entry_price": 0.0,
+                    "market_value": 300.0,
+                    "unrealized_pl": 0.0,
+                    "unrealized_plpc": 0.0,
+                }
+            ]
+
     _patch_payloads(monkeypatch, "get_account_broker_type", lambda _account: "schwab")
     monkeypatch.setattr("src.core.pipeline.resolve_brokerage", lambda _config: FakeBrokerage())
-    _patch_payloads(monkeypatch, "load_latest_prices", lambda symbols, config, client: {"SPY": 100.0})
 
     def fail(*_args, **_kwargs):
         raise AssertionError("the Alpaca client must not be used for a Schwab account")
@@ -190,8 +216,7 @@ def test_a_non_alpaca_account_is_not_reported_from_alpaca(monkeypatch) -> None:
     assert payload["cash"] == 321.0
     assert [row["symbol"] for row in payload["rows"]] == ["SPY"]
     assert payload["rows"][0]["market_value"] == 300.0
-    # The interface carries no cost basis, so P/L stays absent rather than a misleading zero.
-    assert payload["total_pl"] is None
+    assert payload["total_pl"] == 0.0
 
 
 def test_config_resolves_real_files_from_the_repo_root() -> None:

@@ -201,7 +201,7 @@ def test_a_payment_past_the_end_of_the_replay_is_not_lost() -> None:
 
 def test_the_paper_book_credits_a_dividend_once(db: str, monkeypatch, tmp_path) -> None:
     """A real account is paid whether or not anything asked, but only once per payment."""
-    from src.brokerages.providers import paper
+    from src.brokerages.paper import brokerage as paper
 
     import src.data.dividends as dividends_module
 
@@ -263,7 +263,7 @@ def test_a_schwab_account_number_matches_however_it_is_punctuated() -> None:
     Matching the raw strings 404'd a correctly configured account, and because the dashboard
     falls back to the default account on error, the Schwab tab then showed Alpaca's money.
     """
-    from src.brokerages.schwab_client import _digits, account_hash
+    from src.brokerages.schwab.client import _digits, account_hash
 
     assert _digits("0000-0000") == _digits("00000000") == "00000000"
 
@@ -277,7 +277,7 @@ def test_a_schwab_account_number_matches_however_it_is_punctuated() -> None:
 
 
 def test_an_unknown_schwab_account_still_raises() -> None:
-    from src.brokerages.schwab_client import SchwabAPIError, account_hash
+    from src.brokerages.schwab.client import SchwabAPIError, account_hash
 
     class _Session:
         def get(self, url, **kwargs):
@@ -301,7 +301,7 @@ def test_a_brokerage_reports_no_income_rather_than_failing() -> None:
 
 
 def test_the_paper_book_reports_the_dividends_it_booked(db: str, monkeypatch) -> None:
-    from src.brokerages.providers import paper
+    from src.brokerages.paper import brokerage as paper
     import src.data.dividends as dividends_module
 
     write_dividends([_dividend("SGOV", "2026-07-01", 0.30)], db_path=db)

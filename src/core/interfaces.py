@@ -4,26 +4,33 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 import pandas as pd
+
+#: Every cron expression is evaluated in this zone -- the market's own, so "0 11 * * 1-5"
+#: means the NYSE morning and DST shifts move scheduled runs with the session rather than
+#: away from it. See :mod:`src.core.cron`.
+MARKET_TZ = ZoneInfo("America/New_York")
 
 @dataclass(frozen=True)
 class AlgorithmContext:
-    """Everything ``analyze`` is allowed to read.
+    """Everything ``plan`` is allowed to read.
 
-    ``analyze`` must be a pure function of this context: no fetching, no clock, no state
-    store. That is what lets the same call be driven by the live runner against today's data
-    and by the backtester against a point-in-time slice, instead of the backtester having to
-    reimplement the strategy -- which is what it used to do, and what let the two drift.
+    ``plan`` must be a pure function of this context: no fetching, no clock, no brokerage, no
+    state store. Every input it needs -- bars, holdings, equity, memory of previous runs --
+    arrives here as plain data, which is what lets the same call be driven by the live runner
+    against today's account and by the backtester against a point-in-time slice, instead of
+    the backtester having to reimplement the strategy.
     """
 
     config: Any
     #: Daily OHLCV per symbol, already truncated to what the algorithm may see. Kept distinct
     #: because the moving-average and regime gates are statements about daily closes.
-    bars_by_symbol: Dict[str, pd.DataFrame] = field(default_factory=dict)
-    #: Timestamped OHLCV per symbol covering ``AlgorithmRequirements.history_lookback_minutes``,
+    daily_bars_by_symbol: Dict[str, pd.DataFrame] = field(default_factory=dict)
+    #: Timestamped OHLCV per symbol covering ``AlgorithmRequirements.intraday_lookback_minutes``,
     #: at whatever resolution was available -- possibly blending fine bars recently with
     #: coarser ones further back. Read it through ``src/data/bars.py``, never by position.
-    history_bars_by_symbol: Dict[str, pd.DataFrame] = field(default_factory=dict)
+    intraday_bars_by_symbol: Dict[str, pd.DataFrame] = field(default_factory=dict)
     #: Per-symbol sentiment score, plus the universe-wide average.
     sentiment_scores: Dict[str, float] = field(default_factory=dict)
     market_sentiment: float = 0.0
@@ -31,6 +38,12 @@ class AlgorithmContext:
     latest_prices: Dict[str, float] = field(default_factory=dict)
     equity: float = 0.0
     account_id: str = ""
+    #: What this binding remembered from its last run -- an accrued budget, a re-entry
+    #: cooldown, an eligibility history. Loaded by the context builder when
+    #: ``AlgorithmRequirements.needs_state`` asks for it, so the algorithm reads memory the
+    #: same way it reads bars: as data it was handed, never as a store it goes to itself.
+    #: Keyed per binding, since two accounts running one algorithm are two separate books.
+    state: Dict[str, Any] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     extra: Dict[str, Any] = field(default_factory=dict)
 
@@ -39,27 +52,29 @@ class AlgorithmContext:
 class AlgorithmRequirements:
     """What data the algorithm needs, so the caller can load it once and hand it over.
 
-    Declaring the need here rather than fetching inside ``analyze`` is what makes an
-    algorithm replayable: the backtester satisfies the same declaration from cached history.
+    Declaring the need here rather than fetching inside ``plan`` is what makes an algorithm
+    replayable: the backtester satisfies the same declaration from cached history.
     """
 
     price_symbols: List[str] = field(default_factory=list)
     daily_lookback_days: Optional[int] = None
     daily_ma_days: int = 0
     daily_extra_buffer_days: int = 0
-    include_latest_daily: bool = True
-    #: How far back the algorithm needs timestamped bars, in minutes the market was open --
+    #: How far back the algorithm needs intraday bars, in minutes the market was open --
     #: 4800 is about twelve sessions, not three and a bit days. Stated in minutes rather than
     #: bars because a bar count only means a span of time once the grid is known, and the grid
     #: is now the feed's business: Schwab serves 1/5/10/15/30-minute bars where yfinance served
     #: 15. The lookback resolves against whichever resolution the cache holds -- down to daily,
     #: at the far end of a long window. See ``src/data/bars.py``.
-    history_lookback_minutes: int = 0
+    intraday_lookback_minutes: int = 0
     #: The finest grid the algorithm would like, when it has a preference. 0 takes the
     #: configured default. A provider that cannot serve it supplies its nearest coarser grid
     #: rather than failing, because the horizons no longer depend on getting an exact one.
     preferred_bar_minutes: int = 0
     needs_sentiment: bool = False
+    #: Whether ``AlgorithmContext.state`` should be loaded for this run. Only algorithms that
+    #: carry something between runs pay for the read.
+    needs_state: bool = False
     paper_only: bool = False
 
 #: An algorithm's intent list is the complete portfolio: a held symbol absent from it is exited.
@@ -100,21 +115,37 @@ def weights_from_intents(intents: List[Intent]) -> Dict[str, float]:
 
 
 @dataclass(frozen=True)
-class AlgorithmDecision:
-    target_weights: Dict[str, float] = field(default_factory=dict)
-    signals: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    min_trade_dollars: float = 0.0
-    rebalance_threshold: float = 0.0
-    #: Left empty by weight-based algorithms, which populate ``target_weights`` instead.
-    intents: List[Intent] = field(default_factory=list)
-    mode: str = MODE_TARGET
+class AlgorithmPlan:
+    """What an algorithm wants to do, and everything needed to act on it.
 
-    def resolved_intents(self) -> List[Intent]:
-        """The decision as intents, deriving them from ``target_weights`` when unset."""
-        if self.intents:
-            return list(self.intents)
-        return intents_from_weights(self.target_weights)
+    One object for one run. There used to be two -- a ``decision`` from step 1 and a
+    ``result`` that carried it to step 2 -- which existed only because the halves ran at
+    different moments and had to survive the gap between them. ``plan`` runs once against a
+    context that already holds positions and equity, so there is no gap, no wire format, and
+    nothing that can go stale in between.
+
+    ``latest_prices`` travels with the plan because ``execute`` does no data fetching of its
+    own: a symbol it cannot price is one the plan never priced.
+    """
+
+    strategy: str = ""
+    intents: List[Intent] = field(default_factory=list)
+    signals: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    latest_prices: Dict[str, float] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    mode: str = MODE_TARGET
+    as_of: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    #: What ``AlgorithmContext.state`` should become -- committed by ``execute`` once orders
+    #: have actually been placed, and never before. A plan that is only ever looked at (the
+    #: dashboard, an agent inspecting a proposal) leaves the stored state untouched, so
+    #: viewing what an algorithm would do cannot change what it does next.
+    state: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def target_weights(self) -> Dict[str, float]:
+        """The weight intents as a mapping. Derived, so it can never disagree with them."""
+        return weights_from_intents(self.intents)
+
 
 @dataclass(frozen=True)
 class PortfolioSnapshot:
@@ -144,41 +175,71 @@ class PortfolioSnapshot:
         }
 
 
-@dataclass(frozen=True)
-class AlgorithmResult:
-    """Step 1 output: what the algorithm proposes from market data alone.
+#: What a run decided about one symbol. Five outcomes, and every algorithm's decision is one
+#: of them however differently it arrived there -- which is what lets one dashboard render all
+#: of them without knowing which algorithm it is looking at.
+ACTION_ENTER = "enter"      #: Opening a position that was not held.
+ACTION_HOLD = "hold"        #: Keeping one that was, whether or not it would be bought today.
+ACTION_EXIT = "exit"        #: Closing one that was held.
+ACTION_BLOCKED = "blocked"  #: Wanted, but a gate said no. ``checks`` says which.
+ACTION_IDLE = "idle"        #: Neither held nor wanted this run.
 
-    Deliberately free of positions, equity, and brokerage state so it can be produced without
-    an account, handed to an agent for validation, and passed back into step 2 unchanged.
-    ``latest_prices`` travels with the result because step 2 does no data fetching of its own.
+ACTIONS = (ACTION_ENTER, ACTION_HOLD, ACTION_EXIT, ACTION_BLOCKED, ACTION_IDLE)
+
+
+@dataclass(frozen=True)
+class Check:
+    """One gate, as this run measured it.
+
+    The unit the dashboard explains a decision in. A gate that is only a boolean can say *that*
+    a name was rejected; carrying the measured value beside the threshold it had to clear says
+    *by how much*, which is the difference between "not eligible" and "-6.2% against a -3.0%
+    band". Both strings are pre-formatted by the algorithm, because only it knows whether a
+    number is a percentage, a dollar amount or a count of runs.
     """
 
-    strategy: str
-    target_weights: Dict[str, float] = field(default_factory=dict)
-    signals: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    latest_prices: Dict[str, float] = field(default_factory=dict)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    as_of: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    intents: List[Intent] = field(default_factory=list)
-    mode: str = MODE_TARGET
+    label: str
+    ok: bool
+    #: What this run measured, formatted. "-6.2%", "$450", "2 of 5 runs".
+    value: str = ""
+    #: What it had to be, formatted with its comparison. "> -3.0%", "<= 55%".
+    limit: str = ""
+    #: Whether failing this is what actually decided the outcome. Several gates can fail at
+    #: once; the blocking one is the answer to "why", and the rest are context.
+    blocking: bool = False
 
-    def __post_init__(self) -> None:
-        # ``intents`` is what step 2 consumes, but weight-mode callers (the MCP agent, the
-        # dashboard) construct results from ``target_weights``. Keep the two consistent
-        # whichever one was supplied so neither view of the result can go stale.
-        if not self.intents and self.target_weights:
-            object.__setattr__(self, "intents", intents_from_weights(self.target_weights))
-        elif self.intents and not self.target_weights:
-            object.__setattr__(self, "target_weights", weights_from_intents(self.intents))
+
+@dataclass(frozen=True)
+class SignalRow:
+    """One symbol's decision, and the evidence for it.
+
+    Deliberately a fixed schema rather than a bag of whatever numbers an algorithm happened to
+    compute. The dashboard used to sniff for known keys -- ``peak``, ``vol_5d``, ``rank`` -- to
+    decide which columns to draw, so adding a signal meant editing the frontend, and the only
+    account of *why* anything happened was one free-text ``reason`` string.
+    """
+
+    symbol: str
+    action: str = ACTION_IDLE
+    #: One line stating the decision in the algorithm's own terms: "Rank 2 - held",
+    #: "Accruing ($40 of $500)", "Below exit band".
+    headline: str = ""
+    #: The few numbers worth showing beside the decision, each pre-formatted and labelled by
+    #: the algorithm. Declared rather than detected, so a column is something an algorithm asks
+    #: for rather than something the deck guesses at.
+    metrics: List[Dict[str, str]] = field(default_factory=list)
+    #: Every gate this run applied to this symbol, passed and failed alike. Passed ones matter:
+    #: they are how a reader tells "cleared everything but the vol ceiling" from "failed at the
+    #: first hurdle".
+    checks: List[Check] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
 class SignalView:
-    """Dashboard-ready view of an algorithm's current signals."""
+    """Dashboard-ready view of an algorithm's current decisions."""
 
-    leaders: List[Dict[str, Any]] = field(default_factory=list)
+    rows: List[SignalRow] = field(default_factory=list)
     summary: List[Dict[str, str]] = field(default_factory=list)
-    wired: bool = True
 
 @dataclass(frozen=True)
 class CashDividend:
@@ -287,6 +348,29 @@ class Brokerage(ABC):
         """
         return {}
 
+    def get_position_details(self) -> List[Dict[str, Any]]:
+        """Full position data per symbol: qty, avg_entry_price, market_value, unrealized_pl, unrealized_plpc.
+
+        The single source for the accounts page.  Defaults to reading ``get_positions`` +
+        ``get_marks`` and filling the rest as zeros, which is what the non-Alpaca path did
+        by hand before this existed.
+        """
+        holdings = self.get_positions()
+        if not holdings:
+            return []
+        marks = self.get_marks(sorted(holdings))
+        return [
+            {
+                "symbol": symbol,
+                "qty": float(shares),
+                "avg_entry_price": 0.0,
+                "market_value": float(shares) * float(marks.get(symbol, 0.0)),
+                "unrealized_pl": 0.0,
+                "unrealized_plpc": 0.0,
+            }
+            for symbol, shares in holdings.items()
+        ]
+
     def cash_equivalent_symbols(self) -> List[str]:
         """Symbols this account treats as cash. See ``BaseBrokerage`` for the config-backed one."""
         return []
@@ -339,157 +423,3 @@ class Brokerage(ABC):
         """
         return {"shortable": False, "reason": "short sale not confirmed by brokerage"}
 
-@dataclass(frozen=True)
-class Schedule:
-    """When an algorithm is allowed to act.
-
-    Declared in code on the algorithm class rather than in config, because cadence is a
-    property of the strategy and not of the deployment: running DCA hourly only burns API
-    calls. Two algorithms that want different cadences cannot share one config knob, which
-    is what the old ``algorithm_market_data_refresh_minutes`` forced them to do.
-
-    Cadence never controls how much DCA spends -- accrual is wall-clock (see
-    ``algorithms/dca/accrual.py``), so this decides only how often a symbol gets the
-    *opportunity* to deploy what it has already accrued.
-    """
-
-    #: Minutes between opportunities within a session. Anything at or above the session
-    #: length yields exactly one run per trading day.
-    refresh_minutes: int = 60
-    #: Spread runs deterministically within the bucket, so every deployment does not hit the
-    #: market data provider on the same minute.
-    jitter_minutes: int = 5
-    #: Market-local window, as ``HH:MM``.
-    start_time: str = "08:30"
-    end_time: str = "15:00"
-    #: Weekdays the algorithm may run at all, ``0`` being Monday. This is the part
-    #: ``refresh_minutes`` cannot express: bucketing happens inside a session, so without it
-    #: the coarsest possible cadence would be daily.
-    weekdays: tuple[int, ...] = (0, 1, 2, 3, 4)
-    #: How often the runtime loop wakes to test the schedule. Not a cadence in itself.
-    check_seconds: int = 60
-
-
-#: Once per trading day, at the open. Shared by algorithms whose inputs are daily bars, where
-#: a second look in the same session cannot produce a different answer.
-DAILY_AT_OPEN = Schedule(refresh_minutes=390, jitter_minutes=15)
-
-_WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
-
-
-def schedule_minutes(value: str, default: int = 0) -> int:
-    """Parse ``HH:MM`` into minutes past midnight, falling back to ``default``."""
-    try:
-        hour, minute = str(value or "").strip().split(":", 1)
-        parsed = (int(hour) * 60) + int(minute)
-    except (TypeError, ValueError):
-        return default
-    return parsed if 0 <= parsed <= (23 * 60) + 59 else default
-
-
-def describe_schedule(schedule: Schedule) -> str:
-    """Render a schedule for the dashboard, e.g. ``"Mondays at 08:30"``.
-
-    Deliberately not shown in the live signal view: cadence is set per binding on the
-    dashboard and every algorithm runs inside the trading session regardless, so a Schedule
-    row beside the signals restated the deployment the reader had just configured -- and, when
-    it read the class instead of the binding, restated it wrongly.
-    """
-    days = tuple(sorted(set(schedule.weekdays)))
-    if not days:
-        return "Never"
-    if days == (0, 1, 2, 3, 4):
-        day_text = "Weekdays"
-    elif len(days) == 1:
-        day_text = f"{_WEEKDAY_NAMES[days[0]]}s"
-    else:
-        day_text = ", ".join(_WEEKDAY_NAMES[day][:3] for day in days)
-
-    cadence = schedule.refresh_minutes
-    session_minutes = schedule_minutes(schedule.end_time) - schedule_minutes(schedule.start_time)
-    if cadence >= max(session_minutes, 1):
-        return f"{day_text} at {schedule.start_time}"
-    return f"{day_text}, every {cadence}m from {schedule.start_time} to {schedule.end_time}"
-
-
-class AlgorithmPlugin(ABC):
-    algorithm_id: str = ""
-
-    #: Cadence, declared per algorithm. See :class:`Schedule`.
-    schedule: Schedule = Schedule()
-
-    def requirements(self, config: Any, current_positions: Dict[str, int]) -> AlgorithmRequirements:
-        return AlgorithmRequirements()
-
-    @abstractmethod
-    def generate_signals(self, context: AlgorithmContext) -> List[Dict[str, Any]]:
-        pass
-
-    def decide(self, context: AlgorithmContext) -> AlgorithmDecision:
-        return AlgorithmDecision()
-
-    def analyze(self, context: AlgorithmContext) -> AlgorithmDecision:
-        """Step 1: propose weights from market data alone.
-
-        ``context.positions`` and ``context.equity`` are empty here by construction. Anything
-        that depends on what is currently held belongs in ``refine``. Defaults to ``decide``
-        so an algorithm with no position-aware logic needs no changes.
-        """
-        return self.decide(context)
-
-    def refine(
-        self,
-        intents: List[Intent],
-        signals: Dict[str, Dict[str, Any]],
-        snapshot: PortfolioSnapshot,
-        latest_prices: Dict[str, float],
-        config: Any,
-        as_of: datetime,
-    ) -> List[Intent]:
-        """Step 2: adjust the proposed intents for what is already held.
-
-        This is where hysteresis lives -- stickiness, turnover thresholds, per-trade minimums,
-        exposure caps. ``intents`` may have been edited by a reviewing agent, so honour them as
-        the intent rather than re-deriving from ``signals``. Defaults to a passthrough.
-
-        ``as_of`` is the moment step 1 described, and is the *only* clock step 2 may read.
-        Everything stateful here -- a session drawdown breaker, a re-entry cooldown, a value
-        averaging path -- is a statement about elapsed time, and reading the wall clock instead
-        makes those answers wrong in a replay, where every step would be "now". It is a
-        required argument rather than an optional one for exactly that reason: a default would
-        put the wall clock back one forgetful call site at a time.
-        """
-        return list(intents)
-
-    def settle(
-        self,
-        config: Any,
-        order_results: List[Dict[str, Any]],
-        intents: List[Intent],
-    ) -> None:
-        """Record what actually reached the market, after step 2 has submitted.
-
-        Only algorithms that carry state between runs need this. DCA draws its accrued budget
-        down here rather than at proposal time, so a run that proposes but never submits --
-        a denied approval, a rejected order -- keeps its budget instead of spending it on
-        nothing. Defaults to doing nothing.
-        """
-        return None
-
-    def sizing(self, config: Any) -> Dict[str, float]:
-        """Order-sizing knobs for step 2, defaulting to the account config.
-
-        Deliberately no cash buffer. How much of the book to deploy is a strategy decision,
-        already stated by whatever gross-exposure cap the algorithm applies to its own weights;
-        holding cash back to *fund* a batch is an account decision, applied once against
-        buying power in ``pipeline.place_orders``. Fusing the two is what made every
-        exposure-capped algorithm override this to zero to avoid under-investing twice.
-        """
-        return {
-            "min_trade_dollars": float(getattr(config, "min_trade_dollars", 0.0) or 0.0),
-            "rebalance_threshold": float(getattr(config, "rebalance_threshold", 0.0) or 0.0),
-        }
-
-    def signal_view(self, config: Any, *, data_client: Any = None) -> SignalView:
-        """Return dashboard-ready signals for this algorithm. Default: not wired."""
-        return SignalView(wired=False)

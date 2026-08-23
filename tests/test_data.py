@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 import pandas as pd
 import pytest
 
-from src import data
 from src.data import bars as bars_module
 from src.data import cache_warmup, duckdb_store, provider_cache
 
@@ -256,7 +255,7 @@ def test_provider_bars_are_stamped_when_the_close_happened() -> None:
     not be known for another six hours. Stamping happens where a payload becomes bars, so a
     fetcher's return value and the rows it stores cannot disagree by an interval.
     """
-    from src.connectors.service import _provider_bars
+    from src.connectors.cache import _provider_bars
 
     intraday = _provider_bars(_bars(["2026-06-04T14:30:00Z"]), 5)
     assert pd.Timestamp(intraday["timestamp"].iloc[0]) == pd.Timestamp("2026-06-04T14:35:00Z")

@@ -8,7 +8,8 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from src.connectors.service import INTRADAY_MARKET_CATEGORY, resolve_bar_minutes
+from src.connectors.grid import resolve_bar_minutes
+from src.connectors.sources import INTRADAY_MARKET_CATEGORY
 from src.core.config import MARKET_DATA_BAR_MINUTES, get_config, load_algorithms_config
 from src.data.duckdb_store import DAILY_INTERVAL_MINUTES, clear_market_bars, market_bars_summary
 from src.data.provider_cache import clear_cached_payloads

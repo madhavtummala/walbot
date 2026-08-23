@@ -16,11 +16,15 @@ DEFAULT_STRATEGY_ID = "bursty_dca"
 
 #: Retired ids that still appear in saved controls, tuning sections, and cached backtests.
 #: ``none`` is here because the deck used to carry a "None" card that meant "no algorithm".
-#: ``dca`` is retired in favour of ``bursty_dca``, which can be tuned to behave identically.
+#:
+#: ``intraday_pick`` was renamed once it committed to trading options rather than picking a
+#: name to hold: what it does is open one contract cheap and close it dearer, and the old id
+#: described neither the instrument nor the round trip. The alias is what keeps a binding and a
+#: tuning section written under the old name loading -- ``walbot.yaml`` on disk elsewhere still
+#: says ``intraday_pick``, and without this the config would silently resolve to no algorithm.
 ALGORITHM_ALIASES = {
-    "dca_bot": "bursty_dca",
     "none": "bursty_dca",
-    "dca": "bursty_dca",
+    "intraday_pick": "options_flip",
 }
 
 

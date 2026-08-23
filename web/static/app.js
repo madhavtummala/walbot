@@ -1,7 +1,10 @@
 const SVG_NS = "http://www.w3.org/2000/svg";
 const BUCKET_NAMES = ["buy", "sell"];
 const MAX_AMOUNT = 2000;
-const DCA_ALGORITHM_KEYS = ["bursty_dca"];
+//: The algorithm declares which purpose-built editor its Tune screen needs, and the config
+//: payload carries the answer. This used to be a hardcoded list of "the DCA algorithms" here,
+//: which meant the frontend held an idea of an algorithm family that the backend did not.
+const BUDGETS_EDITOR = "budgets";
 const WHEEL_STEP = 25;
 //: Vertical offset of a bubble's amount label from its centre. Shared so the typing caret
 //: lands on the number it is editing rather than near it.
@@ -27,13 +30,13 @@ const DISABLED_COLORS = {
 const STRATEGIES = [
   {
     key: "bursty_dca",
-    blurb: "Buys sized proportionally to drawdown from peak. Deeper dips get bigger buys.",
+    blurb: "Sized by distance from the moving average, paced by how far ahead of plan it already is.",
     name: "Bursty DCA",
     status: "Live",
     horizon: "Continuous",
     risk: "Medium",
-    logic: "Accrues a monthly budget per symbol and sizes each buy proportionally to how far the price has fallen from its peak. Monthly cap scales with drawdown so crash months deploy more capital. Sells at peak.",
-    signals: ["Drawdown from peak", "Scaling factor", "Monthly cap with cap_boost", "Picky threshold"],
+    logic: "Accrues a monthly budget per symbol, then sizes each order by two multiplied factors: how many standard deviations the price sits from its moving average, and how far ahead of or behind its plan that symbol already is. Cheap names buy more, rich names buy less or sell, and a symbol that has overspent resists spending again until it catches up. The only hard stop is share rounding.",
+    signals: ["Distance from moving average", "Scaling factor per σ", "Backlog resistance", "Monthly cap"],
   },
   {
     key: "rally_rotation",
@@ -46,9 +49,9 @@ const STRATEGIES = [
     signals: ["Absolute eligibility", "Cross-sectional rank", "Replacement margin", "Crash stop"],
   },
   {
-    key: "intraday_pick",
-    blurb: "Macro trend picks direction; intraday setup picks the option. Limit entry, GTC limit exit.",
-    name: "Intraday Pick",
+    key: "options_flip",
+    blurb: "One contract at a time, bought cheap and flipped dearer. Direction comes from the macro trend.",
+    name: "Options Flip",
     status: "Paper",
     horizon: "Intraday",
     risk: "High",
@@ -97,6 +100,9 @@ const state = {
   backtestLoading: {},
   signals: {},
   signalLoading: {},
+  //: Symbols whose gate breakdown is open, by symbol rather than by row index: the table
+  //: reorders as a run changes what it decided, and an index would expand the wrong name.
+  expandedSignals: new Set(),
   universeProposal: null,
   universeRefreshing: false,
   universeApplying: false,
@@ -205,11 +211,16 @@ function bucketStrokeColor(bucketName) {
   return shadeColor(bucketColor(bucketName), isDcaEnabled() ? -48 : -34);
 }
 
-//: Which algorithm's plan the board is editing. DCA is a normal algorithm with a custom
-//: editor, so its plan is ordinary tuning living at algorithms.<id>.plan -- which is why
-//: ``dca`` and ``bursty_dca`` now have separate budgets rather than sharing one.
+//: Which algorithm's plan the board is editing. Its plan is ordinary tuning living at
+//: algorithms.<id>.plan, so the board always edits exactly the algorithm whose page you are on.
 function planStrategyKey() {
   return state.planStrategy || DEFAULT_ALGORITHM_KEY;
+}
+
+//: Whether an algorithm wants the budget board, as reported by /api/algorithm-config. False
+//: until that config has loaded, which is the same condition the board's own guards test.
+function usesBudgetsEditor(strategyKey) {
+  return state.algorithmConfigs[strategyKey]?.tune_editor === BUDGETS_EDITOR;
 }
 
 //: The plan object inside the loaded config, created empty if this algorithm has none yet.
@@ -636,12 +647,17 @@ function beginPinch(node, element) {
 
 function startAssetPointer(event, node) {
   event.preventDefault();
+  // Capture first. Everything below can re-render the board, and a re-render replaces this
+  // group element -- calling setPointerCapture on the detached node throws InvalidStateError
+  // and the drag never starts.
+  event.currentTarget.setPointerCapture(event.pointerId);
   hideSymbolEntry();
+  // Commit whatever was being typed on the previous bubble before the selection moves.
+  commitAmountEntry();
   const wasSelected = state.selected === node.symbol;
   state.selected = wasSelected ? null : node.symbol;
   $("#bubbleBoard")?.classList.toggle("resize-mode", Boolean(state.selected));
   if (event.pointerType === "touch") updateBoardElements();
-  event.currentTarget.setPointerCapture(event.pointerId);
   event.currentTarget.onpointermove = (moveEvent) => handleAssetPointerMove(moveEvent, node);
   event.currentTarget.onpointerup = (upEvent) => endAssetPointer(upEvent, node);
   event.currentTarget.onpointercancel = (upEvent) => endAssetPointer(upEvent, node);
@@ -659,7 +675,8 @@ function startAssetPointer(event, node) {
     }
   }
 
-  state.drag = { node, pointerId: event.pointerId, element: event.currentTarget };
+  // ``moved`` separates a click from a drag: only the former opens the budget caret.
+  state.drag = { node, pointerId: event.pointerId, element: event.currentTarget, moved: false };
   event.currentTarget.classList.add("dragging");
 }
 
@@ -683,6 +700,17 @@ function setNodeAmount(node, amount) {
   node.radius = itemRadius(node.amount);
   syncNodeToPlan(node);
   schedulePlanSave();
+  syncAmountEntryTo(node);
+}
+
+//: Keep an open budget field showing what the bubble now holds. Scrolling and pinching change
+//: the amount behind the caret, and committing afterwards would otherwise write back the value
+//: the field was opened with -- undoing the gesture that had just been made.
+function syncAmountEntryTo(node) {
+  if (state.amountEdit?.symbol !== node.symbol) return;
+  const entry = $("#amountEntry");
+  if (!entry || document.activeElement === entry) return;
+  entry.value = String(Math.round(node.amount));
 }
 
 function resizeNodeToAmount(node, amount) {
@@ -762,6 +790,7 @@ function handleAssetPointerMove(event, node) {
     return;
   }
   if (state.drag?.node === node && state.drag.pointerId === event.pointerId) {
+    state.drag.moved = true;
     dragNode(event, node);
   }
 }
@@ -792,10 +821,19 @@ function endAssetPointer(event, node) {
     return;
   }
   if (state.drag?.node === node && state.drag.pointerId === event.pointerId) {
+    const moved = state.drag.moved;
     event.currentTarget.classList.remove("dragging");
     state.drag = null;
     moveAsset(node);
     renderDca();
+    // A click that selected this bubble puts the caret straight onto its budget, with the
+    // current value selected so typing replaces it. Waiting for the first keystroke worked --
+    // the digit was carried into the field -- but showed nothing to say that typing would do
+    // anything, so the affordance was invisible.
+    if (!moved) {
+      if (state.selected === node.symbol) showAmountEntry(node);
+      else hideAmountEntry();
+    }
   }
 }
 
@@ -922,6 +960,14 @@ function commitAmountEntry() {
   if (digits === "") {
     // Cleared and confirmed reads as "never mind", not as a budget of zero -- type 0 for that.
     setNodeAmount(node, edit.originalAmount);
+  } else if (Number(digits) === 0) {
+    // A $0 budget is not a holding in the book -- it is a bubble sitting in a bucket doing
+    // nothing -- so zeroing the amount takes the symbol out of the plan entirely. Escape
+    // remains how you change your mind without touching the plan's membership.
+    state.selected = null;
+    removeSymbol(node.bucketName, edit.symbol);
+    showToast(`${edit.symbol} removed`);
+    return;
   } else if (Number(digits) > MAX_AMOUNT) {
     // Already clamped on screen; say why, so a smaller number than was typed is not a mystery.
     showToast(`${edit.symbol} capped at ${money(MAX_AMOUNT)}/month`);
@@ -1014,6 +1060,22 @@ function formatDateTick(date, zoom) {
   return date.toLocaleDateString(undefined, options);
 }
 
+//: Whether a backtest's rows are finer than one a day. Asked of the data rather than of the
+//: strategy, because it is the replay grid that decides: the same algorithm steps daily or per
+//: bar depending on whether it declared an intraday lookback.
+function backtestIsIntraday(rows) {
+  return rows.some((row, index) => index > 0
+    && row.date.getTime() - rows[index - 1].date.getTime() < 20 * 60 * 60 * 1000);
+}
+
+//: A date label on a daily chart, a time label on an intraday one. Without the second case
+//: every tick and every hover in a session reads as the same date, which is exactly as useful
+//: as the stacked x-positions this replaced.
+function formatChartStamp(date, intraday) {
+  if (!intraday) return formatDateTick(date, 4);
+  return date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
 function algorithmChoices() {
   return STRATEGIES;
 }
@@ -1033,17 +1095,13 @@ function accountForStrategy(strategyKey) {
   return (candidates.find((binding) => binding.enabled) || candidates[0]).account_id || "";
 }
 
-function primaryDcaBindingId() {
-  return bindings().find((binding) => DCA_ALGORITHM_KEYS.includes(binding.strategy))?.id || "";
-}
-
 function bindingById(bindingId) {
   return bindings().find((binding) => String(binding.id) === String(bindingId)) || null;
 }
 
 function isDcaEnabled() {
-  // The bubbles are one shared plan, so any live DCA binding lights them up.
-  return bindings().some((binding) => binding.enabled && DCA_ALGORITHM_KEYS.includes(binding.strategy));
+  // The board edits one algorithm's plan, so it is that algorithm's bindings that light it up.
+  return bindings().some((binding) => binding.enabled && binding.strategy === planStrategyKey());
 }
 
 function configFieldKind(value) {
@@ -1267,69 +1325,119 @@ async function loadSignals(strategyKey) {
   }
 }
 
-function signalRowColor(row) {
-  if (row.eligible !== undefined && !row.eligible) return "signalRow--rejected";
-  if (row.target_weight > 0) return "signalRow--held";
-  return "";
+//: How each decision reads at a glance. The five actions are the whole vocabulary -- every
+//: algorithm classifies its rows into them, so this map is the only place the deck decides what
+//: an outcome looks like, and it never learns which algorithm produced one.
+const ACTION_STYLE = {
+  enter:   { label: "ENTER",   cls: "is-enter",   hint: "Opening a position that was not held" },
+  hold:    { label: "HOLD",    cls: "is-hold",    hint: "Kept: clears the exit band, even if it would not be bought today" },
+  exit:    { label: "EXIT",    cls: "is-exit",    hint: "Closing a position that was held" },
+  blocked: { label: "BLOCKED", cls: "is-blocked", hint: "Wanted, but a gate said no. Expand for which one" },
+  idle:    { label: "IDLE",    cls: "is-idle",    hint: "Neither held nor wanted this run" },
+};
+
+function actionStyle(action) {
+  return ACTION_STYLE[action] || ACTION_STYLE.idle;
 }
 
-function renderSignalTable(leaders) {
-  const hasScore = leaders.some((r) => r.score !== undefined && r.score !== null);
-  const hasRank = leaders.some((r) => r.rank !== undefined && r.rank !== null && r.rank !== 0);
-  const hasWeight = leaders.some((r) => r.target_weight !== undefined && r.target_weight !== null);
-  const hasMA = leaders.some((r) => r.moving_average > 0);
-  const hasVol5d = leaders.some((r) => r.vol_5d > 0);
-  const hasVolRatio = leaders.some((r) => r.volume_ratio > 0);
-  const hasBudget = leaders.some((r) => r.monthly_budget !== undefined && r.monthly_budget !== null);
+//: A price that is not a live print gets an age badge, so a stored-bar fallback can never read
+//: as a fresh quote. Live prices (price_current true) stay unbadged.
+function priceAgeBadge(row) {
+  if (row.price_current !== false || !row.price_time) return "";
+  const fetched = Date.parse(row.price_time);
+  if (Number.isNaN(fetched)) return "";
+  const ageMinutes = Math.max(0, Math.round((Date.now() - fetched) / 60000));
+  const ageText = ageMinutes >= 1440 ? `${Math.round(ageMinutes / 1440)}d` : ageMinutes >= 60 ? `${Math.round(ageMinutes / 60)}h` : `${ageMinutes}m`;
+  return ` <span class="tableNote" title="Not a live print — closest stored price">(${escapeHtml(ageText)} old)</span>`;
+}
 
-  const extraHeaders = [];
+//: The gate strip: one pip per check, in the order the algorithm applied them. Filled is a pass,
+//: hollow a fail, and the blocking one is marked separately -- several gates can fail at once
+//: while only the first decided anything.
+function gateStrip(checks) {
+  if (!checks.length) return `<span class="gateStrip is-empty" title="No gates applied to this row">—</span>`;
+  const pips = checks.map((check) => {
+    const cls = check.ok ? "is-pass" : check.blocking ? "is-blocking" : "is-fail";
+    const limit = check.limit ? ` (needs ${check.limit})` : "";
+    return `<i class="gatePip ${cls}" title="${escapeHtml(`${check.label}: ${check.ok ? "PASS" : "FAIL"} — ${check.value}${limit}`)}"></i>`;
+  }).join("");
+  const failed = checks.filter((check) => !check.ok).length;
+  return `<span class="gateStrip">${pips}<span class="gateCount">${escapeHtml(failed ? `${checks.length - failed}/${checks.length}` : "all")}</span></span>`;
+}
 
-  if (hasScore) extraHeaders.push('<th class="num">Score</th>');
-  if (hasRank) extraHeaders.push('<th class="num">Rank</th>');
-  if (hasWeight) extraHeaders.push('<th class="num">Wt</th>');
-  if (hasMA) extraHeaders.push('<th class="num">100d MA</th>');
-  if (hasVol5d) extraHeaders.push('<th class="num">5d Vol</th>');
-  if (hasVolRatio) extraHeaders.push('<th class="num">Vol Ratio</th>');
-  if (hasBudget) {
-    extraHeaders.push('<th class="num">Budget</th>');
-    extraHeaders.push('<th class="num">Accrued</th>');
+//: The expanded panel: every gate with what this run measured beside what it had to clear.
+//: Passed gates are listed too -- they are how a reader tells "cleared everything but the vol
+//: ceiling" from "failed at the first hurdle", which is a different kind of rejection.
+function gateDetail(row) {
+  if (!row.checks?.length) {
+    return `<p class="gateEmpty">No gates were recorded for ${escapeHtml(row.symbol)} on this run.</p>`;
   }
+  const items = row.checks.map((check) => {
+    const cls = check.ok ? "is-pass" : check.blocking ? "is-blocking" : "is-fail";
+    return `<li class="gateItem ${cls}">
+      <span class="gateVerdict">${check.ok ? "PASS" : "FAIL"}</span>
+      <span class="gateLabel">${escapeHtml(check.label)}</span>
+      <span class="gateValue">${escapeHtml(check.value || "—")}</span>
+      <span class="gateLimit">${check.limit ? escapeHtml(`needs ${check.limit}`) : ""}</span>
+    </li>`;
+  }).join("");
+  return `<ul class="gateList">${items}</ul>`;
+}
 
-  const rows = leaders.map((row) => {
-    const rowCls = signalRowColor(row);
-    const maCls = row.ma_distance > 0 ? "pos" : row.ma_distance < 0 ? "neg" : "";
+function renderSignalTable(rows) {
+  // Columns are declared by the algorithm rather than sniffed from the data. This used to probe
+  // for a dozen known keys -- peak, vol_5d, rank -- so publishing a new signal meant editing the
+  // frontend, and every algorithm's rows had to pretend to be one shape.
+  const metricLabels = [];
+  rows.forEach((row) => (row.metrics || []).forEach((metric) => {
+    // A column every row leaves blank is a column with nothing to say. Rally Rotation ranks
+    // only its eligible candidates, so on a defensive day Rank is "--" the whole way down.
+    const blank = !metric.value || metric.value === "--";
+    if (!blank && !metricLabels.includes(metric.label)) metricLabels.push(metric.label);
+  }));
+  // toggle, symbol, action, why, ...metrics, gates
+  const columns = 5 + metricLabels.length;
 
-    let extra = "";
-    if (hasScore) extra += `<td class="num">${escapeHtml(num(row.score, 2))}</td>`;
-    if (hasRank) extra += `<td class="num">${row.rank ? escapeHtml(String(row.rank)) : "--"}</td>`;
-    if (hasWeight) extra += `<td class="num">${row.target_weight !== undefined && row.target_weight !== null ? escapeHtml(percent(row.target_weight)) : "--"}</td>`;
-    if (hasMA) extra += `<td class="num signalMa ${maCls}">${row.moving_average ? escapeHtml(money(row.moving_average, 2)) : "--"}</td>`;
-    if (hasVol5d) extra += `<td class="num">${escapeHtml(percent(row.vol_5d))}</td>`;
-    if (hasVolRatio) extra += `<td class="num">${row.volume_ratio ? escapeHtml(num(row.volume_ratio, 1)) + "x" : "--"}</td>`;
-    if (hasBudget) {
-      extra += `<td class="num">${row.monthly_budget !== undefined ? escapeHtml(money(row.monthly_budget, 0)) : "--"}</td>`;
-      extra += `<td class="num">${row.accrued !== undefined ? escapeHtml(money(row.accrued, 2)) : "--"}</td>`;
-    }
-
-    return `<tr class="${rowCls}">
-      <td><strong>${escapeHtml(row.symbol)}</strong></td>
-      <td><span class="side ${row.target_weight > 0 ? "is-buy" : row.side === "FLAT" ? "" : "is-sell"}">${escapeHtml(row.side || row.signal || "--")}</span></td>
-      <td class="num">${row.close ? escapeHtml(money(row.close, 2)) : "--"}</td>
-      ${extra}
-      <td class="signalStatus">${escapeHtml(row.reason || row.eligibility_reason || "—")}</td>
-    </tr>`;
+  const body = rows.map((row) => {
+    const style = actionStyle(row.action);
+    // A row with no gates is not a row whose gates failed to record -- Rally Rotation's
+    // defensive sleeve is chosen by rule rather than by rank, so it has none to show. Offering
+    // a caret that opens onto "no gates were recorded" reads as a data fault; better to not
+    // offer the affordance at all.
+    const gated = Boolean((row.checks || []).length);
+    const open = gated && state.expandedSignals.has(row.symbol);
+    const metrics = metricLabels.map((label) => {
+      const metric = (row.metrics || []).find((item) => item.label === label);
+      return `<td class="num">${escapeHtml(metric ? metric.value : "--")}</td>`;
+    }).join("");
+    const detail = open
+      ? `<tr class="signalDetailRow"><td colspan="${columns}">${gateDetail(row)}</td></tr>`
+      : "";
+    return `<tr class="signalRow ${style.cls}${open ? " is-open" : ""}${gated ? "" : " is-ungated"}"
+             ${gated ? `data-signal-symbol="${escapeHtml(row.symbol)}" tabindex="0" role="button" aria-expanded="${open}"` : ""}
+             title="${escapeHtml(style.hint)}">
+        <td class="signalToggle">${gated ? (open ? "▾" : "▸") : ""}</td>
+        <td><strong>${escapeHtml(row.symbol)}</strong></td>
+        <td><span class="actionBadge ${style.cls}">${style.label}</span></td>
+        <td class="signalWhy"><span class="whyText">${escapeHtml(row.headline || "—")}</span></td>
+        ${metrics}
+        <td class="signalGates">${gateStrip(row.checks || [])}</td>
+      </tr>${detail}`;
   }).join("");
 
   return `<div class="tableWrap is-scroll"><table class="dataTable signalTable">
     <thead><tr>
+      <th aria-label="Expand"></th>
       <th>Symbol</th>
-      <th>Side</th>
-      <th class="num">Price</th>
-      ${extraHeaders.join("")}
-      <th>Status</th>
+      <th>Action</th>
+      <th>Why</th>
+      ${metricLabels.map((label) => `<th class="num">${escapeHtml(label)}</th>`).join("")}
+      <th title="One pip per gate, in the order applied. Filled passed, hollow failed, red is the one that decided it.">Gates</th>
     </tr></thead>
-    <tbody>${rows}</tbody>
-  </table></div>`;
+    <tbody>${body}</tbody>
+  </table>
+  <p class="tableNote">Click a row for every gate, with what this run measured beside what it had to clear.</p>
+  </div>`;
 }
 
 function backtestStatusLabel(backtest, loading) {
@@ -1399,23 +1507,21 @@ function renderUniverseProposalRows() {
 }
 
 function renderSignalFallbackRows(selected, payload, signalInputs) {
-  const isTemplate = payload?.wired === false;
-  const heading = isTemplate ? "Template signal model" : "No active live rows";
-  const detail = isTemplate
-    ? "Signal inputs are shown until this strategy is wired to live market rows."
-    : payload
-      ? "No symbols currently meet the live criteria; signal inputs are shown below."
-      : "Waiting for the first live snapshot.";
+  // Every algorithm renders its own plan now, so an empty list means the run proposed nothing --
+  // never that the strategy is a template with no wiring behind it.
+  const detail = payload
+    ? "This run produced no rows at all; the summary above says why."
+    : "Waiting for the first live snapshot.";
   const inputs = signalInputs.length ? signalInputs : [selected.logic || "Signal configuration pending"];
   return `
     <article class="signalFallback">
-      <strong>${escapeHtml(heading)}</strong>
+      <strong>No rows this run</strong>
       <span>${escapeHtml(detail)}</span>
     </article>
     ${inputs.map((signal) => `
       <article>
         <strong>${escapeHtml(signal)}</strong>
-        <span>${isTemplate ? "Template input" : "Signal input"}</span>
+        <span>Signal input</span>
       </article>
     `).join("")}
   `;
@@ -1439,6 +1545,7 @@ function renderBacktestChart(payload, svg) {
       cash: Number(row.cash ?? 0),
       positions: backtestPositions(row.positions),
       dcaContributions: Number(row.dca_contributions ?? 0),
+      trade: backtestTrades(row),
     }))
     .filter((row) => Number.isFinite(row.equity) && !Number.isNaN(row.date.getTime()));
   if (rows.length < 2) {
@@ -1468,18 +1575,115 @@ function renderBacktestChart(payload, svg) {
   const path = points.map((point, index) => `${index ? "L" : "M"} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(" ");
   const color = rows.at(-1).equity >= rows[0].equity ? "#057a55" : "#b42318";
   const axisY = height - bottom;
+  const intraday = backtestIsIntraday(rows);
   svg.appendChild(svgEl("line", { class: "axis-line", x1: left, y1: axisY, x2: width - right, y2: axisY }));
+  // ``dateTicks`` samples at a fixed stride and then always appends the last row, so the final
+  // pair can land arbitrarily close together -- and both get clamped to the same edge inset,
+  // stacking them outright. Tolerable while every label was "Aug 21"; an intraday label is wide
+  // enough that the two overprint. Measured in drawn width rather than in rows, because that is
+  // what actually collides.
+  let previousTickX = -Infinity;
   dateTicks(rows, 3).forEach((row) => {
     const xRaw = xScale(row.date);
     // keep tick labels inside the chart area to avoid overflow at the edges
     const x = Math.min(Math.max(xRaw, left + 12), width - right - 12);
+    const label = formatChartStamp(row.date, intraday);
+    if (x - previousTickX < label.length * 6.3) return;
+    previousTickX = x;
     svg.appendChild(svgEl("line", { class: "axis-line", x1: x, y1: axisY, x2: x, y2: axisY + 4 }));
-    svg.appendChild(textEl({ x, y: height - 6, "text-anchor": "middle", class: "axis-label" }, formatDateTick(row.date, 4)));
+    svg.appendChild(textEl({ x, y: height - 6, "text-anchor": "middle", class: "axis-label" }, label));
   });
   svg.appendChild(svgEl("path", { class: "growth-line", stroke: color, d: path }));
+  // After the line so the marks sit on top of it, before the hover overlay so the hitbox still
+  // catches every pointer event -- markers are decoration and must not become targets.
+  renderTradeMarkers(svg, rows, { xScale, yScale });
   svg.appendChild(textEl({ x: left, y: valueLabelY, class: "chart-label" }, money(rows[0].equity)));
   svg.appendChild(textEl({ x: width - right, y: valueLabelY, "text-anchor": "end", class: "chart-label" }, money(rows.at(-1).equity)));
-  addBacktestChartHover(svg, rows, { width, height, left, right, top, bottom, xScale, yScale });
+  addBacktestChartHover(svg, rows, { width, height, left, right, top, bottom, xScale, yScale, intraday });
+}
+
+//: Closest two marks may sit before they are merged. A trading day is worth a mark; a pixel is
+//: not worth two. Bursty DCA puts 31 marks on a 12-month curve and Rally Rotation 58, so this
+//: never engages for them -- it exists for the intraday grid, where a 3-month replay trades on
+//: 7,175 of its 9,047 bars and one mark per step would ink the entire plot area solid.
+const MIN_MARKER_SPACING = 7;
+
+//: Half-width of a marker triangle, and how far clear of the curve its centre sits.
+//:
+//: The offset is doing real work, not just spacing. The equity line is drawn in one of exactly
+//: the two colours the markers use -- green when the period made money, red when it lost -- so
+//: whichever way the backtest went, one kind of marker is the same hue as the line it sits on.
+//: Keeping the line's win/loss colour and separating the marks instead: 9px of offset against a
+//: 3px line leaves a clear gap either side, and the white halo in ``.trade-marker`` closes the
+//: case where a steep segment passes near one anyway.
+const MARKER_SIZE = 4.5;
+const MARKER_OFFSET = 9;
+
+function renderTradeMarkers(svg, rows, { xScale, yScale }) {
+  // Merged by position rather than sampled: dropping every second mark would misreport *which*
+  // way a bucket traded. A bucket that contains a buy and a sell is a bucket that shows both.
+  const buckets = [];
+  rows.forEach((row) => {
+    if (!row.trade.side) return;
+    const x = xScale(row.date);
+    const y = yScale(row.equity);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    const last = buckets.at(-1);
+    if (last && x - last.x < MIN_MARKER_SPACING) {
+      last.buy = last.buy || row.trade.side === "buy" || row.trade.side === "both";
+      last.sell = last.sell || row.trade.side === "sell" || row.trade.side === "both";
+      last.flat = last.flat || row.trade.side === "flat";
+      return;
+    }
+    buckets.push({
+      x,
+      y,
+      buy: row.trade.side === "buy" || row.trade.side === "both",
+      sell: row.trade.side === "sell" || row.trade.side === "both",
+      flat: row.trade.side === "flat",
+    });
+  });
+  if (!buckets.length) return;
+
+  const layer = svgEl("g", { class: "trade-markers" });
+  buckets.forEach((bucket) => {
+    // A step that bought *and* sold is one decision, not two, so it gets one mark. Drawing both
+    // triangles said "buy" and "sell" at the same x and left the reader to infer the rotation;
+    // amber names it. Rally Rotation is mostly this, so it is the common case, not the corner.
+    if (bucket.buy && bucket.sell) {
+      layer.appendChild(diamond(bucket.x, bucket.y, "is-rotation"));
+    } else if (bucket.buy) {
+      // Buys below the curve, sells above, so the two one-sided cases stay distinguishable at a
+      // glance even where the line is the same colour as the mark.
+      layer.appendChild(marker(bucket.x, bucket.y + MARKER_OFFSET, "up", "is-buy"));
+    } else if (bucket.sell) {
+      layer.appendChild(marker(bucket.x, bucket.y - MARKER_OFFSET, "down", "is-sell"));
+    } else if (bucket.flat) {
+      layer.appendChild(svgEl("circle", { class: "trade-marker is-flat", cx: bucket.x, cy: bucket.y, r: 2.5 }));
+    }
+  });
+  svg.appendChild(layer);
+}
+
+//: Sits *on* the curve rather than offset from it, because a rotation belongs to neither side.
+function diamond(x, y, className) {
+  const size = MARKER_SIZE + 0.5;
+  return svgEl("polygon", {
+    class: `trade-marker ${className}`,
+    points: `${x.toFixed(1)},${(y - size).toFixed(1)} ${(x + size).toFixed(1)},${y.toFixed(1)} `
+      + `${x.toFixed(1)},${(y + size).toFixed(1)} ${(x - size).toFixed(1)},${y.toFixed(1)}`,
+  });
+}
+
+function marker(x, y, direction, className) {
+  // ``up`` points at the curve from below, ``down`` from above: both apexes face the line, so
+  // the mark reads as attached to the point it describes rather than floating near it.
+  const tip = direction === "up" ? y - MARKER_SIZE : y + MARKER_SIZE;
+  const base = direction === "up" ? y + MARKER_SIZE : y - MARKER_SIZE;
+  return svgEl("polygon", {
+    class: `trade-marker ${className}`,
+    points: `${x.toFixed(1)},${tip.toFixed(1)} ${(x - MARKER_SIZE).toFixed(1)},${base.toFixed(1)} ${(x + MARKER_SIZE).toFixed(1)},${base.toFixed(1)}`,
+  });
 }
 
 function addBacktestChartHover(svg, rows, chart) {
@@ -1509,12 +1713,23 @@ function addBacktestChartHover(svg, rows, chart) {
   const timestamps = rows.map((row) => row.date.getTime());
   const minX = Math.min(...timestamps);
   const maxX = Math.max(...timestamps);
+  //: Through the SVG's own transform, not by rescaling the bounding box by hand.
+  //:
+  //: The hand-rolled version assumed the viewBox stretched edge to edge, which is what
+  //: ``preserveAspectRatio="none"`` would do. The default is ``xMidYMid meet``: when the
+  //: element's aspect ratio does not match the viewBox's, the drawing is scaled to whichever
+  //: axis binds and *centred* on the other. Measured here at 1440px, a 1104x378 viewBox in a
+  //: 1106x366 box came out scaled 0.969 with an 18px inset each side -- so the crosshair sat up
+  //: to a full row away from the cursor, and hovering a trade marker resolved to its neighbour.
+  //: ``getScreenCTM`` already knows all of it, including any future padding or transform.
   const toSvgPoint = (event) => {
-    const rect = svg.getBoundingClientRect();
-    return {
-      x: ((event.clientX - rect.left) / Math.max(rect.width, 1)) * chart.width,
-      y: ((event.clientY - rect.top) / Math.max(rect.height, 1)) * chart.height,
-    };
+    const matrix = svg.getScreenCTM();
+    if (!matrix) return { x: 0, y: 0 };
+    const origin = svg.createSVGPoint();
+    origin.x = event.clientX;
+    origin.y = event.clientY;
+    const local = origin.matrixTransform(matrix.inverse());
+    return { x: local.x, y: local.y };
   };
   const nearestRow = (x) => {
     const ratio = clamp((x - chart.left) / Math.max(chart.width - chart.left - chart.right, 1), 0, 1);
@@ -1540,9 +1755,7 @@ function addBacktestChartHover(svg, rows, chart) {
     const row = nearestRow(pointInSvg.x);
     const x = chart.xScale(row.date);
     const y = chart.yScale(row.equity);
-    const positionLines = row.positions.length
-      ? row.positions.map(([symbol, value]) => `${symbol} : ${money(value)}`)
-      : ["No positions"];
+    const positionLines = backtestHoldingLines(row);
     const tooltipWidth = Math.max(168, Math.min(260, 64 + Math.max(...positionLines.map((line) => line.length)) * 6));
     const tooltipHeight = 16 + positionLines.length * 14;
     const tooltipX = x + tooltipWidth + 12 > chart.width ? x - tooltipWidth - 10 : x + 10;
@@ -1554,7 +1767,7 @@ function addBacktestChartHover(svg, rows, chart) {
     const axisValueWidth = Math.max(58, axisValue.length * 6.3 + 14);
     const axisValueX = chart.left;
     const axisValueY = Math.min(Math.max(y - 9, chart.top), chart.height - chart.bottom - 18);
-    const axisDate = formatDateTick(row.date, 4);
+    const axisDate = formatChartStamp(row.date, chart.intraday);
     const axisDateWidth = Math.max(52, axisDate.length * 6.3 + 16);
     const axisDateX = Math.min(
       Math.max(x - axisDateWidth / 2, chart.left),
@@ -1608,6 +1821,79 @@ function backtestPositions(positions) {
     .map(([symbol, value]) => [symbol, Number(value)])
     .filter(([symbol, value]) => symbol && Number.isFinite(value) && Math.abs(value) > 0.005)
     .sort((left, right) => Math.abs(right[1]) - Math.abs(left[1]));
+}
+
+//: What one replay step traded, from the ``trades`` map the backtest already publishes: net
+//: notional per symbol, signed, buys positive. Same shape and same filtering as
+//: ``backtestPositions`` above, because it comes off the same row and is read the same way.
+//:
+//: ``order_count`` is carried separately rather than derived from the map. The two can disagree
+//: -- a row from an algorithm that never populated ``trades`` still counts its orders -- and
+//: when they do, the count is the one that knows a trade happened at all.
+function backtestTrades(row) {
+  const raw = row?.trades;
+  const entries = raw && typeof raw === "object" && !Array.isArray(raw)
+    ? Object.entries(raw)
+        .map(([symbol, value]) => [symbol, Number(value)])
+        .filter(([symbol, value]) => symbol && Number.isFinite(value) && Math.abs(value) > 0.005)
+        .sort((left, right) => Math.abs(right[1]) - Math.abs(left[1]))
+    : [];
+  // Share counts ride alongside rather than replacing the notionals: the marker still sizes and
+  // sorts by dollars, while the holding line reports the quantity that actually changed hands.
+  const rawShares = row?.trade_shares;
+  const shares = new Map(
+    rawShares && typeof rawShares === "object" && !Array.isArray(rawShares)
+      ? Object.entries(rawShares)
+          .map(([symbol, value]) => [symbol, Number(value)])
+          .filter(([symbol, value]) => symbol && Number.isFinite(value) && value !== 0)
+      : [],
+  );
+  const count = Number(row?.order_count) || 0;
+  const bought = entries.some(([, value]) => value > 0);
+  const sold = entries.some(([, value]) => value < 0);
+  // "It traded, but the row does not say which way" is a real state, not an error: it is every
+  // row written before ``trades`` existed, and every Options Flip row, whose orders currently
+  // record no notional at all. A neutral mark says something happened here, which is strictly
+  // better than the silence of treating the row as a quiet day.
+  const side = bought && sold ? "both" : bought ? "buy" : sold ? "sell" : count > 0 ? "flat" : "";
+  return { side, entries, shares, count };
+}
+
+//: What the book held after this step, with what changed to get there appended to the line.
+//:
+//: Inline rather than as its own block underneath. The two used to be separate lists, so a
+//: rotation printed the same four symbols twice -- once as holdings, once as orders -- and left
+//: the reader to pair them up. One line per symbol says the whole thing: what is held now, and
+//: what moved.
+function backtestHoldingLines(row) {
+  const shares = row.trade?.shares || new Map();
+  const held = new Set();
+  const lines = row.positions.map(([symbol, value]) => {
+    held.add(symbol);
+    return `${symbol} : ${money(value)}${shareDelta(shares.get(symbol))}`;
+  });
+  // A position sold out entirely is absent from ``positions`` -- it is worth nothing, so the
+  // replay drops it. Without this the most consequential line of a rotation, the leg that was
+  // closed, is the one line the tooltip does not show.
+  shares.forEach((quantity, symbol) => {
+    if (!held.has(symbol)) lines.push(`${symbol} : ${money(0)}${shareDelta(quantity)}`);
+  });
+  if (lines.length) return lines;
+  // Traded, but with no per-symbol detail to attach to a holding.
+  if (row.trade?.side) return [`${row.trade.count} order${row.trade.count === 1 ? "" : "s"}`];
+  return ["No positions"];
+}
+
+//: The signed quantity that changed hands, as a suffix. Blank when nothing moved, so a quiet
+//: day's holdings read exactly as they did before this existed.
+function shareDelta(quantity) {
+  if (!quantity || !Number.isFinite(quantity)) return "";
+  // Fractional brokerages fill to six places and whole-share ones never do, so the precision
+  // has to follow the number: "+0.4521" is the honest answer for a $10 slice of a $500 ETF,
+  // and "+1" is the honest answer beside it.
+  const size = Math.abs(quantity);
+  const shown = size >= 1 ? Number(size.toFixed(2)) : Number(size.toFixed(4));
+  return ` ${quantity > 0 ? "+" : "−"}${shown}`;
 }
 
 function percent(value) {
@@ -1744,7 +2030,7 @@ function accountLabel(accountId) {
 //: identical to "the agent is driving it".
 function deploymentStatus(deployments) {
   const armed = (deployments || []).filter((deployment) => deployment.enabled);
-  if (armed.some((deployment) => normalizeBindingFrequency(deployment.frequency) !== "mcp")) return "live";
+  if (armed.some((deployment) => normalizeBindingCron(deployment.cron))) return "live";
   if (armed.length) return "idle";
   return "off";
 }
@@ -1851,8 +2137,8 @@ function runtimeSummary() {
   // The bot pill takes the same colour as the algorithms: green while anything is on a
   // clock, orange when everything that is on is waiting for the agent instead.
   const status = deploymentStatus(armed);
-  const scheduled = armed.filter((binding) => normalizeBindingFrequency(binding.frequency) !== "mcp");
-  const agentDriven = armed.filter((binding) => normalizeBindingFrequency(binding.frequency) === "mcp");
+  const scheduled = armed.filter((binding) => normalizeBindingCron(binding.cron));
+  const agentDriven = armed.filter((binding) => !normalizeBindingCron(binding.cron));
   const lastRun = loops
     .map((loop) => loop.last_finished_at)
     .filter(Boolean)
@@ -1871,7 +2157,7 @@ function runtimeSummary() {
     ? error
     : [
         scheduled.length
-          ? `Scheduled: ${scheduled.map((binding) => `${strategyByKey(binding.strategy).name} every ${normalizeBindingFrequency(binding.frequency)}`).join(", ")}`
+          ? `Scheduled: ${scheduled.map((binding) => `${strategyByKey(binding.strategy).name} ${describeCron(binding.cron)}`).join(", ")}`
           : "",
         agentDriven.length
           ? `Agent-driven: ${agentDriven.map((binding) => strategyByKey(binding.strategy).name).join(", ")}`
@@ -1940,9 +2226,52 @@ function render(options = {}) {
 
 // -- algorithm page ----------------------------------------------------------------------
 
-function normalizeBindingFrequency(value) {
-  const candidate = String(value ?? "1hr").trim().toLowerCase();
-  return ["15m", "30m", "1hr", "2hr", "1d", "mcp"].includes(candidate) ? candidate : "1hr";
+// A binding's schedule is a cron expression in market time; empty means an agent drives it.
+// Validated here only well enough to keep an obviously broken string from being saved -- the
+// server re-parses with src/core/cron.py, which is the authority on what will actually run.
+// The prose comes from the vendored cronstrue, which reads arbitrary expressions back in
+// words; anything it cannot phrase falls back to the expression itself.
+const CRON_FIELD_BOUNDS = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
+
+function normalizeBindingCron(value) {
+  return String(value ?? "").trim().replace(/\s+/g, " ");
+}
+
+function cronError(expression) {
+  const text = normalizeBindingCron(expression);
+  if (!text) return "";
+  const parts = text.split(" ");
+  if (parts.length !== 5) {
+    return `Needs 5 fields (minute hour day-of-month month day-of-week), got ${parts.length}.`;
+  }
+  const names = ["minute", "hour", "day of month", "month", "day of week"];
+  for (let index = 0; index < 5; index += 1) {
+    const [low, high] = CRON_FIELD_BOUNDS[index];
+    for (const item of parts[index].split(",")) {
+      const [range, step] = item.split("/");
+      if (step !== undefined && !/^\d+$/.test(step)) return `Bad step in the ${names[index]} field.`;
+      if (range === "*") continue;
+      const bounds = range.split("-");
+      if (bounds.length > 2 || bounds.some((bound) => !/^\d+$/.test(bound))) {
+        return `Cannot read "${item}" in the ${names[index]} field.`;
+      }
+      if (bounds.some((bound) => Number(bound) < low || Number(bound) > high)) {
+        return `${names[index]} must be ${low}-${high}.`;
+      }
+    }
+  }
+  return "";
+}
+
+function describeCron(expression) {
+  const text = normalizeBindingCron(expression);
+  if (!text) return "Agent-driven (MCP)";
+  if (cronError(text)) return "Invalid schedule";
+  try {
+    return window.cronstrue.toString(text, { use24HourTimeFormat: true });
+  } catch {
+    return text;
+  }
 }
 
 function renderAlgorithmPage(content, strategyKey, tab) {
@@ -1952,8 +2281,7 @@ function renderAlgorithmPage(content, strategyKey, tab) {
   // Every account is offered to every algorithm. Sharing one account between algorithms is
   // allowed; it only costs attribution, which the overview says plainly when it happens.
   const options = accountRows();
-  const frequencyOptions = ["15m", "30m", "1hr", "2hr", "1d", "mcp"];
-  const savedFrequency = normalizeBindingFrequency(deployment?.frequency || "1hr");
+  const savedCron = normalizeBindingCron(deployment?.cron);
   const actions = options.length
     ? `<div class="deployControl"${deployment ? ` data-binding="${escapeHtml(deployment.id)}"` : ""}>
          <button class="ctl powerButton${deployment?.enabled ? " on" : ""}" type="button" data-role="power"
@@ -1962,9 +2290,14 @@ function renderAlgorithmPage(content, strategyKey, tab) {
          <select class="ctl" id="deployTargetSelect" aria-label="Account"${deployment?.enabled ? " disabled" : ""}>
            ${options.map((account) => `<option value="${escapeHtml(account.id)}"${account.id === deployment?.account_id ? " selected" : ""}>${escapeHtml(account.label)}</option>`).join("")}
          </select>
-         <select class="ctl" id="deployFrequencySelect" aria-label="Frequency" data-binding="${escapeHtml(deployment?.id || "")}" ${!deployment ? "disabled" : ""}>
-           ${frequencyOptions.map((value) => `<option value="${escapeHtml(value)}"${savedFrequency === value ? " selected" : ""}>${escapeHtml(value)}</option>`).join("")}
-         </select>
+         <span class="cronField">
+           <input class="ctl cronInput" id="deployCronInput" type="text" spellcheck="false"
+             aria-label="Schedule (cron, market time)" data-binding="${escapeHtml(deployment?.id || "")}"
+             value="${escapeHtml(savedCron)}" placeholder="0 11 * * 1-5"
+             title="Cron in US Eastern: minute hour day-of-month month day-of-week. Leave blank to let an agent drive it."
+             ${!deployment ? "disabled" : ""}>
+           <span class="cronHint" id="deployCronHint">${escapeHtml(describeCron(savedCron))}</span>
+         </span>
        </div>`
     : `<span class="pill is-idle">No account available</span>`;
 
@@ -2171,21 +2504,24 @@ function explainerCard(strategy) {
       ${explainer.formula?.length
         ? `<pre class="formula">${explainer.formula.map((line) => escapeHtml(line)).join("\n")}</pre>`
         : ""}
-      ${explainer.behavior ? `<p class="cardBody">${escapeHtml(explainer.behavior)}</p>` : ""}
     </section>`;
 }
 
-// The two halves of an algorithm's tuning are separate things and both belong here. DCA's
-// budgets live in its plan (the bubble board, per account); everything else an algorithm
-// exposes lives in config/algorithms.yaml (the parameter form). DCA used to get only the
-// board, which left Bursty DCA's regime gate, RSI and value-averaging knobs -- all of them
-// present in config and served by /api/algorithm-config -- with no way to edit them at all.
+// The two halves of an algorithm's tuning are separate things and both belong here. Bursty
+// DCA's budgets live in its plan (the bubble board); everything else an algorithm exposes
+// lives in its config section (the parameter form). It used to get only the board, which left
+// its regime gate, scaling factor and cap knobs -- all of them present in config and served by
+// /api/algorithm-config -- with no way to edit them at all.
+//
+// The board is absent on the first paint because the algorithm has not said it wants one yet;
+// ``ensureAlgorithmConfig`` re-renders when the payload lands, and the board's own guards
+// already tolerate a config that has not arrived.
 function renderTuneTab(body, strategy) {
-  const isDca = DCA_ALGORITHM_KEYS.includes(strategy.key);
+  const hasBudgets = usesBudgetsEditor(strategy.key);
   ensureAlgorithmConfig(strategy.key);
   body.innerHTML = `
     ${explainerCard(strategy)}
-    ${isDca ? `
+    ${hasBudgets ? `
     <section class="card tuneCard">
       <div class="cardHead">
         <h2>Budgets</h2>
@@ -2195,13 +2531,13 @@ function renderTuneTab(body, strategy) {
     </section>` : ""}
     <section class="card tuneCard">
       <div class="cardHead">
-        <h2>${isDca ? "Parameters" : "Configuration"}</h2>
+        <h2>${hasBudgets ? "Parameters" : "Configuration"}</h2>
         <span class="cardHint" id="configHint"></span>
       </div>
       <div class="tuneBody" id="tuneBody"></div>
       <div class="cardActions" id="configActions" hidden><button class="ctl" type="button" id="saveConfigButton">Save changes</button></div>
     </section>`;
-  if (isDca) renderDcaTuner($("#dcaBoard"), strategy);
+  if (hasBudgets) renderDcaTuner($("#dcaBoard"), strategy);
   renderConfigForm($("#tuneBody"), strategy);
 }
 
@@ -2216,6 +2552,7 @@ function renderDcaTuner(host, strategy) {
     // place as though they were this plan's.
     state.nodes = [];
     state.selected = null;
+    hideAmountEntry();
   }
   state.planStrategy = strategy.key;
   if (!entry) {
@@ -2225,7 +2562,7 @@ function renderDcaTuner(host, strategy) {
   if (hint) hint.textContent = `Dollars per month, per symbol · algorithms.${entry.config_key || strategy.key}.plan`;
   host.innerHTML = `<svg class="bubbleBoard" id="bubbleBoard" role="img"
     aria-label="Interactive buy and sell budget bubbles"></svg>
-    <p class="cardHint">${escapeHtml(plan?.effect || "")} Scroll a bubble to change its budget, or select one and type the amount. Drag between buckets, double-click to add.
+    <p class="cardHint">${escapeHtml(plan?.effect || "")} Scroll a bubble to change its budget, or select one and type the amount. Zero an amount to remove it. Drag between buckets, double-click to add.
       <span id="planSaveStatus" class="saveStatus">${escapeHtml(planSaveStatusText())}</span></p>`;
   renderDca();
 }
@@ -2326,8 +2663,8 @@ function renderOverviewTab(body, strategy, deployment) {
 function renderSignalsTab(body, strategy) {
   const payload = state.signals[strategy.key];
   const loading = Boolean(state.signalLoading[strategy.key]);
-  // Already ordered strongest-first by ``signal_view_from_decision``.
-  const leaders = payload?.leaders || [];
+  // Already ordered by the algorithm: what the run changed first, then holdings, then the rest.
+  const rows = payload?.rows || [];
   body.innerHTML = `
     <section class="card">
       <div class="cardHead">
@@ -2347,8 +2684,8 @@ function renderSignalsTab(body, strategy) {
             ? `<p class="emptyState">Fetching live signal snapshot.</p>`
             : payload?.error
               ? `<p class="emptyState">${escapeHtml(payload.error)}</p>`
-              : leaders.length
-                ? renderSignalTable(leaders)
+              : rows.length
+                ? renderSignalTable(rows)
                 : renderSignalFallbackRows(strategy, payload, (strategy.signals || []).slice(0, 5))}
       </div>
     </section>`;
@@ -2479,7 +2816,7 @@ async function loadAccounts() {
 //: The plan is config, but it has the bubble board rather than a form field. Everything that
 //: walks the config form has to know to leave it alone.
 function isPlanField(strategyKey, key) {
-  return key === "plan" && DCA_ALGORITHM_KEYS.includes(strategyKey);
+  return key === "plan" && usesBudgetsEditor(strategyKey);
 }
 
 async function saveCurrentConfig(strategyKey) {
@@ -2538,18 +2875,31 @@ async function setDeploymentAccount(strategyKey, accountId) {
   await deployTo(strategyKey, accountId);
 }
 
-async function setDeploymentFrequency(bindingId, frequency) {
+async function setDeploymentCron(bindingId, expression) {
   const binding = bindingById(bindingId);
   if (!binding) return;
-  binding.frequency = normalizeBindingFrequency(frequency);
+  const cron = normalizeBindingCron(expression);
+  const problem = cronError(cron);
+  if (problem) {
+    // Refused rather than saved-and-corrected. Falling back silently would leave the field
+    // showing one schedule while the scheduler ran another, and a schedule is the one setting
+    // where being quietly wrong costs a trading day.
+    showToast(problem);
+    return;
+  }
+  binding.cron = cron;
   await saveBindings();
+  showToast(cron ? `Schedule: ${describeCron(cron)}` : "Schedule cleared -- agent-driven");
 }
 
 async function deployTo(strategyKey, accountId) {
   const used = new Set(bindings().map((binding) => String(binding.id)));
   let index = 1;
   while (used.has(`b${index}`)) index += 1;
-  bindings().push({ id: `b${index}`, strategy: strategyKey, account_id: accountId, enabled: false, frequency: "1hr" });
+  // No cron key at all: the server fills in the algorithm's own default. Sending "" here
+  // would mean "this binding wants no clock", and a new deployment would sit switched on
+  // and never run.
+  bindings().push({ id: `b${index}`, strategy: strategyKey, account_id: accountId, enabled: false });
   await saveBindings();
   showToast(`Deployed to ${accountLabel(accountId)}`);
 }
@@ -2641,6 +2991,13 @@ function wireEvents() {
       delete state.signals[route.id];
       return loadSignals(route.id);
     }
+    const signalRow = event.target.closest("[data-signal-symbol]");
+    if (signalRow) {
+      const symbol = signalRow.dataset.signalSymbol;
+      if (state.expandedSignals.has(symbol)) state.expandedSignals.delete(symbol);
+      else state.expandedSignals.add(symbol);
+      return render();
+    }
     if (event.target.closest("#refreshAlgoOrdersButton")) {
       delete state.algorithmActivity[route.id];
       return ensureAlgorithmActivity(route.id);
@@ -2657,14 +3014,26 @@ function wireEvents() {
     }
   });
 
+  // Reads back the expression as it is typed, before the change event saves it. A cron string
+  // is write-only otherwise: nothing on the screen tells you "0 11 * * 1-5" is 11am weekdays
+  // until after you have committed it to a live binding.
+  $("#content")?.addEventListener("input", (event) => {
+    if (event.target.id !== "deployCronInput") return;
+    const hint = $("#deployCronHint");
+    if (!hint) return;
+    const problem = cronError(event.target.value);
+    hint.textContent = problem || describeCron(event.target.value);
+    hint.classList.toggle("is-bad", Boolean(problem));
+  });
+
   $("#content")?.addEventListener("change", (event) => {
     if (event.target.id === "deployTargetSelect") {
       setDeploymentAccount(currentRoute().id, event.target.value);
       return;
     }
-    if (event.target.id === "deployFrequencySelect") {
+    if (event.target.id === "deployCronInput") {
       const bindingId = event.target.dataset.binding;
-      if (bindingId) setDeploymentFrequency(bindingId, event.target.value);
+      if (bindingId) setDeploymentCron(bindingId, event.target.value);
       return;
     }
     if (event.target.id === "backtestPeriodSelect") {
@@ -2684,6 +3053,20 @@ function wireEvents() {
     window.setTimeout(() => {
       if (renderDeferred) render();
     }, 0);
+  });
+
+  // Rows are focusable buttons, so they have to answer the keys a button answers to. Without
+  // this the gate breakdown is mouse-only, which is the one part of the deck that explains why
+  // the bot did what it did.
+  $("#content")?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const signalRow = event.target.closest?.("[data-signal-symbol]");
+    if (!signalRow) return;
+    event.preventDefault();
+    const symbol = signalRow.dataset.signalSymbol;
+    if (state.expandedSignals.has(symbol)) state.expandedSignals.delete(symbol);
+    else state.expandedSignals.add(symbol);
+    render();
   });
 
   $("#navFooter")?.addEventListener("click", (event) => {
@@ -2735,6 +3118,9 @@ function wireEvents() {
         bucketItems(bucketName).map((item) => ({ bucketName, item })),
       ).find(({ item }) => item.symbol === state.selected);
       if (found) {
+        // The field is over a bubble that is about to stop existing, so it goes first --
+        // and without committing, which would write the deleted symbol's budget back.
+        hideAmountEntry();
         removeSymbol(found.bucketName, state.selected);
         state.selected = null;
       }

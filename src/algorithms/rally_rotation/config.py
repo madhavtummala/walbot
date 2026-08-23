@@ -8,15 +8,12 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import Any
 
 
-from ...common.config_utils import load_tuning, tuning_section
 from ...data.bars import TRADING_MINUTES_PER_DAY
 
 logger = logging.getLogger(__name__)
 
-STATE_KEY = "rally_rotation_runtime"
 
 EPSILON = 1e-9
 
@@ -36,11 +33,16 @@ class RallyRotationConfig:
     risk_on_universe: list[str] = field(default_factory=lambda: ["QQQM", "VTI", "IWM", "IEMG", "XSD"])
     defensive_universe: list[str] = field(default_factory=lambda: ["BIL", "IEF", "AGG", "GLD"])
     # -- decision cadence -------------------------------------------------------------------
-    #: How often the cross-section is re-ranked, in *trading* days -- counted in runs, since
-    #: the algorithm runs once a session. The algorithm runs every session; that is the rate at
-    #: which it looks, not the rate at which it should act, and collapsing the two is what made
-    #: a medium-term signal trade like a fast one. The slowest selection horizon is twelve
+    #: How often the cross-section is re-ranked, in *trading* days -- elapsed sessions since the
+    #: last re-rank, not runs since. How often the algorithm looks is the binding's cron and has
+    #: nothing to say about how often it should act; collapsing the two is what made a
+    #: medium-term signal trade like a fast one. The slowest selection horizon is twelve
     #: sessions, so re-ranking daily asks the score a question it cannot answer that fast.
+    #:
+    #: This used to count runs, on the premise that the algorithm fires once a session. A binding
+    #: is free to state any cron it likes, and at the five-a-session one in ``walbot.yaml`` that
+    #: premise made this knob mean "re-rank daily" -- five times the intended rate, with nothing
+    #: on the deck saying so.
     #:
     #: Selection, entry, replacement and the considered exits all happen on this clock.
     #: :func:`crash_stop` does not: it runs every session whatever this says, because a name
@@ -138,11 +140,19 @@ class RallyRotationConfig:
     #:
     #: The band between the two counts is where a holding is neither bought nor sold, which is
     #: what lets a holding stay put until something genuinely changes.
+    #:
+    #: All three are counted in **market days**, never in runs, however often the binding's cron
+    #: fires. Within a day the last run wins. Counting runs made every one of them a function of
+    #: the schedule: at five fires a session a three-"day" settling period was served by 36
+    #: minutes of one morning, and pausing the binding stopped the clocks where they stood.
+    #: Only days the algorithm actually ran are on record, so a pause makes a name take longer to
+    #: qualify rather than disqualifying it. See :mod:`.memory`.
+    #: Market days of history kept per symbol -- the window all three counts are taken over.
     eligibility_window: int = 10
-    #: Runs, out of ``eligibility_window``, a name must have been eligible for before it may
-    #: be opened.
+    #: Market days, out of ``eligibility_window``, a name must have been eligible for before it
+    #: may be opened.
     entry_min_eligible_days: int = 8
-    #: A holding is sold once it has been eligible on this many runs or fewer.
+    #: A holding is sold once it has been eligible on this many market days or fewer.
     exit_max_eligible_days: int = 3
 
     # -- ranking and hysteresis -----------------------------------------------------------
@@ -213,10 +223,6 @@ class RallyRotationConfig:
     minimum_trade_notional: float = 100.0
     minimum_trade_nav_fraction: float = 0.005
     defensive_max_positions: int = 2
-
-    @classmethod
-    def from_runtime_config(cls, config: Any) -> "RallyRotationConfig":
-        return load_tuning(cls, tuning_section(config, "rally_rotation"))
 
     @property
     def symbols(self) -> list[str]:

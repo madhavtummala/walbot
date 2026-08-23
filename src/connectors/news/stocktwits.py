@@ -13,10 +13,10 @@ from typing import Any
 
 
 from ...core.config import Config
-from ..support import (
-    NEWS_CATEGORY, _basic_auth_header, json_number,
-    _news_record, _request_json, _provider_config,
-)
+from ...common.config_utils import json_number
+from ..frames import _news_record
+from ..http import _basic_auth_header, _request_json
+from ..sources import NEWS_CATEGORY, _provider_config
 
 logger = logging.getLogger(__name__)
 

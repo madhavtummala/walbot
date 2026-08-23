@@ -6,11 +6,11 @@ import pandas as pd
 import pytest
 
 from src.api import api_payloads as api_payloads
-from src.core import market_context
-from src.algorithms import dca as dca
-from src.algorithms.dca import bot as dca_bot
+from src.core import market_context, runner
+from src.algorithms.bursty_dca import algorithm as dca_algorithm
+from src.algorithms.bursty_dca.algorithm import MAX_SIGMA
+from src.algorithms.bursty_dca.config import BurstyConfig
 from src.core.config import Config
-from src.core.interfaces import Schedule, DAILY_AT_OPEN
 from src.execution import replay as replay_module
 from src.algorithms.registry import canonical_algorithm_id
 from src.api.api_payloads import (
@@ -192,9 +192,9 @@ tradable_universe:
 def test_a_plan_carries_only_what_to_buy_and_how_much() -> None:
     """Cadence lives on the algorithm class and the on/off switch is the binding's, so a plan
     carrying either would be a second source of truth that nothing reads."""
-    from src.algorithms.dca import sanitize_dca_plan
+    from src.algorithms.bursty_dca.config import sanitize_plan
 
-    plan = sanitize_dca_plan(
+    plan = sanitize_plan(
         {"enabled": True, "frequency": "1hr", "schedule_pattern": "0 9 * * 1-5",
          "buy": {"items": [{"symbol": "SPY", "amount": 40}]}, "sell": {"items": []}},
         [{"symbol": "SPY", "enabled": True}],
@@ -373,6 +373,18 @@ def test_history_backtest_reads_configured_provider_order(monkeypatch) -> None:
 
 
 
+class _EmptyBook:
+    """A brokerage holding nothing, for the read half of a signal view."""
+
+    supports_fractional_shares = True
+
+    def get_account_state(self) -> dict:
+        return {"equity": 10_000.0, "cash": 10_000.0, "buying_power": 10_000.0}
+
+    def get_positions(self) -> dict:
+        return {}
+
+
 def test_none_strategy_resolves_to_dca(monkeypatch) -> None:
     """The retired "None" card always meant "just run DCA", so its saved id maps there."""
     assert canonical_algorithm_id("none") == "bursty_dca"
@@ -390,15 +402,21 @@ def test_dca_view_states_its_planned_total(monkeypatch) -> None:
         "sell": {"items": []},
     }
     _patch_payloads(monkeypatch, "universe_payload", lambda: {"rows": [{"symbol": "SPY"}]})
-    monkeypatch.setattr(dca_bot.DCAAlgorithm, "plan", lambda self, config: plan)
-    monkeypatch.setattr(dca_bot, "unknown_plan_symbols", lambda *a, **kw: [])
+    monkeypatch.setattr(dca_algorithm.BurstyDCAAlgorithm, "budget_plan", lambda self, config: plan)
+    monkeypatch.setattr(dca_algorithm.BurstyDCAAlgorithm, "_unknown_symbols", lambda self: [])
     monkeypatch.setattr(market_context, "create_data_client", lambda config: object())
-    monkeypatch.setattr(market_context, "load_latest_prices", lambda symbols, config, client: {"SPY": 500.0})
+    # The view runs the algorithm, and a plan is sized against a real book -- so the read goes
+    # through a brokerage even though nothing is placed.
+    monkeypatch.setattr(runner, "resolve_brokerage", lambda config: _EmptyBook())
 
-    payload = strategy_signals_payload("dca")
+    payload = strategy_signals_payload("bursty_dca")
 
-    rows = {row["symbol"]: row for row in payload["leaders"]}
-    assert rows["SPY"]["reason"].startswith("Accruing")
+    rows = {row["symbol"]: row for row in payload["rows"]}
+    # No provider answers in a test environment, so the row explains the absence rather than
+    # reporting a size it could not have computed. The headline is asserted at all only to pin
+    # that a bucket always says *something* -- what it says with real bars is covered by the
+    # headline tests in test_dca_accrual.
+    assert rows["SPY"]["headline"] == "No price history"
     assert payload["summary"][0] == {"label": "Mode", "value": "DCA"}
     assert payload["summary"][1] == {"label": "Planned", "value": "$250/month"}
     assert "Schedule" not in {row["label"] for row in payload["summary"]}
@@ -476,9 +494,9 @@ def test_backtest_cache_key_separates_accounts(monkeypatch) -> None:
         lambda account_id=None, strategy_id=None: Config(symbols=["SPY"], account_id=str(account_id or "")),
     )
 
-    assert _cache_key("dca", "6m", "paper") != _cache_key("dca", "6m", "local_paper")
-    assert _cache_key("dca", "6m", "paper") == _cache_key("dca", "6m", "paper")
-    assert _cache_key("dca", "6m", "paper") != _cache_key("dca", "4m", "paper")
+    assert _cache_key("bursty_dca", "6m", "paper") != _cache_key("bursty_dca", "6m", "local_paper")
+    assert _cache_key("bursty_dca", "6m", "paper") == _cache_key("bursty_dca", "6m", "paper")
+    assert _cache_key("bursty_dca", "6m", "paper") != _cache_key("bursty_dca", "4m", "paper")
 
 
 def _dca_backtest_history(monkeypatch, strategy, plan, *, price=100.0, equity=100_000.0):
@@ -492,8 +510,8 @@ def _dca_backtest_history(monkeypatch, strategy, plan, *, price=100.0, equity=10
     _patch_payloads(monkeypatch, "get_config", lambda *a, **kw: config)
     _patch_payloads(monkeypatch, "create_data_client", lambda config: object())
     _patch_payloads(monkeypatch, "fetch_daily_bars", lambda syms, **kw: {s: bars[s] for s in syms})
-    monkeypatch.setattr(dca_bot.DCAAlgorithm, "plan", lambda self, config: plan)
-    monkeypatch.setattr(dca_bot, "broker_supports_fractional_shares", lambda account_id: True)
+    monkeypatch.setattr(dca_algorithm.BurstyDCAAlgorithm, "budget_plan", lambda self, config: plan)
+    monkeypatch.setattr(dca_algorithm, "broker_supports_fractional_shares", lambda account_id: True)
 
     payload = api_payloads._compute_backtest(strategy, "6m")
     return pd.DataFrame(payload["rows"]).set_index("timestamp")
@@ -504,30 +522,44 @@ def test_dca_backtest_spend_rate_does_not_depend_on_cadence(monkeypatch) -> None
     would model (runs per month) x the plan, and would make a frequent cadence look better
     purely because it deployed more capital -- so the replay accrues like the live algorithm.
     """
-    from src.algorithms.dca.bursty import BurstyDCAAlgorithm
+    from src.algorithms.bursty_dca.algorithm import BurstyDCAAlgorithm
 
-    # Well above the $50 min_executable floor, so the two cadences genuinely diverge in how
-    # often they can act rather than both being gated by the floor.
-    plan = {"buy": {"items": [{"symbol": "AAA", "amount": 3_000.0}]}, "sell": {"items": []}}
+    # Well above the one-share floor, so the two cadences genuinely diverge in how often they
+    # can act rather than both being limited by share rounding.
+    budget = 3_000.0
+    plan = {"buy": {"items": [{"symbol": "AAA", "amount": budget}]}, "sell": {"items": []}}
 
-    monkeypatch.setattr(BurstyDCAAlgorithm, "schedule", replace(DAILY_AT_OPEN, weekdays=(0,)))
+    monkeypatch.setattr(BurstyDCAAlgorithm, "cron", "0 11 * * 1")   # Mondays only
     weekly = _dca_backtest_history(monkeypatch, "bursty_dca", plan)
-    monkeypatch.setattr(BurstyDCAAlgorithm, "schedule", Schedule())
+    monkeypatch.setattr(BurstyDCAAlgorithm, "cron", "0 11 * * 1-5")  # every weekday
     daily = _dca_backtest_history(monkeypatch, "bursty_dca", plan)
 
-    # ~6 months x $3,000/month, whichever cadence deployed it.
-    assert weekly["dca_contributions"].iloc[-1] == pytest.approx(18_000.0, rel=0.15)
-    assert daily["dca_contributions"].iloc[-1] == pytest.approx(18_000.0, rel=0.15)
+    weekly_total = weekly["dca_contributions"].iloc[-1]
+    daily_total = daily["dca_contributions"].iloc[-1]
+
+    # The invariant itself: ~5x the runs deploys the same money. Asserted directly rather than
+    # via each total's distance from the plan rate, because that formulation passes whenever
+    # both happen to be wrong by the same amount.
+    assert weekly_total == pytest.approx(daily_total, rel=0.15)
+
+    # ~6 months x $3,000/month, plus the overdraft ``spending_allowance`` deliberately permits.
+    # That overdraft is bounded by relax_months x conviction rather than growing with the
+    # horizon, which is what keeps the *rate* equal to the plan rate over a long enough run --
+    # on a six-month replay it is still a visible fraction of the total.
+    six_months = 6.0 * budget
+    overdraft = BurstyConfig().relax_months * budget * (1.0 + BurstyConfig().scaling_factor * MAX_SIGMA)
+    for total in (weekly_total, daily_total):
+        assert 0.85 * six_months <= total <= six_months + overdraft
 
 
 def test_dca_backtest_only_trades_on_its_scheduled_weekdays(monkeypatch) -> None:
-    """The replay gates on the same Schedule the runtime does, so a backtest cannot model a
+    """The replay gates on the same cron the runtime does, so a backtest cannot model a
     different cadence than the one that will actually trade."""
-    from src.algorithms.dca.bursty import BurstyDCAAlgorithm
+    from src.algorithms.bursty_dca.algorithm import BurstyDCAAlgorithm
 
     plan = {"buy": {"items": [{"symbol": "AAA", "amount": 3_000.0}]}, "sell": {"items": []}}
 
-    monkeypatch.setattr(BurstyDCAAlgorithm, "schedule", replace(DAILY_AT_OPEN, weekdays=(0,)))
+    monkeypatch.setattr(BurstyDCAAlgorithm, "cron", "0 11 * * 1")   # Mondays only
     history = _dca_backtest_history(monkeypatch, "bursty_dca", plan)
     traded = history[history["order_count"] > 0]
 
@@ -539,7 +571,7 @@ def test_dca_backtest_never_spends_more_cash_than_it_has(monkeypatch) -> None:
     """A budget the account cannot fund is held back, not overdrawn."""
     plan = {"buy": {"items": [{"symbol": "AAA", "amount": 5_000.0}]}, "sell": {"items": []}}
 
-    history = _dca_backtest_history(monkeypatch, "dca", plan, equity=1_000.0)
+    history = _dca_backtest_history(monkeypatch, "bursty_dca", plan, equity=1_000.0)
 
     assert (history["cash"] >= -0.01).all()
     assert history["dca_contributions"].iloc[-1] <= 1_000.0 + 0.01
@@ -558,8 +590,8 @@ def test_an_algorithm_declares_what_invalidates_its_cached_backtest() -> None:
     from src.api.payloads.backtest import _cache_key
     from src.core.config import get_config
 
-    dca = get_algorithm_class("dca").from_config(get_config(strategy_id="dca"))
-    assert "plan" in dca.config_fingerprint(get_config(strategy_id="dca"))
+    dca = get_algorithm_class("bursty_dca").from_config(get_config(strategy_id="bursty_dca"))
+    assert "plan" in dca.config_fingerprint(get_config(strategy_id="bursty_dca"))
 
     momentum = get_algorithm_class("rally_rotation").from_config(get_config(strategy_id="rally_rotation"))
     assert "plan" not in momentum.config_fingerprint(get_config(strategy_id="rally_rotation"))
@@ -567,7 +599,7 @@ def test_an_algorithm_declares_what_invalidates_its_cached_backtest() -> None:
     # Stable for the same inputs, and distinct per strategy and per period.
     assert _cache_key("rally_rotation", "6m") == _cache_key("rally_rotation", "6m")
     assert _cache_key("rally_rotation", "6m") != _cache_key("rally_rotation", "4m")
-    assert _cache_key("rally_rotation", "6m") != _cache_key("dca", "6m")
+    assert _cache_key("rally_rotation", "6m") != _cache_key("bursty_dca", "6m")
 
 
 def test_an_unknown_strategy_still_hashes_rather_than_raising() -> None:

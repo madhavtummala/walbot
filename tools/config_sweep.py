@@ -48,6 +48,7 @@ from src.api.payloads.backtest import (
 )
 from src.common.config_utils import tuning_section
 from src.core.config import get_config
+from src.core.cron import parse_cron
 from src.execution.metrics import calculate_performance_metrics
 from src.data.duckdb_store import pooled_connections
 from src.execution.replay import HistoryCache, replay
@@ -261,10 +262,10 @@ class Sweep:
             config,
             daily_history=daily,
             trade_dates=self._dates[period],
-            should_run=lambda date: int(date.dayofweek) in algorithm.schedule.weekdays,
+            should_run=lambda date: parse_cron(algorithm.cron).matches_date(date),
             starting_equity=self.starting_equity,
             history_providers=self.providers,
-            history=self._history_for(period, symbols, requirements.history_lookback_minutes),
+            history=self._history_for(period, symbols, requirements.intraday_lookback_minutes),
             open_in=self.open_in,
             cost_bps=self.cost_bps,
         )
@@ -475,27 +476,43 @@ def dual_wide() -> list[tuple[str, dict[str, Any]]]:
 
 
 def bursty_axes() -> list[tuple[str, dict[str, Any]]]:
-    """Bursty DCA's sizing parameters.
+    """Bursty DCA's sizing parameters, one axis at a time from deployed.
+
+    The sizing model is ``size = budget x conviction(z) x willingness(backlog)``:
+    ``conviction = 1 + scaling_factor x z`` over ``regime_ma_days``, and
+    ``willingness = 1 + relax_depth x tanh(backlog / relax_months)``. ``z`` is clamped to
+    +-3 sigma, so ``scaling_factor`` has a hard ceiling of ``1 + 3 x scaling_factor`` on how
+    far a single order may stretch the budget -- the ladder here spans "flat" (0) to a 7x
+    ceiling (2).
 
     For DCA the headline metric is not return but ``deployed``: the plan states a monthly
     contribution, and a trigger picky enough to skip it is not timing the market, it is
     declining to invest. Read ``deployed`` and ``pnl`` together -- a variant that deploys less
     and earns less has simply been out of the market.
+
+    The old percent-drawdown model needed ``scaling_factor`` ~10-30 to act on a broad ETF;
+    the sigma-normalized one works near 0.5, so ladders tuned for the old model read as
+    no-ops here.
     """
     base = deployed_tuning("bursty_dca")
     variants = [("baseline", dict(base))]
 
-    for factor in (5.0, 20.0, 30.0):
-        variants.append(_axis(base, f"scaling_factor={factor:.0f}", scaling_factor=factor))
-    for days in (50, 150, 300):
+    # A plain-DCA reference row: no valuation scaling, no backlog resistance. Every other row
+    # is only worth its complexity if it beats this one.
+    variants.append(("plain_dca_ref", {**base, "scaling_factor": 0.0, "relax_depth": 0.0}))
+    for factor in (0.0, 0.25, 1.0, 2.0):
+        variants.append(_axis(base, f"scaling_factor={factor}", scaling_factor=factor))
+    for days in (50, 100, 200, 300):
         variants.append(_axis(base, f"regime_ma_days={days}", regime_ma_days=days))
-    for multiple in (1.0, 3.0, 6.0):
-        variants.append(_axis(base, f"max_monthly_multiple={multiple:.0f}", max_monthly_multiple=multiple))
-    for boost in (0.0, 0.5, 1.0):
-        variants.append(_axis(base, f"cap_boost={boost}", cap_boost=boost))
-    # A variant that equals the deployed baseline is not an axis, it is a restatement, and it
-    # reads as a tie rather than as the same run twice. ``rsi_threshold=5`` is exactly that
-    # today, and any of these can become one when the deployed config moves.
+    for multiple in (1.0, 2.0, 6.0):
+        variants.append(_axis(base, f"max_monthly_multiple={multiple:.0f}",
+                              max_monthly_multiple=multiple))
+    for months in (0.5, 1.0, 4.0, 8.0):
+        variants.append(_axis(base, f"relax_months={months}", relax_months=months))
+    for depth in (0.0, 0.35, 1.2):
+        variants.append(_axis(base, f"relax_depth={depth}", relax_depth=depth))
+    # A variant that equals the deployed baseline is not an axis, it is a restatement -- and a
+    # configuration change can promote one silently. Drop it rather than let it read as a win.
     return [variant for variant in variants if variant[0] == "baseline" or variant[1] != base]
 
 
@@ -779,7 +796,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    for noisy in ("src.core.orders", "src.brokerages.providers.paper", "src.algorithms.rally_rotation.algorithm",
+    for noisy in ("src.core.orders", "src.brokerages.paper.brokerage", "src.algorithms.rally_rotation.algorithm",
                   "src.data.provider_cache", "src.connectors"):
         logging.getLogger(noisy).setLevel(logging.ERROR)
 

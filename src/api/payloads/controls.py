@@ -11,7 +11,7 @@ from typing import Any
 
 
 
-from ...brokerages.schwab_auth import auth_status, begin_authorization, complete_authorization
+from ...brokerages.schwab.auth import auth_status, begin_authorization, complete_authorization
 from ...core.bot_runtime import bot_runtime
 from ...core.config import (
     get_config,

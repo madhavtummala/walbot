@@ -67,15 +67,15 @@ def test_a_history_requirement_needs_no_grid_to_be_meaningful() -> None:
     """A lookback in minutes states its own span, so no bar size has to accompany it."""
     from src.core.interfaces import AlgorithmRequirements
 
-    wanted = AlgorithmRequirements(price_symbols=["SPY"], history_lookback_minutes=1170)
-    assert wanted.history_lookback_minutes == 1170
+    wanted = AlgorithmRequirements(price_symbols=["SPY"], intraday_lookback_minutes=1170)
+    assert wanted.intraday_lookback_minutes == 1170
     # Naming a grid stays optional, and means "prefer this fidelity", not "count in these".
     assert wanted.preferred_bar_minutes == 0
 
 
 def test_algorithms_state_horizons_in_minutes_not_bars() -> None:
     """No algorithm counts in bars any more, so none of them pins a bar size."""
-    from src.algorithms.rally_rotation import RallyRotationConfig
+    from src.algorithms.rally_rotation.config import RallyRotationConfig
 
     # Still stated in minutes, but rally rotation reads daily bars only, so it asks for no
     # intraday window at all rather than one it would not look at.
@@ -87,7 +87,6 @@ def test_algorithms_state_horizons_in_minutes_not_bars() -> None:
 
 def test_a_minutes_key_wins_over_a_stale_bars_key() -> None:
     """Once saved in minutes, a leftover bars key must not override it."""
-    from src.algorithms.rally_rotation import RallyRotationConfig
 
     class _Runtime:
         algorithm_configs = {
@@ -97,7 +96,9 @@ def test_a_minutes_key_wins_over_a_stale_bars_key() -> None:
             }
         }
 
-    assert RallyRotationConfig.from_runtime_config(_Runtime()).selection_horizon_macro_minutes == 2400
+    from src.algorithms.rally_rotation.algorithm import RallyRotationAlgorithm
+
+    assert RallyRotationAlgorithm(_Runtime()).tuning(_Runtime()).selection_horizon_macro_minutes == 2400
 
 
 def test_live_signals_are_ordered_by_score_not_by_its_magnitude() -> None:
@@ -107,11 +108,11 @@ def test_live_signals_are_ordered_by_score_not_by_its_magnitude() -> None:
     seats the worst name in the universe next to the best: -3.0 sorted ahead of +1.0. For a
     cross-sectional ranker the sign is the entire signal.
     """
-    from src.algorithms.base import signal_view_from_decision
-    from src.core.interfaces import AlgorithmDecision
+    from src.algorithms.base import signal_view_from_plan
+    from src.core.interfaces import AlgorithmPlan, intents_from_weights
 
-    decision = AlgorithmDecision(
-        target_weights={"GOOD": 0.6},
+    plan = AlgorithmPlan(
+        intents=intents_from_weights({"GOOD": 0.6}),
         signals={
             "WORST": {"signal": 0, "score": -3.0},
             "GOOD": {"signal": 1, "score": 1.0},
@@ -119,6 +120,6 @@ def test_live_signals_are_ordered_by_score_not_by_its_magnitude() -> None:
         },
     )
 
-    view = signal_view_from_decision(decision)
+    view = signal_view_from_plan(plan)
 
-    assert [row["symbol"] for row in view.leaders] == ["GOOD", "MID", "WORST"]
+    assert [row.symbol for row in view.rows] == ["GOOD", "MID", "WORST"]

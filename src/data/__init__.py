@@ -15,6 +15,8 @@ def fetch_daily_bars(
     force_refresh: bool = False,
     include_latest: bool = False,
     config=None,
+    start_date=None,
+    end_date=None,
 ) -> dict[str, pd.DataFrame]:
     """Fetch enough daily bars for a momentum signal and moving average calculation.
 
@@ -31,6 +33,8 @@ def fetch_daily_bars(
         lookback_bars=lookback_days + ma_days + extra_buffer_days,
         force_refresh=force_refresh,
         data_client=data_client,
+        start_date=start_date,
+        end_date=end_date,
     )
 
     normalized: dict[str, pd.DataFrame] = {}
@@ -42,10 +46,10 @@ def fetch_daily_bars(
         normalized[symbol] = df
     if include_latest:
         from src.core.config import get_config
-        from ..connectors import append_latest_quotes_to_bars, fetch_latest_market_quotes
+        from ..connectors import append_latest_quotes_to_bars, load_latest_prices
 
         runtime_config = config or get_config()
-        quotes = fetch_latest_market_quotes(
+        quotes = load_latest_prices(
             symbols,
             runtime_config,
             data_client=data_client,

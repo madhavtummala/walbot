@@ -14,34 +14,57 @@ from src.core.config import (
 
 logger = logging.getLogger(__name__)
 
-#: Every binding cadence, and how many minutes it means. ``mcp`` maps to ``None`` because it
-#: names no cadence at all -- it is the absence of one, delegated to an agent.
-#:
-#: One mapping rather than a list of names beside a separate lookup of their lengths: the set
-#: was previously written out four times (twice here, twice in ``core.bot_runtime``, each with
-#: its own default), so adding a cadence to one of them meant the dashboard accepted a value
-#: the scheduler silently rewrote to 1hr and then timed as 60 minutes.
-BINDING_FREQUENCIES: dict[str, int | None] = {
-    "15m": 15,
-    "30m": 30,
-    "1hr": 60,
-    "2hr": 120,
-    "1d": 24 * 60,
-    "mcp": None,
-}
+#: An empty cron is how a binding says "no clock drives me" -- the job the ``mcp`` frequency
+#: used to do. It is the absence of a schedule rather than a special kind of one, which is what
+#: it always was: ``frequency_minutes`` returned ``None`` for it and every caller tested exactly
+#: that, never the number.
+AGENT_DRIVEN_CRON = ""
 
-DEFAULT_FREQUENCY = "1hr"
-VALID_FREQUENCIES = set(BINDING_FREQUENCIES)
+#: What a pre-cron binding's ``frequency`` becomes. Only ``mcp`` carried information, because
+#: only ``mcp`` was ever read: the numeric cadences were consumed solely as "not None", so a
+#: binding saved as ``15m`` and one saved as ``2hr`` were timed identically -- by the algorithm
+#: class, at its own cadence. Migrating them all to the algorithm's default cron preserves what
+#: they actually did rather than what their name claimed.
+_LEGACY_AGENT_FREQUENCY = "mcp"
 
 
-def normalize_frequency(value: Any) -> str:
-    candidate = str(value or DEFAULT_FREQUENCY).strip().lower()
-    return candidate if candidate in BINDING_FREQUENCIES else DEFAULT_FREQUENCY
+def algorithm_default_cron(strategy: Any) -> str:
+    """The cron a binding gets before anyone has chosen one, read off the algorithm class."""
+    from src.algorithms.registry import get_algorithm_class
+
+    try:
+        return str(get_algorithm_class(canonical_algorithm_id(strategy)).cron)
+    except (KeyError, ValueError, TypeError, AttributeError):
+        from src.algorithms.base import BaseAlgorithm
+
+        return str(BaseAlgorithm.cron)
 
 
-def frequency_minutes(frequency: Any) -> int | None:
-    """How often a cadence fires, or ``None`` for ``mcp``, which never fires on a clock."""
-    return BINDING_FREQUENCIES[normalize_frequency(frequency)]
+def normalize_cron(value: Any, strategy: Any = None) -> str:
+    """A cron this system will actually run, or ``""`` for an agent-driven binding.
+
+    An unparseable expression falls back to the algorithm's default rather than to nothing.
+    Falling back to ``""`` would silently reclassify a scheduled binding as agent-driven, which
+    stops it trading altogether -- a typo in a text field must not be able to do that.
+    """
+    from src.core.cron import CronError, parse_cron
+
+    text = " ".join(str(value or "").split())
+    if not text:
+        return AGENT_DRIVEN_CRON
+    if text.lower() == _LEGACY_AGENT_FREQUENCY:
+        return AGENT_DRIVEN_CRON
+    try:
+        return parse_cron(text).expression
+    except CronError:
+        fallback = algorithm_default_cron(strategy)
+        logger.warning("Unusable cron %r; falling back to the algorithm default %r", text, fallback)
+        return fallback
+
+
+def cron_is_scheduled(cron: Any) -> bool:
+    """Whether a clock drives this binding at all."""
+    return bool(str(cron or "").strip())
 
 
 #: A binding is one algorithm pointed at one account, with its own on/off switch. The dashboard
@@ -52,7 +75,7 @@ DEFAULT_BINDING: dict[str, Any] = {
     "strategy": DEFAULT_STRATEGY_ID,
     "account_id": "",
     "enabled": False,
-    "frequency": DEFAULT_FREQUENCY,
+    "cron": AGENT_DRIVEN_CRON,
 }
 
 DEFAULT_CONTROLS: dict[str, Any] = {
@@ -87,8 +110,28 @@ def sanitize_binding(raw: dict[str, Any] | None, existing_ids: set[str], fallbac
         "strategy": strategy,
         "account_id": str(raw.get("account_id") or fallback_account or "")[:80],
         "enabled": enabled,
-        "frequency": normalize_frequency(raw.get("frequency")),
+        "cron": _binding_cron(raw, strategy),
     }
+
+
+def _binding_cron(raw: dict[str, Any], strategy: str) -> str:
+    """This binding's schedule, migrating a pre-cron ``frequency`` when that is all there is.
+
+    A binding saved before cron existed carries ``frequency`` and no ``cron``. ``mcp`` becomes
+    the empty cron, since that is the same statement; every other value becomes the algorithm's
+    default, because that is what those bindings were *actually* running at -- the number in the
+    name never reached the clock.
+    """
+    # An explicit ``cron`` is honoured whatever it says, empty included -- that is a binding
+    # stating it wants no clock. An *absent* key is a binding that has never chosen, which is
+    # not the same statement and must not land agent-driven by default: a deployment created
+    # from the dashboard would then sit switched on and never run, with nothing to say why.
+    if "cron" in raw:
+        return normalize_cron(raw.get("cron"), strategy)
+    legacy = str(raw.get("frequency") or "").strip().lower()
+    if legacy == _LEGACY_AGENT_FREQUENCY:
+        return AGENT_DRIVEN_CRON
+    return algorithm_default_cron(strategy)
 
 
 def _bindings_from_raw(controls: dict[str, Any]) -> list[dict[str, Any]]:
@@ -168,10 +211,10 @@ ORIGIN_MCP = "mcp"
 def binding_driver(binding: dict[str, Any] | None) -> str:
     """Which origin is allowed to place this binding's orders.
 
-    Exactly one, always: ``frequency: "mcp"`` does not *add* an agent driver, it hands the
-    clock's job to one. A binding is driven by the scheduler or by an agent, never both.
+    Exactly one, always: clearing the cron does not *add* an agent driver, it hands the clock's
+    job to one. A binding is driven by the scheduler or by an agent, never both.
     """
-    return ORIGIN_SCHEDULE if frequency_minutes((binding or {}).get("frequency")) is not None else ORIGIN_MCP
+    return ORIGIN_SCHEDULE if cron_is_scheduled((binding or {}).get("cron")) else ORIGIN_MCP
 
 
 def binding_refusal(binding: dict[str, Any] | None, origin: str) -> str:
@@ -191,8 +234,8 @@ def binding_refusal(binding: dict[str, Any] | None, origin: str) -> str:
     if driver != origin:
         if origin == ORIGIN_MCP:
             return (
-                f"Binding {binding.get('id')} runs on the {binding.get('frequency')} schedule, so the scheduler "
-                "places its orders. Set its frequency to 'mcp' to drive it from an agent instead."
+                f"Binding {binding.get('id')} runs on the schedule '{binding.get('cron')}', so the scheduler "
+                "places its orders. Clear its schedule to drive it from an agent instead."
             )
         return f"Binding {binding.get('id')} is driven by an agent over MCP, not by the schedule"
     return ""

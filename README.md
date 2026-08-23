@@ -10,7 +10,6 @@ The project follows a **Plugin-Oriented Architecture**:
 - **Connectors (`src/connectors/`)**: Modular market-data and sentiment providers.
 - **Data (`src/data/`)**: State, cache, DuckDB storage, universe, and provider fallback logic.
 - **Algorithms (`src/algorithms/`)**: Strategy plugins for equities, options, and DCA.
-- **Notifications (`src/notifications/`)**: Notification provider connectors such as Telegram.
 - **MCP (`src/mcp_server.py`)**: Agent-facing tools for runtimes such as OpenClaw.
 
 ## Features
@@ -93,30 +92,25 @@ waiting for an external agent to drive it. A `--mcp` process mode could only con
 binding's own frequency, and it did: the dashboard reported "MCP mode" with every algorithm
 switched off.
 
-Built-in bot scheduling and approval behavior is configured in `algorithm_bot.yaml`:
+Built-in bot scheduling is configured in `algorithm_bot.yaml`:
 
 ```yaml
 algorithm_bot:
   backtest_period: 4m
   trading_start_time: "08:30"
   trading_end_time: "15:00"
-  require_trade_approval: false
-  trade_approval_timeout_seconds: 300
-  trade_approval_poll_seconds: 5
 ```
 
-When `require_trade_approval` is true, planned orders are sent to Telegram for approval before submission. You can approve or deny with the inline buttons or by replying `/approve <approval_id>` / `/deny <approval_id>`.
-
-An external agent such as OpenClaw drives a binding parked on `mcp` through the MCP tool
-server on port `8001`, and uses the `request_trade_approval` MCP tool for the same Telegram
-approval flow. That keeps approval behavior consistent between agent-driven runs and the
-built-in bot runtime.
+There is no out-of-band trade approval. Review happens through the MCP flow instead:
+`get_algorithm_plan` runs the algorithm and places nothing, and an external agent such as
+OpenClaw -- driving a binding parked on `mcp` through the tool server on port `8001` -- edits
+the plan's intents and calls `place_orders` only when it is satisfied.
 
 Current config files:
 
 - `config/accounts.yaml` - brokerage account wiring; use `api_key_env` and `api_secret_env`.
-- `config/connectors.yaml` - market/sentiment/notification providers and provider order.
-- `config/algorithm_bot.yaml` - built-in equity bot runtime, trading window, approval, and kill switch.
+- `config/connectors.yaml` - market and sentiment providers, and provider order.
+- `config/algorithm_bot.yaml` - built-in equity bot runtime, trading window, and kill switch.
 - `config/algorithms.yaml` - per-algorithm strategy knobs and universes.
 - `config/options_bot.yaml` - options bot runtime and options strategy knobs.
 - `config/dca_bot.yaml` - DCA scheduler and DCA plan.
@@ -209,7 +203,6 @@ pytest
 - `src/core/` - config, interfaces, orders, portfolio logic, and bot runtime
 - `src/data/` - state, cache, social data, universe, and storage helpers
 - `src/execution/` - live runner and backtest execution
-- `src/notifications/` - notification provider connectors
 - `src/mcp_server.py` - MCP tools for external agent runtimes
 - `src/container_entrypoint.py` - Docker/local runtime entrypoint: dashboard, scheduler, and MCP server
 - `web/` - dashboard HTML, CSS, and JavaScript

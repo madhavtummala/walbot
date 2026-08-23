@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
+
 from src.api.web_app import controls_payload, status_payload, universe_payload
 
 
@@ -104,37 +106,6 @@ def test_controls_are_not_stretched_by_the_base_button_rule() -> None:
     assert "grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));" in app_css
 
 
-def test_sidebar_no_longer_carries_a_watchlist() -> None:
-    app_js, app_css, index_html = _assets()
-
-    assert 'id="watchlist"' not in index_html
-    assert 'id="addWatchButton"' not in index_html
-    assert 'id="targetNav"' not in index_html
-    assert 'id="globalStats"' not in index_html
-    assert "function renderWatchlist" not in app_js
-    assert "function addWatchTicker" not in app_js
-    assert "function removeWatchTicker" not in app_js
-    assert "/api/watchlist" not in app_js
-    assert ".watchRow {" not in app_css
-
-
-def test_watchlist_round_trips_through_the_state_store() -> None:
-    from src.api.api_payloads import DEFAULT_WATCHLIST, save_watchlist_payload, watchlist_payload
-    from src.data.state_store import ephemeral_state
-
-    with ephemeral_state():
-        assert [row["symbol"] for row in watchlist_payload()["rows"]] == DEFAULT_WATCHLIST
-        saved = save_watchlist_payload(["spy", " qqq ", "SPY", ""])
-        # Upper-cased, de-duplicated, blanks dropped.
-        assert saved["symbols"] == ["SPY", "QQQ"]
-
-    with ephemeral_state():
-        import pytest
-
-        with pytest.raises(ValueError):
-            save_watchlist_payload("SPY")
-
-
 def test_broker_holdings_and_orders_live_on_the_account_page() -> None:
     """The broker reports per account and cannot attribute a fill to an algorithm.
 
@@ -183,7 +154,7 @@ def test_one_colour_rule_drives_algorithms_accounts_and_the_bot() -> None:
     app_js, _, _ = _assets()
 
     rule = app_js[app_js.index("function deploymentStatus"):app_js.index("function renderSidebar")]
-    assert 'normalizeBindingFrequency(deployment.frequency) !== "mcp")) return "live"' in rule
+    assert "normalizeBindingCron(deployment.cron))) return \"live\"" in rule
     assert 'if (armed.length) return "idle"' in rule
     assert 'return "off"' in rule
     # Every consumer goes through it rather than re-deriving.
@@ -199,7 +170,7 @@ def test_the_footer_reports_every_binding_not_just_the_first() -> None:
     assert "Object.values(bot.bindings || {})" in summary
     assert "loops.filter((loop) => loop.running)" in summary
     # A binding parked on "mcp" is armed but deliberately unscheduled.
-    assert 'normalizeBindingFrequency(binding.frequency) === "mcp"' in summary
+    assert "!normalizeBindingCron(binding.cron)" in summary
     assert "state.bot?.algorithm" not in app_js, "the single-loop shortcut is what caused the bug"
 
 
@@ -272,27 +243,23 @@ def test_a_deferred_repaint_is_not_silently_dropped() -> None:
     assert 'addEventListener("focusout"' in app_js
 
 
-def test_watchlist_drag_reorder_left_with_the_watchlist() -> None:
-    app_js, app_css, _ = _assets()
-
-    assert "function reorderWatchlist" not in app_js
-    assert "function wireWatchlistDrag" not in app_js
-    assert ".watchRow.is-dragging {" not in app_css
-
-
 def test_tune_tab_renders_the_right_editor_per_algorithm() -> None:
     app_js, _, _ = _assets()
 
-    # DCA's budgets are its plan and get the bubble board, but they are not all of its config:
-    # Bursty DCA's regime gate, RSI and value-averaging knobs live in config/algorithms.yaml
-    # like every other algorithm's. DCA used to get the board *instead of* the parameter form,
-    # which left those with no editor at all. It now gets both; everything else gets the form.
+    # Bursty DCA's budgets are its plan and get the bubble board, but they are not all of its
+    # config: its regime gate, scaling factor and cap knobs live in the config section like
+    # every other algorithm's. It used to get the board *instead of* the parameter form, which
+    # left those with no editor at all. It now gets both; everything else gets the form.
     assert "function renderDcaTuner" in app_js
     assert "function renderConfigForm" in app_js
-    assert 'if (isDca) renderDcaTuner($("#dcaBoard"), strategy);' in app_js
+    assert 'if (hasBudgets) renderDcaTuner($("#dcaBoard"), strategy);' in app_js
     assert 'renderConfigForm($("#tuneBody"), strategy);' in app_js
-    # The save button is no longer suppressed for DCA, because DCA now has a form to save.
-    assert 'isDca ? "" : `<div class="cardActions">' not in app_js
+    # The save button is no longer suppressed, because there is now a form to save.
+    assert 'hasBudgets ? "" : `<div class="cardActions">' not in app_js
+    # Which editor to render is the algorithm's declaration, carried on the config payload --
+    # not a list of "the DCA algorithms" kept here in the frontend.
+    assert "DCA_ALGORITHM_KEYS" not in app_js
+    assert 'state.algorithmConfigs[strategyKey]?.tune_editor === BUDGETS_EDITOR' in app_js
     # Typed widgets, not a raw JSON box.
     assert "function configFieldKind" in app_js
     assert "function collectConfigValues" in app_js
@@ -449,7 +416,63 @@ def test_frontend_keeps_the_configured_backtest_period_and_chart() -> None:
     assert "chart-crosshair" in app_js
     assert "backtestPositions(row.positions)" in app_js
     assert "renderUniverseProposalRows" in app_js
-    assert "app.js?v=20260816-account-layout" in index_html
+    assert "app.js?v=20260822-inline-trades" in index_html
+
+
+def test_the_backtest_chart_marks_where_the_strategy_traded() -> None:
+    """The equity line alone cannot say. The replay emits a row for every step whether or not it
+    ran, so a quiet stretch and a rotation that netted out are the same shape."""
+    app_js, app_css, _ = _assets()
+
+    # Read off the ``trades`` map the payload already carries -- no new backend plumbing.
+    assert "backtestTrades(row)" in app_js
+    assert "renderTradeMarkers(svg, rows" in app_js
+    # Buys below the curve, sells above, and a step that did both is one amber mark rather than
+    # two -- a rotation is a single decision, and drawing both sides left the reader to infer it.
+    assert "is-buy" in app_js and "is-sell" in app_js and "is-rotation" in app_js
+    assert ".trade-marker.is-buy { fill: var(--good); }" in app_css
+    assert ".trade-marker.is-sell { fill: var(--bad); }" in app_css
+    assert ".trade-marker.is-rotation { fill: #b45309; }" in app_css
+    # Marks are drawn under the hover hitbox, so they must not swallow pointer events.
+    assert "pointer-events: none;" in app_css
+    # One mark per bucket, not per step: the intraday grid trades on most of its bars.
+    assert "MIN_MARKER_SPACING" in app_js
+
+
+def test_the_tooltip_reports_holdings_and_what_moved_on_one_line() -> None:
+    """Two lists meant a rotation printed the same symbols twice and left them to be paired up."""
+    app_js, _, _ = _assets()
+
+    assert "function backtestHoldingLines" in app_js
+    assert "backtestHoldingLines(row)" in app_js
+    # Share counts, not a second dollar figure: "+1" beside $498 is a fact about the order.
+    assert "function shareDelta" in app_js
+    assert "row?.trade_shares" in app_js
+    # A leg sold out entirely is absent from ``positions``, and is the most consequential line.
+    assert "if (!held.has(symbol))" in app_js
+    # The separate "Bought X $Y" block is what this replaced.
+    assert "tradeTooltipLines" not in app_js
+
+
+def test_backtest_rows_keep_their_time_of_day() -> None:
+    """Truncating to a date collapsed every bar in a session onto one x-position.
+
+    Options Flip's ~14,000 rows plotted at 179 of them, roughly 78 points deep, so the line was
+    drawn through whichever arrived last and no mark could ever address a single bar.
+    """
+    from src.api.payloads.backtest import BACKTEST_CACHE_VERSION, _json_backtest_rows
+
+    frame = pd.DataFrame(
+        {"equity": [100.0, 101.0]},
+        index=pd.DatetimeIndex(
+            ["2026-05-20T14:30:00Z", "2026-05-20T15:00:00Z"], name="timestamp"
+        ),
+    )
+
+    rows = _json_backtest_rows(frame)
+
+    assert [row["timestamp"] for row in rows] == ["2026-05-20T14:30:00Z", "2026-05-20T15:00:00Z"]
+    assert BACKTEST_CACHE_VERSION >= 10, "a payload shape change has to invalidate cached rows"
 
 
 def test_options_and_carousel_stay_gone() -> None:
@@ -509,7 +532,7 @@ def test_the_bot_pill_describes_the_algorithms_not_the_container() -> None:
     """Running an MCP server alongside the dashboard says nothing about what is switched on.
 
     The pill used to read "MCP mode" whenever the container was started with --mcp, even with
-    every algorithm off. What runs is a per-binding fact: on with a frequency, or on and
+    every algorithm off. What runs is a per-binding fact: on with a cron, or on and
     parked on "mcp" awaiting an external request.
     """
     app_js, _, _ = _assets()

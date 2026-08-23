@@ -716,7 +716,7 @@ def write_market_bars(
     if normalized.empty:
         return 0
     resolution = int(interval_minutes)
-    # Timestamps arrive already stamped at bar-end -- ``connectors.service._provider_bars``
+    # Timestamps arrive already stamped at bar-end -- ``connectors.cache._provider_bars``
     # does it where a payload becomes bars, so a fetcher's return value and its stored rows
     # cannot disagree. Doing it again here would shift everything a second interval.
     normalized = _drop_unclosed_bars(normalized, resolution)

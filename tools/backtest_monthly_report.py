@@ -175,7 +175,7 @@ def main():
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    for noisy in ("src.core.orders", "src.brokerages.providers.paper",
+    for noisy in ("src.core.orders", "src.brokerages.paper.brokerage",
                   "src.algorithms.rally_rotation.algorithm", "src.data.provider_cache",
                   "src.connectors"):
         logging.getLogger(noisy).setLevel(logging.ERROR)

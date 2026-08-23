@@ -3,7 +3,6 @@ import logging
 import os
 from typing import Any
 
-from src.notifications.service import notify_portfolio_changes
 
 
 class _UvicornAccessDebugFilter(logging.Filter):
@@ -84,7 +83,6 @@ def log_position_changes(order_results: list[dict[str, Any]]) -> None:
         if order.get("limit_price") is not None:
             details.append(f"limit={float(order.get('limit_price') or 0.0):.2f}")
         logger.warning("  %s order_id=%s", " ".join(details), order.get("order_id"))
-    notify_portfolio_changes(order_results)
 
 
 def log_signals(signals: dict[str, dict[str, float | int]], prices: dict[str, float]) -> None:

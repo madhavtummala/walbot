@@ -2,6 +2,7 @@ from __future__ import annotations
 import logging
 from ..api.controls import load_controls
 from ..core import pipeline
+from ..core.runner import execute_algorithm, run_algorithm
 from ..core.config import DEFAULT_STRATEGY_ID, get_config
 from ..common.logging_utils import configure_logging, log_signals, log_portfolio, log_orders, log_position_changes
 from ..core.strategy_models import STRATEGY_LABELS
@@ -51,10 +52,11 @@ def run_once(account_id: str | None = None, strategy: str | None = None) -> None
         logger.warning("Market is closed according to brokerage clock. Exiting without sending orders.")
         return
 
-    # Step 1: algorithm + data only. Identical call to the one the MCP agent makes.
-    result = pipeline.run_algorithm(strategy, config)
+    # Ask the algorithm what it wants to do. Identical call to the one the MCP agent and the
+    # dashboard make, and like them it places nothing and remembers nothing.
+    plan = run_algorithm(strategy, config, brokerage=brokerage)
 
-    if result.metadata["requirements"].paper_only and "paper-api.alpaca.markets" not in str(config.alpaca_base_url):
+    if plan.metadata["requirements"].paper_only and "paper-api.alpaca.markets" not in str(config.alpaca_base_url):
         logger.warning(
             "%s is restricted to Alpaca paper trading by default. Configured endpoint %s is not paper; exiting without orders.",
             STRATEGY_LABELS.get(strategy, strategy),
@@ -62,19 +64,12 @@ def run_once(account_id: str | None = None, strategy: str | None = None) -> None
         )
         return
 
-    logger.info("%s metadata: %s", STRATEGY_LABELS.get(strategy, strategy), result.metadata)
-    log_signals(result.signals, result.latest_prices)
+    logger.info("%s metadata: %s", STRATEGY_LABELS.get(strategy, strategy), plan.metadata)
+    log_signals(plan.signals, plan.latest_prices)
 
-    # Step 2: brokerage + algorithm. The scheduled flow goes straight here; the MCP flow
-    # pauses in between so an agent can validate the proposal first.
-    outcome = pipeline.place_orders(
-        result,
-        config,
-        brokerage,
-        require_approval=config.require_trade_approval,
-        approval_timeout_seconds=config.trade_approval_timeout_seconds,
-        approval_poll_seconds=config.trade_approval_poll_seconds,
-    )
+    # Place it. The scheduled flow goes straight here; the MCP flow pauses in between so an
+    # agent can validate -- and edit -- the plan first.
+    outcome = execute_algorithm(plan, config, brokerage)
     log_portfolio(outcome["final_weights"], outcome["equity"])
     log_orders(outcome["order_results"])
     log_position_changes(outcome["order_results"])

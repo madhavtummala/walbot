@@ -12,10 +12,9 @@ from typing import Any
 
 
 from ...core.config import Config
-from ..support import (
-    NEWS_CATEGORY, ProviderUnavailable, _api_key,
-    _news_record, _request_json,
-)
+from ..frames import _news_record
+from ..http import _request_json
+from ..sources import NEWS_CATEGORY, ProviderUnavailable, _api_key
 
 logger = logging.getLogger(__name__)
 
