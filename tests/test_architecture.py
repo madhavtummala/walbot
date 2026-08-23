@@ -245,7 +245,6 @@ def test_the_binding_frequency_vocabulary_is_declared_once() -> None:
     dashboard's list therefore produced a value the normaliser rewrote to ``1hr`` and the
     scheduler then timed as sixty minutes: accepted, silently renamed, wrongly clocked.
     """
-    from src.api.controls import BINDING_FREQUENCIES
 
     files, _ = _module_graph()
     core = {"15m", "30m", "1hr"}
@@ -267,24 +266,26 @@ def test_the_binding_frequency_vocabulary_is_declared_once() -> None:
     assert not offenders, "\n".join(offenders) + "\n(import from src.api.controls instead)"
 
 
-def test_the_dashboard_offers_exactly_the_cadences_the_backend_accepts() -> None:
+def test_the_dashboard_validates_cron_against_the_same_bounds_as_the_backend() -> None:
     """The frontend keeps its own copy -- it cannot import Python -- so pin the two together.
 
-    A cadence in the dropdown that the backend normalises away is a control that silently does
-    nothing, and one missing from the dropdown is a config the user cannot reach.
+    The dashboard refuses a cron it thinks is malformed rather than saving it, so a bound that
+    is tighter than the backend's makes a legal schedule unreachable, and one that is looser
+    lets a broken schedule through to a scheduler that will then decline to fire it.
     """
     import json
     import re as _re
 
-    from src.api.controls import BINDING_FREQUENCIES
+    from src.core.cron import _FIELDS
 
     source = open("web/static/app.js").read()
-    # Every array literal in app.js that mentions "mcp" is a copy of this vocabulary.
-    arrays = [
-        json.loads(match.replace("'", '"'))
-        for match in _re.findall(r"\[[^\[\]]*\"mcp\"[^\[\]]*\]", source)
-    ]
+    match = _re.search(r"CRON_FIELD_BOUNDS\s*=\s*(\[\[.*?\]\])", source, _re.S)
+    assert match, "app.js no longer declares CRON_FIELD_BOUNDS where this test can see it"
+    frontend = json.loads(match.group(1))
 
-    assert arrays, "app.js no longer declares the cadence list where this test can see it"
-    for array in arrays:
-        assert array == list(BINDING_FREQUENCIES), f"app.js has {array}, backend has {list(BINDING_FREQUENCIES)}"
+    # ``day of week`` accepts 7 as an alias for Sunday, so its usable ceiling is one above the
+    # range ``_FIELDS`` states. Every other field is exactly its declared bounds.
+    backend = [
+        [low, 7 if name == "day of week" else high] for name, low, high in _FIELDS
+    ]
+    assert frontend == backend, f"app.js has {frontend}, backend has {backend}"

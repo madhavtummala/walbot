@@ -1,45 +1,57 @@
 """Alpha Vantage market data.
 
-Extracted verbatim from ``service.py``: this is the same code, in a file named after the
-provider it belongs to. Adding a provider is now a new module plus a registry line, rather
-than an edit to the module that dispatches to every provider.
+Quotes only. Alpha Vantage serves bars too, but behind a rate limit strict enough that it has
+never been worth putting in a provider order for them -- so ``fetch_bars`` reports nothing and
+the dispatcher falls through.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 
+import pandas as pd
 
-from ...core.config import Config
-from ..support import (
-    MARKET_CATEGORY, ProviderUnavailable, _api_key,
-    _normalize_quote, _request_json,
-)
+from ..base import MarketDataProvider
+from ..frames import _normalize_quote
+from ..http import _request_json
+from ..sources import MARKET_CATEGORY, ProviderUnavailable, _api_key
 
 logger = logging.getLogger(__name__)
 
+QUERY_URL = "https://www.alphavantage.co/query"
 
-def _fetch_alpha_vantage_quotes(symbols: list[str], config: Config) -> dict[str, dict[str, Any]]:
-    key = _api_key(config, MARKET_CATEGORY, "alpha_vantage")
-    if not key:
-        raise ProviderUnavailable("ALPHA_VANTAGE_API_KEY is not configured")
-    quotes: dict[str, dict[str, Any]] = {}
-    for symbol in symbols:
-        payload = _request_json(
-            "alpha_vantage",
-            MARKET_CATEGORY,
-            "https://www.alphavantage.co/query",
-            {"function": "GLOBAL_QUOTE", "symbol": symbol, "apikey": key},
-        )
-        quote_payload = payload.get("Global Quote", {}) if isinstance(payload, dict) else {}
-        quote = _normalize_quote(
-            "alpha_vantage",
-            symbol,
-            quote_payload.get("05. price"),
-            payload,
-            quote_payload.get("07. latest trading day"),
-        )
-        if quote:
-            quotes[symbol.upper()] = quote
-    return quotes
+
+class AlphaVantage(MarketDataProvider):
+    name = "alpha_vantage"
+
+    def fetch_price(self, symbols: list[str], **extra: Any) -> dict[str, dict[str, Any]]:
+        key = _api_key(self.config, MARKET_CATEGORY, self.name)
+        if not key:
+            raise ProviderUnavailable("ALPHA_VANTAGE_API_KEY is not configured")
+        quotes: dict[str, dict[str, Any]] = {}
+        for symbol in symbols:
+            payload = _request_json(
+                self.name, MARKET_CATEGORY, QUERY_URL,
+                {"function": "GLOBAL_QUOTE", "symbol": symbol, "apikey": key},
+            )
+            row = payload.get("Global Quote", {}) if isinstance(payload, dict) else {}
+            quote = _normalize_quote(
+                self.name, symbol, row.get("05. price"), payload, row.get("07. latest trading day")
+            )
+            if quote:
+                quotes[symbol.upper()] = quote
+        return quotes
+
+    def fetch_bars(
+        self,
+        symbols: list[str],
+        *,
+        interval_minutes: int,
+        lookback_bars: int,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        **extra: Any,
+    ) -> dict[str, pd.DataFrame]:
+        return {}

@@ -301,9 +301,6 @@ def test_get_config_reads_split_bot_and_universe_files(tmp_path, monkeypatch) ->
 runtime:
   kill_switch: false
 algorithm_bot:
-  require_trade_approval: true
-  trade_approval_timeout_seconds: 120
-  trade_approval_poll_seconds: 2
 """,
         encoding="utf-8",
     )
@@ -343,9 +340,6 @@ tradable_universe:
     assert config.symbols == ["SPY", "QQQ", "GLD"]
     assert config.momentum_lookback_days == 126
     assert config.max_longs == 4
-    assert config.require_trade_approval is True
-    assert config.trade_approval_timeout_seconds == 120
-    assert config.trade_approval_poll_seconds == 2
 
 
 def test_the_kill_switch_is_an_environment_brake_not_a_config_key(tmp_path, monkeypatch) -> None:

@@ -7,81 +7,47 @@ from typing import Any
 import pandas as pd
 
 from ..core.config import Config
+from ..data.duckdb_store import DAILY_INTERVAL_MINUTES
 from ..data.provider_cache import (
     load_cached_payload,
     provider_is_limited,
     save_cached_payload,
 )
-from .utils import filter_bar_range, normalize_intraday_frame
-
-_filter_bar_range = filter_bar_range
-_normalize_intraday_frame = normalize_intraday_frame
-
 
 logger = logging.getLogger(__name__)
 
-# Providers are declared in ``registry`` and imported on first use. ``MARKET_FETCHERS`` and
-# ``NEWS_FETCHERS`` keep their names and their dict behaviour because callers and tests reach
-# for them directly; what changed is that the implementations now live in one module per
-# provider instead of in this file.
+# Providers are declared in ``registry`` and imported on first use. Market data resolves to a
+# ``MarketDataProvider`` class that brings its own read-through cache; news is still a plain
+# fetcher dict, because a headline fetch has no bar store to read through to.
 from .registry import (  # noqa: E402
-    EOD_BAR_REGISTRY,
-    INTRADAY_BAR_REGISTRY,
+    MARKET_DATA,
     NEWS_FETCHER_REGISTRY as NEWS_FETCHERS,
-    QUOTE_FETCHER_REGISTRY as MARKET_FETCHERS,
+    market_provider,
 )
 
-# Provider plumbing, and the category and resolution constants, live in ``support`` so a
-# provider can be its own module without importing the service that dispatches to it.
-# Re-exported here because callers across the codebase -- and the tests -- have long imported
-# these names from ``connectors.service``.
-from .support import (  # noqa: E402,F401
-    DAILY_INTERVAL_MINUTES,
-    EOD_BAR_FRESH_FOR_DAYS,
-    EOD_CACHE_TTL_SECONDS,
+# The shared plumbing, from the module that owns each piece. ``service`` used to re-export all
+# forty of these names so that callers could reach them through the dispatcher; twenty-eight of
+# those were unused here, which made the wall a second, drifting description of the toolkit.
+from .cache import (  # noqa: E402
+    _news_cache_key,
+    _read_duckdb_sentiment,
+    _write_duckdb_sentiment,
+)
+from .frames import _empty_bars  # noqa: E402
+from .grid import default_bar_minutes  # noqa: E402
+from .sources import (  # noqa: E402
     EOD_MARKET_CATEGORY,
     EXTERNAL_AUTH_PROVIDERS,
-    INTRADAY_CACHE_TTL_SECONDS,
     INTRADAY_MARKET_CATEGORY,
     MARKET_CATEGORY,
     NEWS_CATEGORY,
-    PROVIDER_BAR_MINUTES,
     ProviderRateLimited,
     ProviderUnavailable,
-    SCHWAB_MINUTE_FREQUENCIES,
-    SENTIMENT_CATEGORY,
-    _access_token,
-    _api_key,
-    _bars_to_records,
-    _basic_auth_header,
-    _bearer_auth_header,
-    _empty_bars,
     _enabled,
     _fallback_suffix,
-    _filter_bar_range,
-    json_number,
-    _fresh_cached_bars,
-    _intraday_cache_key,
-    _looks_limited,
-    _news_cache_key,
-    _news_record,
     _next_provider_name,
-    _normalize_intraday_frame,
-    _normalize_quote,
-    _provider_bars,
     _provider_config,
     _provider_configured,
-    _quote_cache_key,
-    _read_duckdb_bars,
-    _read_duckdb_sentiment,
-    _records_to_bars,
-    _request_json,
-    _schwab_token,
-    _write_duckdb_bars,
-    _write_duckdb_sentiment,
-    bars_for_minutes,
-    default_bar_minutes,
-    resolve_bar_minutes,
 )
 
 
@@ -146,33 +112,22 @@ def _run_provider_fallback(
     return {symbol: resolved.get(symbol, _empty_bars()) for symbol in wanted}
 
 
-def _bind_fetchers(registry, symbols, config, **kwargs):
-    """``{provider: callable}`` for every registered provider, each bound to what it accepts.
+def _bound(providers: list[str], config: Config, call: str, **kwargs):
+    """``{provider: thunk}`` for each named provider, bound to one method call.
 
-    Providers do not take identical keyword arguments -- only Alpaca wants a preconstructed
-    ``data_client``, and a third-party provider added downstream will want neither that nor
-    anything else this module knows about. Rather than maintaining a hand-written lambda per
-    provider (which is what made adding one an edit in three places), each fetcher is inspected
-    and handed exactly the arguments it declares. A fetcher with ``**kwargs`` gets everything.
+    This used to inspect every fetcher's signature and hand it only the keyword arguments it
+    declared, because providers were loose functions with different parameters -- only Alpaca
+    wanted a ``data_client``, and a new provider would want neither that nor anything else this
+    module knew about. One method signature on ``MarketDataProvider`` makes that unnecessary:
+    ``**extra`` absorbs whatever a particular vendor needs.
     """
-    import inspect
+    def bind(name: str):
+        def run():
+            return getattr(market_provider(name, config), call)(**kwargs)
 
-    def bind(name):
-        def call():
-            fetcher = registry[name]
-            try:
-                parameters = inspect.signature(fetcher).parameters
-            except (TypeError, ValueError):  # builtins and C callables have no signature
-                return fetcher(symbols, config, **kwargs)
-            if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
-                accepted = kwargs
-            else:
-                accepted = {k: v for k, v in kwargs.items() if k in parameters}
-            return fetcher(symbols, config, **accepted)
+        return run
 
-        return call
-
-    return {name: bind(name) for name in registry}
+    return {name: bind(name) for name in providers if name in MARKET_DATA}
 
 
 def fetch_market_history(
@@ -211,12 +166,11 @@ def fetch_market_history(
         item.lower()
         for item in getattr(config, "intraday_market_data_provider_order", [])
     ] or ["yfinance"]
-    fetchers = _bind_fetchers(
-        INTRADAY_BAR_REGISTRY,
-        symbols,
-        config,
+    fetchers = _bound(
+        providers, config, "bars",
+        symbols=symbols,
+        interval_minutes=requested_minutes,
         lookback_minutes=lookback_minutes,
-        bar_minutes=requested_minutes,
         force_refresh=force_refresh,
         data_client=data_client,
         **range_kwargs,
@@ -296,10 +250,10 @@ def fetch_eod_market_bars(
     ] or [item.lower() for item in getattr(config, "market_data_provider_order", [])] or ["alpaca"]
     # Built from the registry, not from a hand-written list: a provider registered at runtime
     # is dispatchable immediately, which is the whole point of the registry existing.
-    fetchers = _bind_fetchers(
-        EOD_BAR_REGISTRY,
-        symbols,
-        config,
+    fetchers = _bound(
+        providers, config, "bars",
+        symbols=symbols,
+        interval_minutes=DAILY_INTERVAL_MINUTES,
         lookback_bars=lookback_bars,
         force_refresh=force_refresh,
         data_client=data_client,
@@ -308,67 +262,6 @@ def fetch_eod_market_bars(
     return _run_provider_fallback(
         symbols, providers, fetchers, config, category=EOD_MARKET_CATEGORY, label="EOD"
     )
-
-
-#: A stream quote older than this is treated as absent: real-time means seconds, not
-#: "whenever the socket last spoke".
-STREAM_QUOTE_MAX_AGE_SECONDS = 15.0
-
-
-def _stream_quote_payload(symbol: str, quote: dict[str, Any]) -> dict[str, Any] | None:
-    """One store entry -> the quote dict shape the REST providers produce.
-
-    Price prefers the last trade and falls back to the bid/ask mid, so a symbol quoting
-    without trading still prices. Bid/ask ride along either way -- that is data only the
-    stream has, and what spread-aware consumers actually want.
-    """
-    bid = quote.get("bid")
-    ask = quote.get("ask")
-    try:
-        bid = float(bid) if bid else None
-        ask = float(ask) if ask else None
-    except (TypeError, ValueError):
-        bid = ask = None
-    last = quote.get("last")
-    try:
-        last = float(last) if last else None
-    except (TypeError, ValueError):
-        last = None
-    mid = (bid + ask) / 2 if bid and ask else None
-    price = last or mid
-    if not price or price <= 0:
-        return None
-    stamp_ms = quote.get("trade_time") or quote.get("quote_time")
-    try:
-        stamp = datetime.fromtimestamp(float(stamp_ms) / 1000, tz=timezone.utc)
-    except (TypeError, ValueError, OSError, OverflowError):
-        stamp = datetime.fromtimestamp(float(quote.get("received_at") or 0), tz=timezone.utc)
-    return {
-        "symbol": symbol,
-        "price": price,
-        "current": True,
-        "provider": "schwab_stream",
-        "timestamp": stamp.isoformat(),
-        **({"bid": bid, "ask": ask, "spread": round(ask - bid, 6)} if bid and ask else {}),
-        "raw": {"source": "schwab_stream", "total_volume": quote.get("total_volume")},
-    }
-
-
-def _stream_quotes(symbols: list[str], config: Config) -> dict[str, dict[str, Any]]:
-    """Fresh quotes from the shared stream, starting it if config enables it."""
-    from .streaming import ensure_stream, stream_store
-
-    ensure_stream(config, symbols)
-    store = stream_store()
-    if store is None:
-        return {}
-    fresh = store.fresh_quotes(symbols, STREAM_QUOTE_MAX_AGE_SECONDS)
-    payloads: dict[str, dict[str, Any]] = {}
-    for symbol, quote in fresh.items():
-        payload = _stream_quote_payload(symbol, quote)
-        if payload:
-            payloads[symbol] = payload
-    return payloads
 
 
 def load_current_prices(
@@ -384,92 +277,66 @@ def load_current_prices(
     fallback. Each quote is written through to the payload cache as it is fetched, so a
     later off-hours read has something to degrade to.
 
-    When the Schwab stream is running, its quotes answer first: they are already on the
-    wire, carry the bid/ask the REST snapshot lacks, and cost no rate-limit budget. Only
-    symbols the stream cannot answer freshly fall through to the provider walk.
+    **Providers only. The Schwab stream is deliberately not consulted here**, though it used
+    to answer first for any symbol it had a quote for under fifteen seconds old. This is the
+    price an algorithm sizes with -- ``resolve_target_shares`` turns a weight or a notional
+    into share counts with it, and DCA's floor is one share of it -- so it has to be
+    reproducible. A stream quote made it three things it must not be: different from what a
+    replay sees (``ReplayContextSource`` has no socket), differently shaped (a stream quote
+    carries bid/ask, a REST snapshot does not), and dependent on whether a fifteen-second
+    window happened to be open at the moment of the run, so two runs a second apart could
+    size differently from the same market.
     """
     wanted = [symbol.upper() for symbol in symbols]
     quotes: dict[str, dict[str, Any]] = {}
-    if not force_refresh:
-        quotes.update(_stream_quotes(wanted, config))
     providers = [item.lower() for item in config.market_data_provider_order]
 
-    has_enabled_provider = any(
-        provider in MARKET_FETCHERS
-        and _enabled(config, MARKET_CATEGORY, provider, uses_external_auth=(provider in EXTERNAL_AUTH_PROVIDERS))
-        for provider in providers
-    )
+    def usable(name: str) -> bool:
+        return name in MARKET_DATA and _enabled(
+            config, MARKET_CATEGORY, name, uses_external_auth=(name in EXTERNAL_AUTH_PROVIDERS)
+        )
+
+    has_enabled_provider = any(usable(name) for name in providers)
 
     for index, provider in enumerate(providers):
-        if provider not in MARKET_FETCHERS:
+        if provider not in MARKET_DATA:
             continue
-        next_provider = _next_provider_name(providers, index, MARKET_FETCHERS, config, MARKET_CATEGORY, EXTERNAL_AUTH_PROVIDERS)
+        next_provider = _next_provider_name(
+            providers, index, MARKET_DATA, config, MARKET_CATEGORY, EXTERNAL_AUTH_PROVIDERS
+        )
         if provider_is_limited(provider):
             log = logger.info if next_provider else logger.warning
-            log(
-                "Market data provider %s is marked rate-limited%s",
-                provider,
-                _fallback_suffix(next_provider),
-            )
+            log("Market data provider %s is marked rate-limited%s", provider, _fallback_suffix(next_provider))
             continue
-        if not _enabled(config, MARKET_CATEGORY, provider, uses_external_auth=(provider in EXTERNAL_AUTH_PROVIDERS)):
+        if not usable(provider):
             continue
 
         missing = [symbol for symbol in wanted if symbol not in quotes]
         if not missing:
             break
 
-        if not force_refresh:
-            for symbol in list(missing):
-                cached = load_cached_payload(MARKET_CATEGORY, provider, _quote_cache_key(symbol))
-                if cached:
-                    quotes[symbol] = {**cached, "cached": True}
-            missing = [symbol for symbol in wanted if symbol not in quotes]
-            if not missing:
-                break
-
         try:
-            if provider == "alpaca":
-                fresh = MARKET_FETCHERS[provider](missing, config, data_client)
-            else:
-                fresh = MARKET_FETCHERS[provider](missing, config)
+            # The per-symbol cache read and write used to be spelled out here, once, for the
+            # quote path only -- and Alpaca needed a positional ``data_client`` that no other
+            # provider took. Both belong to the provider now: ``price`` reads through its own
+            # cache and ``**extra`` carries whatever one vendor happens to want.
+            fresh = market_provider(provider, config).price(
+                missing, force_refresh=force_refresh, data_client=data_client
+            )
         except ProviderRateLimited as exc:
             log = logger.info if next_provider else logger.warning
-            log(
-                "Market data provider %s hit its rate limit%s: %s",
-                provider,
-                _fallback_suffix(next_provider),
-                exc,
-            )
+            log("Market data provider %s hit its rate limit%s: %s", provider, _fallback_suffix(next_provider), exc)
             continue
         except ProviderUnavailable as exc:
             log = logger.info if next_provider else logger.warning
-            log(
-                "Market data provider %s unavailable%s: %s",
-                provider,
-                _fallback_suffix(next_provider),
-                exc,
-            )
+            log("Market data provider %s unavailable%s: %s", provider, _fallback_suffix(next_provider), exc)
             continue
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - one provider must not end the walk
             log = logger.info if next_provider else logger.warning
-            log(
-                "Market data provider %s failed%s: %s",
-                provider,
-                _fallback_suffix(next_provider),
-                exc,
-            )
+            log("Market data provider %s failed%s: %s", provider, _fallback_suffix(next_provider), exc)
             continue
 
-        for symbol, quote in fresh.items():
-            quotes[symbol] = quote
-            save_cached_payload(
-                MARKET_CATEGORY,
-                provider,
-                _quote_cache_key(symbol),
-                quote,
-                ttl_seconds=config.market_data_cache_ttl_seconds,
-            )
+        quotes.update(fresh)
 
     still_missing = [symbol for symbol in wanted if symbol not in quotes]
     if still_missing and not has_enabled_provider:
@@ -539,7 +406,7 @@ def load_latest_prices(
     if not force_refresh:
         try:
             # Use a cached market status if possible to avoid excessive clock calls
-            from src.brokerages.alpaca_client import create_trading_client, is_market_open
+            from src.brokerages.alpaca.client import create_trading_client, is_market_open
 
             trading_client = create_trading_client(config)
             provider_fetch_allowed = is_market_open(trading_client)

@@ -306,7 +306,7 @@ class StreamStore:
 
 def default_token_info(config) -> tuple[str, dict[str, Any]]:
     """Fresh OAuth token plus the ``streamerInfo`` block, via the shared Schwab session."""
-    from src.brokerages.schwab_client import SchwabSession
+    from src.brokerages.schwab.client import SchwabSession
 
     session = SchwabSession(config)
     token = session.access_token()

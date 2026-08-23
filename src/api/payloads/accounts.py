@@ -7,7 +7,7 @@ unrelated domains. The public names are unchanged and still importable from ``ap
 
 from __future__ import annotations
 
-from ...brokerages.alpaca_client import create_trading_client
+from ...brokerages.alpaca.client import create_trading_client
 from src.api.controls import load_controls
 
 import os
@@ -18,7 +18,7 @@ from typing import Any
 from alpaca.trading.enums import QueryOrderStatus
 from alpaca.trading.requests import GetOrdersRequest
 
-from ...brokerages.providers.paper import PaperBrokerage
+from ...brokerages.paper.brokerage import PaperBrokerage
 from ...core.config import (
     UnknownAccountError,
     get_account_broker_type,
@@ -94,7 +94,7 @@ def positions_payload(account_id: str = "") -> dict[str, Any]:
         if last_equity:
             payload["day_pl"] = equity - last_equity
             payload["day_pl_percent"] = (equity - last_equity) / last_equity
-        from ...brokerages.providers.alpaca import AlpacaBrokerage
+        from ...brokerages.alpaca.brokerage import AlpacaBrokerage
         rows = AlpacaBrokerage(config).get_position_details()
         payload["rows"] = rows
         payload["total_pl"] = sum(float(row["unrealized_pl"]) for row in rows) if rows else 0.0

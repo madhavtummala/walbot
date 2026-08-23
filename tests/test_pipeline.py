@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -9,11 +8,11 @@ from src.algorithms.base import BaseAlgorithm
 from src.algorithms.registry import register_algorithm
 from src.core import pipeline
 from src.core.config import Config
-from src.core.interfaces import AlgorithmResult, Intent, PortfolioSnapshot
+from src.core.interfaces import PortfolioSnapshot, intents_from_weights
 
 
 class PassthroughAlgorithm(BaseAlgorithm):
-    """The thinnest possible plugin, so these tests exercise the pipeline and not a strategy."""
+    """The thinnest possible algorithm, so these tests exercise the pipeline, not a strategy."""
 
     algorithm_id = "passthrough"
 
@@ -43,15 +42,17 @@ class RecordingBrokerage:
         return {"shortable": True, "reason": "ok"}
 
 
-def _result(**overrides) -> AlgorithmResult:
-    defaults = {
-        "strategy": "passthrough",
-        "target_weights": {"AAA": 0.5},
-        "signals": {"AAA": {"score": 1.0}},
-        "latest_prices": {"AAA": 100.0},
-    }
-    defaults.update(overrides)
-    return AlgorithmResult(**defaults)
+def _orders(config, brokerage, weights=None, **kwargs) -> dict[str, Any]:
+    """Place a one-symbol weight plan, spelling out the arguments the algorithm supplies."""
+    return pipeline.place_orders(
+        intents_from_weights(weights or {"AAA": 0.5}),
+        config,
+        brokerage,
+        latest_prices=kwargs.pop("latest_prices", {"AAA": 100.0}),
+        signals={"AAA": {"score": 1.0}},
+        min_trade_dollars=float(getattr(config, "min_trade_dollars", 0.0) or 0.0),
+        **kwargs,
+    )
 
 
 def _config(**overrides) -> Config:
@@ -68,10 +69,10 @@ def test_snapshot_weights_are_empty_without_equity() -> None:
     assert PortfolioSnapshot(positions={"AAA": 10}, equity=0.0).weights({"AAA": 50.0}) == {}
 
 
-def test_place_orders_sizes_from_the_result_prices() -> None:
+def test_place_orders_sizes_from_the_prices_on_the_plan() -> None:
     brokerage = RecordingBrokerage()
 
-    outcome = pipeline.place_orders(_result(), _config(), brokerage)
+    outcome = _orders(_config(), brokerage)
 
     assert outcome["status"] == "submitted"
     assert brokerage.submitted == [("AAA", "buy", 50)]  # 50% of 10k at 100
@@ -80,32 +81,22 @@ def test_place_orders_sizes_from_the_result_prices() -> None:
 def test_place_orders_exits_a_holding_left_out_of_the_targets() -> None:
     brokerage = RecordingBrokerage(positions={"BBB": 4})
 
-    outcome = pipeline.place_orders(
-        _result(latest_prices={"AAA": 100.0, "BBB": 100.0}), _config(), brokerage
-    )
+    outcome = _orders(_config(), brokerage, latest_prices={"AAA": 100.0, "BBB": 100.0})
 
     assert ("BBB", "sell", 4) in brokerage.submitted
     assert outcome["diff"][0]["symbol"] in {"AAA", "BBB"}
 
 
-def test_place_orders_refuses_a_stale_result() -> None:
-    stale = _result(as_of=datetime.now(timezone.utc) - timedelta(hours=1))
-
-    with pytest.raises(pipeline.StaleResultError, match="too stale"):
-        pipeline.place_orders(stale, _config(), RecordingBrokerage())
-
-
-def test_place_orders_rejects_a_symbol_the_result_never_priced() -> None:
-    result = _result(target_weights={"AAA": 0.3, "ZZZ": 0.2})
-
+def test_place_orders_rejects_a_symbol_the_plan_never_priced() -> None:
     with pytest.raises(ValueError, match="ZZZ"):
-        pipeline.place_orders(result, _config(), RecordingBrokerage())
+        _orders(_config(), RecordingBrokerage(), weights={"AAA": 0.3, "ZZZ": 0.2})
 
 
-def test_place_orders_honours_an_agents_edited_weights() -> None:
+def test_place_orders_acts_on_whatever_intents_it_is_handed() -> None:
+    """An agent edits the plan's intents; this step has no opinion about where they came from."""
     brokerage = RecordingBrokerage()
 
-    pipeline.place_orders(_result(), _config(), brokerage, target_weights={"AAA": 0.25})
+    _orders(_config(), brokerage, weights={"AAA": 0.25})
 
     assert brokerage.submitted == [("AAA", "buy", 25)]
 
@@ -130,7 +121,7 @@ def test_no_algorithm_sizes_against_a_cash_buffer() -> None:
     from src.algorithms.registry import get_algorithm_class
 
     config = Config(cash_buffer=0.02)
-    for strategy in ("rally_rotation", "dca"):
+    for strategy in ("rally_rotation", "bursty_dca"):
         sizing = get_algorithm_class(strategy).from_config(config).sizing(config)
         assert "cash_buffer" not in sizing, strategy
 
@@ -163,7 +154,7 @@ def test_place_orders_trims_a_batch_to_available_buying_power() -> None:
     """Sizing targets the book; only funding knows what the account can pay for."""
     brokerage = FundingBrokerage(buying_power=2_500.0, equity=10_000.0)
 
-    outcome = pipeline.place_orders(_result(), _config(), brokerage)
+    outcome = _orders(_config(), brokerage)
 
     # A 50% target on $10k equity is $5,000 of AAA, against $2,500 that can actually be spent.
     assert brokerage.submitted == [("AAA", "buy", 25.0)]
@@ -176,7 +167,7 @@ def test_place_orders_trims_a_batch_to_available_buying_power() -> None:
 def test_place_orders_holds_back_the_account_cash_buffer() -> None:
     brokerage = FundingBrokerage(buying_power=10_000.0, equity=10_000.0)
 
-    outcome = pipeline.place_orders(_result(), _config(cash_buffer=0.02), brokerage)
+    outcome = _orders(_config(cash_buffer=0.02), brokerage)
 
     assert outcome["funding"]["reserve"] == 200.0
     assert outcome["funding"]["budget"] == 9_800.0
@@ -191,7 +182,7 @@ def test_place_orders_liquidates_cash_equivalents_to_fund_a_batch() -> None:
         cash_equivalents={"SGOV": {"shares": 500.0, "price": 100.0, "value": 50_000.0}},
     )
 
-    outcome = pipeline.place_orders(_result(), _config(), brokerage)
+    outcome = _orders(_config(), brokerage)
 
     assert ("SGOV", "sell") == brokerage.submitted[0][:2]
     assert ("AAA", "buy", 50.0) == brokerage.submitted[1]
@@ -203,7 +194,7 @@ def test_place_orders_reports_an_unfundable_leg_with_its_reason() -> None:
     """An agent has to be able to tell a deliberate trim from a broker refusal."""
     brokerage = FundingBrokerage(buying_power=0.0, equity=10_000.0)
 
-    outcome = pipeline.place_orders(_result(), _config(min_trade_dollars=50.0), brokerage)
+    outcome = _orders(_config(min_trade_dollars=50.0), brokerage)
 
     assert brokerage.submitted == []
     assert outcome["status"] == "unfunded"
@@ -217,19 +208,7 @@ def test_final_weights_reflect_what_was_submitted_not_what_was_planned() -> None
     """Reporting the pre-funding target would claim a fill that never happened."""
     brokerage = FundingBrokerage(buying_power=2_500.0, equity=10_000.0)
 
-    outcome = pipeline.place_orders(_result(), _config(), brokerage)
+    outcome = _orders(_config(), brokerage)
 
     # 25 shares at $100 against $10k equity is a quarter of the book, not the half targeted.
     assert outcome["final_weights"] == {"AAA": 0.25}
-    assert outcome["proposed_weights"] == {"AAA": 0.5}
-
-
-def test_a_denied_approval_is_not_reported_as_a_submission() -> None:
-    """Nothing was attempted, so neither funding nor refusals describe what happened."""
-    brokerage = FundingBrokerage(buying_power=10_000.0, equity=10_000.0)
-
-    outcome = pipeline.place_orders(_result(), _config(), brokerage, require_approval=True,
-                                    approval_timeout_seconds=0, approval_poll_seconds=0)
-
-    assert brokerage.submitted == []
-    assert outcome["status"] == "not_approved"

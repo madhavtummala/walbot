@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from src.api.api_payloads import account_activity_payload, accounts_payload, positions_payload
-from src.brokerages.providers.paper import PaperBrokerage
+from src.brokerages.paper.brokerage import PaperBrokerage
 from src.core.config import (
     UNNAMED_ACCOUNT_ID,
     Config,
@@ -72,6 +72,21 @@ def test_the_book_tracks_average_entry_so_it_can_report_pl() -> None:
         row = next(row for row in brokerage.book()["rows"] if row["symbol"] == "SPY")
         assert row["unrealized_pl"] == 400.0
         assert round(row["unrealized_plpc"], 4) == 0.1818
+
+
+def test_the_paper_book_is_whole_share_only() -> None:
+    """Sizing reads whole-share off the class, and a fractional order is refused outright.
+
+    Backtests execute through this same class, so the flag moves both paths at once -- and
+    refusing in ``submit_order`` is what stops anything bypassing the sizer from filling.
+    """
+    assert PaperBrokerage.supports_fractional_shares is False
+
+    with ephemeral_state():
+        brokerage = PaperBrokerage(get_config(account_id=LOCAL))
+        with pytest.raises(ValueError, match="whole shares only"):
+            brokerage.submit_order(_order("SPY", "buy", 10.5, 100.0))
+        assert brokerage.get_positions() == {}
 
 
 def test_selling_part_of_a_position_leaves_the_basis_alone() -> None:

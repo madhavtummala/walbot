@@ -308,45 +308,59 @@ def _quote_config() -> Config:
     )
 
 
-def test_load_current_prices_prefers_fresh_stream_quotes(stubbed_stream) -> None:
+def test_the_price_an_algorithm_sizes_with_never_comes_from_the_stream(stubbed_stream, monkeypatch) -> None:
+    """A live socket must not change what a run trades.
+
+    ``load_current_prices`` feeds ``context.latest_prices``, which prices every intent --
+    ``resolve_target_shares`` turns a weight or a notional into share counts with it. The
+    stream used to answer first for any symbol it had seen in the last fifteen seconds, which
+    made that number three things it must not be: different from what a replay sees (there is
+    no socket in a backtest), differently shaped (a stream quote carries bid/ask, a REST
+    snapshot does not), and dependent on whether that window happened to be open.
+    """
     import time as time_module
 
+    from src.connectors import base
+    from tests.test_connectors import use_provider
+
     store = stream.StreamStore()
-    store.apply({"kind": "quote", "symbol": "SPY", "bid": 559.2, "ask": 559.4, "last": 559.3, "received_at": time_module.time()})
+    store.apply({
+        "kind": "quote", "symbol": "SPY", "bid": 559.2, "ask": 559.4, "last": 559.3,
+        "received_at": time_module.time(),
+    })
     stubbed_stream(store)
 
-    def fail_fetch(_symbols, _config):
-        raise AssertionError("REST should not be called when the stream answers")
+    use_provider(monkeypatch, "finnhub", price=lambda symbols, _config, **_kw: {
+        symbol: {"symbol": symbol, "price": 101.0, "provider": "finnhub", "raw": {}}
+        for symbol in symbols
+    })
+    monkeypatch.setattr(connectors, "provider_is_limited", lambda _provider: False)
+    monkeypatch.setattr(base, "load_cached_payload", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(base, "save_cached_payload", lambda *args, **_kwargs: None)
 
-    import src.connectors.registry as registry
+    quotes = connectors.load_current_prices(["SPY"], _quote_config())
 
-    original = registry.QUOTE_FETCHER_REGISTRY.get("finnhub")
-    registry.QUOTE_FETCHER_REGISTRY["finnhub"] = fail_fetch
-    try:
-        quotes = connectors.load_current_prices(["SPY"], _quote_config())
-    finally:
-        registry.QUOTE_FETCHER_REGISTRY["finnhub"] = original
-
-    quote = quotes["SPY"]
-    assert quote["provider"] == "schwab_stream"
-    assert quote["current"] is True
-    assert quote["price"] == 559.3
-    assert quote["bid"] == 559.2 and quote["ask"] == 559.4
-    assert quote["spread"] == pytest.approx(0.2)
+    # The stream holds a fresher quote for SPY and is ignored regardless.
+    assert store.fresh_quotes(["SPY"], 60.0), "the fixture only bites while the stream has one"
+    assert quotes["SPY"]["provider"] == "finnhub"
+    assert quotes["SPY"]["price"] == 101.0
 
 
-def test_load_current_prices_falls_back_when_stream_stale(stubbed_stream, monkeypatch) -> None:
+def test_prices_come_from_the_provider_walk(stubbed_stream, monkeypatch) -> None:
     store = stream.StreamStore()
     store.apply({"kind": "quote", "symbol": "SPY", "bid": 559.2, "ask": 559.4, "received_at": 1.0})
     stubbed_stream(store)
 
-    monkeypatch.setitem(connectors.MARKET_FETCHERS, "finnhub", lambda symbols, _config: {
+    from src.connectors import base
+    from tests.test_connectors import use_provider
+
+    use_provider(monkeypatch, "finnhub", price=lambda symbols, _config, **_kw: {
         symbol: {"symbol": symbol, "price": 101.0, "timestamp": "2026-08-20T15:30:00+00:00", "provider": "finnhub", "raw": {}}
         for symbol in symbols
     })
     monkeypatch.setattr(connectors, "provider_is_limited", lambda _provider: False)
-    monkeypatch.setattr(connectors, "load_cached_payload", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(connectors, "save_cached_payload", lambda *args, **_kwargs: None)
+    monkeypatch.setattr(base, "load_cached_payload", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(base, "save_cached_payload", lambda *args, **_kwargs: None)
 
     quotes = connectors.load_current_prices(["SPY"], _quote_config())
 

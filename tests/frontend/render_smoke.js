@@ -32,12 +32,12 @@ global.AbortController = class { constructor(){ this.signal = {}; } abort(){} };
 const PAYLOADS = {
   "/api/status": { config: { backtest_period: "2m" }, runtime_mode: "bot" },
   "/api/universe": { rows: [{ symbol: "SPY", enabled: true }] },
-  "/api/controls": { controls: { bindings: [{ id: "b1", strategy: "dca", account_id: "paper", enabled: true }], trading_account_id: "paper" }, bot: {} },
-  "/api/accounts": { default: "paper", rows: [{ id: "paper", label: "Alpaca Paper", broker: "alpaca", base_url: "u", data_feed: "iex", api_key_env: "K", api_secret_env: "S", credentials_ready: true, missing_env: [], deployments: ["dca"] }] },
+  "/api/controls": { controls: { bindings: [{ id: "b1", strategy: "bursty_dca", account_id: "paper", enabled: true }], trading_account_id: "paper" }, bot: {} },
+  "/api/accounts": { default: "paper", rows: [{ id: "paper", label: "Alpaca Paper", broker: "alpaca", base_url: "u", data_feed: "iex", api_key_env: "K", api_secret_env: "S", credentials_ready: true, missing_env: [], deployments: ["bursty_dca"] }] },
   "/api/dca": { account_id: "paper", plan: { max_item_amount: 2000, buy: { amount: 100, items: [{ symbol: "SPY", amount: 50 }] }, sell: { amount: 0, items: [] } }, available: [], preview: {} },
   "/api/positions": { account_id: "paper", equity: 100, cash: 10, day_pl: 1, day_pl_percent: 0.01, total_pl: 2, rows: [], error: "" },
   "/api/activity": { account_id: "paper", rows: [], error: "" },
-  "/api/algorithm-activity": { strategy: "dca", rows: [{ submitted_at: "2026-08-13T14:00:00+00:00", strategy: "dca", account_id: "paper", symbol: "SPY", side: "buy", quantity: 2, status: "submitted", reason: "" }] },
+  "/api/algorithm-activity": { strategy: "bursty_dca", rows: [{ submitted_at: "2026-08-13T14:00:00+00:00", strategy: "bursty_dca", account_id: "paper", symbol: "SPY", side: "buy", quantity: 2, status: "submitted", reason: "" }] },
   "/api/schwab/auth": { configured: false, connector_enabled: true, state: "unconfigured", detail: "Schwab is not configured: missing SCHWAB_APP_KEY." },
   "/api/algorithm-config": { strategy: "rally_rotation", config_key: "rally_rotation", config: { max_positions: 3 } },
 };

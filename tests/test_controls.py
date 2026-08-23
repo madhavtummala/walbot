@@ -12,7 +12,7 @@ def test_sanitize_controls_defaults_and_bools() -> None:
         "algorithm": {"enabled": False, "strategy": "rally_rotation"},
         "algorithm_enabled": False,
         "bindings": [
-            {"id": "b1", "strategy": "rally_rotation", "account_id": "", "enabled": False, "frequency": "1hr"},
+            {"id": "b1", "strategy": "rally_rotation", "account_id": "", "enabled": False, "cron": "30 9 * * 1-5"},
         ],
         "active_strategy": "rally_rotation",
     }

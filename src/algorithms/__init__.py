@@ -1,16 +1,9 @@
-from __future__ import annotations
+"""The algorithms, and the contract they share.
 
-from ..core.interfaces import AlgorithmContext, AlgorithmDecision, AlgorithmPlugin, AlgorithmRequirements
-from .registry import ALGORITHM_MODULES, ALGORITHM_REGISTRY, get_algorithm_class, get_algorithm_module, register_algorithm
-
-__all__ = [
-    "ALGORITHM_MODULES",
-    "ALGORITHM_REGISTRY",
-    "AlgorithmContext",
-    "AlgorithmDecision",
-    "AlgorithmPlugin",
-    "AlgorithmRequirements",
-    "get_algorithm_class",
-    "get_algorithm_module",
-    "register_algorithm",
-]
+Deliberately empty of re-exports. ``core.config`` canonicalises strategy ids through
+``algorithms.ids``, and a facade here would drag the registry -- and through it ``base``, the
+order-placing layer and every brokerage -- into that import, closing a cycle back onto
+``core.config`` before it has finished loading. Import from the module that owns the name:
+``.base`` for ``BaseAlgorithm``, ``.registry`` for the lookup, ``core.interfaces`` for the
+dataclasses.
+"""

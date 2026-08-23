@@ -1,11 +1,14 @@
 """One way to register a pluggable implementation.
 
-This project has six extension points -- algorithms, brokerages, notification connectors,
-market-data providers, quote providers, dividend providers -- and until now they were
-registered three different ways: bare functions in a dict, eagerly-imported classes in a dict,
-and lazily-imported ``"module:Class"`` strings behind a ``register()`` helper. The last of
-those was the only one that let a provider be added without importing it at startup or editing
-the module that dispatches to it, so it is the one that survives here.
+This project has several extension points -- algorithms, brokerages, market-data providers,
+quote providers, dividend providers -- and they were registered three different ways: bare
+functions in a dict, eagerly-imported classes in a dict, and lazily-imported ``"module:Class"``
+strings. The last was the only one that let an implementation be added without importing it at
+startup or editing the module that dispatches to it, so it is the one that survives here.
+
+Class-based extension points use this directly. The connector fetchers are plain functions
+rather than subclasses, so they keep their own dicts of paths in ``connectors/registry.py`` and
+share only the resolution idea.
 
 Lazy resolution is the point, not an optimisation. A registry entry that imports its module at
 definition time drags every provider's third-party dependency into every process that touches
@@ -39,6 +42,13 @@ class Registry(Generic[T]):
         self._aliases: dict[str, str] = {}
 
     # -- registration ---------------------------------------------------------------------
+
+    def register(self, name: str, entry: str | Type[T]) -> None:
+        """Add or replace an implementation, as a class or an unimported ``"module:Class"``."""
+        normalized = self.normalize(name)
+        if not normalized:
+            raise ValueError(f"{self.label} name is required")
+        self._entries[normalized] = entry
 
     def alias(self, alias: str, target: str) -> None:
         self._aliases[self.normalize(alias)] = self.normalize(target)

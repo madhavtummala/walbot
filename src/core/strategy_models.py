@@ -1,7 +1,7 @@
 """Daily-bar feature frames, and the signal rows the options runner ranks underlyings with.
 
 Not an algorithm registry, despite the name and despite once holding a branch per strategy.
-The real algorithms live in ``src/algorithms/`` behind ``AlgorithmPlugin``; what survives here
+The real algorithms live in ``src/algorithms/`` behind ``BaseAlgorithm``; what survives here
 is the daily-bar feature frame the backtest fetcher also uses, and one scoring rule --
 ``rally_rotation`` in the *rule set* sense, a 126/252-day blend -- which ``options/swing.py``
 uses to pick which underlyings to buy contracts on.
@@ -16,12 +16,12 @@ import pandas as pd
 
 from src.common.config_utils import as_float
 from src.data.bars import signal_price
-from src.data.signals.signals import compute_social_trend_score
+from src.data.signals.social import compute_social_trend_score
 
 STRATEGY_LABELS = {
     "bursty_dca": "Bursty DCA",
     "rally_rotation": "Rally Rotation",
-    "intraday_pick": "Intraday Pick",
+    "options_flip": "Options Flip",
 }
 
 

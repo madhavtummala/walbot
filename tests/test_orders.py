@@ -21,18 +21,15 @@ class FakeBrokerage:
 
 def _sync(brokerage, latest_prices, current_positions, target_weights, equity, **kwargs):
     """Plan then submit, the pairing ``pipeline.place_orders`` performs in production."""
-    submit_keys = {"require_approval", "approval_timeout_seconds", "approval_poll_seconds"}
     planned = orders.plan_position_orders(
         latest_prices,
         current_positions,
         target_weights,
         equity,
         supports_fractional_shares=getattr(brokerage, "supports_fractional_shares", False),
-        **{k: v for k, v in kwargs.items() if k not in submit_keys},
+        **kwargs,
     )
-    return orders.submit_planned_orders(
-        brokerage, planned, **{k: v for k, v in kwargs.items() if k in submit_keys}
-    )
+    return orders.submit_planned_orders(brokerage, planned)
 
 
 def test_sync_positions_sells_positions_missing_from_targets() -> None:
@@ -104,45 +101,6 @@ def test_sync_positions_skips_infeasible_short_sale() -> None:
     assert result[0]["action"] == "skip"
     assert result[0]["approval_status"] == "short_sale_not_feasible"
     assert result[0]["reason"] == "asset is not shortable"
-
-
-def test_sync_positions_skips_when_approval_is_denied(monkeypatch) -> None:
-    monkeypatch.setattr(orders, "request_trade_approval", lambda *a, **kw: False)
-
-    brokerage = FakeBrokerage()
-    result = _sync(
-        brokerage,
-        latest_prices={"AAA": 100.0},
-        current_positions={},
-        target_weights={"AAA": 0.5},
-        equity=1_000.0,
-        min_trade_dollars=1.0,
-        rebalance_threshold=0.0,
-        require_approval=True,
-    )
-
-    assert brokerage.submitted == []
-    assert result[0]["action"] == "skip"
-    assert result[0]["approval_status"] == "not_approved"
-
-
-def test_sync_positions_submits_after_approval(monkeypatch) -> None:
-    monkeypatch.setattr(orders, "request_trade_approval", lambda *a, **kw: True)
-
-    brokerage = FakeBrokerage()
-    result = _sync(
-        brokerage,
-        latest_prices={"AAA": 100.0},
-        current_positions={},
-        target_weights={"AAA": 0.5},
-        equity=1_000.0,
-        min_trade_dollars=1.0,
-        rebalance_threshold=0.0,
-        require_approval=True,
-    )
-
-    assert brokerage.submitted == [("AAA", "buy", 5)]
-    assert result[0]["order_id"] == "order-1"
 
 
 class FractionalBrokerage(FakeBrokerage):

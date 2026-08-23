@@ -1,7 +1,7 @@
 """Timestamp parsing shared across layers.
 
 One tolerant ISO reader rather than the three private copies that had accumulated
-(``rally_rotation/stateful._parse_time``, ``dca/accrual._parse_timestamp``, and the inline
+(``rally_rotation``'s own ``_parse_time``, DCA's ``_parse_timestamp``, and the inline
 handling in the connectors).
 """
 
@@ -15,7 +15,7 @@ def utc_now() -> datetime:
     """The current instant, timezone-aware, in UTC.
 
     Only the two callers that genuinely meant this. ``provider_cache._now`` returns a
-    ``pd.Timestamp`` and ``schwab_auth._now`` returns an epoch float for token expiry
+    ``pd.Timestamp`` and ``brokerages/schwab/auth._now`` returns an epoch float for token expiry
     arithmetic -- same name, different types, deliberately left alone.
     """
     return datetime.now(timezone.utc)

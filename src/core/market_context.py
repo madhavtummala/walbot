@@ -9,13 +9,14 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from src.brokerages.alpaca_client import create_data_client
+from src.brokerages.alpaca.client import create_data_client
 from src.connectors import (
     fetch_latest_news_sentiment,
     fetch_market_history,
 )
 from src.core.interfaces import AlgorithmContext
 from src.data import fetch_daily_bars
+from src.data.state_store import algorithm_state_key, load_state
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,7 @@ class ContextSource(ABC):
 
     @abstractmethod
     def timestamp(self) -> datetime:
-        """The moment this context describes. ``analyze`` may read no data after it."""
+        """The moment this context describes. ``plan`` may read no data after it."""
 
     @abstractmethod
     def latest_prices(self, symbols: list[str], config) -> dict[str, float]:
@@ -145,7 +146,7 @@ class LiveContextSource(ContextSource):
             ma_days=requirements.daily_ma_days,
             extra_buffer_days=requirements.daily_extra_buffer_days,
             data_client=self._data_client,
-            include_latest=requirements.include_latest_daily and self._as_of is None,
+            include_latest=self._as_of is None,
             config=config,
             end_date=self._as_of,
         )
@@ -183,13 +184,14 @@ def build_algorithm_context(
     config,
     requirements,
     *,
+    algorithm_id: str = "",
     positions: dict[str, int] | None = None,
     equity: float = 0.0,
     data_client: Any = None,
     source: ContextSource | None = None,
     as_of: datetime | None = None,
 ) -> AlgorithmContext:
-    """Satisfy ``requirements`` and return the context ``analyze`` will read.
+    """Satisfy ``requirements`` and return the context ``plan`` will read.
 
     The single place a context is assembled, live or replayed. The live runner, the dashboard
     signal view, the MCP agent and the backtester all go through here, so an algorithm that
@@ -218,6 +220,14 @@ def build_algorithm_context(
     if requirements.needs_sentiment:
         sentiment_scores, market_sentiment = source.sentiment(price_symbols, config)
 
+    # Read here, so an algorithm never reaches into the store during its own run. Under a
+    # replay this resolves against the throwaway dict ``ephemeral_state`` installs, which is
+    # what keeps a backtest from reading -- and then overwriting -- the live account's memory.
+    state: dict[str, Any] = {}
+    if requirements.needs_state:
+        loaded = load_state(algorithm_state_key(algorithm_id, getattr(config, "account_id", "")), {})
+        state = dict(loaded) if isinstance(loaded, dict) else {}
+
     return AlgorithmContext(
         config=config,
         daily_bars_by_symbol=daily_bars_by_symbol,
@@ -228,6 +238,7 @@ def build_algorithm_context(
         latest_prices=latest_prices,
         equity=equity,
         account_id=getattr(config, "account_id", ""),
+        state=state,
         timestamp=source.timestamp(),
         extra=source.extra(),
     )

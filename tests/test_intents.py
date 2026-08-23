@@ -5,7 +5,7 @@ import pytest
 from src.core.interfaces import (
     MODE_INCREMENTAL,
     MODE_TARGET,
-    AlgorithmResult,
+    AlgorithmPlan,
     Intent,
     intents_from_weights,
     weights_from_intents,
@@ -18,12 +18,11 @@ def test_intent_rejects_an_unknown_kind() -> None:
         Intent(symbol="AAA", kind="dollars", value=1.0)
 
 
-def test_result_derives_intents_from_weights_and_back() -> None:
-    from_weights = AlgorithmResult(strategy="x", target_weights={"AAA": 0.5})
-    assert from_weights.intents == [Intent("AAA", "weight", 0.5)]
-
-    from_intents = AlgorithmResult(strategy="x", intents=[Intent("BBB", "weight", 0.25)])
-    assert from_intents.target_weights == {"BBB": 0.25}
+def test_plan_derives_weights_from_its_intents() -> None:
+    """Weights are a view of the intents, so the two cannot disagree."""
+    plan = AlgorithmPlan(strategy="x", intents=intents_from_weights({"AAA": 0.5}))
+    assert plan.intents == [Intent("AAA", "weight", 0.5)]
+    assert plan.target_weights == {"AAA": 0.5}
 
 
 def test_weight_helpers_round_trip() -> None:

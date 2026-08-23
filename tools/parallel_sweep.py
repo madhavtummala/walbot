@@ -58,7 +58,7 @@ os.environ["STATE_DUCKDB_PATH"] = {duckdb_path!r}
 
 import logging
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
-for noisy in ("src.core.orders", "src.brokerages.providers.paper",
+for noisy in ("src.core.orders", "src.brokerages.paper.brokerage",
               "src.algorithms.rally_rotation.algorithm",
               "src.data.provider_cache", "src.connectors"):
     logging.getLogger(noisy).setLevel(logging.ERROR)
@@ -88,7 +88,7 @@ print(f"worker done: {{len(runs)}} runs -> {{out_path}}")
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--algorithm", default="rally_rotation",
-                        choices=["rally_rotation", "both"])
+                        choices=["rally_rotation", "bursty_dca", "both"])
     parser.add_argument("--starting-equity", type=float, default=None)
     parser.add_argument("--cost-bps", type=float, default=0.0)
     parser.add_argument("--open-in", default="")

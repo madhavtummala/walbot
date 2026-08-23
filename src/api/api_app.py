@@ -34,7 +34,7 @@ from src.api.api_payloads import (
     strategy_signals_payload,
     universe_payload,
 )
-from ..brokerages.schwab_client import SchwabAuthError
+from ..brokerages.schwab.client import SchwabAuthError
 from ..core.bot_runtime import bot_runtime
 from ..core.config import DEFAULT_STRATEGY_ID
 from ..common.logging_utils import configure_logging, demote_uvicorn_access_logs_to_debug
