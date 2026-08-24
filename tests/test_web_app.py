@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import re
 import pandas as pd
 
 from src.api.web_app import controls_payload, status_payload, universe_payload
@@ -416,7 +417,15 @@ def test_frontend_keeps_the_configured_backtest_period_and_chart() -> None:
     assert "chart-crosshair" in app_js
     assert "backtestPositions(row.positions)" in app_js
     assert "renderUniverseProposalRows" in app_js
-    assert "app.js?v=20260822-inline-trades" in index_html
+    # That the assets are versioned, not which version they are. Pinning the literal string made
+    # this test fail on every legitimate asset change and taught the reader to edit it without
+    # looking -- which is worse than not asserting at all. Both files must carry the *same* stamp,
+    # since a page that loads new CSS against old JS is the failure the query string exists to
+    # prevent.
+    css_version = re.search(r"app\.css\?v=([\w.-]+)", index_html)
+    js_version = re.search(r"app\.js\?v=([\w.-]+)", index_html)
+    assert css_version and js_version, "static assets must carry a cache-busting version"
+    assert css_version.group(1) == js_version.group(1)
 
 
 def test_the_backtest_chart_marks_where_the_strategy_traded() -> None:

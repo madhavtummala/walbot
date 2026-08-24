@@ -18,6 +18,128 @@ _INSTRUCTIONS = {
     ("sell", True): "SELL_SHORT",
 }
 
+#: Options are opened and closed rather than bought and sold, and Schwab wants to be told which.
+#: Defaults follow this codebase's only options strategy -- long premium -- so a bare buy opens
+#: and a bare sell closes; ``extra["position_intent"]`` overrides for the short side.
+_OPTION_INSTRUCTIONS = {
+    ("buy", "open"): "BUY_TO_OPEN",
+    ("buy", "close"): "BUY_TO_CLOSE",
+    ("sell", "open"): "SELL_TO_OPEN",
+    ("sell", "close"): "SELL_TO_CLOSE",
+}
+
+_ORDER_TYPES = {
+    "market": "MARKET",
+    "limit": "LIMIT",
+    "stop": "STOP",
+    "stop_limit": "STOP_LIMIT",
+}
+
+_DURATIONS = {"day": "DAY", "gtc": "GOOD_TILL_CANCEL"}
+
+_STRATEGY_TYPES = {"single": "SINGLE", "oco": "OCO", "trigger": "TRIGGER"}
+
+#: Statuses that mean an order is finished. Everything else -- ``PENDING_ACTIVATION`` on a fresh
+#: submission, ``AWAITING_PARENT_ORDER`` on an untriggered bracket leg, ``QUEUED`` out of hours --
+#: is still live and must be treated as resting. Enumerated the terminal side rather than the live
+#: side deliberately: a status Schwab adds later should read as "still live", which makes a
+#: reconciler leave it alone, not as "gone", which makes it place a duplicate.
+_TERMINAL_STATUSES = frozenset({
+    "FILLED", "CANCELED", "CANCELLED", "REJECTED", "EXPIRED", "REPLACED",
+})
+
+
+def _instruction_for(request: OrderRequest) -> str:
+    """The Schwab verb for this order, which differs by asset class.
+
+    Equities net long and short, so the verb encodes direction. Options are positional, so it
+    encodes whether the leg opens or closes exposure -- Schwab rejects the order outright if the
+    two disagree with the account's actual position.
+    """
+    action = request.action.lower()
+    intent = str((request.extra or {}).get("position_intent", "")).lower()
+    if request.asset_type == "option":
+        if "open" in intent:
+            side = "open"
+        elif "close" in intent:
+            side = "close"
+        else:
+            side = "open" if action == "buy" else "close"
+        return _OPTION_INSTRUCTIONS[(action, side)]
+    shorting = "short" in intent or "cover" in intent
+    return _INSTRUCTIONS[(action, shorting)]
+
+
+def _order_payload(request: OrderRequest) -> Dict[str, Any]:
+    """One :class:`OrderRequest` as Schwab's order JSON, children and all.
+
+    Recursive, because Schwab nests the same order shape under ``childOrderStrategies`` for both
+    OCO pairs and trigger brackets. Writing the bracket as one payload rather than as a sequence
+    of submissions is the whole point: the exchange then owns the invariant that the target and
+    the stop cannot both fill.
+
+    A plain equity market order must serialise exactly as it did before this function existed --
+    ``tests/test_schwab.py`` asserts the payload field by field, and that test is the contract.
+    """
+    quantity = float(request.quantity)
+    if quantity != int(quantity):
+        raise ValueError(
+            f"Schwab does not accept fractional quantities (got {quantity} for {request.symbol})"
+        )
+
+    payload: Dict[str, Any] = {
+        "orderType": _ORDER_TYPES[request.order_type],
+        "session": "NORMAL",
+        "duration": _DURATIONS.get(request.time_in_force.lower(), "DAY"),
+        "orderStrategyType": _STRATEGY_TYPES[request.strategy],
+        "orderLegCollection": [
+            {
+                "instruction": _instruction_for(request),
+                "quantity": int(quantity),
+                "instrument": {
+                    "symbol": request.symbol.upper(),
+                    "assetType": "OPTION" if request.asset_type == "option" else "EQUITY",
+                },
+            }
+        ],
+    }
+    # Schwab names the limit price ``price``, not ``limitPrice``, and rejects the field outright
+    # on a market order rather than ignoring it.
+    if request.limit_price is not None and request.order_type in ("limit", "stop_limit"):
+        payload["price"] = _tick(request.limit_price)
+    if request.stop_price is not None and request.order_type in ("stop", "stop_limit"):
+        payload["stopPrice"] = _tick(request.stop_price)
+    if request.children:
+        # A trigger with two children must nest them under an OCO, not list them as siblings.
+        # Verified against the live API: listing them flat is *accepted*, and Schwab stores two
+        # independent SINGLE orders -- so after the target fills the stop stays live and can sell
+        # a position that no longer exists. The whole point of the bracket is that it cannot.
+        payload["childOrderStrategies"] = (
+            [_oco_payload(request.children)]
+            if request.strategy == "trigger" and len(request.children) > 1
+            else [_order_payload(child) for child in request.children]
+        )
+    return payload
+
+
+def _oco_payload(children: tuple[OrderRequest, ...]) -> Dict[str, Any]:
+    """An OCO wrapper, which carries no legs of its own -- only the pair it governs."""
+    return {
+        "orderStrategyType": "OCO",
+        "childOrderStrategies": [_order_payload(child) for child in children],
+    }
+
+
+def _tick(price: float) -> float:
+    """Round to a penny.
+
+    Schwab rejects a price carrying more precision than the instrument's tick, and the arithmetic
+    upstream -- a delta-translated limit, a percentage stop -- routinely produces one. Options
+    below $3 actually trade in half-cents, so rounding up to a penny is conservative on the buy
+    side and costs at most half a tick on the sell.
+    """
+    return round(float(price), 2)
+
 
 class SchwabBrokerage(BaseBrokerage):
     """Charles Schwab Trader API.
@@ -27,6 +149,10 @@ class SchwabBrokerage(BaseBrokerage):
     """
 
     supports_fractional_shares = False
+    supports_options = True
+    #: Schwab holds the OCO pair itself, via ``orderStrategyType``, so a bracket is one order and
+    #: the venue owns the "never both" invariant.
+    supports_oco = True
 
     def __init__(self, config: Dict[str, Any], session: SchwabSession | None = None):
         super().__init__(config)
@@ -163,34 +289,16 @@ class SchwabBrokerage(BaseBrokerage):
         return rows
 
     def submit_order(self, request: OrderRequest) -> Dict[str, Any]:
-        if request.order_type != "market":
-            raise NotImplementedError(f"Order type {request.order_type} is not implemented for Schwab")
-
-        quantity = float(request.quantity)
-        if quantity != int(quantity):
-            raise ValueError(
-                f"Schwab does not accept fractional quantities (got {quantity} for {request.symbol})"
-            )
-
-        intent = str((request.extra or {}).get("position_intent", ""))
-        shorting = "short" in intent or "cover" in intent
-        instruction = _INSTRUCTIONS[(request.action.lower(), shorting)]
-
-        payload = {
-            "orderType": "MARKET",
-            "session": "NORMAL",
-            "duration": "DAY",
-            "orderStrategyType": "SINGLE",
-            "orderLegCollection": [
-                {
-                    "instruction": instruction,
-                    "quantity": int(quantity),
-                    "instrument": {"symbol": request.symbol.upper(), "assetType": "EQUITY"},
-                }
-            ],
-        }
-
-        logger.info("Submitting Schwab %s order for %s qty=%s", instruction, request.symbol, int(quantity))
+        payload = (
+            _oco_payload(request.children)
+            if request.strategy == "oco"
+            else _order_payload(request)
+        )
+        logger.info(
+            "Submitting Schwab %s %s order for %s qty=%s",
+            payload["orderStrategyType"], payload.get("orderType", "-"),
+            request.symbol, int(request.quantity),
+        )
         response = self.session.post(
             f"{TRADER_BASE}/accounts/{self.account_hash}/orders",
             json=payload,
@@ -201,20 +309,82 @@ class SchwabBrokerage(BaseBrokerage):
             "client_order_id": request.client_order_id or "",
             "status": "accepted",
             "symbol": request.symbol.upper(),
-            "qty": int(quantity),
+            "qty": int(request.quantity),
+        }
+
+    def get_orders(self, status: str = "WORKING") -> List[Dict[str, Any]]:
+        """Orders in ``status``, flattened so a bracket's legs are listed alongside plain orders.
+
+        Flattened because a reconciler asks "is the stop still working", and under a trigger
+        bracket the stop is a child of the entry rather than a top-level order. Each row keeps
+        ``parent_order_id`` so the tree is still recoverable.
+
+        ``status="WORKING"`` means "still live", which at Schwab is a dozen different words --
+        see :data:`_TERMINAL_STATUSES`. Filtering on the literal ``WORKING`` misses an untriggered
+        bracket leg (``AWAITING_PARENT_ORDER``) and a freshly placed order (``PENDING_ACTIVATION``),
+        which would have a reconciler conclude nothing is resting and submit the whole book again.
+        """
+        # ``fromEnteredTime``/``toEnteredTime`` are mandatory -- Schwab answers 400 without them,
+        # rather than defaulting to a recent window. Sixty days back covers any GTC bracket this
+        # algorithm could still have resting, since nothing it opens is held past a few sessions.
+        now = pd.Timestamp.now(tz="UTC")
+        orders = self.session.get(
+            f"{TRADER_BASE}/accounts/{self.account_hash}/orders",
+            params={
+                "fromEnteredTime": _schwab_time(now - pd.Timedelta(days=60)),
+                "toEnteredTime": _schwab_time(now),
+            },
+        ) or []
+        rows: List[Dict[str, Any]] = []
+        for order in orders:
+            rows.extend(_flatten_order(order, parent_order_id=""))
+        if str(status).upper() in ("WORKING", "OPEN"):
+            rows = [row for row in rows if row["status"] not in _TERMINAL_STATUSES]
+        elif status:
+            rows = [row for row in rows if row["status"] == str(status).upper()]
+        return rows
+
+    def cancel_order(self, order_id: str) -> None:
+        """Cancel one order. An order that is already gone is a success, not an error.
+
+        Schwab answers 400 or 404 for an order that filled or was cancelled a moment ago, and
+        that race is routine for a reconciler working from a snapshot a few seconds old. Raising
+        would abort the rest of the pass over something that is already true.
+        """
+        try:
+            self.session.delete(f"{TRADER_BASE}/accounts/{self.account_hash}/orders/{order_id}")
+            logger.info("Cancelled Schwab order %s", order_id)
+        except Exception as exc:
+            logger.info("Schwab order %s was not cancellable (already filled or gone): %s", order_id, exc)
+
+    def replace_order(self, order_id: str, request: OrderRequest) -> Dict[str, Any]:
+        """Re-price in one call, so the order is never absent from the book in between."""
+        payload = (
+            _oco_payload(request.children)
+            if request.strategy == "oco"
+            else _order_payload(request)
+        )
+        response = self.session.put(
+            f"{TRADER_BASE}/accounts/{self.account_hash}/orders/{order_id}",
+            json=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        new_id = _order_id_from(response)
+        logger.info("Replaced Schwab order %s with %s for %s", order_id, new_id, request.symbol)
+        return {
+            # Schwab issues a new id for the replacement; falling back to the old one keeps the
+            # caller's bookkeeping pointing at a real order either way.
+            "order_id": new_id if new_id != "unknown" else str(order_id),
+            "client_order_id": request.client_order_id or "",
+            "status": "accepted",
+            "symbol": request.symbol.upper(),
+            "qty": int(request.quantity),
         }
 
     def cancel_all_orders(self) -> None:
-        orders = self.session.get(
-            f"{TRADER_BASE}/accounts/{self.account_hash}/orders",
-            params={"status": "WORKING"},
-        ) or []
-        for order in orders:
-            order_id = order.get("orderId")
-            if order_id is None:
-                continue
-            self.session.delete(f"{TRADER_BASE}/accounts/{self.account_hash}/orders/{order_id}")
-            logger.info("Cancelled Schwab order %s", order_id)
+        for order in self.get_orders("WORKING"):
+            if order.get("order_id"):
+                self.cancel_order(str(order["order_id"]))
 
     def is_market_open(self) -> bool:
         """Whether the equity market is open, per ``/marketdata/v1/markets``."""
@@ -245,6 +415,48 @@ class SchwabBrokerage(BaseBrokerage):
             "shortable": False,
             "reason": "Schwab does not expose a pre-trade shortability check",
         }
+
+
+def _schwab_time(moment: Any) -> str:
+    """Schwab's order-window format: ISO-8601 with milliseconds and a literal ``Z``.
+
+    It rejects both a bare date and an offset like ``+00:00``, so the format is spelled out here
+    rather than left to ``isoformat``.
+    """
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
+
+
+def _flatten_order(order: Dict[str, Any], *, parent_order_id: str) -> List[Dict[str, Any]]:
+    """One Schwab order tree as flat rows, in the shape :meth:`Brokerage.get_orders` promises.
+
+    An OCO wrapper contributes no row of its own: it carries no legs, so there is nothing to
+    reconcile against. Only orders that name an instrument are returned.
+    """
+    rows: List[Dict[str, Any]] = []
+    order_id = str(order.get("orderId") or "")
+    legs = order.get("orderLegCollection") or []
+    if legs:
+        leg = legs[0]
+        instrument = leg.get("instrument") or {}
+        instruction = str(leg.get("instruction") or "").upper()
+        rows.append({
+            "order_id": order_id,
+            "parent_order_id": parent_order_id,
+            "symbol": str(instrument.get("symbol") or "").upper(),
+            "asset_type": "option" if str(instrument.get("assetType") or "") == "OPTION" else "equity",
+            # Schwab's verb encodes open/close as well as direction; the caller wants direction.
+            "action": "buy" if instruction.startswith("BUY") else "sell",
+            "instruction": instruction,
+            "quantity": float(leg.get("quantity") or 0.0),
+            "filled_quantity": float(order.get("filledQuantity") or 0.0),
+            "order_type": str(order.get("orderType") or "").lower(),
+            "limit_price": float(order.get("price") or 0.0),
+            "stop_price": float(order.get("stopPrice") or 0.0),
+            "status": str(order.get("status") or "").upper(),
+        })
+    for child in order.get("childOrderStrategies") or []:
+        rows.extend(_flatten_order(child, parent_order_id=order_id or parent_order_id))
+    return rows
 
 
 def _order_id_from(response: Any) -> str:

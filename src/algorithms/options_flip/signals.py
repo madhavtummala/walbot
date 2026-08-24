@@ -1,11 +1,10 @@
-"""What an Options Flip run decided, and the setup behind it.
+"""What an Options Flip run decided, per symbol.
 
-This algorithm buys at most one contract set per run, so most sessions it picks nothing. That
-makes the *rejected* candidates the interesting part of the view: a run that shows one row and
-"macro flat" is telling you the direction gate never opened, which is a different thing from
-one that scored twelve names and found none aligned.
-
-Every candidate therefore gets a row and its own gate list, not just the winner.
+Every configured symbol gets a row every run, including the ones doing nothing. That is
+deliberate and it is the main thing this view is for: most sessions most symbols will not trade,
+and "no direction" and "direction but pre-market disagreed" and "everything confirmed but the
+chain had nothing tradable" are three very different silences. A view that only showed the
+symbols with orders would render all three identically, as absence.
 """
 
 from __future__ import annotations
@@ -15,184 +14,134 @@ from typing import Any
 from ...core.interfaces import (
     ACTION_BLOCKED,
     ACTION_ENTER,
+    ACTION_HOLD,
     ACTION_IDLE,
     AlgorithmPlan,
     Check,
     SignalRow,
     SignalView,
 )
-from .config import OptionsFlipConfig
-
-
-def candidate_checks(scored: dict[str, Any], cfg: OptionsFlipConfig, macro: str) -> list[dict[str, Any]]:
-    """The four conditions a name has to meet to be worth a contract, as measured.
-
-    Scoring is additive rather than a hard gate -- a name can be picked while failing one of
-    these -- so these are stated as conditions with their contribution, not as vetoes. The
-    exception is price range, which really is a veto and short-circuits the rest.
-    """
-    if "price_outside_range" in scored:
-        return [_dict(Check(
-            label="Price in tradable range",
-            ok=False,
-            value=f"${float(scored.get('last_price', 0.0)):,.2f}",
-            limit=f"${cfg.min_price:,.0f} - ${cfg.max_price:,.0f}",
-            blocking=True,
-        ))]
-
-    vol_regime = float(scored.get("vol_regime", 0.0))
-    range_expansion = float(scored.get("range_expansion", 0.0))
-    volume_ratio = float(scored.get("volume_ratio", 0.0))
-    aligned = bool(scored.get("direction_aligned"))
-    momentum = float(scored.get("intraday_momentum", 0.0))
-    return [
-        _dict(Check(
-            label=f"Direction matches {macro} macro",
-            ok=aligned,
-            value=f"{momentum:+.2%} intraday, {'above' if scored.get('above_vwap') else 'below'} VWAP",
-            limit="momentum and VWAP both with the trend",
-            # The only condition that can leave a name unpickable on its own: an unaligned name
-            # never earns the 2.0 that carries a score past the field.
-            blocking=not aligned,
-        )),
-        _dict(Check(
-            label="Volatility regime expanding",
-            ok=vol_regime >= cfg.vol_regime_threshold,
-            value=f"{vol_regime:.2f}x",
-            limit=f"≥ {cfg.vol_regime_threshold:.2f}x",
-        )),
-        _dict(Check(
-            label="Range expansion",
-            ok=range_expansion >= cfg.range_expansion_threshold,
-            value=f"{range_expansion:.2f}x ATR",
-            limit=f"≥ {cfg.range_expansion_threshold:.2f}x",
-        )),
-        _dict(Check(
-            label="Volume confirming",
-            ok=volume_ratio >= cfg.min_volume_ratio,
-            value=f"{volume_ratio:.2f}x",
-            limit=f"≥ {cfg.min_volume_ratio:.2f}x",
-        )),
-    ]
-
-
-def _dict(check: Check) -> dict[str, Any]:
-    return check.__dict__
-
-
-def signal_rows(
-    candidates: list[dict[str, Any]],
-    picked: str,
-    contract: dict[str, Any],
-    cfg: OptionsFlipConfig,
-    macro: str,
-) -> dict[str, dict[str, Any]]:
-    """One row per scored candidate; the picked one carries the contract to be ordered."""
-    rows: dict[str, dict[str, Any]] = {}
-    for scored in candidates:
-        symbol = str(scored["symbol"])
-        chosen = symbol == picked
-        rows[symbol] = {
-            "signal": 1 if chosen and contract.get("option_type") == "call" else -1 if chosen else 0,
-            "side": "LONG" if contract.get("option_type") == "call" else "SHORT",
-            "action": ACTION_ENTER if chosen else ACTION_BLOCKED,
-            "score": float(scored.get("score", 0.0)),
-            "close": float(scored.get("last_price", 0.0)),
-            "macro": macro,
-            "reason": _headline(scored, chosen, contract),
-            "checks": candidate_checks(scored, cfg, macro),
-            "realized_volatility": float(scored.get("vol_short", 0.0)),
-            "vol_regime": float(scored.get("vol_regime", 0.0)),
-            "range_expansion": float(scored.get("range_expansion", 0.0)),
-            "volume_ratio": float(scored.get("volume_ratio", 0.0)),
-            # Read by the order path, not only by the deck: ``submit_option_intents`` prices
-            # both legs from these, so they belong to the plan rather than to its rendering.
-            **(contract if chosen else {}),
-        }
-    return rows
-
-
-def _headline(scored: dict[str, Any], chosen: bool, contract: dict[str, Any]) -> str:
-    if chosen:
-        return (
-            f"Best setup - {contract['contracts']}x {contract['option_type']} "
-            f"{contract['strike']:g} / {contract['dte']}DTE"
-        )
-    if "price_outside_range" in scored:
-        return "Price outside the tradable range"
-    if not scored.get("direction_aligned"):
-        return "Not aligned with the macro trend"
-    return f"Outscored (score {float(scored.get('score', 0.0)):.2f})"
+from .lifecycle import BIDDING, HELD
 
 
 def signal_view(plan: AlgorithmPlan) -> SignalView:
-    """The pick, the runners-up, and -- when there is no pick -- what stopped there being one."""
-    rows = [
-        SignalRow(
-            symbol=symbol,
-            action=str(values["action"]),
-            headline=str(values["reason"]),
-            metrics=[
-                {"label": "Score", "value": f"{float(values['score']):.2f}"},
-                {"label": "Close", "value": f"${float(values['close']):,.2f}"},
-                {"label": "Contract", "value": _contract(values)},
-                {"label": "Entry", "value": _entry(values)},
-            ],
-            checks=[Check(**check) for check in values.get("checks") or []],
-        )
-        for symbol, values in plan.signals.items()
-    ]
-    rows.sort(key=lambda row: (-_score(row), -sum(check.ok for check in row.checks), row.symbol))
+    """One row per symbol, ordered so the positions and the near-misses come first."""
+    rows = [_row(symbol, signal) for symbol, signal in sorted(plan.signals.items())]
+    rows.sort(key=lambda row: (_ORDER.get(row.action, 9), row.symbol))
+    return SignalView(rows=rows, summary=_summary(rows, plan))
 
-    macro = str(plan.metadata.get("macro") or "flat")
+
+_ORDER = {ACTION_HOLD: 0, ACTION_ENTER: 1, ACTION_BLOCKED: 2, ACTION_IDLE: 3}
+
+
+def _row(symbol: str, signal: dict[str, Any]) -> SignalRow:
+    state = str(signal.get("state") or "")
+    checks = [_check(raw) for raw in signal.get("checks") or []]
+    if state == HELD:
+        action = ACTION_HOLD
+    elif state == BIDDING:
+        action = ACTION_ENTER
+    elif any(check.blocking for check in checks):
+        action = ACTION_BLOCKED
+    else:
+        action = ACTION_IDLE
+    return SignalRow(
+        symbol=symbol,
+        action=action,
+        headline=str(signal.get("headline") or ""),
+        metrics=_metrics(signal),
+        checks=checks,
+    )
+
+
+def _metrics(signal: dict[str, Any]) -> list[dict[str, str]]:
+    """What the row needs to be *judged*, not merely watched.
+
+    Reported even on a run that places nothing, which is the point: on most sessions this
+    algorithm stands down, and "no trade today" tells you nothing about whether the setup was
+    close or hopeless. The contract, its cost, and the band it expects to transact in do.
+
+    Kept to four columns, because every extra one squeezes the reason text the row is built
+    around. The spread is not among them: it is no longer a gate, and it is already visible on the
+    chosen-contract line in the expanded panel.
+    """
+    estimate = signal.get("estimate") or {}
+    metrics: list[dict[str, str]] = []
+    # No Direction column: the contract label already reads "$88 call", so a CALL/PUT column
+    # beside it says the same word twice. The only case it carried anything extra was a symbol
+    # with a direction but no contract, and that row now shows the pre-market reading instead.
+    if not estimate.get("contract") and (direction := str(signal.get("direction") or "")):
+        metrics.append({"label": "Direction", "value": direction.upper()})
+
+    if premarket := signal.get("premarket_change"):
+        metrics.append({"label": "Pre-market", "value": f"{float(premarket):+.2%}"})
+    # Guarded on the contract, not on the dict: direction and pre-market are merged in even when
+    # no contract was found, so the dict is never empty.
+    if not estimate.get("contract"):
+        return metrics
+
+    mark = float(estimate.get("mark", 0.0) or 0.0)
+    # No "(not tradable)" suffix: the row already carries a BLOCKED badge and the gate list says
+    # exactly which floor it missed and by how much. Repeating it here is a third telling.
+    metrics.append({"label": "Contract", "value": str(estimate.get("contract_label") or "")})
+    # The contract's current mid price, per share. Not multiplied out: ×100 is a fixed property
+    # of every listed option and the contract count is a config setting, so the product carried
+    # no information the reader did not already have.
+    metrics.append({"label": "Price", "value": f"${mark:.2f}"})
+    # Low and high in one cell, and without the dollar totals beside each: the totals are the
+    # per-contract figure times a round number that is already in the Cost column.
+    metrics.append({
+        "label": "Est. band",
+        "value": f"${float(estimate.get('estimated_low', 0.0)):.2f} – ${float(estimate.get('estimated_high', 0.0)):.2f}",
+    })
+
+    # Gross. It assumes *both* ends fill -- entry at the predicted low, exit at the predicted
+    # high -- when neither is guaranteed and the exit may hit the stop instead, so read it as the
+    # band's width in dollars rather than as an expectation.
+    metrics.append({
+        "label": "Est Profit",
+        "value": f"${float(estimate.get('expected_profit', 0.0)):,.0f}",
+    })
+
+    if (fill := float(signal.get("fill_price", 0.0) or 0.0)) > 0:
+        metrics.append({"label": "Fill", "value": f"${fill:.2f}"})
+    return metrics
+
+
+def _summary(rows: list[SignalRow], plan: AlgorithmPlan) -> list[dict[str, str]]:
+    """The header strip: label/value chips, matching what every other algorithm returns.
+
+    A list rather than a sentence because that is what :class:`SignalView` declares and what the
+    deck renders -- it maps over these to build the metric row, and a string silently becomes
+    ``payload.summary.map is not a function``, which empties the whole panel rather than just
+    the strip.
+    """
+    held = sum(1 for row in rows if row.action == ACTION_HOLD)
+    bidding = sum(1 for row in rows if row.action == ACTION_ENTER)
+    blocked = sum(1 for row in rows if row.action == ACTION_BLOCKED)
+
     summary = [
-        {"label": "Macro", "value": macro.title()},
-        {"label": "Evaluated", "value": str(int(plan.metadata.get("candidates_evaluated") or 0))},
-        {"label": "Picked", "value": str(sum(1 for row in rows if row.action == ACTION_ENTER))},
+        {"label": "Symbols", "value": str(len(rows))},
+        {"label": "Held", "value": str(held)},
+        {"label": "Bidding", "value": str(bidding)},
     ]
-    if not any(row.action == ACTION_ENTER for row in rows):
-        # On a run that picks nothing the reason *is* the payload, and it is usually a macro
-        # gate that never opened rather than anything about the candidates. Said in a word
-        # here; the sentence version is the top row's headline, and putting it in a summary
-        # tile as well printed it twice and wrapped it over four lines.
-        summary.append({"label": "Result", "value": "No pick"})
-    return SignalView(rows=rows, summary=summary)
+    if blocked:
+        summary.append({"label": "Blocked", "value": str(blocked)})
+    # Deliberately no aggregate "why flat". The strip is counts across the whole book, and one
+    # symbol's blocking gate is not a fact about the book -- with several symbols it names
+    # whichever happened to sort first. Each row already carries its own reason, measured.
+    return summary
 
 
-def _contract(values: dict[str, Any]) -> str:
-    if not values.get("option_type"):
-        return "--"
-    return f"{values['option_type'].upper()} {values['strike']:g} / {values['dte']}DTE"
-
-
-def _entry(values: dict[str, Any]) -> str:
-    if not values.get("entry_limit"):
-        return "--"
-    return f"${values['entry_limit']:.2f} -> ${values['exit_limit']:.2f}"
-
-
-def _score(row: SignalRow) -> float:
-    for metric in row.metrics:
-        if metric["label"] == "Score":
-            return float(metric["value"])
-    return 0.0
-
-
-def macro_view(plan: AlgorithmPlan) -> SignalView:
-    """Used when the macro gate closed before any candidate was scored."""
-    macro = str(plan.metadata.get("macro") or "flat")
-    return SignalView(
-        rows=[SignalRow(
-            symbol=str(plan.metadata.get("benchmark") or "--"),
-            action=ACTION_IDLE,
-            headline=str(plan.metadata.get("reason") or "No pick"),
-            checks=[Check(**check) for check in plan.metadata.get("checks") or []],
-        )],
-        # No "Result" chip. The reason is already the row's headline, verbatim, and a summary
-        # tile is sized for a measurement -- a full sentence in one wrapped to four lines and
-        # said nothing the row beneath it had not just said.
-        summary=[
-            {"label": "Macro", "value": macro.title()},
-            {"label": "Candidates", "value": "0 scored"},
-        ],
+def _check(raw: Any) -> Check:
+    """Checks travel through ``plan.signals`` as plain dicts, since the plan must stay JSON-able."""
+    if isinstance(raw, Check):
+        return raw
+    data = dict(raw or {})
+    return Check(
+        label=str(data.get("label", "")),
+        ok=bool(data.get("ok", False)),
+        value=str(data.get("value", "")),
+        limit=str(data.get("limit", "")),
+        blocking=bool(data.get("blocking", False)),
     )

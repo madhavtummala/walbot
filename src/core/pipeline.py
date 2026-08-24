@@ -18,7 +18,6 @@ from src.core.interfaces import (
     MODE_TARGET,
     Brokerage,
     Intent,
-    OrderRequest,
     PortfolioSnapshot,
     weights_from_intents,
 )
@@ -107,131 +106,6 @@ def weight_diff(
     return sorted(rows, key=lambda row: -abs(row["change"]))
 
 
-def submit_option_intents(
-    brokerage: Brokerage,
-    option_intents: list[Intent],
-    signals: dict[str, dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Submit option buy/sell limit orders for each option intent.
-
-    For each intent, two orders are placed:
-    1. A buy limit at the entry discount price
-    2. A GTC sell limit at the exit target price
-
-    If wrong, the sell limit just sits there -- the user sized for the loss.
-    """
-    results: list[dict[str, Any]] = []
-
-    for intent in option_intents:
-        signal = signals.get(intent.symbol, {})
-        option_type = signal.get("option_type", "call")
-        strike = signal.get("strike", 0.0)
-        dte = signal.get("dte", 0)
-        entry_limit = signal.get("entry_limit", 0.0)
-        exit_limit = signal.get("exit_limit", 0.0)
-        contracts = int(intent.value)
-
-        if contracts <= 0 or entry_limit <= 0:
-            results.append({
-                "symbol": intent.symbol,
-                "action": "buy",
-                "quantity": contracts,
-                "status": "rejected",
-                "reason": f"invalid option parameters: contracts={contracts}, entry_limit={entry_limit}",
-                "option_type": option_type,
-                "strike": strike,
-                "dte": dte,
-            })
-            continue
-
-        buy_request = OrderRequest(
-            symbol=intent.symbol,
-            action="buy",
-            quantity=contracts,
-            order_type="limit",
-            limit_price=entry_limit,
-            extra={
-                "option_type": option_type,
-                "strike": strike,
-                "dte": dte,
-                "position_intent": "buy_to_open",
-            },
-        )
-
-        try:
-            buy_result = brokerage.submit_order(buy_request)
-            results.append({
-                "symbol": intent.symbol,
-                "action": "buy",
-                "quantity": contracts,
-                "status": "submitted",
-                "order_type": "limit",
-                "limit_price": entry_limit,
-                "order_id": buy_result.get("order_id", "unknown"),
-                "option_type": option_type,
-                "strike": strike,
-                "dte": dte,
-            })
-        except Exception as exc:
-            logger.warning("Option buy rejected for %s: %s", intent.symbol, exc)
-            results.append({
-                "symbol": intent.symbol,
-                "action": "buy",
-                "quantity": contracts,
-                "status": "rejected",
-                "reason": str(exc),
-                "option_type": option_type,
-                "strike": strike,
-                "dte": dte,
-            })
-            continue
-
-        if exit_limit > 0:
-            sell_request = OrderRequest(
-                symbol=intent.symbol,
-                action="sell",
-                quantity=contracts,
-                order_type="limit",
-                limit_price=exit_limit,
-                extra={
-                    "option_type": option_type,
-                    "strike": strike,
-                    "dte": dte,
-                    "position_intent": "sell_to_close",
-                    "time_in_force": "gtc",
-                },
-            )
-            try:
-                sell_result = brokerage.submit_order(sell_request)
-                results.append({
-                    "symbol": intent.symbol,
-                    "action": "sell",
-                    "quantity": contracts,
-                    "status": "submitted",
-                    "order_type": "limit",
-                    "time_in_force": "gtc",
-                    "limit_price": exit_limit,
-                    "order_id": sell_result.get("order_id", "unknown"),
-                    "option_type": option_type,
-                    "strike": strike,
-                    "dte": dte,
-                })
-            except Exception as exc:
-                logger.warning("Option sell limit rejected for %s: %s", intent.symbol, exc)
-                results.append({
-                    "symbol": intent.symbol,
-                    "action": "sell",
-                    "quantity": contracts,
-                    "status": "rejected",
-                    "reason": str(exc),
-                    "option_type": option_type,
-                    "strike": strike,
-                    "dte": dte,
-                })
-
-    return results
-
-
 def place_orders(
     intents: list[Intent],
     config,
@@ -255,16 +129,9 @@ def place_orders(
     signals = signals or {}
     snapshot = read_snapshot(config, brokerage)
 
-    option_intents = [intent for intent in intents if intent.kind == "option"]
-    share_intents = [intent for intent in intents if intent.kind != "option"]
-
-    option_results: list[dict[str, Any]] = []
-    if option_intents:
-        option_results = submit_option_intents(brokerage, option_intents, signals)
-
     # ``shares`` intents carry their own quantity; everything else has to be priced to size.
     unpriced = sorted(
-        {intent.symbol for intent in share_intents if intent.kind != "shares" and latest_prices.get(intent.symbol, 0.0) <= 0}
+        {intent.symbol for intent in intents if intent.kind != "shares" and latest_prices.get(intent.symbol, 0.0) <= 0}
     )
     if unpriced:
         raise ValueError(
@@ -274,7 +141,7 @@ def place_orders(
 
     fractional = getattr(brokerage, "supports_fractional_shares", False)
     sized_shares = resolve_target_shares(
-        share_intents,
+        intents,
         mode,
         snapshot.positions,
         latest_prices,
@@ -290,7 +157,7 @@ def place_orders(
         min_trade_dollars=min_trade_dollars,
         rebalance_threshold=rebalance_threshold,
         supports_fractional_shares=fractional,
-        target_weights=weights_from_intents(share_intents),
+        target_weights=weights_from_intents(intents),
     )
 
     fundable, unfunded, funding = fund_planned_orders(
@@ -308,7 +175,7 @@ def place_orders(
         {**order, "action": "skip", "quantity": 0, "status": "unfunded"} for order in unfunded
     )
 
-    order_results = option_results + share_order_results
+    order_results = share_order_results
 
     # A brokerage that keeps its own book (the local paper one) has no price feed, so its
     # equity would stay marked at the last fill until someone traded again.
@@ -332,7 +199,6 @@ def place_orders(
         "diff": weight_diff(snapshot.weights(latest_prices), resulting_weights),
         "planned_orders": planned_orders,
         "order_results": order_results,
-        "option_results": option_results,
         "funding": funding,
         "unfunded": [
             {"symbol": order["symbol"], "action": order["action"], "reason": order["reason"]}

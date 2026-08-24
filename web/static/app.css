@@ -524,13 +524,24 @@ select.ctl {
 .signalTable th:nth-child(2),
 .signalTable th:nth-child(3),
 .signalTable th.num,
+.signalTable th.text,
 .signalTable th:last-child,
 .signalRow > td:nth-child(2),
 .signalRow > td:nth-child(3),
 .signalRow > td.num,
+.signalRow > td.text,
 .signalRow > td:last-child {
   width: 1%;
   white-space: nowrap;
+}
+
+/* A metric column whose values are prose rather than figures. Left-aligned, because right-
+   aligning a phrase leaves it ragged down its left edge against the numbers beside it -- which
+   is what reads as inconsistent padding. Pinned to its content like the numeric columns, so the
+   slack still all goes to Why. */
+.signalTable th.text,
+.signalRow > td.text {
+  text-align: left;
 }
 
 .signalRow {
@@ -573,8 +584,14 @@ select.ctl {
    layout. The ceiling sits well above every headline the algorithms emit -- the longest live
    one measures ~330px against a cell that runs ~650px wide -- so a reading only wraps when
    the words genuinely need it, not while the row still has slack to spare. */
+/* A floor as well as a ceiling. Every other column is pinned to its content, so when the pinned
+   widths exceed the table this column absorbs the whole deficit -- and with enough metrics it
+   collapses to one character per line ("No / trad / e / toda / y"). The floor stops that, and
+   because it widens the table past its container the wrapper's ``overflow-x`` finally engages:
+   the row scrolls sideways instead of the reason becoming unreadable. */
 .signalWhy .whyText {
   display: block;
+  min-width: 14ch;
   max-width: 52ch;
 }
 
@@ -667,7 +684,16 @@ select.ctl {
      keyword like max-content, so `minmax(160px, min(max-content, 26em))` is invalid, and the
      whole declaration is dropped -- which silently collapses the gates to a single stacked
      column rather than failing visibly. */
-  grid-template-columns: 40px minmax(160px, 26em) minmax(90px, 16em) minmax(80px, 18em);
+  /* The threshold column takes the slack (``1fr``) while the first three stay capped. Capping
+     all four left the row 640px wide inside a 1134px panel, so the measurement and the threshold
+     both wrapped onto two lines with 500px of the row empty beside them -- the failure the fixed
+     tracks were meant to prevent, arrived at from the other direction. Only the last column
+     grows, so the measurement still sits beside the gate it belongs to rather than drifting
+     across the page. */
+  /* The caps are sized to the longest content each column actually carries -- labels run to
+     about 34 characters and measurements to about 30, while thresholds are the long ones. Giving
+     the first two the widths they need and no more leaves the slack where the prose is. */
+  grid-template-columns: 40px minmax(140px, 21em) minmax(90px, 18em) minmax(80px, 1fr);
   gap: 8px;
   justify-content: start;
   align-items: baseline;
@@ -1841,9 +1867,14 @@ h2 {
    so a two-chip strip gave each one half the page -- "Macro / Flat" in a 549px box, against a
    sensible 177px when six chips share the same row. ``auto-fill`` keeps the empty tracks, so a
    chip is the same size whether an algorithm publishes two of them or six. */
+/* ``auto-fit``, not ``auto-fill``. Both lay out the same number of tiles; the difference is
+   what happens to the tracks left over. ``auto-fill`` keeps them as empty columns, so a row of
+   five tiles in space that fits seven stops two tracks short of the card's edge and leaves a gap
+   that reads as broken padding. ``auto-fit`` collapses the empties and the real tiles stretch to
+   the full width, which is also what the narrow-viewport override below already did. */
 .metricRow {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 9px;
   margin-bottom: 12px;
 }

@@ -259,3 +259,34 @@ def test_cash_equivalents_are_empty_when_the_account_configures_none() -> None:
         book.submit_order(_order("SGOV", "buy", 10, 100.0))
 
         assert book.get_cash_equivalents() == {}
+
+
+def test_paper_refuses_option_orders_rather_than_buying_the_underlying(tmp_path) -> None:
+    """It fills at the mark with no resting orders, so it cannot represent a contract.
+
+    Before this refusal existed the order went through as shares of whatever the symbol string
+    happened to be, and was reported back as a filled contract.
+    """
+    from src.core.interfaces import OrderRequest
+
+    with ephemeral_state():
+        brokerage = PaperBrokerage(Config(account_id="local_paper"))
+        with pytest.raises(NotImplementedError, match="option"):
+            brokerage.submit_order(OrderRequest(
+                symbol="QQQM  260220C00100000", action="buy", quantity=1,
+                order_type="limit", limit_price=1.15, asset_type="option",
+                extra={"latest_price": 1.15},
+            ))
+
+
+def test_paper_refuses_a_bracket_it_cannot_hold(tmp_path) -> None:
+    from src.core.interfaces import OrderRequest
+
+    child = OrderRequest(symbol="AAA", action="sell", quantity=1, order_type="limit", limit_price=2.0)
+    with ephemeral_state():
+        brokerage = PaperBrokerage(Config(account_id="local_paper"))
+        with pytest.raises(NotImplementedError, match="OCO"):
+            brokerage.submit_order(OrderRequest(
+                symbol="AAA", action="sell", quantity=1, order_type="limit", limit_price=2.0,
+                strategy="oco", children=(child, child), extra={"latest_price": 2.0},
+            ))

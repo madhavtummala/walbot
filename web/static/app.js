@@ -50,13 +50,13 @@ const STRATEGIES = [
   },
   {
     key: "options_flip",
-    blurb: "One contract at a time, bought cheap and flipped dearer. Direction comes from the macro trend.",
+    blurb: "Buys a predicted intraday low, one contract per symbol, bracketed at the exchange",
     name: "Options Flip",
-    status: "Paper",
-    horizon: "Intraday",
+    status: "Live",
+    horizon: "1-2 sessions",
     risk: "High",
-    logic: "Detects the macro trend from the SPY 50-day moving average, then scores each candidate on volatility regime, range expansion, and momentum. Buys calls in bull trends, puts in bear trends. Entry is a buy limit below fair value; exit is a GTC sell limit above.",
-    signals: ["Macro trend (SPY 50-day MA)", "Vol regime", "Range expansion", "Intraday momentum", "VWAP alignment"],
+    logic: "Reads a multi-day trend per symbol and requires pre-market to confirm it -- disagreement means no trade that day. Picks the nearest contract at least min_dte out inside a delta band, then rests a limit buy priced from how far comparable past sessions pulled back before going the right way, walking it in as the day's budget depletes. On a fill an OCO goes to the broker: a profit limit that only ratchets up, and a stop that never moves. Flat within max_hold_sessions.",
+    signals: ["Multi-day trend", "Pre-market confirmation", "Excursion budget", "Delta band and spread", "Exchange-side OCO"],
   },
 ];
 
@@ -1232,6 +1232,12 @@ async function loadBacktest(strategyKey, refresh, options = {}) {
     if (isBacktestPayload(payload)) {
       state.backtests[strategyKey] = payload;
       changed = true;
+    } else if (payload?.supported === false) {
+      // Kept even on the cache probe, unlike an ordinary error. "No cached run yet" is a state
+      // the next click can change; "this algorithm cannot be replayed" is a permanent property
+      // of the strategy, and discarding it leaves the tab offering a button that cannot work.
+      state.backtests[strategyKey] = { supported: false, error: payload.error };
+      changed = true;
     } else if (payload?.error) {
       if (!cacheOnly) {
         state.backtests[strategyKey] = { error: payload.error };
@@ -1397,6 +1403,18 @@ function renderSignalTable(rows) {
   }));
   // toggle, symbol, action, why, ...metrics, gates
   const columns = 5 + metricLabels.length;
+  // Alignment is decided per *column*, from every value in it, rather than per cell. Numbers
+  // want to be right-aligned so their decimal points line up; prose does not, and a column
+  // carrying "$88 call · 04 Sep · 12d" ragged-left against its neighbours is what "the padding
+  // looks off" actually is. Deciding per cell would be worse still: Bursty DCA's price column
+  // holds "$90.12" on one row and "$86.79 (stale)" on the next, and they must align together.
+  const numericColumn = new Map(metricLabels.map((label) => [
+    label,
+    rows.every((row) => {
+      const metric = (row.metrics || []).find((item) => item.label === label);
+      return !metric || isNumericValue(metric.value);
+    }),
+  ]));
 
   const body = rows.map((row) => {
     const style = actionStyle(row.action);
@@ -1408,7 +1426,8 @@ function renderSignalTable(rows) {
     const open = gated && state.expandedSignals.has(row.symbol);
     const metrics = metricLabels.map((label) => {
       const metric = (row.metrics || []).find((item) => item.label === label);
-      return `<td class="num">${escapeHtml(metric ? metric.value : "--")}</td>`;
+      const cls = numericColumn.get(label) ? "num" : "text";
+      return `<td class="${cls}">${escapeHtml(metric ? metric.value : "--")}</td>`;
     }).join("");
     const detail = open
       ? `<tr class="signalDetailRow"><td colspan="${columns}">${gateDetail(row)}</td></tr>`
@@ -1431,13 +1450,27 @@ function renderSignalTable(rows) {
       <th>Symbol</th>
       <th>Action</th>
       <th>Why</th>
-      ${metricLabels.map((label) => `<th class="num">${escapeHtml(label)}</th>`).join("")}
+      ${metricLabels.map((label) => `<th class="${numericColumn.get(label) ? "num" : "text"}">${escapeHtml(label)}</th>`).join("")}
       <th title="One pip per gate, in the order applied. Filled passed, hollow failed, red is the one that decided it.">Gates</th>
     </tr></thead>
     <tbody>${body}</tbody>
   </table>
   <p class="tableNote">Click a row for every gate, with what this run measured beside what it had to clear.</p>
   </div>`;
+}
+
+//: Whether a metric value is a bare number the eye should read as a column of figures --
+//: currency, percentage, multiple, or a range of two. Anything carrying a word ("0.0mo banked",
+//: "$86.79 (stale)", "$88 call · 04 Sep") is prose and reads left-aligned.
+//:
+//: Placeholders count as numeric so a column of figures with one missing value does not flip
+//: itself to left-aligned for the sake of a dash.
+const NUMERIC_VALUE = /^[$+\-]?[\d.,]+\s*[%x×]?(\s*[–—-]\s*[$+\-]?[\d.,]+\s*[%x×]?)?$/;
+
+function isNumericValue(value) {
+  const text = String(value ?? "").trim();
+  if (!text || text === "--" || text === "—") return true;
+  return NUMERIC_VALUE.test(text);
 }
 
 function backtestStatusLabel(backtest, loading) {
@@ -2593,6 +2626,16 @@ function renderConfigForm(host, strategy) {
 function renderBacktestTab(body, strategy) {
   const backtest = state.backtests[strategy.key];
   const loading = Boolean(state.backtestLoading[strategy.key]);
+  // The backend says whether a replay is meaningful for this algorithm. Offering the controls
+  // anyway would present an action that cannot succeed, and the reason only after it failed.
+  if (backtest && backtest.supported === false) {
+    body.innerHTML = `
+      <section class="card">
+        <div class="cardHead"><h2>Backtest</h2></div>
+        <p class="emptyState">${escapeHtml(backtest.error || "This algorithm cannot be backtested.")}</p>
+      </section>`;
+    return;
+  }
   body.innerHTML = `
     <section class="card">
       <div class="cardHead">
