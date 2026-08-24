@@ -86,6 +86,21 @@ class ContextSource(ABC):
     def extra(self) -> dict[str, Any]:
         return {}
 
+    def capabilities(self, requirements, config) -> dict[str, Any]:
+        """Live handles an algorithm may *call* during ``plan``, rather than data handed to it.
+
+        Separate from :meth:`extra` because these are gated on what the algorithm declared, and
+        separate from the fetch methods because what to fetch is not knowable in advance: an
+        option chain is chosen by the strategy at plan time, from a trend it has only just
+        computed. Declaring the underlyings up front and discovering the contracts at plan time
+        is the narrowest way to express that.
+
+        Defaults to nothing, which is what a replay gets unless it supplies its own -- so an
+        algorithm reaching for a capability in a backtest fails loudly rather than silently
+        planning against a live feed at some other point in time.
+        """
+        return {}
+
 
 class LiveContextSource(ContextSource):
     """Satisfies requirements from the live feeds, through the connector layer.
@@ -179,6 +194,26 @@ class LiveContextSource(ContextSource):
         extra["stream_status"] = stream_status()
         return extra
 
+    def capabilities(self, requirements, config) -> dict[str, Any]:
+        """Bind the option-chain and pre-market readers, when the algorithm asked for them.
+
+        Bound to ``config`` and to this source's ``as_of`` so the algorithm supplies only what
+        it knows -- an underlying, a DTE window -- and cannot accidentally read across the
+        moment the context describes.
+        """
+        from ..connectors.market.schwab_options import fetch_option_chain, fetch_premarket_summary
+
+        handles: dict[str, Any] = {}
+        if getattr(requirements, "needs_option_chains", False):
+            def option_chain(underlying: str, **kwargs: Any):
+                return fetch_option_chain(config, underlying, as_of=self.timestamp().date(), **kwargs)
+            handles["option_chain"] = option_chain
+        if getattr(requirements, "needs_premarket", False):
+            def premarket(symbol: str):
+                return fetch_premarket_summary(config, symbol, as_of=self.timestamp())
+            handles["premarket"] = premarket
+        return handles
+
 
 def build_algorithm_context(
     config,
@@ -240,5 +275,5 @@ def build_algorithm_context(
         account_id=getattr(config, "account_id", ""),
         state=state,
         timestamp=source.timestamp(),
-        extra=source.extra(),
+        extra={**source.extra(), **source.capabilities(requirements, config)},
     )

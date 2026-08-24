@@ -133,6 +133,9 @@ class SchwabSession:
     def post(self, url: str, **kwargs) -> Any:
         return self.request("POST", url, **kwargs)
 
+    def put(self, url: str, **kwargs) -> Any:
+        return self.request("PUT", url, **kwargs)
+
     def delete(self, url: str, **kwargs) -> Any:
         return self.request("DELETE", url, **kwargs)
 

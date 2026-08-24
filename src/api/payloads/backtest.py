@@ -492,6 +492,25 @@ def _compute_backtest(strategy: str, period: str, account_id: str = "") -> dict[
     return payload
 
 
+def _unsupported_reason(strategy: str) -> str:
+    """Why this algorithm cannot be replayed, or an empty string when it can.
+
+    Read off the class, without instantiating it: this is a property of the strategy, not of a
+    particular deployment's configuration, and building one would authenticate a brokerage just
+    to answer a question about what kind of algorithm it is.
+    """
+    try:
+        algorithm = get_algorithm_class(strategy)
+    except KeyError:
+        return ""
+    if getattr(algorithm, "backtestable", True):
+        return ""
+    return (
+        getattr(algorithm, "not_backtestable_reason", "")
+        or f"{strategy} cannot be backtested."
+    )
+
+
 def backtest_payload(body: dict[str, Any] | None = None) -> dict[str, Any]:
     body = body or {}
     period = str(body.get("period") or _default_backtest_period()).lower()
@@ -499,6 +518,21 @@ def backtest_payload(body: dict[str, Any] | None = None) -> dict[str, Any]:
     refresh = bool(body.get("refresh"))
     cache_only = bool(body.get("cache_only") or body.get("cacheOnly"))
     account_id = str(body.get("account_id") or body.get("accountId") or "")[:80]
+
+    # Asked before the cache, and before any work: an algorithm that cannot be replayed should
+    # say so the same way every time, rather than answering from a stale cache written before it
+    # declared that, or surfacing a NotImplementedError from deep inside the replay as a 500.
+    unsupported = _unsupported_reason(strategy)
+    if unsupported:
+        return {
+            "strategy": strategy,
+            "period": period,
+            "period_label": _period_label(period),
+            "cached": False,
+            "supported": False,
+            "error": unsupported,
+        }
+
     key = _cache_key(strategy, period, account_id)
     cache = _load_backtest_cache()
 

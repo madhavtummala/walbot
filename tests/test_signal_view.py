@@ -75,3 +75,33 @@ def test_a_plan_that_proposes_nothing_still_renders() -> None:
 def test_every_algorithm_inherits_a_signal_view() -> None:
     """The dashboard calls ``signal_view`` on whatever is registered, so the base defines it."""
     assert callable(BaseAlgorithm.signal_view)
+
+
+def test_every_algorithm_renders_a_summary_the_deck_can_map_over() -> None:
+    """``SignalView.summary`` is a list of label/value chips, and the deck maps over it.
+
+    A string satisfies the dataclass at runtime -- nothing validates it -- and then fails in the
+    browser as ``payload.summary.map is not a function``, which blanks the whole Signals panel
+    rather than just the header strip. The type is only enforced here, so this is the enforcement.
+    """
+    from dataclasses import asdict
+
+    from src.algorithms.ids import ALGORITHM_ALIASES
+    from src.algorithms.registry import ALGORITHMS, get_algorithm_class
+    from src.core.config import Config
+
+    plan = {"plan": {"buy": {"items": [{"symbol": "SPY", "amount": 100.0}]}, "sell": {"items": []}}}
+    config = Config(algorithm_configs={"dca": plan, "bursty_dca": plan})
+    ids = sorted(set(ALGORITHMS.names()) - set(ALGORITHM_ALIASES))
+
+    for algorithm_id in ids:
+        algorithm = get_algorithm_class(algorithm_id).from_config(config)
+        view = algorithm.signal_view(AlgorithmPlan())
+
+        assert isinstance(view.summary, list), f"{algorithm_id} summary is not a list"
+        for chip in view.summary:
+            assert isinstance(chip, dict), f"{algorithm_id} summary item is not a dict"
+            assert set(chip) == {"label", "value"}, f"{algorithm_id} chip keys are {set(chip)}"
+            assert isinstance(chip["label"], str) and isinstance(chip["value"], str)
+        # The payload is serialised with asdict, so every row must survive it too.
+        assert all(isinstance(asdict(row), dict) for row in view.rows)

@@ -2,6 +2,7 @@ from __future__ import annotations
 import logging
 import math
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from ...common.config_utils import as_bool
 
@@ -12,7 +13,15 @@ except ImportError:  # type: ignore
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import ContractType, OrderSide, OrderType, PositionIntent, TimeInForce
-from alpaca.trading.requests import GetOptionContractsRequest, LimitOrderRequest, MarketOrderRequest
+from alpaca.trading.requests import (
+    GetOptionContractsRequest,
+    GetOrdersRequest,
+    LimitOrderRequest,
+    MarketOrderRequest,
+    ReplaceOrderRequest,
+    StopLimitOrderRequest,
+    StopOrderRequest,
+)
 from alpaca.data.enums import DataFeed
 from alpaca.data.historical import OptionHistoricalDataClient, StockHistoricalDataClient
 from alpaca.data.requests import OptionLatestQuoteRequest, StockBarsRequest
@@ -403,6 +412,69 @@ def submit_option_limit_order(
     return trading_client.submit_order(order_data=order)
 
 
+#: Alpaca's own request class per order type. Each carries only the trigger fields its type
+#: allows, and rejects the others outright -- a ``price`` on a market order is an error rather
+#: than an ignored field.
+_ORDER_REQUESTS = {
+    "market": MarketOrderRequest,
+    "limit": LimitOrderRequest,
+    "stop": StopOrderRequest,
+    "stop_limit": StopLimitOrderRequest,
+}
+
+
+def build_order_request(request: Any):
+    """One :class:`OrderRequest` as the Alpaca SDK request object for its type.
+
+    Replaces the pair of hand-rolled helpers this module used to expose, which between them made
+    equity limit orders unreachable: the brokerage routed *every* limit order to the option
+    builder, so a limit on a share came out carrying an option position intent.
+
+    ``position_intent`` is sent for options only. Alpaca infers it from the account's actual
+    position and rejects the order when the two disagree -- so declaring "sell to close" while
+    flat is a 422, not a shorted contract.
+    """
+    from ...core.options import to_osi_form
+
+    side = request.action.lower()
+    if side not in {"buy", "sell"}:
+        raise ValueError("side must be 'buy' or 'sell'")
+    quantity = float(request.quantity)
+    if quantity <= 0:
+        raise ValueError("quantity must be positive")
+    if request.strategy != "single":
+        # Verified against the live API: Alpaca answers "complex orders not supported for options
+        # trading". The caller is expected to have asked ``supports_oco`` and split the bracket.
+        raise NotImplementedError(
+            f"Alpaca does not accept {request.strategy.upper()} orders on options; "
+            "submit the legs separately"
+        )
+    builder = _ORDER_REQUESTS.get(request.order_type)
+    if builder is None:
+        raise NotImplementedError(f"Order type {request.order_type} is not implemented for Alpaca")
+
+    is_option = request.asset_type == "option"
+    fields: dict[str, Any] = {
+        # Alpaca spells OSI without padding the root; Schwab pads it. Converted here, at the
+        # boundary, so a contract chosen from a Schwab chain can be ordered through Alpaca.
+        "symbol": to_osi_form(request.symbol, padded=False) if is_option else request.symbol.upper(),
+        "qty": int(quantity) if is_option else quantity,
+        "side": OrderSide.BUY if side == "buy" else OrderSide.SELL,
+        "type": OrderType(request.order_type),
+        "time_in_force": TimeInForce.GTC if request.time_in_force.lower() == "gtc" else TimeInForce.DAY,
+    }
+    if request.order_type in ("limit", "stop_limit"):
+        fields["limit_price"] = round(float(request.limit_price), 2)
+    if request.order_type in ("stop", "stop_limit"):
+        fields["stop_price"] = round(float(request.stop_price), 2)
+    if is_option:
+        intent = str((request.extra or {}).get("position_intent", "")).lower()
+        if not intent:
+            intent = "buy_to_open" if side == "buy" else "sell_to_close"
+        fields["position_intent"] = PositionIntent(intent)
+    return builder(**fields)
+
+
 #: Alpaca's activity types for cash distributions. ``DIV`` is the ordinary case; the rest cover
 #: capital gains, return of capital, and the withholding variants, all of which are still cash
 #: moving into or out of the account and belong in an income figure.
@@ -446,3 +518,23 @@ def get_account_activities(
     response.raise_for_status()
     payload = response.json()
     return payload if isinstance(payload, list) else []
+
+
+def build_replace_request(request: Any) -> ReplaceOrderRequest:
+    """The subset of an order Alpaca will let you change in place.
+
+    Deliberately narrow, because Alpaca's replace accepts only these fields -- symbol, side, type
+    and position intent are fixed for the life of an order. A caller wanting to change one of
+    those is describing a different order and must cancel and resubmit.
+    """
+    fields: dict[str, Any] = {"qty": int(float(request.quantity))}
+    if request.limit_price is not None and request.order_type in ("limit", "stop_limit"):
+        fields["limit_price"] = round(float(request.limit_price), 2)
+    if request.stop_price is not None and request.order_type in ("stop", "stop_limit"):
+        fields["stop_price"] = round(float(request.stop_price), 2)
+    return ReplaceOrderRequest(**fields)
+
+
+def get_open_orders(trading_client: TradingClient, status: str = "open"):
+    """Resting orders, newest first. ``nested`` is off: this codebase has no bracket to unpack."""
+    return trading_client.get_orders(filter=GetOrdersRequest(status=status, nested=False))

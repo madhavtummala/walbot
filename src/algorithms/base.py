@@ -164,6 +164,18 @@ class BaseAlgorithm:
     #: the strategy -- running Bursty DCA every fifteen minutes only burns API calls.
     cron: str = "*/30 9-15 * * 1-5"
 
+    #: Whether the replay can meaningfully simulate this algorithm, and why not when it cannot.
+    #:
+    #: The backtester drives a paper book that fills at the mark and keeps no resting orders. An
+    #: algorithm whose decisions *are* resting orders -- a limit that waits for a price, a stop
+    #: the exchange watches -- has nothing to be simulated against, and a run against that book
+    #: would either crash or, worse, report plausible numbers for a strategy it did not execute.
+    #:
+    #: Declared here rather than discovered by attempting the run, so the dashboard can say so
+    #: before the button is pressed instead of surfacing an exception from deep in the replay.
+    backtestable: bool = True
+    not_backtestable_reason: str = ""
+
     #: Name of a purpose-built editor the Tune screen should render for this algorithm's
     #: configuration, or None for the generic parameter form. An algorithm whose real
     #: configuration is not a list of scalars declares it here, so the dashboard asks the

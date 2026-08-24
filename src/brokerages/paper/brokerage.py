@@ -156,6 +156,20 @@ class PaperBrokerage(BaseBrokerage):
         return {symbol: shares for symbol, shares in self.state.get("positions", {}).items() if shares}
 
     def submit_order(self, request: OrderRequest) -> Dict[str, Any]:
+        # This book fills at the mark, immediately, and keeps no resting orders -- so it cannot
+        # represent a contract, a limit that waits, or a stop that watches. Refusing outright is
+        # the only honest answer: filling an option order here would buy shares of whatever the
+        # symbol string happened to be and report it as a filled contract.
+        if request.asset_type != "equity":
+            raise NotImplementedError(
+                f"Paper brokerage cannot trade {request.asset_type} contracts "
+                f"(got {request.symbol}); options require a live options-capable brokerage"
+            )
+        if request.strategy != "single":
+            raise NotImplementedError(
+                f"Paper brokerage cannot hold a {request.strategy.upper()} order: it fills "
+                "immediately and keeps no resting orders"
+            )
         quantity = float(request.quantity)
         if quantity != int(quantity):
             raise ValueError(

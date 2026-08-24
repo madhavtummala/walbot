@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
-
 import pandas as pd
 import pytest
 
@@ -11,6 +9,7 @@ from src.algorithms.bursty_dca import algorithm as dca_algorithm
 from src.algorithms.bursty_dca.algorithm import MAX_SIGMA
 from src.algorithms.bursty_dca.config import BurstyConfig
 from src.core.config import Config
+from src.api.payloads import backtest as backtest_module
 from src.execution import replay as replay_module
 from src.algorithms.registry import canonical_algorithm_id
 from src.api.api_payloads import (
@@ -607,3 +606,47 @@ def test_an_unknown_strategy_still_hashes_rather_than_raising() -> None:
     from src.api.payloads.backtest import _cache_key
 
     assert _cache_key("no_such_algorithm", "6m")
+
+
+def test_an_algorithm_that_cannot_be_replayed_refuses_before_computing(monkeypatch) -> None:
+    """A resting-order algorithm has nothing the paper book can simulate.
+
+    The refusal has to happen before the replay runs, not as an exception out of it: the API
+    would otherwise answer 500 and the dashboard would say only "backtest failed".
+    """
+    computed = []
+    monkeypatch.setattr(
+        backtest_module, "_compute_backtest",
+        lambda *args, **kwargs: computed.append(args) or {},
+    )
+
+    payload = backtest_payload({"strategy": "options_flip", "period": "3m", "refresh": True})
+
+    assert computed == []
+    assert payload["supported"] is False
+    assert "resting" in payload["error"]
+
+
+def test_the_refusal_is_not_served_from_a_stale_cache(monkeypatch) -> None:
+    """Asked before the cache, so a curve written before the flag existed cannot outlive it."""
+    monkeypatch.setattr(
+        backtest_module, "_load_backtest_cache",
+        lambda: {"items": {backtest_module._cache_key("options_flip", "3m", ""): {
+            "strategy": "options_flip", "total_return": 0.42,
+        }}},
+    )
+
+    payload = backtest_payload({"strategy": "options_flip", "period": "3m"})
+
+    assert payload["supported"] is False
+    assert "total_return" not in payload
+
+
+def test_a_replayable_algorithm_is_unaffected(monkeypatch) -> None:
+    monkeypatch.setattr(backtest_module, "_load_backtest_cache", lambda: {"items": {}})
+
+    payload = backtest_payload({"strategy": "rally_rotation", "period": "3m"})
+
+    # Falls through to the ordinary "no cached run" answer rather than the refusal.
+    assert payload.get("supported") is not False
+    assert "No cached" in payload["error"]
