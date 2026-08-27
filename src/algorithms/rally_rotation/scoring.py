@@ -36,17 +36,6 @@ def _rolling_volatility(closes: pd.Series, window: int) -> float:
     return 0.0 if math.isnan(value) else value
 
 
-def _trend_ma_distance(closes: pd.Series, ma_days: int) -> float:
-    """Signed distance from the trend MA (e.g. 20-day). Returns 0 if insufficient data."""
-    if ma_days <= 0 or len(closes) < ma_days:
-        return 0.0
-    trend_ma = float(closes.tail(ma_days).mean())
-    last = float(closes.iloc[-1])
-    if trend_ma <= 0:
-        return 0.0
-    return last / trend_ma - 1.0
-
-
 def compute_features(
     symbol: str,
     daily_bars: Any,
@@ -65,13 +54,18 @@ def compute_features(
     closes = _closes(daily_bars)
     daily_closes = closes
     step = market_minutes_per_bar(daily_bars, TRADING_MINUTES_PER_DAY)
-    smoothing = max(config.score_ema_minutes, step)
+    smoothing = max(config.score_ema_days * TRADING_MINUTES_PER_DAY, step)
 
+    # ``return_path`` works in market minutes; the config states days, which is the unit the
+    # ladder is actually reasoned about in.
     horizons = {
-        "nano": config.selection_horizon_nano_minutes,
-        "micro": config.selection_horizon_micro_minutes,
-        "meso": config.selection_horizon_meso_minutes,
-        "macro": config.selection_horizon_macro_minutes,
+        name: days * TRADING_MINUTES_PER_DAY
+        for name, days in (
+            ("nano", config.nano_days),
+            ("micro", config.micro_days),
+            ("meso", config.meso_days),
+            ("macro", config.macro_days),
+        )
     }
     return_series = {
         name: return_path(daily_bars, minutes, span_minutes=smoothing)
@@ -87,39 +81,9 @@ def compute_features(
     last_daily = float(daily_closes.iloc[-1]) if not daily_closes.empty else 0.0
     daily_vol = _rolling_volatility(daily_closes, max(config.vol_estimation_days, 2))
 
-    # -- new risk signals for climax detection --
-    # Get high, low, volume columns
-    bars_df = daily_bars if isinstance(daily_bars, pd.DataFrame) else pd.DataFrame()
-    highs = pd.to_numeric(bars_df.get("high", pd.Series()), errors="coerce").dropna() if not bars_df.empty else pd.Series(dtype=float)
-    lows = pd.to_numeric(bars_df.get("low", pd.Series()), errors="coerce").dropna() if not bars_df.empty else pd.Series(dtype=float)
-    volumes = pd.to_numeric(bars_df.get("volume", pd.Series()), errors="coerce").dropna() if not bars_df.empty else pd.Series(dtype=float)
-
-    # 5-day annualized volatility (short-term vol vs 20d)
-    vol_5d = _rolling_volatility(daily_closes, 5) * math.sqrt(TRADING_DAYS)
-
-    # 20-day average intraday range (high-low)/close
-    range_20d_avg = 0.0
-    if len(highs) >= 20 and len(lows) >= 20:
-        recent_range = (highs.tail(20).values - lows.tail(20).values) / highs.tail(20).values
-        range_20d_avg = float(recent_range.mean())
-
-    # Current range expansion: today's range vs 20d average
-    range_expansion = 0.0
-    if len(highs) >= 1 and len(lows) >= 1 and range_20d_avg > 0:
-        today_range = float(highs.iloc[-1] - lows.iloc[-1]) / float(highs.iloc[-1]) if float(highs.iloc[-1]) > 0 else 0.0
-        range_expansion = today_range / range_20d_avg if range_20d_avg > 0 else 0.0
-
-    # Volume ratio: last volume vs 20-day average
-    volume_ratio = 0.0
-    if len(volumes) >= 20:
-        avg_vol = float(volumes.tail(20).mean())
-        if avg_vol > 0:
-            volume_ratio = float(volumes.iloc[-1]) / avg_vol
-
     return {
         "symbol": symbol.upper(),
         "close": float(closes.iloc[-1]) if not closes.empty else last_daily,
-        "nano_return": return_series["nano"][-1],
         "micro_return": return_series["micro"][-1],
         "meso_return": return_series["meso"][-1],
         "macro_return": return_series["macro"][-1],
@@ -132,17 +96,14 @@ def compute_features(
         "ma_distance": (last_daily / moving_average - 1.0) if moving_average > 0 else 0.0,
         "daily_bars": int(len(daily_closes)),
         "enough_history": bool(enough_history),
+        # The crash stop's input. Its own feature rather than the fastest selection horizon,
+        # which it used to borrow: a stop that moves whenever someone retunes the score's
+        # ladder is a stop nobody can reason about.
+        "session_return": _return_over(daily_closes, 1),
         "abs_return": _return_over(daily_closes, config.etf_abs_return_days),
         "fast_return": _return_over(daily_closes, config.etf_fast_return_days),
-        # Trend filter features
-        "trend_ma_distance": _trend_ma_distance(daily_closes, config.trend_ma_days),
-        "trend_return": _return_over(daily_closes, config.trend_return_days),
         # Annualised, because the volatility target is quoted annually.
         "annual_volatility": daily_vol * math.sqrt(TRADING_DAYS),
-        "vol_5d": vol_5d,
-        "range_20d_avg": range_20d_avg,
-        "range_expansion": range_expansion,
-        "volume_ratio": volume_ratio,
         "has_daily": not daily_closes.empty,
         "has_history": not closes.empty,
     }
@@ -194,7 +155,7 @@ def base_scores(
     features_by_symbol: dict[str, dict[str, Any]],
     config: RallyRotationConfig,
 ) -> dict[str, dict[str, Any]]:
-    """Slow-weighted composite score, smoothed over ``score_ema_minutes``.
+    """Slow-weighted composite score, smoothed over ``score_ema_days``.
 
     The smoothing is done here rather than across runs so that ``analyze`` stays pure: the
     score at bar t-1 is recomputed from the bars, not remembered from the previous run, which
@@ -214,7 +175,7 @@ def base_scores(
     # rather than a fixed count: 45 minutes is three points on a 15m grid and nine on a 5m
     # one. Read off the paths themselves so every symbol's cross-section lines up.
     first = next(iter(features_by_symbol.values()))
-    smoothing = max(len(first.get("return_series", {}).get("nano", [])), 1)
+    smoothing = max(len(first.get("return_series", {}).get("micro", [])), 1)
     step = int(first.get("step_minutes") or 1)
     scale = _risk_scales(features_by_symbol) if config.risk_adjusted_score else {}
     weights = {
@@ -249,7 +210,7 @@ def base_scores(
         }
         scored[symbol] = {
             **features,
-            "base_score": ema(path, config.score_ema_minutes, step),
+            "base_score": ema(path, config.score_ema_days * TRADING_MINUTES_PER_DAY, step),
             "score_unsmoothed": path[-1],
             "z": latest_z[symbol],
             "score_components": components,

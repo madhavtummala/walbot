@@ -13,7 +13,6 @@ from src.algorithms.rally_rotation.gates import (
     blocking,
     crash_stop,
     entry_checks,
-    exit_checks,
     passes,
     universe_data_ok,
 )
@@ -24,7 +23,6 @@ from src.algorithms.rally_rotation.memory import (
     record_action,
     resolve_positions,
     sessions_since,
-    track_eligibility,
     track_ranking,
 )
 from src.algorithms.rally_rotation.scoring import base_scores, zscores
@@ -32,7 +30,6 @@ from src.algorithms.rally_rotation.sizing import (
     apply_turnover_filters,
     defensive_weights,
     park_residual,
-    partial_adjustment,
     score_to_weights,
 )
 from src.core.interfaces import MARKET_TZ, AlgorithmContext
@@ -194,8 +191,7 @@ def test_each_absolute_gate_rejects_and_says_why(row: dict, expected: str) -> No
 def test_an_ineligible_name_is_never_ranked_so_a_thin_field_means_holding_less() -> None:
     config = Runtime(
         risk_on_universe=["AAA", "BBB", "CCC"], defensive_universe=["BIL"],
-        max_positions=3, min_base_score=-99,
-    )
+        max_positions=3, )
     daily = {
         "AAA": daily_bars(80, 130),    # eligible
         "BBB": daily_bars(130, 90),    # below its own average
@@ -217,34 +213,6 @@ def test_an_ineligible_name_is_never_ranked_so_a_thin_field_means_holding_less()
 # =========================================================================================
 
 
-def test_an_entry_must_clear_the_score_floor_but_a_holding_need_not() -> None:
-    """Entry and exit are deliberately asymmetric, and always have been.
-
-    The asymmetry used to be demonstrated through the entry-timing gate. That gate is gone, so
-    the floor stands in for it here. The two halves used to be two calls -- a pure ``analyze``
-    that scored, and a ``refine_weights`` that was handed the book -- and the property could
-    only be shown by wiring them together by hand. ``plan`` sees the holdings on its context, so
-    the same asymmetry is now visible in one call: identical market data, different book.
-    """
-    config = Runtime(risk_on_universe=["AAA"], defensive_universe=["BIL"],
-                     min_base_score=99)
-    daily = {"AAA": daily_bars(80, 130), "BIL": daily_bars(100, 101)}
-    intraday = {"AAA": intraday_bars(130, 130), "BIL": intraday_bars(101, 101)}
-    algorithm = RallyRotationAlgorithm(config)
-
-    empty_book = algorithm.plan(context_for(config, daily, intraday))
-    assert empty_book.target_weights.get("AAA", 0) == 0, "below the floor, no new entry"
-
-    holding = replace(
-        context_for(config, daily, intraday), positions={"AAA": 10}, equity=10_000.0
-    )
-    kept = algorithm.plan(holding)
-
-    assert kept.target_weights.get("AAA", 0) > 0, (
-        "an eligible holding is kept even when it would not be bought today"
-    )
-
-
 def test_a_kept_holding_survives_into_the_intents_the_pipeline_acts_on() -> None:
     """Being kept is not enough: the keep has to reach the order path.
 
@@ -253,8 +221,7 @@ def test_a_kept_holding_survives_into_the_intents_the_pipeline_acts_on() -> None
     is indistinguishable from a decision to exit -- which is exactly the bug this guards: the
     keep was recorded internally and then dropped, force-selling a still-qualifying holding.
     """
-    config = Runtime(risk_on_universe=["AAA"], defensive_universe=["BIL"],
-                     min_base_score=99)
+    config = Runtime(risk_on_universe=["AAA"], defensive_universe=["BIL"],)
     daily = {"AAA": daily_bars(80, 130), "BIL": daily_bars(100, 101)}
     intraday = {"AAA": intraday_bars(130, 130), "BIL": intraday_bars(101, 101)}
     algorithm = RallyRotationAlgorithm(config)
@@ -332,7 +299,7 @@ def test_a_zero_tilt_sizes_on_score_alone() -> None:
     The score is already a cross-sectional comparison; dividing by volatility on top of it
     underweighted the leaders, which cost return *and* drawdown on full-coverage replay.
     """
-    config = RallyRotationConfig(min_base_score=0.0, risk_on_gross_max=1.0,
+    config = RallyRotationConfig(risk_on_gross_max=1.0,
                                 volatility_tilt=0.0)
     rows = [
         {"symbol": "CALM", "base_score": 1.0, "annual_volatility": 0.10},
@@ -347,7 +314,7 @@ def test_a_zero_tilt_sizes_on_score_alone() -> None:
 
 def test_a_positive_tilt_leans_into_the_volatile_name() -> None:
     """The shipped default: same score, bigger position in the wilder name."""
-    config = RallyRotationConfig(min_base_score=0.0, risk_on_gross_max=1.0,
+    config = RallyRotationConfig(risk_on_gross_max=1.0,
                                 volatility_tilt=1.0)
     rows = [
         {"symbol": "CALM", "base_score": 1.0, "annual_volatility": 0.10},
@@ -360,7 +327,7 @@ def test_a_positive_tilt_leans_into_the_volatile_name() -> None:
 
 
 def test_a_negative_tilt_restores_risk_parity() -> None:
-    config = RallyRotationConfig(min_base_score=0.0, risk_on_gross_max=1.0,
+    config = RallyRotationConfig(risk_on_gross_max=1.0,
                                 volatility_tilt=-1.0)
     rows = [
         {"symbol": "CALM", "base_score": 1.0, "annual_volatility": 0.10},
@@ -383,7 +350,7 @@ def test_sizing_is_proportional_and_uncapped() -> None:
     ~0.7 and parked a third of the book in bills, which is a drag on a strategy whose job is
     to be in the market when the market is working.
     """
-    config = RallyRotationConfig(min_base_score=0.0, risk_on_gross_max=1.0, volatility_tilt=0.0)
+    config = RallyRotationConfig(risk_on_gross_max=1.0, volatility_tilt=0.0)
     rows = [
         {"symbol": "BIG", "base_score": 3.0, "annual_volatility": 0.5},
         {"symbol": "SMALL", "base_score": 1.0, "annual_volatility": 0.1},
@@ -398,7 +365,7 @@ def test_sizing_is_proportional_and_uncapped() -> None:
 
 def test_a_single_qualifying_name_takes_the_whole_book() -> None:
     """The direct consequence of removing the cap, stated so it cannot surprise anyone later."""
-    config = RallyRotationConfig(min_base_score=0.0, risk_on_gross_max=1.0, volatility_tilt=0.0)
+    config = RallyRotationConfig(risk_on_gross_max=1.0, volatility_tilt=0.0)
 
     weights = score_to_weights([{"symbol": "ONLY", "base_score": 1.0, "annual_volatility": 0.6}], config)
 
@@ -531,17 +498,18 @@ def test_a_single_session_collapse_still_sells_the_holding() -> None:
     config = RallyRotationConfig(max_daily_drop=0.10)
     held = {"symbol": "AAA", "eligible": 1, "above_moving_average": True,
             "ma_distance": 0.20, "abs_return": 0.30, "fast_return": -0.12,
-            "enough_history": True, "nano_return": -0.15}
+            "enough_history": True, "session_return": -0.15}
 
-    checks = exit_checks(held, config)
+    culprit = crash_stop(held, config)
 
-    assert passes(checks) is False
-    culprit = blocking(checks)
+    assert culprit.ok is False
     # The gate names itself *and* carries what it measured, which is the whole contract: a
     # rejection with no number attached is what this replaced.
     assert culprit.label == "No crash this session"
     assert "-15" in culprit.value
     assert culprit.limit == "> -10%"
+    # It reads its own feature, not a selection horizon that a retune could move underneath it.
+    assert crash_stop({**held, "session_return": -0.05}, config).ok is True
 
 
 # =========================================================================================
@@ -567,15 +535,6 @@ def test_the_algorithm_is_registered_and_declares_what_it_needs() -> None:
     assert requirements.daily_lookback_days >= 100
     assert requirements.paper_only is True
     assert requirements.needs_sentiment is False, "sentiment is off until it is phased in"
-
-
-def test_sentiment_is_requested_only_once_it_is_switched_on() -> None:
-    from src.algorithms.registry import get_algorithm_class
-
-    config = Runtime(sentiment_size_scale=0.05)
-    algorithm = get_algorithm_class("rally_rotation")(config)
-
-    assert algorithm.requirements(config, {}).needs_sentiment is True
 
 
 def test_sizing_carries_no_cash_buffer() -> None:
@@ -628,31 +587,6 @@ def test_a_close_is_not_blocked_by_the_rebalance_threshold() -> None:
     assert tiny["AAA"] == 0.005, "below the notional floor it is still left alone"
 
 
-def test_partial_adjustment_moves_a_fraction_of_the_way_but_exits_in_full() -> None:
-    """``rebalance_step`` regularises turnover without stranding a rejected holding.
-
-    The no-trade band and the partial step brake different things: the band filters small
-    drift, the step damps a target that swings hard every session. An exit is exempt from
-    both, or a name the strategy has dropped decays off the book over a week.
-    """
-    config = RallyRotationConfig(rebalance_step=0.5)
-
-    stepped = partial_adjustment({"AAA": 0.40, "BBB": 0.10}, {"AAA": 0.20, "BBB": 0.30}, config)
-    assert stepped["AAA"] == pytest.approx(0.30), "half way up from 0.20 toward 0.40"
-    assert stepped["BBB"] == pytest.approx(0.20), "half way down from 0.30 toward 0.10"
-
-    # An entry from nothing also arrives gradually -- that is the point of the knob.
-    entry = partial_adjustment({"AAA": 0.40}, {}, config)
-    assert entry["AAA"] == pytest.approx(0.20)
-
-    # But a target of zero is honoured immediately.
-    exit_now = partial_adjustment({"AAA": 0.0}, {"AAA": 0.30}, config)
-    assert exit_now["AAA"] == 0.0, "an exit is never decayed"
-
-    # The default is a full jump, so the knob is inert until it is turned on.
-    assert partial_adjustment({"AAA": 0.40}, {"AAA": 0.20}, RallyRotationConfig())["AAA"] == 0.40
-
-
 def test_undeployed_gross_is_parked_in_bills_not_left_as_cash() -> None:
     """A funded account holds bills, not idle cash, for whatever the risk sleeve cannot use."""
     config = RallyRotationConfig(risk_on_gross_max=0.96)
@@ -676,30 +610,6 @@ def _session(offset: int, hour: int = 10) -> datetime:
         if day.weekday() < 5:
             offset -= 1
     return day
-
-
-def test_eligibility_becomes_a_state_rather_than_a_daily_coin_flip() -> None:
-    """A name near a floor used to flip in and out on consecutive sessions."""
-    config = RallyRotationConfig(eligibility_window=10, entry_min_eligible_days=8,
-                                exit_max_eligible_days=3)
-    state: dict = {}
-
-    # Alternating in and out: never a settled enough signal to open.
-    for day, flag in enumerate([1, 0] * 5):
-        history = track_eligibility(state, {"AAA": {"eligible": flag}}, config, _session(day))
-    assert qualifying_days(history["AAA"]) == 5
-    assert qualifying_days(history["AAA"]) < config.entry_min_eligible_days, "chop does not earn an entry"
-    assert qualifying_days(history["AAA"]) > config.exit_max_eligible_days, "nor does it force an exit"
-
-    # A settled signal does.
-    for day in range(10, 20):
-        history = track_eligibility(state, {"AAA": {"eligible": 1}}, config, _session(day))
-    assert qualifying_days(history["AAA"]) == 10
-
-    # The window is bounded, so a sustained breakdown eventually clears the exit bar.
-    for day in range(20, 28):
-        history = track_eligibility(state, {"AAA": {"eligible": 0}}, config, _session(day))
-    assert qualifying_days(history["AAA"]) == 2 <= config.exit_max_eligible_days
 
 
 def test_a_settling_period_counts_days_rather_than_runs() -> None:
@@ -750,56 +660,6 @@ def test_a_paused_binding_does_not_backfill_the_days_it_missed() -> None:
 
     assert observed_days(history["IAU"]) == 3, "the missed sessions are absent, not zeroed"
     assert qualifying_days(history["IAU"]) == 3
-
-
-def test_a_cold_state_store_does_not_liquidate_the_book() -> None:
-    """With no history a count reads as zero, which must not be read as 'ineligible'."""
-    config = RallyRotationConfig(eligibility_window=10, exit_max_eligible_days=3)
-    state: dict = {}
-
-    history = track_eligibility(state, {"AAA": {"eligible": 1}}, config, _session(0))
-
-    assert qualifying_days(history["AAA"]) == 1 <= config.exit_max_eligible_days
-    assert observed_days(history["AAA"]) < config.eligibility_window, (
-        "the window is not full, so the exit rule must not fire yet"
-    )
-
-
-def test_a_run_indexed_window_is_dropped_rather_than_read_as_days() -> None:
-    """State written before this change is a bare list with no days attached.
-
-    Reading it as days would let the old five-fires-a-session inflation survive the upgrade, so
-    it is discarded. Both gates then see an unfilled window, which holds the book still and makes
-    new entries serve the settling period -- the safe direction on both sides.
-    """
-    config = RallyRotationConfig(eligibility_window=10, exit_max_eligible_days=3)
-    state: dict = {"eligible_history": {"AAA": [1] * 10}}
-
-    history = track_eligibility(state, {"AAA": {"eligible": 1}}, config, _session(0))
-
-    assert observed_days(history["AAA"]) == 1, "the run-indexed list is not carried over"
-    assert observed_days(history["AAA"]) < config.eligibility_window, "so no exit can fire on it"
-
-
-def test_a_holding_that_crashes_in_one_session_is_sold_at_once() -> None:
-    """The portfolio-level breaker cannot fire at a daily cadence; this one can."""
-    config = RallyRotationConfig(max_daily_drop=0.10, exit_threshold_slack=0.05,
-                                etf_min_abs_return=0.0, etf_min_fast_return=-0.02)
-    healthy = {"enough_history": 1, "ma_distance": 0.08, "abs_return": 0.20,
-               "fast_return": 0.05, "nano_return": -0.01}
-
-    stays = passes(exit_checks(healthy, config))
-    assert stays
-
-    crashed = {**healthy, "nano_return": -0.12}
-    crashed_checks = exit_checks(crashed, config)
-    stays, why = passes(crashed_checks), (blocking(crashed_checks).label if blocking(crashed_checks) else "")
-    assert stays is False
-    assert "crash this session" in why
-
-    # Still inside the limit: everything else about the name is fine, so it is kept.
-    dipped = {**healthy, "nano_return": -0.08}
-    assert passes(exit_checks(dipped, config)) is True
 
 
 def test_the_no_trade_band_cannot_push_the_book_over_its_gross_budget() -> None:
@@ -926,7 +786,7 @@ def test_the_crash_stop_answers_to_no_clock() -> None:
     """
     config = RallyRotationConfig(max_daily_drop=0.10)
 
-    assert crash_stop({"nano_return": -0.15}, config).ok is False
-    assert crash_stop({"nano_return": -0.05}, config).ok is True
+    assert crash_stop({"session_return": -0.15}, config).ok is False
+    assert crash_stop({"session_return": -0.05}, config).ok is True
     # 0 turns it off entirely.
-    assert crash_stop({"nano_return": -0.99}, RallyRotationConfig(max_daily_drop=0.0)).ok is True
+    assert crash_stop({"session_return": -0.99}, RallyRotationConfig(max_daily_drop=0.0)).ok is True

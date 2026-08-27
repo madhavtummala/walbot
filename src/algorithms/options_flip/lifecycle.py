@@ -27,6 +27,7 @@ from typing import Any
 
 from ...core.interfaces import Check, DesiredOrder, OrderRequest
 from ...core.options import CALL, OptionContract
+from .config import REPRICE_MIN_PRICE_FRACTION
 from .excursion import option_price_for
 
 logger = logging.getLogger(__name__)
@@ -71,7 +72,7 @@ def plan_symbol(
     contracts: int,
     underlying_now: float,
     entry_target: float,
-    exit_budget: float,
+    exit_target: float,
     checks: list[Check],
     config: Any,
     session: dict[str, Any],
@@ -86,7 +87,7 @@ def plan_symbol(
     """
     if held_contract:
         return _held(
-            symbol, memory, held_contract, contracts, underlying_now, exit_budget,
+            symbol, memory, held_contract, contracts, underlying_now, exit_target,
             checks, config, session, oco,
         )
     if memory.get("state") == BIDDING and not held_contract and session.get("day_changed"):
@@ -115,17 +116,32 @@ def _flat_or_bidding(
     if not direction or contract is None or contracts <= 0:
         return SymbolPlan(symbol, FLAT, [], {}, checks, "No trade today")
 
-    # The bid walks in toward the contract's midpoint and stops there -- it never crosses the
-    # spread. That is structural rather than a clamp: ``entry_underlying_target`` never returns a
-    # level on the wrong side of the market, so the delta translation can only ever land at or
-    # below the mark. Reaching here at all means the direction still confirms, since it is
-    # re-derived every run and a symbol that lost its confirmation returned above with no orders.
-    limit = option_price_for(
-        entry_target or underlying_now,
-        underlying_now=underlying_now,
-        option_mark=contract.midpoint,
-        delta=contract.delta,
+    # At the pullback level, translated into premium through delta -- not at the mid.
+    #
+    # Resting at the mid fills on almost every armed session and pays whatever the market asks;
+    # this waits for the dip the level model predicts, and is refused when that dip is unlikely
+    # to arrive in time. The two are different strategies and the backtest measures this one: a
+    # static limit at ``entry_target`` filled 4 of 11 armed sessions on real option bars, and the
+    # seven misses sat 5-6.5% below the mark and simply never traded there.
+    #
+    # The adverse selection a fixed offset suffers -- filling on days that fell, absent on days
+    # that rose -- is answered by ``entry_reach`` conditioning the depth on the day in
+    # front of it, rather than by abandoning the pullback.
+    floor_price = (
+        option_price_for(entry_target, underlying_now=underlying_now,
+                         option_mark=contract.midpoint, delta=contract.delta)
+        if entry_target > 0 else contract.midpoint
     )
+    # Soft ratchet. The limit starts at the pullback level and gives ground toward the mark as
+    # the session runs out, on a curve ``entry_patience`` shapes. It is deliberately the patient
+    # side: raising a bid to meet a rising ask is how a pullback strategy quietly becomes a
+    # momentum-chasing one, and an entry that never fills costs only the opportunity.
+    #
+    # It never goes above the mark, so the spread is still not crossed.
+    given_up = (1.0 - max(float(session.get("fraction_remaining", 0.0)), 0.0)) ** max(
+        float(getattr(config, "entry_patience", 1.0)), 0.01
+    )
+    limit = min(floor_price + (contract.midpoint - floor_price) * given_up, contract.midpoint)
 
     request = OrderRequest(
         symbol=contract.osi_symbol,
@@ -137,15 +153,23 @@ def _flat_or_bidding(
         time_in_force="day",
         extra={"position_intent": "buy_to_open", "underlying": symbol},
     )
+    # Zero when the stop is disabled, not ``limit x 1.0``, which is the entry price itself.
+    # The held path re-checks the setting so nothing acts on it today -- but a position carrying
+    # a recorded stop equal to its own fill would be closed the instant the stop was turned on.
+    stop_pct = float(config.stop_loss_pct)
+    stop = round(max(limit * (1.0 - stop_pct), 0.01), 2) if stop_pct > 0 else 0.0
     checks = checks + [Check(
         label="Entry bid",
         ok=True,
         value=(
-            f"${limit:.2f} for {contract.osi_symbol} "
-            f"(waiting for the underlying at ${entry_target or underlying_now:,.2f}, "
-            f"now ${underlying_now:,.2f})"
+            f"${limit:.2f} for {contract.osi_symbol}, waiting for the underlying at "
+            f"${entry_target:,.2f} (now ${underlying_now:,.2f})"
+            + (f" — ratcheted {given_up:.0%} toward the mark" if given_up > 0.01 else "")
+            if entry_target > 0 else
+            f"${limit:.2f} for {contract.osi_symbol}, at the mid (no level)"
         ),
-        limit=f"{config.target_fill_probability:.0%} target fill probability",
+        limit=f"pullback limit, patience {float(getattr(config, 'entry_patience', 1.0)):.1f}; "
+              f"never above the mark, abandoned unfilled at the close",
     )]
     memory = {
         "state": BIDDING,
@@ -153,6 +177,11 @@ def _flat_or_bidding(
         "direction": direction,
         "contracts": contracts,
         "bid": round(limit, 2),
+        # The stop travels with the entry rather than waiting for the fill. A limit buy can only
+        # fill at or below its price, so a stop struck off the limit is never looser than the cap
+        # -- and being known now is what lets the protective pair go up attached to the entry
+        # instead of a run later, leaving the position naked in between.
+        "stop": stop,
         "market_day": session.get("market_day", ""),
     }
     return SymbolPlan(
@@ -174,7 +203,7 @@ def _held(
     held_contract: str,
     contracts: int,
     underlying_now: float,
-    exit_budget: float,
+    exit_target: float,
     checks: list[Check],
     config: Any,
     session: dict[str, Any],
@@ -186,27 +215,86 @@ def _held(
     mark = float(memory.get("mark", 0.0) or 0.0)
     direction = str(memory.get("direction") or CALL)
 
-    # The stop is anchored to the fill and never recomputed. Recomputing it from the current mark
-    # would be a trailing stop, which is a different strategy -- and one that ratchets the risk
-    # floor upward on exactly the noise this stop exists to sit beneath.
-    stop = round(max(fill_price * (1.0 - float(config.stop_loss_pct)), 0.01), 2)
+    # Struck off the entry *limit*, recorded when the order was placed, and never recomputed.
+    # Not off the fill: the limit is known at submission time, which is what lets the stop ride
+    # up attached to the entry as one bracket. Not off the current mark either -- that would be a
+    # trailing stop, a different strategy, and one that ratchets the risk floor upward on exactly
+    # the noise this stop exists to sit beneath.
+    recorded = float(memory.get("stop", 0.0) or 0.0)
+    anchor = float(memory.get("bid", 0.0) or 0.0) or fill_price
+    stop_pct = float(config.stop_loss_pct)
+    # Zero disables the stop. The bracket then rests the profit target alone and the deadline is
+    # the only exit that forces the issue -- which is the intended shape for a bounded-loss long
+    # call, not an oversight.
+    stop = (recorded or round(max(anchor * (1.0 - stop_pct), 0.01), 2)) if stop_pct > 0 else 0.0
 
-    deadline = int(memory.get("sessions_held", 0) or 0) >= max(int(config.max_hold_sessions), 1)
+    held_days = int(memory.get("sessions_held", 0) or 0)
+    deadline = held_days >= max(int(config.max_hold_sessions), 1)
+
+    # The exit target steps *down* with the days, and that is the opposite of the ratchet it
+    # replaces. A target that only ever rose asked more of a position the longer it failed to
+    # deliver, which is how a winner becomes a deadline exit at the bid. Seeking a fraction of
+    # the modelled gain -- 70% on the day of entry, giving up a step a session -- is what makes
+    # the order executable rather than theoretical, and it is the reference design's schedule.
+    #
+    #   day 0: entry + 0.70 x gain     day 1: + 0.50     day 2: + 0.30
+    #
+    # The floor is the entry itself: the schedule gives up profit, never principal. Getting out
+    # at cost is the deadline exit's job, and it is a different decision.
+    # Nothing to price a bracket from. Guarded before the schedule rather than after it: the
+    # schedule floors at a penny, so an unpriceable contract would otherwise rest a one-cent ask
+    # against a position whose value is unknown -- an order that is certain to fill and certain
+    # to be wrong.
+    if mark <= 0 and fill_price <= 0:
+        return SymbolPlan(
+            symbol, HELD, [],
+            {**memory, "state": HELD, "contract": held_contract},
+            checks + [Check(
+                label="Priceable",
+                ok=False,
+                value="no current mark for the contract, and no recorded fill",
+                limit="a quote to size the bracket from",
+                blocking=True,
+            )],
+            f"Holding {held_contract} — unpriced this run",
+        )
+
+    modelled = _target_premium(mark, underlying_now, exit_target, direction, memory)
+    entry_price = float(memory.get("bid", 0.0) or 0.0) or fill_price or mark
+    gain = max(modelled - entry_price, 0.0)
+    # Soft ratchet on the sell side, mirroring the entry's. ``exit_patience`` below 1 concedes
+    # early, which is the intended default: a position that reaches its deadline unsold is sold
+    # at whatever the market offers, and with the stop disabled the deadline is the only thing
+    # that ends a losing trade. Conceding early is cheaper than conceding at gunpoint.
+    elapsed = min(held_days / max(int(config.max_hold_sessions), 1), 1.0)
+    conceded = elapsed ** max(float(getattr(config, "exit_patience", 1.0)), 0.01)
+    asked = max(float(config.exit_gain_share) * (1.0 - conceded), 0.0)
+    target = round(max(entry_price + asked * gain, 0.01), 2)
+
     if deadline:
-        # Out of time: converge on the mark along the same curve the entry bid walks, so the ask
-        # is at the market by the close rather than resting at an ambitious price the position is
-        # no longer allowed to wait for.
-        decay = float(session.get("fraction_remaining", 0.0)) ** max(float(config.entry_decay_power), 0.0)
-        ambitious = _exit_target(mark, underlying_now, exit_budget, direction, memory)
-        target = round(max(mark + (ambitious - mark) * decay, 0.01), 2)
-    else:
-        target = round(_exit_target(mark, underlying_now, exit_budget, direction, memory), 2)
+        # Out of time. Converge on the market across what is left of the session, so the ask is
+        # at the bid by the close rather than resting at a price the position may no longer wait
+        # for. This is the one step allowed to price below the entry: the deadline outranks the
+        # profit target, and a position still open past it is a worse risk than a small loss.
+        decay = float(session.get("fraction_remaining", 0.0))
+        target = round(max(mark + (target - mark) * decay, 0.01), 2)
 
-    # Ratchet: the target only ever rises. A target that fell would be chasing a losing position
-    # down, which is what the stop is for.
-    previous = float(memory.get("target", 0.0) or 0.0)
-    if previous > 0 and target < previous * (1.0 + float(config.ratchet_min_improvement)):
-        target = previous
+    if target <= 0:
+        # A quote the feed missed -- and no recorded fill to anchor on either -- leaves nothing
+        # to price a bracket from. Resting nothing says so rather than crashing the run: with no
+        # fill recorded there is no book of ours at the broker for an empty plan to cancel.
+        return SymbolPlan(
+            symbol, HELD, [],
+            {**memory, "state": HELD, "contract": held_contract},
+            checks + [Check(
+                label="Priceable",
+                ok=False,
+                value="no current mark for the contract",
+                limit="a quote to size the bracket from",
+                blocking=True,
+            )],
+            f"Holding {held_contract} — unpriced this run",
+        )
 
     orders = _bracket_orders(symbol, held_contract, quantity, target, stop, config, oco=oco)
 
@@ -215,17 +303,30 @@ def _held(
         Check(
             label="Profit target",
             ok=True,
-            value=f"${target:.2f} ({(target / fill_price - 1.0):+.0%} on the fill)" if fill_price > 0 else f"${target:.2f}",
-            limit="raised only, never lowered",
+            value=(
+                f"${target:.2f} ({(target / fill_price - 1.0):+.0%} on the fill)"
+                if fill_price > 0 else f"${target:.2f}"
+            ),
+            limit=(
+                f"asking {asked:.0%} of the modelled gain, session {held_days + 1} of "
+                f"{int(config.max_hold_sessions)} (patience "
+                f"{float(getattr(config, 'exit_patience', 1.0)):.1f})"
+                if not deadline else "deadline — converging on the market"
+            ),
         ),
         Check(
             label="Protective stop",
             ok=True,
             value=(
-                f"${stop:.2f} at the exchange"
-                if oco else f"${stop:.2f} at the exchange, as a separate order"
+                (f"${stop:.2f} at the exchange" if oco
+                 else f"${stop:.2f} at the exchange, as a separate order")
+                if stop > 0 else
+                f"none — the {quantity}-contract premium is the loss cap"
             ),
-            limit=f"{float(config.stop_loss_pct):.0%} below the ${fill_price:.2f} fill",
+            limit=(
+                f"{float(config.stop_loss_pct):.0%} below the ${anchor:.2f} entry" if stop > 0
+                else "disabled; the deadline is the exit that forces the issue"
+            ),
         ),
         Check(
             label="Hold deadline",
@@ -260,19 +361,19 @@ def _reprice_tolerance(contract: OptionContract, price: float, config: Any) -> f
     return max(REPRICE_MIN_PRICE_FRACTION, (spread * REPRICE_MIN_SPREAD_FRACTION) / price)
 
 
-def _exit_target(mark: float, underlying_now: float, exit_budget: float, direction: str, memory: dict) -> float:
-    """The profit target, as the mirror of the entry: a call is sold into a rise, a put a fall.
+def _target_premium(mark: float, underlying_now: float, exit_target: float, direction: str, memory: dict) -> float:
+    """The profit target in premium, from the target *level* the model produced.
 
-    Reasoned from the current mark rather than the session open, unlike the entry. A profit target
-    is a move to be captured *from here*, and a position may be held across sessions, which makes
-    "today's open" meaningless for it.
+    ``exit_target`` is an absolute underlying price, not a fraction. It used to be a fraction and
+    the caller passed a price into it -- ``underlying_now * (1 + 403.75)`` -- which put the target
+    four hundred times the spot, so it never filled and every position ran to its deadline. The
+    levels model speaks in prices; so does this now, and the ambiguity is gone rather than
+    documented.
     """
-    underlying_target = (
-        underlying_now * (1.0 + exit_budget) if direction == CALL
-        else underlying_now * (1.0 - exit_budget)
-    )
+    if exit_target <= 0:
+        return 0.0
     return option_price_for(
-        underlying_target, underlying_now=underlying_now, option_mark=mark,
+        exit_target, underlying_now=underlying_now, option_mark=mark,
         delta=float(memory.get("delta", 0.0) or 0.0),
     )
 
@@ -287,11 +388,17 @@ def _sell_leg(contract: str, quantity: int, **kwargs: Any) -> OrderRequest:
 def _bracket_orders(
     symbol: str, contract: str, quantity: int, target: float, stop: float, config: Any, *, oco: bool
 ) -> list[DesiredOrder]:
-    """The protective pair, in whichever shape this broker will hold.
+    """What should be resting against an open position -- a pair, or a lone target.
 
-    With OCO the venue owns the invariant that only one side can fill, and the bracket is one
-    order. Without it -- Alpaca refuses any complex order class on options -- the same two legs
-    go up independently, and that invariant becomes ours.
+    **A ``stop`` of zero means no stop order reaches the exchange at all.** Not a stop at a
+    distant price, not an OCO with one live leg: a single resting sell limit, and nothing else.
+    The strategy is then a resting buy limit followed by a resting sell limit, with the premium
+    of ``contracts_per_trade`` as the loss cap and the deadline as the exit that forces the
+    issue. ``oco`` is not consulted in that case, because there is no pair for a venue to hold.
+
+    With a live stop and OCO the venue owns the invariant that only one side can fill, and the
+    bracket is one order. Without OCO -- Alpaca refuses any complex order class on options --
+    the same two legs go up independently, and that invariant becomes ours.
 
     **The exposure that creates, stated plainly:** when one leg fills, the other is briefly live
     against a position that no longer exists. The next reconciliation cancels it, because a flat
@@ -300,8 +407,16 @@ def _bracket_orders(
     nothing to close, and the remaining leg is a *sell* of a contract we no longer hold rather
     than anything that could open new exposure.
     """
-    tolerance = float(config.ratchet_min_improvement)
+    tolerance = REPRICE_MIN_PRICE_FRACTION
     limit_leg = _sell_leg(contract, quantity, order_type="limit", limit_price=target)
+    # Checked before anything else, so no code path below can construct a stop leg. Note the key
+    # is ``:target`` rather than ``:bracket``: turning the stop off on a position that already
+    # has a bracket resting therefore reads to the reconciler as "the bracket is no longer
+    # wanted, this target is", and it cancels the one and places the other. That is the intended
+    # transition and it is why the two shapes do not share a key.
+    if stop <= 0:
+        return [DesiredOrder(key=f"{symbol}:{TARGET}", request=limit_leg,
+                             replace_tolerance=tolerance)]
     stop_leg = _sell_leg(contract, quantity, order_type="stop", stop_price=stop)
     if not oco:
         return [

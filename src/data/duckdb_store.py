@@ -393,7 +393,22 @@ def _connect(db_path: str | None = None):
     # the warmup job and the CLI keep working against the same database between batch jobs.
     path = Path(resolved)
     path.parent.mkdir(parents=True, exist_ok=True)
-    connection = _open_with_retry(lambda: _duckdb().connect(resolved), resolved)
+    try:
+        connection = _open_with_retry(lambda: _duckdb().connect(resolved), resolved)
+    except Exception as exc:
+        if not _is_lock_conflict(exc):
+            raise
+        # Read-only rather than nothing. A writer outliving the retry window used to take down
+        # every reader with it: the dashboard's Schwab-auth panel raised a 500 because loading a
+        # stored OAuth token -- a pure SELECT -- demanded a write lock a batch job happened to
+        # hold. DuckDB permits any number of concurrent read-only openers, which is what a read
+        # actually needs, and it is the fallback its own documentation points at.
+        #
+        # A write attempted on this connection still fails, and should: the caller genuinely
+        # cannot have it. Failing the writes alone beats failing everything.
+        logger.warning("%s is write-locked elsewhere; opening read-only for this call", resolved)
+        connection = _duckdb().connect(resolved, read_only=True)
+        return connection
     initialize_schema(connection)
     return connection
 

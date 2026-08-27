@@ -129,10 +129,19 @@ def social(limit: int = Query(default=250, ge=1, le=5000)) -> dict[str, Any]:
 def strategy_signals(
     strategy: str = Query(default=DEFAULT_STRATEGY_ID, max_length=80),
     account_id: str = Query(default="", max_length=80),
+    refresh: bool = Query(default=False),
+    cache_only: bool = Query(default=False),
 ) -> dict[str, Any]:
     # ``account_id`` is optional: omitted, the strategy's binding decides. The dashboard sends
     # it so the view it renders is the one whose plan its own editor is writing.
-    return strategy_signals_payload(strategy=strategy, account_id=account_id)
+    # ``cache_only`` probes the stored snapshot without computing -- how the dashboard opens
+    # on cached signals instead of recomputing every render -- and ``refresh`` forces the
+    # recompute behind the dashboard's Refresh button.
+    return strategy_signals_payload(
+        strategy=strategy,
+        account_id=account_id,
+        body={"refresh": refresh, "cache_only": cache_only},
+    )
 
 
 @app.post("/api/refresh-social")

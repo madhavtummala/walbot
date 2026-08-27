@@ -444,13 +444,13 @@ class BurstyDCAAlgorithm(BaseAlgorithm):
             floor_dollars = min_executable(price, fractional)
             # Months of budget banked, signed: positive is unspent money waiting, negative is
             # a symbol that deployed ahead of its plan and is repaying. The input to
-            # ``willingness``, and the number the deck reports as the backlog.
+            # ``willingness``; the deck reports the dollar balance itself as the backlog.
             backlog_months = symbol_state.accrued / abs(monthly_budget) if monthly_budget else 0.0
             valuation = evaluate_valuation(context.daily_bars_by_symbol.get(symbol), settings)
             z = float(valuation.get("detail", {}).get("z") or 0.0)
 
             # What a run would order for this symbol on its own terms, before the gates. The
-            # dashboard shows it as "next order", so it is computed once here rather than
+            # dashboard shows it as "upcoming", so it is computed once here rather than
             # re-derived by the view from a different set of numbers.
             size = planned_order_size(
                 monthly_budget,
@@ -500,9 +500,6 @@ class BurstyDCAAlgorithm(BaseAlgorithm):
             metadata={
                 "allocation_mode": "DCA",
                 "monthly_total": sum(abs(value) for value in budgets.values()),
-                # Provenance of the prices these rows were sized at, so a stored-bar fallback
-                # never masquerades as a live print on the dashboard.
-                "price_quotes": dict(context.extra.get("price_quotes") or {}),
                 "scaling_factor": settings.scaling_factor,
                 "max_monthly_multiple": settings.max_monthly_multiple,
                 "relax_months": settings.relax_months,

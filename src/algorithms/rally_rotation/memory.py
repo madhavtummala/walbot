@@ -109,26 +109,6 @@ def record_action(state: dict[str, Any], action: str, as_of: datetime) -> None:
     state[f"last_{action}_day"] = market_day(as_of)
 
 
-def track_eligibility(
-    state: dict[str, Any],
-    rows: dict[str, dict[str, Any]],
-    config: RallyRotationConfig,
-    as_of: datetime,
-) -> dict[str, dict[str, int]]:
-    """Record today's eligibility per symbol and return each one's recent window.
-
-    Eligibility is otherwise a stateless per-day test, which makes every floor a coin-flip
-    boundary for anything sitting near it. Counting instead asks "has this been qualifying?", so
-    an entry needs a run of agreement and an exit needs a run of disagreement.
-
-    Returns the series rather than the count so callers can tell a name that has failed the test
-    from one that has simply not been watched long enough yet. That distinction matters: a cold
-    state store would otherwise read every holding as ineligible and liquidate the book on the
-    first run after a restart.
-    """
-    return _track(state, "eligible_history", rows, config, as_of, lambda row: int(bool(row.get("eligible"))))
-
-
 def track_ranking(
     state: dict[str, Any],
     rows: dict[str, dict[str, Any]],

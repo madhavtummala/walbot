@@ -26,8 +26,8 @@ from ...core.interfaces import (
     intents_from_weights,
 )
 from ..base import BaseAlgorithm
-from .config import RallyRotationConfig
-from .gates import climax_check, crash_stop, entry_checks, passes, universe_data_ok
+from .config import MIN_ENTRY_SCORE, RallyRotationConfig
+from .gates import crash_stop, entry_checks, passes, universe_data_ok
 from .memory import (
     action_due,
     observed_days,
@@ -35,7 +35,6 @@ from .memory import (
     record_action,
     resolve_positions,
     sessions_since,
-    track_eligibility,
     track_ranking,
 )
 from .scoring import base_scores, compute_features
@@ -44,9 +43,7 @@ from .sizing import (
     apply_turnover_filters,
     defensive_weights,
     park_residual,
-    partial_adjustment,
     score_to_weights,
-    sentiment_adjusted,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,7 +71,7 @@ class RallyRotationAlgorithm(BaseAlgorithm):
             # intraday window would make the live path fetch one on each run and the replay build
             # a HistoryCache over it, both for data no gate reads.
             intraday_lookback_minutes=settings.required_history_minutes,
-            needs_sentiment=settings.uses_sentiment,
+
             # Eligibility history and the re-rank throttle both measure elapsed market days,
             # which means both need what previous runs recorded and the day they recorded it on.
             needs_state=True,
@@ -117,9 +114,6 @@ class RallyRotationAlgorithm(BaseAlgorithm):
             signals=finalize(signals, weights, held, settings, notes),
             metadata={
                 "allocation_mode": self._allocation_mode(weights, settings),
-                # Reported only when it is actually an input, so the deck does not show a
-                # sentiment reading for a run that never asked for one.
-                **({"market_sentiment": context.market_sentiment} if settings.uses_sentiment else {}),
                 "universe_data": universe["data"],
                 "eligible_count": len(universe["ranked"]),
             },
@@ -144,14 +138,8 @@ class RallyRotationAlgorithm(BaseAlgorithm):
             for symbol in settings.symbols
         }
         scored = base_scores(features, settings)
-        for symbol, row in scored.items():
-            row["sentiment_score"] = float(context.sentiment_scores.get(symbol, 0.0))
+        for row in scored.values():
             row["eligible"] = passes(entry_checks(row, settings))
-            if settings.sentiment_weight:
-                clip = max(settings.sentiment_clip, 0.0)
-                tilt = max(-clip, min(clip, row["sentiment_score"])) * settings.sentiment_weight
-                row["base_score"] = float(row["base_score"]) + tilt
-                row["score_components"]["sentiment"] = tilt
 
         data = universe_data_ok(scored, settings)
         ranked = self._rank(scored, settings)
@@ -163,13 +151,12 @@ class RallyRotationAlgorithm(BaseAlgorithm):
         qualified = [
             row for row in ranked
             if int(row.get("rank") or 0) <= settings.entry_rank_max
-            and float(row.get("base_score", 0.0)) >= settings.min_base_score
+            and float(row.get("base_score", 0.0)) >= MIN_ENTRY_SCORE
         ]
         entries = qualified[: max(settings.max_positions, 0)]
 
         if data["data_ok"] and entries:
             weights = score_to_weights(entries, settings)
-            weights = sentiment_adjusted(weights, context.sentiment_scores, settings)
             weights = park_residual(weights, defensive_book, settings)
         else:
             weights = dict(defensive_book)
@@ -234,9 +221,7 @@ class RallyRotationAlgorithm(BaseAlgorithm):
             return self._settle(book, proposed, current, context, settings)
 
         risk_rows = {symbol: row for symbol, row in rows.items() if symbol not in defensive}
-        history = track_eligibility(state, risk_rows, settings, as_of)
         rank_history = track_ranking(state, risk_rows, settings, as_of)
-        window = max(settings.eligibility_window, 1)
 
         # The stops answer to no clock. Everything else -- ranking, entering, replacing and the
         # considered exits -- happens on ``rerank_interval_days``, because they are the same
@@ -245,17 +230,10 @@ class RallyRotationAlgorithm(BaseAlgorithm):
         # the book paid the spread for the noise.
         stopped = set()
         for symbol in held - defensive:
-            row = rows.get(symbol, {})
-            # The crash test is already among the exit gates, so only the climax one is news
-            # here; appending both listed it twice on every holding.
-            climax = climax_check(row, settings)
-            if climax is not None:
-                notes.setdefault(symbol, []).append(climax)
-            for check in (crash_stop(row, settings), climax):
-                if check is not None and not check.ok:
-                    logger.warning("[%s] Rally Rotation stopping out %s: %s", stamp[:10], symbol, check.value)
-                    stopped.add(symbol)
-                    break
+            check = crash_stop(rows.get(symbol, {}), settings)
+            if not check.ok:
+                logger.warning("[%s] Rally Rotation stopping out %s: %s", stamp[:10], symbol, check.value)
+                stopped.add(symbol)
 
         due = action_due(state, "rerank", settings.rerank_interval_days, as_of)
         if not due:
@@ -277,7 +255,7 @@ class RallyRotationAlgorithm(BaseAlgorithm):
             weights = {symbol: float(current.get(symbol, 0.0)) for symbol in survivors}
         else:
             record_action(state, "rerank", as_of)
-            keep = self._survivors(rows, held - defensive - stopped, history, window, settings, stamp, notes)
+            keep = (held - defensive) - stopped
             candidates = self._candidates(risk_rows, keep, rank_history, settings, notes)
             selection = resolve_positions(keep, candidates, settings, as_of=stamp)
             self._record_slots(candidates, selection, settings, notes)
@@ -302,45 +280,6 @@ class RallyRotationAlgorithm(BaseAlgorithm):
         return self._settle(weights, proposed, current, context, settings)
 
     @staticmethod
-    def _survivors(
-        rows: dict[str, dict[str, Any]],
-        candidates: set[str],
-        history: dict[str, dict[str, int]],
-        window: int,
-        settings: RallyRotationConfig,
-        stamp: str,
-        notes: dict[str, list[Check]],
-    ) -> set[str]:
-        """Which holdings stay. Two ways out, answering different questions.
-
-        The count is the slow one: this name has stopped qualifying for long enough to mean
-        something. The exit band is the fast one. Both are checked only once the window is full,
-        because a cold state store has no history and reading that as "ineligible" would sell
-        everything on the first run.
-        """
-        keep: set[str] = set()
-        for symbol in candidates:
-            watched = observed_days(history.get(symbol))
-            days = qualifying_days(history.get(symbol))
-            # Only once the window is full: a cold state store has no history, and reading that
-            # as "ineligible" would sell everything on the first run after a restart.
-            still_qualifying = watched < window or days > settings.exit_max_eligible_days
-            notes.setdefault(symbol, []).append(Check(
-                label="Still qualifying recently",
-                ok=still_qualifying,
-                value=f"eligible on {days} of the last {watched} days",
-                limit=f"> {settings.exit_max_eligible_days}, once {window} days are on record",
-            ))
-            if not still_qualifying:
-                logger.info(
-                    "[%s] Rally Rotation exiting %s: eligible on only %d of the last %d days",
-                    stamp[:10], symbol, days, window,
-                )
-                continue
-            keep.add(symbol)
-        return keep
-
-    @staticmethod
     def _candidates(
         risk_rows: dict[str, dict[str, Any]],
         keep: set[str],
@@ -350,9 +289,15 @@ class RallyRotationAlgorithm(BaseAlgorithm):
     ) -> list[dict[str, Any]]:
         """Everything selectable this run, ranked. Holdings face eligibility alone.
 
-        The quality floor and the settling period are *entry* conditions: a holding that would
-        not be bought today is not thereby worth selling, and applying them symmetrically sells a
-        name the moment it stops being a purchase.
+        The settling period is an *entry* condition: a holding that would not be bought today is
+        not thereby worth selling, and applying it symmetrically sells a name the moment it stops
+        being a purchase.
+
+        Eligibility is not exempt, and that is deliberate rather than an oversight -- the
+        ``continue`` above drops an ineligible name whether it is held or not. An ineligible name
+        never reaches the ranked list, so ``resolve_positions`` cannot retain it and the position
+        is sold. ``exit_rank_max`` protects a holding that *slipped in rank*; it does nothing for
+        one that failed a gate.
         """
         candidates: list[dict[str, Any]] = []
         ordered = sorted(risk_rows.items(), key=lambda item: -float(item[1].get("base_score", 0.0)))
@@ -366,10 +311,10 @@ class RallyRotationAlgorithm(BaseAlgorithm):
             settled = qualifying_days(rank_history.get(symbol))
             entry = [
                 Check(
-                    label="Score above the quality floor",
-                    ok=score >= settings.min_base_score,
+                    label="Scores at or above the universe median",
+                    ok=score >= MIN_ENTRY_SCORE,
                     value=f"{score:.2f}",
-                    limit=f"≥ {settings.min_base_score:.2f}",
+                    limit=f"≥ {MIN_ENTRY_SCORE:.2f}",
                 ),
                 Check(
                     label=f"Ranked in the top {settings.entry_rank_max} for long enough",
@@ -420,7 +365,7 @@ class RallyRotationAlgorithm(BaseAlgorithm):
         context: AlgorithmContext,
         settings: RallyRotationConfig,
     ) -> dict[str, float]:
-        """Damp the move to ``weights`` and return the book to aim at.
+        """Filter out trades too small to be worth their costs, and return the book to aim at.
 
         The symbol set is the union of what pass one proposed, what is currently held, and what
         pass two decided to hold. It used to be the proposal alone, which silently discarded
@@ -431,10 +376,8 @@ class RallyRotationAlgorithm(BaseAlgorithm):
         source of turnover.
         """
         symbols = set(proposed) | set(current) | set(weights)
-        stepped = partial_adjustment(
-            {symbol: float(weights.get(symbol, 0.0)) for symbol in symbols}, current, settings
-        )
-        return apply_turnover_filters(stepped, current, float(context.equity or 0.0), settings)
+        target = {symbol: float(weights.get(symbol, 0.0)) for symbol in symbols}
+        return apply_turnover_filters(target, current, float(context.equity or 0.0), settings)
 
     @staticmethod
     def _allocation_mode(weights: dict[str, float], settings: RallyRotationConfig) -> str:

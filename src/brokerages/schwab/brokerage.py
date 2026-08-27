@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import Any, Dict, List
 
 import pandas as pd
@@ -139,6 +140,26 @@ def _tick(price: float) -> float:
     side and costs at most half a tick on the sell.
     """
     return round(float(price), 2)
+
+
+def _rejection_reason(order: Dict[str, Any]) -> str:
+    """Why Schwab refused an order tree, gathered from wherever in it the explanation sits.
+
+    A rejected bracket carries no ``statusDescription`` on the parent: the reason is written
+    against the leg that actually offended, and the siblings each get a bare "Order Rejected due
+    to Order: <id>" pointing at it. Reading only the top level therefore reports nothing at all
+    for the one case where the caller most needs a reason, so this walks the tree and keeps every
+    distinct description it finds, in the order encountered.
+    """
+    reasons: List[str] = []
+    def walk(node: Dict[str, Any]) -> None:
+        description = str(node.get("statusDescription") or "").strip()
+        if description and description not in reasons:
+            reasons.append(description)
+        for child in node.get("childOrderStrategies") or []:
+            walk(child)
+    walk(order)
+    return "; ".join(reasons)
 
 
 class SchwabBrokerage(BaseBrokerage):
@@ -304,13 +325,54 @@ class SchwabBrokerage(BaseBrokerage):
             json=payload,
             headers={"Content-Type": "application/json"},
         )
+        order_id = _order_id_from(response)
         return {
-            "order_id": _order_id_from(response),
+            "order_id": order_id,
             "client_order_id": request.client_order_id or "",
-            "status": "accepted",
+            "status": self._confirm(order_id, request),
             "symbol": request.symbol.upper(),
             "qty": int(request.quantity),
         }
+
+    def _confirm(self, order_id: str, request: OrderRequest) -> str:
+        """The status Schwab actually holds for a just-submitted order, not the one 201 implies.
+
+        A 201 with a ``Location`` header means "accepted for processing", not "resting". Schwab
+        runs its own validation afterwards and can move the order straight to ``REJECTED``,
+        reporting why in ``statusDescription`` -- observed live with a sub-penny option price,
+        which this client cannot produce (see :func:`_tick`) but a hand-built payload can.
+
+        **A rejection takes the whole tree with it.** The bad leg was a bracket's stop, and the
+        entry and the profit target were rejected alongside it, each citing the offending order
+        id. So reporting the parent as accepted would not merely overstate one leg -- it would
+        claim a position was protected when nothing at all had been placed.
+
+        One read, no retry loop: the rejection may not have landed yet, and an order still shown
+        as pending here is reported as accepted, exactly as before. That is not a gap the caller
+        has to cover, because :func:`..algorithms.reconcile.reconcile_orders` reads the working
+        set at the top of every run and resubmits anything that is no longer resting -- a
+        rejection this misses self-heals on the next fire rather than persisting as a phantom.
+        """
+        if not order_id or order_id == "unknown":
+            return "accepted"
+        try:
+            order = self.session.get(
+                f"{TRADER_BASE}/accounts/{self.account_hash}/orders/{order_id}"
+            ) or {}
+        except Exception as exc:
+            # The order is placed either way; failing to read it back is not a reason to tell the
+            # caller the submission failed.
+            logger.warning("Could not read Schwab order %s back after submitting: %s", order_id, exc)
+            return "accepted"
+        status = str(order.get("status") or "").upper()
+        if status not in _TERMINAL_STATUSES or status == "FILLED":
+            return "accepted"
+        logger.error(
+            "Schwab %s order %s for %s was %s on submission: %s",
+            str(order.get("orderStrategyType") or "-"), order_id, request.symbol, status,
+            _rejection_reason(order) or "no reason given",
+        )
+        return status.lower()
 
     def get_orders(self, status: str = "WORKING") -> List[Dict[str, Any]]:
         """Orders in ``status``, flattened so a bracket's legs are listed alongside plain orders.
@@ -358,11 +420,20 @@ class SchwabBrokerage(BaseBrokerage):
             logger.info("Schwab order %s was not cancellable (already filled or gone): %s", order_id, exc)
 
     def replace_order(self, order_id: str, request: OrderRequest) -> Dict[str, Any]:
-        """Re-price in one call, so the order is never absent from the book in between."""
+        """Re-price in one call, so the order is never absent from the book in between.
+
+        **The replacement payload may not carry children.** Schwab answers
+        ``400 "Replacing order cannot have child orders."`` to a PUT that repeats the tree,
+        verified live -- so a trigger parent is re-priced by sending its own leg alone. Schwab
+        rebuilds the bracket underneath the replacement from the children's *current* prices, and
+        issues new ids for every node in it. The legs are stripped here rather than at the callers
+        so that a request built once for :meth:`submit_order` can be handed to this method
+        unchanged, which is exactly what the reconciler does.
+        """
         payload = (
             _oco_payload(request.children)
             if request.strategy == "oco"
-            else _order_payload(request)
+            else _order_payload(replace(request, children=()))
         )
         response = self.session.put(
             f"{TRADER_BASE}/accounts/{self.account_hash}/orders/{order_id}",
@@ -376,7 +447,10 @@ class SchwabBrokerage(BaseBrokerage):
             # caller's bookkeeping pointing at a real order either way.
             "order_id": new_id if new_id != "unknown" else str(order_id),
             "client_order_id": request.client_order_id or "",
-            "status": "accepted",
+            # Confirmed for the same reason a submission is: a replacement is a fresh order to
+            # Schwab's validation, and it can be rejected on exactly the grounds a first
+            # submission can -- leaving the caller believing it re-priced something that is gone.
+            "status": self._confirm(new_id if new_id != "unknown" else str(order_id), request),
             "symbol": request.symbol.upper(),
             "qty": int(request.quantity),
         }

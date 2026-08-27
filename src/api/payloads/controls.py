@@ -13,6 +13,7 @@ from typing import Any
 
 from ...brokerages.schwab.auth import auth_status, begin_authorization, complete_authorization
 from ...core.bot_runtime import bot_runtime
+from ...core.config.accounts import UnknownAccountError
 from ...core.config import (
     get_config,
 )
@@ -64,6 +65,25 @@ def save_controls_payload(body: dict[str, Any]) -> dict[str, Any]:
     controls = save_controls(raw_controls)
     return {
         "controls": controls,
-        "accounts": get_config(account_id=str(controls.get("trading_account_id") or "") or None).account_options,
+        "accounts": _account_options(str(controls.get("trading_account_id") or "")),
         "bot": bot_runtime.snapshot(),
     }
+
+
+def _account_options(account_id: str) -> list[dict[str, str]]:
+    """The account list, which must not depend on the account being asked about.
+
+    ``account_options`` is the same for every account -- it *is* the list of them -- so reading
+    it through a specific one only creates a way to fail. A browser open since before an account
+    was renamed posts the old id back, and that took the whole save endpoint down with an
+    ``UnknownAccountError``: the controls were written, the response was not, and the dashboard
+    showed a 500 for a save that had already succeeded.
+    """
+    try:
+        return get_config(account_id=account_id or None).account_options
+    except UnknownAccountError:
+        logger.warning(
+            "Controls named account %r, which no longer exists; listing accounts from the "
+            "default instead.", account_id,
+        )
+        return get_config().account_options

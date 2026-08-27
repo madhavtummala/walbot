@@ -147,7 +147,7 @@ def test_place_orders_refuses_to_guess_between_two_eligible_bindings(monkeypatch
 def test_place_orders_uses_the_bindings_account_not_the_default(monkeypatch) -> None:
     """The bug this replaced: get_config() with no account_id resolves the *default* account,
     so an algorithm bound to a live account could have had its orders sent to a paper one."""
-    fake_server = _build(monkeypatch, [_binding(account_id="schwab_individual")])
+    fake_server = _build(monkeypatch, [_binding(account_id="schwab2")])
     seen: dict = {}
 
     def fake_get_config(**kwargs):
@@ -157,7 +157,7 @@ def test_place_orders_uses_the_bindings_account_not_the_default(monkeypatch) -> 
     monkeypatch.setattr(mcp_server, "get_config", fake_get_config)
     fake_server.place_orders(_plan_payload())
 
-    assert seen["account_id"] == "schwab_individual"
+    assert seen["account_id"] == "schwab2"
 
 
 def test_get_algorithm_plan_runs_for_a_scheduled_binding_but_says_it_cannot_trade(monkeypatch) -> None:

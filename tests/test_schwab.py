@@ -422,3 +422,102 @@ def test_the_orders_request_carries_the_window_schwab_demands() -> None:
     params = next(c[2]["params"] for c in session._session.calls if "/orders" in c[1])
     assert params["fromEnteredTime"].endswith("Z") and params["toEnteredTime"].endswith("Z")
     assert "T" in params["fromEnteredTime"]
+
+
+def _rejected_tree(order_id: str = "4242") -> dict:
+    """The shape Schwab returns for a bracket refused after it was accepted for processing.
+
+    Taken from a live rejection: the parent carries no reason at all, the offending leg carries
+    the real one, and its sibling carries only a pointer back to it.
+    """
+    return {
+        "orderId": order_id,
+        "orderStrategyType": "TRIGGER",
+        "status": "REJECTED",
+        "childOrderStrategies": [{
+            "orderStrategyType": "OCO",
+            "status": "REJECTED",
+            "childOrderStrategies": [
+                {"orderId": "4244", "status": "REJECTED",
+                 "statusDescription": "Order Rejected due to Order: 4243"},
+                {"orderId": "4243", "status": "REJECTED",
+                 "statusDescription": "Options orders cannot be entered in sub-penny increments."},
+            ],
+        }],
+    }
+
+
+def test_a_submission_schwab_rejects_is_not_reported_as_accepted() -> None:
+    """201 means "accepted for processing", not "resting".
+
+    Verified live: a bracket carrying a sub-penny stop was answered 201 with a Location header and
+    then rejected outright moments later. Reporting the 201 as success claimed a position was
+    protected when nothing had been placed at all.
+    """
+    session = _session({
+        # Ordered before the bare "/orders" route so the read-back resolves to the order itself.
+        "/orders/4242": FakeResponse(_rejected_tree()),
+        "/orders": FakeResponse(None, status_code=201, headers={"Location": "https://x/orders/4242"}),
+    })
+    brokerage = SchwabBrokerage(_config(), session=session)
+    brokerage._account_hash = "HASH"
+
+    result = brokerage.submit_order(OrderRequest(
+        symbol="QQQM  260220C00100000", action="buy", quantity=1, order_type="limit",
+        limit_price=1.15, asset_type="option", extra={"position_intent": "buy_to_open"},
+    ))
+
+    assert result["status"] == "rejected"
+    assert result["order_id"] == "4242"
+
+
+def test_a_rejection_reason_is_read_off_the_leg_that_caused_it() -> None:
+    """The parent of a rejected tree carries no ``statusDescription`` -- only the bad leg does."""
+    from src.brokerages.schwab.brokerage import _rejection_reason
+
+    reason = _rejection_reason(_rejected_tree())
+
+    assert "sub-penny" in reason
+    # Both descriptions are kept: the pointer is what identifies which leg was at fault.
+    assert "Order Rejected due to Order: 4243" in reason
+
+
+def test_an_order_still_pending_reads_as_accepted() -> None:
+    """A rejection may not have landed yet, and a pending order must not be called a failure."""
+    session = _session({
+        "/orders/4242": FakeResponse({"orderId": "4242", "status": "PENDING_ACTIVATION"}),
+        "/orders": FakeResponse(None, status_code=201, headers={"Location": "https://x/orders/4242"}),
+    })
+    brokerage = SchwabBrokerage(_config(), session=session)
+    brokerage._account_hash = "HASH"
+
+    result = brokerage.submit_order(OrderRequest(
+        symbol="QQQM", action="buy", quantity=1, order_type="market",
+    ))
+
+    assert result["status"] == "accepted"
+
+
+def test_a_replacement_never_carries_the_bracket_it_is_re_pricing() -> None:
+    """Schwab answers 400 "Replacing order cannot have child orders." to a PUT that repeats the tree.
+
+    Verified live. The entry of a trigger bracket is re-priced by sending its own leg alone;
+    Schwab rebuilds the OCO underneath the replacement from the children's current prices.
+    """
+    brokerage, session = _order_brokerage()
+    leg = lambda **kw: OrderRequest(
+        symbol="QQQM  260220C00100000", action="sell", quantity=1, asset_type="option",
+        time_in_force="gtc", extra={"position_intent": "sell_to_close"}, **kw,
+    )
+
+    brokerage.replace_order("4242", OrderRequest(
+        symbol="QQQM  260220C00100000", action="buy", quantity=1, order_type="limit",
+        limit_price=1.25, asset_type="option", strategy="trigger",
+        extra={"position_intent": "buy_to_open"},
+        children=(leg(order_type="limit", limit_price=2.80), leg(order_type="stop", stop_price=1.50)),
+    ))
+
+    payload = _sent_payload(session)
+    assert payload["price"] == 1.25
+    assert "childOrderStrategies" not in payload, "Schwab rejects a replacement carrying children"
+    assert payload["orderStrategyType"] == "TRIGGER"

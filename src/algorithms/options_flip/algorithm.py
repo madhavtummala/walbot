@@ -47,14 +47,12 @@ from ..rally_rotation.memory import market_day, sessions_since
 from ..reconcile import ORDER_IDS_KEY, broker_supports_oco, reconcile_orders
 from .config import OptionsFlipConfig
 from .contracts import affordable_contracts, fill_missing_deltas, select_contract
-from .direction import premarket_confirms, trend_direction, typical_daily_move
-from .excursion import (
-    expected_excursion,
-    entry_underlying_target,
-    option_price_for,
-    predicted_extreme,
-    session_fraction_remaining,
-)
+from .candidates import scoring_parameters, trend_strength
+from .indicators import average_true_range, quote_age_seconds
+from .levels import conditional_levels
+from .pricing import expected_profit, max_debit, scenarios
+from .regime import bull_regime
+from .excursion import option_price_for, session_fraction_remaining
 from .lifecycle import BIDDING, HELD, plan_symbol
 from .signals import signal_view
 
@@ -99,14 +97,21 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
         the context loads bars for one set and the algorithm iterates another, and the difference
         shows up as symbols that silently never trade.
         """
-        return [str(symbol).upper() for symbol in (cfg.symbols or getattr(config, "symbols", []) or [])]
+        named = [str(symbol).upper() for symbol in (cfg.symbols or [])]
+        if named:
+            return named
+        # This algorithm's own list, or the account's tradable universe. Rally Rotation's
+        # configured universe is deliberately *not* consulted: the two run different symbol
+        # lists on different accounts, and reading its section let one strategy's tuning
+        # silently decide the other's candidates. Only its scoring function is borrowed.
+        return [str(s).upper() for s in (getattr(config, "symbols", []) or [])]
 
     def requirements(self, config: Any, current_positions: dict[str, int]) -> AlgorithmRequirements:
         cfg = self.tuning(config)
         return AlgorithmRequirements(
             price_symbols=self._symbols(cfg, config),
             daily_lookback_days=cfg.required_daily_bars,
-            daily_ma_days=cfg.trend_ma_period,
+            daily_ma_days=cfg.regime_slow_ma_days,
             intraday_lookback_minutes=cfg.required_intraday_minutes,
             preferred_bar_minutes=cfg.intraday_bar_minutes,
             needs_state=True,
@@ -121,7 +126,10 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
         session = _session_facts(context.timestamp, cfg)
         held = _held_contracts(context.positions)
 
-        symbols = self._symbols(cfg, context.config)
+        universe = self._symbols(cfg, context.config)
+        # No ranking, and nothing shared between symbols. Each is scored from its own bars
+        # inside ``_plan_one``, so adding or removing a name cannot change what the others do.
+        symbols = sorted({*universe, *held}) if universe else sorted(held)
         orders, signals, memory = [], {}, {}
         for symbol in symbols:
             outcome = self._plan_one(
@@ -142,6 +150,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
                 "session": session,
                 "reason": _reason(signals),
                 "symbols_evaluated": len(symbols),
+                "universe": len(universe),
             },
         )
 
@@ -162,95 +171,144 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
                 contracts=int(memory.get("contracts", 1) or 1),
                 underlying_now=underlying_now,
                 entry_target=0.0,
-                exit_budget=_budget(daily, intraday, memory.get("direction"), cfg, session, exit_side=True),
+                exit_target=_held_exit_target(intraday, session, cfg, underlying_now, daily),
                 checks=[], config=cfg, session=session,
                 oco=broker_supports_oco(getattr(context.config, "account_id", "")),
             )
 
-        direction, checks = trend_direction(daily, cfg)
+        history, today = _split_sessions(intraday, session["market_day"])
+        # ── gate 1: is the bull thesis intact today? ──────────────────────────────────
+        eligible, regime, checks = bull_regime(
+            daily, today, price=underlying_now, config=cfg,
+        )
+        # Scored from this symbol's own bars, against a threshold in its own sigma. A held
+        # position is managed out whatever it scores today.
+        strength = trend_strength(daily, scoring_parameters())
+        trending = bool(strength >= float(cfg.min_trend_strength)) or bool(held_contract)
+        checks = [Check(
+            label="Trend strength",
+            ok=trending,
+            value=f"{strength:+.2f}σ" + ("" if trending else " — not trending enough today"),
+            limit=f"≥ {float(cfg.min_trend_strength):+.2f}σ, measured on this symbol alone",
+            blocking=not trending,
+        )] + checks
+        atr = float(regime.get("atr", 0.0) or 0.0)
+
         vol_ok, vol_check, annual_vol = _volatility_gate(daily, cfg)
         checks = checks + [vol_check]
-        if not direction or not vol_ok:
-            return plan_symbol(
-                symbol, memory=memory, held_contract="", direction="", contract=None, contracts=0,
-                underlying_now=underlying_now, entry_target=0.0, exit_budget=0.0,
-                checks=checks, config=cfg, session=session,
-            )
 
-        premarket = _premarket(context, symbol)
-        confirms, premarket_checks = premarket_confirms(
-            premarket, direction, typical_daily_move(daily, cfg.volatility_window), cfg
+        # ── gate 2: where would we buy and sell, and how often is each reached? ───────
+        # Levels are sampled at the minute a decision could still be *made*, not at the clock's
+        # current minute. Past the entry cutoff there is no remaining session to travel through,
+        # so every past session contributes an empty "after" window and the sample comes back
+        # zero -- which reads as "no comparable history" when the truth is "too late to arm one".
+        # Outside the session entirely this shows the first fire, so an overnight deck previews
+        # the decision tomorrow morning rather than a degenerate one.
+        levels = conditional_levels(
+            history, minute=_decision_minute(session, cfg), price=underlying_now,
+            session_open=_session_open(intraday, session["market_day"], underlying_now),
+            atr=atr, config=cfg,
         )
-        checks = checks + premarket_checks
+        in_time = float(session.get("fraction_remaining", 0.0)) >= float(cfg.entry_cutoff_fraction)
+        # The entry is placed *at* the ``entry_reach`` quantile, so its own reach is that
+        # number by construction and needs no separate floor. What still has to be checked is the
+        # conditional half: of the days that dipped this far, how many then paid.
+        # ``target_reach`` places the target at the reach it asks for, so the only remaining
+        # question is whether a sample exists at all, and whether there is session left to work.
+        levels_ok = levels["p_target"] > 0.0 and levels["entry"] > 0.0 and in_time
+        checks = checks + [Check(
+            label="Entry reachable",
+            ok=levels["p_touch"] > 0.0,
+            value=(
+                f"{levels['p_touch']:.0%} of {levels['sample']} comparable sessions reached "
+                f"${levels['entry']:,.2f} ({levels['k_entry']:.2f} ATR below)"
+                + ("" if levels["conditional"] else " — unconditional sample, bucket was thin")
+            ),
+            limit=f"placed at the {float(cfg.entry_reach):.0%} reach quantile",
+            blocking=levels["p_touch"] <= 0.0,
+        ), Check(
+            label="Target reachable after entry",
+            ok=levels["p_target"] > 0.0,
+            value=(
+                f"{levels['p_target']:.0%} of those went on to ${levels['target']:,.2f} "
+                f"({levels['k_target']:.2f} ATR above the entry)"
+            ),
+            limit=f"placed at the {float(cfg.target_reach):.0%} reach quantile of the days that dipped",
+            blocking=levels["p_target"] <= 0.0,
+        ), Check(
+            label="Time to work",
+            ok=in_time,
+            value=f"{float(session.get('fraction_remaining', 0.0)):.0%} of the session left",
+            limit=f"≥ {float(cfg.entry_cutoff_fraction):.0%} to arm a new entry",
+            blocking=not in_time,
+        )]
 
-        # The contract is chosen even when pre-market has vetoed the trade. It costs one chain
-        # request and it is the difference between a deck that says "no trade today" and one that
-        # says which contract, at what price, against what estimated range -- which is what makes
-        # the strategy assessable on the days it does not fire. Only the *orders* are gated.
+        # The contract is priced whatever the gates said, so a stand-down row still names it.
         contract, candidate, contract_checks = _pick_contract(
-            context, symbol, direction, session, cfg,
+            context, symbol, CALL, session,  cfg,
             spot=underlying_now, annual_volatility=annual_vol,
         )
         checks = checks + contract_checks
-        contracts = affordable_contracts(contract, cfg) if contract else 0
-        if contract and not contracts:
-            checks = checks + [Check(
-                label="Affordable at the notional cap",
-                ok=False,
-                value=f"${contract.ask * 100:,.0f} per contract",
-                limit=f"≤ ${float(cfg.max_notional_per_trade):,.0f}",
-                blocking=True,
-            )]
+        priced = contract or candidate
 
-        levels = _entry_levels(daily, intraday, direction, cfg, session, underlying_now)
-        exit_budget = _budget(daily, intraday, direction, cfg, session, exit_side=True)
-        # Estimated against whatever the chain's best in-band contract was, traded or not: a
-        # rejected near-miss is exactly what has to be visible to judge the strategy.
-        estimate = _estimate(
-            contract or candidate, direction, underlying_now, levels, exit_budget, cfg,
-            date.fromisoformat(session["market_day"]),
-        )
+        # ── gate 3: does the base case clear its costs, through the full greeks? ──────
+        estimate: dict[str, Any] = {}
+        contracts = 0
+        if priced is not None and atr > 0 and levels["entry"] > 0:
+            outcomes = scenarios(
+                priced, entry_underlying=levels["entry"], target_underlying=levels["target"],
+                spot=underlying_now, config=cfg,
+            )
+            ceiling = max_debit(priced, outcomes, config=cfg)
+            contracts = affordable_contracts(priced, cfg) if contract else 0
+            profit = expected_profit(outcomes, contracts or 1, config=cfg)
+            worth_it = profit["per_contract"] >= float(cfg.min_profit_per_contract)
+            estimate = _estimate_row(
+                priced, levels, outcomes, profit, ceiling, contracts, regime, cfg,
+            )
+            checks = checks + [Check(
+                label="Worth trading",
+                ok=worth_it,
+                value=(
+                    f"${profit['per_contract']:,.0f} per contract base case "
+                    f"(bad ${profit['bad']:,.0f}, good ${profit['good']:,.0f})"
+                ),
+                limit=f"≥ ${float(cfg.min_profit_per_contract):,.0f} per contract, gross",
+                blocking=not worth_it,
+            ), Check(
+                label="Max debit",
+                ok=ceiling > 0,
+                value=f"${ceiling:.2f} — the entry limit is never raised past this",
+                limit="derived from the base case, not chosen",
+            )]
+            if not worth_it:
+                contracts = 0
+            age = quote_age_seconds(priced, session.get("now_ms", 0.0))
+            if age > float(cfg.max_quote_age_seconds):
+                checks = checks + [Check(
+                    label="Quote fresh", ok=False, value=f"{age:,.0f}s old",
+                    limit=f"≤ {float(cfg.max_quote_age_seconds):,.0f}s", blocking=True,
+                )]
+                contracts = 0
+
+        if not (eligible and vol_ok and levels_ok and trending):
+            contracts = 0
+        direction = CALL if (eligible and vol_ok and levels_ok and trending and contracts > 0) else ""
 
         outcome = plan_symbol(
             symbol, memory=memory, held_contract="",
-            # Pre-market is what gates the order, not the analysis: passing no direction is how
-            # the state machine is told to stand down while the deck keeps the reasoning above.
-            direction=direction if confirms else "",
+            # Momentum gates the order, not the analysis. Passing the *real* direction -- empty
+            # when nothing is trending -- is how the state machine is told to stand down, while
+            # the deck above keeps the previewed contract and the reasoning that goes with it.
+            direction=direction,
             contract=contract, contracts=contracts, underlying_now=underlying_now,
-            entry_target=levels["bid"], exit_budget=0.0,
+            entry_target=levels["entry"], exit_target=float(levels.get("target", 0.0)),
             checks=checks, config=cfg, session=session,
             oco=broker_supports_oco(getattr(context.config, "account_id", "")),
         )
         if estimate and contract is None:
             estimate["tradable"] = False
 
-        # The economic gate, and the last one applied: everything above asks whether the setup is
-        # *right*, this asks whether it is worth doing at all. A contract whose predicted move is
-        # a few dollars is a losing trade after any realistic round trip, even when every other
-        # gate passed and the direction was called correctly -- which is exactly the trade that
-        # is easiest to keep making without noticing.
-        if contract and contracts > 0 and estimate:
-            # Judged **per contract**, not on the position total. A floor on the total is
-            # satisfiable by buying more -- ten contracts predicted to move two cents each clears
-            # a $25 position floor -- so raising ``contracts_per_position`` would quietly loosen
-            # the quality bar. Whether the setup is worth trading cannot depend on how much of it
-            # you buy; size is a separate decision, made by the notional cap.
-            per_contract = float(estimate.get("expected_profit_per_contract", 0.0))
-            floor = float(cfg.min_expected_profit)
-            worth_it = per_contract >= floor
-            total = float(estimate.get("expected_profit", 0.0))
-            checks = checks + [Check(
-                label="Worth trading",
-                ok=worth_it,
-                value=(
-                    f"${per_contract:,.0f} per contract"
-                    + (f" (${total:,.0f} for {contracts})" if contracts > 1 else "")
-                ),
-                limit=f"≥ ${floor:,.0f} per contract",
-                blocking=not worth_it,
-            )]
-            if not worth_it:
-                contracts = 0
         if outcome.memory and contract:
             # The delta is the one input the exit needs and cannot re-read: after a fill this
             # symbol's chain is no longer fetched, since the contract is already chosen.
@@ -258,7 +316,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
         return replace(outcome, estimate={
             **estimate,
             "direction": direction,
-            "premarket_change": (premarket or {}).get("change_pct"),
+            "provisional": not direction,
         })
 
     def execute(self, plan: AlgorithmPlan, config: Any, brokerage: Any, **kwargs: Any) -> dict[str, Any]:
@@ -303,8 +361,27 @@ def _session_facts(now: datetime, cfg: OptionsFlipConfig) -> dict[str, Any]:
     today = moment.date()
     open_at = pd.Timestamp(datetime.combine(today, REGULAR_OPEN, tzinfo=MARKET_TZ))
     close_at = pd.Timestamp(datetime.combine(today, REGULAR_CLOSE, tzinfo=MARKET_TZ))
+    open_minute = open_at.hour * 60 + open_at.minute
+    close_minute = close_at.hour * 60 + close_at.minute
+    raw_minute = moment.hour * 60 + moment.minute
+    in_session = open_minute <= raw_minute <= close_minute
     return {
         "market_day": market_day(now),
+        # Minute of the market day, **clamped into session hours**. The band is keyed on it,
+        # because intraday volatility is a function of the clock -- large at the open, small at
+        # midday -- not of elapsed time.
+        #
+        # Clamped because the raw clock is meaningless outside the session and silently emptied
+        # the sample: at 00:21 the minute is 21, ``session_sigma`` keeps bars at or before minute
+        # 21, every bar sits between 570 and 960, and so sixteen sessions of history produced a
+        # sample of zero and the deck reported "no band" while the data sat right there. Outside
+        # the session the band is shown as of the last close, which is the most recent complete
+        # picture rather than a degenerate one.
+        "minute": raw_minute if in_session else close_minute,
+        # So the deck can say the band is a review of the last close rather than a live reading.
+        "in_session": in_session,
+        #: Epoch milliseconds, for comparing against a chain quote's own stamp.
+        "now_ms": pd.Timestamp(moment).timestamp() * 1000.0,
         "fraction_remaining": session_fraction_remaining(
             pd.Timestamp(moment), open_time=open_at, close_time=close_at
         ),
@@ -406,8 +483,8 @@ def _pick_contract(context, symbol, direction, session, cfg, spot=0.0, annual_vo
 
 
 def _estimate(
-    contract, direction: str, underlying_now: float, levels: dict[str, float], exit_budget: float,
-    cfg, as_of: date,
+    contract, direction: str, underlying_now: float, levels: dict[str, float], exit_target: float,
+    cfg, as_of: date, contracts: int = 1,
 ) -> dict[str, Any]:
     """The contract, its cost, and the price band this run expects to transact in.
 
@@ -419,7 +496,7 @@ def _estimate(
     if contract is None or underlying_now <= 0:
         return {}
 
-    units = max(int(cfg.contracts_per_position), 1)
+    units = max(int(contracts), 1)
     # The band's low is the *predicted* low, not the walk-in's current position. The band is a
     # statement about the session -- "this is the range the model expects" -- and it should not
     # collapse to the current price simply because the session is nearly over or has not started.
@@ -433,8 +510,8 @@ def _estimate(
         underlying_now=underlying_now, option_mark=contract.midpoint, delta=contract.delta,
     )
     exit_underlying = (
-        underlying_now * (1.0 + exit_budget) if direction == CALL
-        else underlying_now * (1.0 - exit_budget)
+        underlying_now * (1.0 + exit_target) if direction == CALL
+        else underlying_now * (1.0 - exit_target)
     )
     exit_price = option_price_for(
         exit_underlying, underlying_now=underlying_now,
@@ -476,35 +553,8 @@ def _estimate(
         "predicted_underlying": round(float(levels.get("predicted") or 0.0), 4),
         "bid_underlying": round(float(levels.get("bid") or 0.0), 4),
         "bid_now": round(bid_now, 2),
-        "exit_budget": exit_budget,
+        "exit_target": exit_target,
     }
-
-
-def _budget(daily, intraday, direction, cfg, session, *, exit_side: bool) -> float:
-    """The exit's favourable excursion, as a fraction of the underlying.
-
-    The direction is **inverted** for the exit, and that is the whole subtlety. ``excursions``
-    measures the move *against* the trade -- for a call it is ``(open - low) / open``, the dip an
-    entry waits for. A profit target is the opposite move, so it has to be measured off the
-    opposite tail: how far the underlying typically *rises* above its open. Passing the trade's
-    own direction here priced every call's target off the distribution of falls, and then applied
-    it upward. On a symmetric name the two are close enough to look right, which is exactly why
-    it survived.
-    """
-    if not direction or daily is None or daily.empty:
-        return 0.0
-    probability = float(cfg.exit_fill_probability if exit_side else cfg.target_fill_probability)
-    measured = ("put" if direction == CALL else CALL) if exit_side else direction
-    expected = expected_excursion(
-        daily, direction=measured, lookback=cfg.excursion_lookback_days,
-        fill_probability=probability,
-        # The exit is held for up to ``max_hold_sessions``, so it is priced off the move available
-        # over that many sessions rather than over one. The entry waits for a dip today.
-        horizon=max(int(cfg.max_hold_sessions), 1) if exit_side else 1,
-    )["excursion"]
-    # Exit only. It names a favourable excursion still to come and should not shrink just
-    # because the day is late, so there is no decay here -- only the entry walks in.
-    return expected
 
 
 def _session_open(intraday, market_day: str, fallback: float) -> float:
@@ -527,36 +577,93 @@ def _session_open(intraday, market_day: str, fallback: float) -> float:
     return float(today["open"].astype(float).iloc[0])
 
 
-def _entry_levels(daily, intraday, direction, cfg, session, underlying_now: float) -> dict[str, float]:
-    """``{"predicted", "bid"}`` -- the session's predicted low, and where the bid sits right now.
+def _decision_minute(session: dict[str, Any], cfg: Any) -> int:
+    """The minute the level sample is drawn at: never past the entry cutoff, never before 10:00."""
+    close_minute = 16 * 60
+    first_fire = 10 * 60
+    cutoff = int(close_minute - float(cfg.entry_cutoff_fraction) * 390)
+    if not session.get("in_session", True):
+        return first_fire
+    return max(min(int(session.get("minute") or first_fire), cutoff), first_fire)
 
-    Two different statements, and conflating them is what made the deck's band start at the
-    current price outside market hours. ``predicted`` is a claim about the *day*: ``open × (1 -
-    expected)``, fixed once the session opens. ``bid`` is where the walk-in has reached at this
-    moment, which converges on the market as the session runs down -- and collapses onto it
-    entirely when there is no session left, which is correct for an order and meaningless as a
-    forecast.
 
-    A price rather than a fraction, because the prediction is about today's low and that is a
-    level. Handing a fraction downstream to be applied to whatever the price is at the moment of
-    the run made the bid drift up with a rally.
+def _estimate_row(contract, levels, outcomes, profit, ceiling, contracts, regime, cfg) -> dict[str, Any]:
+    """What the deck needs to judge the setup, on the days it trades and the days it does not.
+
+    Every field is reported whether or not an order goes out. "No trade today" says nothing about
+    whether the setup was close or hopeless; the contract, its price, the levels it would have
+    transacted between and the modelled profit say which.
     """
-    if not direction or daily is None or daily.empty or underlying_now <= 0:
-        return {"predicted": 0.0, "bid": 0.0}
-    expected = expected_excursion(
-        daily, direction=direction, lookback=cfg.excursion_lookback_days,
-        fill_probability=float(cfg.target_fill_probability),
-    )["excursion"]
-    session_open = _session_open(intraday, session["market_day"], underlying_now)
-    predicted = predicted_extreme(session_open, expected, direction=direction)
     return {
-        "predicted": predicted,
-        "bid": entry_underlying_target(
-            underlying_now, predicted, direction=direction,
-            fraction_remaining=session["fraction_remaining"],
-            decay_power=float(cfg.entry_decay_power),
+        "contract": contract.osi_symbol,
+        "contract_label": (
+            f"${contract.strike:g} {contract.option_type} · {contract.expiry:%d %b} · "
+            f"delta {contract.delta:+.2f}"
         ),
+        "mark": contract.midpoint,
+        "spread_pct": contract.spread_pct,
+        "entry_underlying": levels["entry"],
+        "target_underlying": levels["target"],
+        "p_touch": levels["p_touch"],
+        "p_target": levels["p_target"],
+        "max_debit": ceiling,
+        "expected_profit_per_contract": profit["per_contract"],
+        "expected_profit": profit["total"],
+        "bad_case": profit["bad"],
+        "good_case": profit["good"],
+        "contracts": contracts,
+        "atr": regime.get("atr", 0.0),
+        "vwap": regime.get("vwap", 0.0),
+        "gap_atr": regime.get("gap_atr", 0.0),
     }
+
+
+def _split_sessions(intraday, market_day: str):
+    """``(history, today)`` -- past sessions and this one, in the shape :mod:`.band` wants.
+
+    Sigma is a claim about *other* sessions. Leaving today in the history measures the day
+    against itself, which drags the band toward whatever has already happened this morning and
+    makes a genuine breakout read as ordinary.
+    """
+    if intraday is None or intraday.empty:
+        empty = pd.DataFrame(columns=["ts", "open", "close", "day", "minute"])
+        return empty, empty
+    frame = intraday.copy()
+    stamps = pd.to_datetime(frame["timestamp"], utc=True).dt.tz_convert(MARKET_TZ)
+    frame["ts"] = stamps
+    frame["day"] = stamps.dt.date
+    frame["minute"] = stamps.dt.hour * 60 + stamps.dt.minute
+    today_key = date.fromisoformat(market_day)
+    return frame[frame["day"] < today_key], frame[frame["day"] == today_key]
+
+
+def _previous_close(history) -> float:
+    """The last print of the most recent completed session, for the gap."""
+    if history is None or history.empty:
+        return 0.0
+    last_day = history["day"].max()
+    session = history[history["day"] == last_day].sort_values("ts")
+    return float(session.iloc[-1]["close"]) if len(session) else 0.0
+
+
+def _held_exit_target(intraday, session, cfg, underlying_now: float, daily) -> float:
+    """The target *level* for a position already open, from the same model that opened it.
+
+    Recomputed each run rather than remembered, so a position taken in a quiet session is not
+    still asking a quiet session's price two days later. It reuses ``conditional_levels`` for the
+    same reason the entry does: one model, one set of quantiles, and no second definition of
+    "how far can this travel" that could drift away from the first.
+    """
+    history, _today = _split_sessions(intraday, session["market_day"])
+    atr = average_true_range(daily, int(cfg.atr_days)) if daily is not None else 0.0
+    if atr <= 0:
+        return 0.0
+    levels = conditional_levels(
+        history, minute=_decision_minute(session, cfg), price=underlying_now,
+        session_open=_session_open(intraday, session["market_day"], underlying_now),
+        atr=atr, config=cfg,
+    )
+    return float(levels.get("target", 0.0))
 
 
 def _refresh_held(memory, held_contract, context, session, cfg) -> dict[str, Any]:

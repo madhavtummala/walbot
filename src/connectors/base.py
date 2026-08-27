@@ -99,7 +99,17 @@ class MarketDataProvider(ABC):
             key = str(symbol).upper()
             if not quote:
                 continue
-            save_cached_payload(MARKET_CATEGORY, self.name, _quote_cache_key(key), quote)
+            # ``ttl_seconds`` is required and has no default. Omitting it raised TypeError on
+            # every *fresh* quote -- never on a cached one -- so the failure only appeared when
+            # a symbol actually needed fetching, and surfaced as "provider failed" with the
+            # whole batch discarded rather than as the missing argument it was.
+            save_cached_payload(
+                MARKET_CATEGORY,
+                self.name,
+                _quote_cache_key(key),
+                quote,
+                ttl_seconds=int(getattr(self.config, "market_data_cache_ttl_seconds", 0) or 0),
+            )
             resolved[key] = quote
         return resolved
 

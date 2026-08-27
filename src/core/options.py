@@ -143,9 +143,21 @@ class OptionContract:
     ask: float = 0.0
     mark: float = 0.0
     delta: float = 0.0
+    #: The rest of the greeks the chain publishes. Delta alone prices a *small* move in the
+    #: underlying and nothing else, which is not what a multi-day option position is exposed to:
+    #: gamma bends the delta over a move worth trading, vega carries the IV crush that can lose
+    #: money on a correct direction, and theta is measurable -- 1.4% of premium a day on a 16-day
+    #: IBIT call. A design that predicts the underlying well and ignores these three can still
+    #: lose on every trade it gets right.
+    gamma: float = 0.0
+    theta: float = 0.0
+    vega: float = 0.0
     open_interest: int = 0
     volume: int = 0
     implied_volatility: float = 0.0
+    #: Epoch milliseconds of the quote, for the staleness check. Zero means the provider did not
+    #: say, which is treated as unknown rather than as fresh.
+    quote_time_ms: int = 0
 
     @property
     def midpoint(self) -> float:

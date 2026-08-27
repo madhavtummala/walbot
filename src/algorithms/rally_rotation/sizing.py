@@ -16,8 +16,8 @@ from .config import EPSILON, RallyRotationConfig
 def score_to_weights(rows: list[dict[str, Any]], config: RallyRotationConfig) -> dict[str, float]:
     """Split ``risk_on_gross_max`` between the selected names, in proportion to score.
 
-    The score enters as its excess over ``min_base_score``, so a name that only just clears the
-    quality floor gets a small position rather than an equal one, tilted by ``volatility_tilt``.
+    The score enters as its positive part, so a name barely above the universe median gets a
+    small position rather than an equal one, tilted by ``volatility_tilt``.
 
     No per-name cap. A cap on top of a two-name split does not diversify anything -- it forces
     the pair toward equal weight and throws away the ranking the whole algorithm exists to
@@ -28,7 +28,7 @@ def score_to_weights(rows: list[dict[str, Any]], config: RallyRotationConfig) ->
     """
     raw: dict[str, float] = {}
     for row in rows:
-        excess = max(float(row.get("base_score", 0.0)) - config.min_base_score, 0.0)
+        excess = max(float(row.get("base_score", 0.0)), 0.0)
         volatility = float(row.get("annual_volatility", 0.0))
         # sigma ** tilt: negative divides (risk parity), zero ignores it, positive leans in.
         scale = (volatility + EPSILON) ** config.volatility_tilt if config.volatility_tilt else 1.0
@@ -85,55 +85,9 @@ def park_residual(
     return combined
 
 
-def sentiment_adjusted(
-    weights: dict[str, float],
-    sentiment_scores: dict[str, float],
-    config: RallyRotationConfig,
-) -> dict[str, float]:
-    """A bounded size modifier, never a reason to hold something price logic rejected.
-
-    Capped at the +-10% the spec asks for by construction: a clipped sentiment of +-2 times a
-    0.05 scale. Sentiment cannot create a position, only nudge one that already qualified.
-    """
-    if not config.sentiment_size_scale:
-        return dict(weights)
-    clip = max(config.sentiment_clip, 0.0)
-    low = 1.0 - (config.sentiment_size_scale * clip)
-    high = 1.0 + (config.sentiment_size_scale * clip)
-    adjusted: dict[str, float] = {}
-    for symbol, weight in weights.items():
-        score = max(-clip, min(clip, float(sentiment_scores.get(symbol, 0.0))))
-        adjusted[symbol] = weight * max(low, min(high, 1.0 + (config.sentiment_size_scale * score)))
-    return adjusted
-
-
 # --------------------------------------------------------------------------------------
 # Damping: how much of the gap to the target is worth crossing today.
 # --------------------------------------------------------------------------------------
-
-
-def partial_adjustment(
-    target: dict[str, float],
-    current: dict[str, float],
-    config: RallyRotationConfig,
-) -> dict[str, float]:
-    """Move ``config.rebalance_step`` of the way from ``current`` to ``target``.
-
-    Applied before :func:`apply_turnover_filters`, so a step small enough to leave the move under
-    the no-trade band results in no trade at all rather than in a token one -- the two brakes
-    compose instead of fighting.
-
-    A target of zero is honoured in full. Decaying an exit would keep a name the strategy has
-    already rejected on the book for several more runs, which is the one kind of turnover saving
-    that is not worth having.
-    """
-    step = max(min(config.rebalance_step, 1.0), 0.0)
-    if step >= 1.0:
-        return dict(target)
-    return {
-        symbol: weight if weight <= 0 else current.get(symbol, 0.0) + step * (weight - current.get(symbol, 0.0))
-        for symbol, weight in target.items()
-    }
 
 
 def apply_turnover_filters(

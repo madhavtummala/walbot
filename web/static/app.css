@@ -943,6 +943,19 @@ body.dca-off .asset.live circle {
   animation: selectedPulse 1.8s ease-in-out infinite;
 }
 
+/* Dragged clear of both buckets: greyed out to say that letting go here deletes it. */
+.asset.removing circle {
+  fill: #94a3b8;
+  opacity: 0.55;
+  stroke: rgba(255, 255, 255, 0.6);
+  stroke-dasharray: 6 5;
+  filter: none;
+}
+
+.asset.removing text {
+  opacity: 0.65;
+}
+
 .asset.draft circle {
   opacity: 0.42;
   stroke: rgba(255, 255, 255, 0.96);
@@ -1546,6 +1559,14 @@ h2 {
   margin-bottom: 14px;
 }
 
+/* The title/subtitle block is a flex item beside the actions, and with no rule of its own it
+   was sized by its content rather than by the space available -- so a one-line description
+   wrapped while the row still had room to its right. */
+.pageHeadMain {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .pageHead h1 {
   margin: 0;
   font-size: clamp(20px, 2.4vw, 27px);
@@ -1555,7 +1576,8 @@ h2 {
 
 .pageHead p {
   margin: 4px 0 0;
-  max-width: 68ch;
+  /* No measure cap: these are one-sentence descriptions, not body copy, and capping them
+     wrapped a line that had somewhere to go. */
   color: var(--muted);
   font-size: 13px;
   font-weight: 700;
@@ -1638,6 +1660,13 @@ h2 {
      while the one beside it scrolls, which reads as a rendering bug rather than a choice. */
   align-items: start;
   gap: 14px;
+}
+
+/* The prose card on an algorithm's Overview shares the auto-fit row with the facts card, which
+   wrapped every sentence at half the page for no gain -- spanning the grid keeps each line one
+   length regardless of how the neighbour sizes. */
+.cardGrid > .card.is-wide {
+  grid-column: 1 / -1;
 }
 
 /* Account page: positions sit above dividends in the left column, and the order feed takes

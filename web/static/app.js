@@ -40,13 +40,13 @@ const STRATEGIES = [
   },
   {
     key: "rally_rotation",
-    blurb: "Relative momentum picks the leaders; absolute momentum decides if it may hold any.",
+    blurb: "Ranks the field to pick leaders, but only holds the ones already trending on their own.",
     name: "Rally Rotation",
     status: "Paper",
     horizon: "Daily",
     risk: "High",
-    logic: "Scores every ETF against the others and requires each to clear its own trend and return floors before it is ranked. Holds the top few, re-ranks on its own clock rather than every session, and needs a score margin to displace a sitting position. Sizing is proportional to score with no per-name cap, so a concentrated book is normal; a single-session drop sells outright.",
-    signals: ["Absolute eligibility", "Cross-sectional rank", "Replacement margin", "Crash stop"],
+    logic: "Two questions, asked separately. Which of these is leading? -- a robust cross-sectional z-score blended over four horizons, one day to twelve, weighted toward the slow end. And is it worth holding at all? -- its own trend line, its own 20- and 60-day returns, and a ceiling on its volatility. The ranking decides the order; the floors decide membership, and a name that fails them is unranked, so it cannot be held however well it scores. That is also how a holding is sold: it stops qualifying, drops out of the ranking, and its slot goes to the next name. When too few qualify the book sits in T-bills rather than in the least bad name. Sizing follows score with no per-name cap, so one qualifying name can take the whole book. Ranking, entry and replacement run on the rerank clock; the single-session crash stop runs every session.",
+    signals: ["Cross-sectional rank", "Absolute eligibility", "Volatility ceiling", "Replacement margin", "Crash stop"],
   },
   {
     key: "options_flip",
@@ -795,16 +795,26 @@ function handleAssetPointerMove(event, node) {
   }
 }
 
+//: Dragging inside a bucket moves the bubble between buckets; dragging clear of both is how a
+//: symbol leaves the plan. The bubble follows the pointer unclamped out there and greys out, so
+//: the drop is committed only once you let go somewhere that is not a bucket.
 function dragNode(event, node) {
   const point = eventToSvgPoint(event);
-  const bucketName = nearestBucket(point);
-  const clamped = clampPointToBucket(point, bucketName, node.radius);
-  node.targetBucket = bucketName;
-  node.bucketName = bucketName;
-  node.x = clamped.x;
-  node.y = clamped.y;
+  const bucketName = bucketAtPoint(point);
+  node.pendingRemoval = !bucketName;
+  if (bucketName) {
+    const clamped = clampPointToBucket(point, bucketName, node.radius);
+    node.targetBucket = bucketName;
+    node.bucketName = bucketName;
+    node.x = clamped.x;
+    node.y = clamped.y;
+  } else {
+    node.x = point.x;
+    node.y = point.y;
+  }
   node.vx = 0;
   node.vy = 0;
+  state.drag?.element?.classList.toggle("removing", node.pendingRemoval);
 }
 
 function endAssetPointer(event, node) {
@@ -822,8 +832,18 @@ function endAssetPointer(event, node) {
   }
   if (state.drag?.node === node && state.drag.pointerId === event.pointerId) {
     const moved = state.drag.moved;
-    event.currentTarget.classList.remove("dragging");
+    event.currentTarget.classList.remove("dragging", "removing");
     state.drag = null;
+    if (node.pendingRemoval) {
+      // The caret would otherwise sit over a bubble that is about to stop existing, and
+      // committing it would write the removed symbol's budget back into the plan.
+      hideAmountEntry();
+      node.pendingRemoval = false;
+      state.selected = null;
+      removeSymbol(node.bucketName, node.symbol);
+      showToast(`${node.symbol} removed`);
+      return;
+    }
     moveAsset(node);
     renderDca();
     // A click that selected this bubble puts the caret straight onto its budget, with the
@@ -960,14 +980,6 @@ function commitAmountEntry() {
   if (digits === "") {
     // Cleared and confirmed reads as "never mind", not as a budget of zero -- type 0 for that.
     setNodeAmount(node, edit.originalAmount);
-  } else if (Number(digits) === 0) {
-    // A $0 budget is not a holding in the book -- it is a bubble sitting in a bucket doing
-    // nothing -- so zeroing the amount takes the symbol out of the plan entirely. Escape
-    // remains how you change your mind without touching the plan's membership.
-    state.selected = null;
-    removeSymbol(node.bucketName, edit.symbol);
-    showToast(`${edit.symbol} removed`);
-    return;
   } else if (Number(digits) > MAX_AMOUNT) {
     // Already clamped on screen; say why, so a smaller number than was typed is not a mystery.
     showToast(`${edit.symbol} capped at ${money(MAX_AMOUNT)}/month`);
@@ -1297,8 +1309,8 @@ async function applyUniverseProposal() {
     state.algorithmConfigs = {};
     ensureAlgorithmConfig(currentRoute().id);
     render();
-    // The universe change invalidates every algorithm's view, so reload the one on screen.
-    loadSignals(currentRoute().id);
+    // The universe change invalidates every algorithm's view, so recompute the one on screen.
+    loadSignals(currentRoute().id, true);
     showToast("Universe applied");
   } catch (error) {
     showToast(error.message);
@@ -1308,26 +1320,66 @@ async function applyUniverseProposal() {
   }
 }
 
-async function ensureSignals(strategyKey) {
-  if (state.signals[strategyKey] || state.signalLoading[strategyKey]) return;
-  await loadSignals(strategyKey);
+function isSignalsPayload(payload) {
+  return Boolean(payload && typeof payload === "object" && Array.isArray(payload.rows));
 }
 
-async function loadSignals(strategyKey) {
-  state.signalLoading[strategyKey] = true;
-  render();
+//: Live signals, cached exactly like a backtest: the tab opens on a stored snapshot and only
+//: recomputes when Refresh asks for it.
+//:
+//: ``refresh`` and ``cacheOnly`` are sent because the endpoint requires them. Without them the
+//: API sees ``refresh=false`` on a cache miss and answers "No cached live signals are
+//: available" *without computing* -- which is exactly what it is meant to do for a probe, and
+//: meant the Refresh button could never populate the cache it was reporting empty. The two
+//: flags were plumbed through the API and never through the one caller that needed them.
+//:
+//: A background refresh keeps the previous snapshot on screen while the new one computes, and
+//: a failure leaves the last good rows up rather than blanking the tab.
+async function loadSignals(strategyKey, refresh = false, options = {}) {
+  const cacheOnly = Boolean(options.cacheOnly);
+  if (state.signalLoading[strategyKey]) return;
+  let changed = false;
+  if (!cacheOnly) {
+    state.signalLoading[strategyKey] = true;
+    // A stale error must not survive an explicit refresh, or the tab keeps explaining a
+    // failure that is currently being retried.
+    if (state.signals[strategyKey]?.error) delete state.signals[strategyKey];
+    render();
+  }
   try {
     // Sent explicitly so the view is computed against the same account the Tune board writes.
     const account = accountForStrategy(strategyKey);
-    state.signals[strategyKey] = await api(
-      `/api/strategy-signals?strategy=${encodeURIComponent(strategyKey)}&account_id=${encodeURIComponent(account)}`,
-      { timeoutMs: 60000 },
-    );
+    const query = new URLSearchParams({
+      strategy: strategyKey,
+      account_id: account,
+      refresh: String(Boolean(refresh)),
+      cache_only: String(cacheOnly),
+    });
+    const payload = await api(`/api/strategy-signals?${query}`, {
+      // A recompute runs the algorithm against live market data; the cache probe is a lookup.
+      timeoutMs: cacheOnly ? 15000 : 120000,
+    });
+    if (isSignalsPayload(payload)) {
+      state.signals[strategyKey] = payload;
+      changed = true;
+    } else if (payload?.error && !cacheOnly) {
+      // On a probe, "no cached snapshot" is not an error worth showing -- it is the state the
+      // Refresh button exists to change, and the tab already says so.
+      state.signals[strategyKey] = { error: payload.error };
+      changed = true;
+      showToast(`Signal refresh failed: ${payload.error}`);
+    }
   } catch (error) {
-    state.signals[strategyKey] = { error: error.message };
+    if (!cacheOnly) {
+      if (!state.signals[strategyKey]) state.signals[strategyKey] = { error: error.message };
+      changed = true;
+      showToast(`Signal refresh failed: ${error.message}`);
+    }
   } finally {
-    state.signalLoading[strategyKey] = false;
-    render();
+    if (!cacheOnly) state.signalLoading[strategyKey] = false;
+    // A probe that found nothing changed no state, so repainting for it would be the same
+    // spurious re-render the backtest tab's probe had to stop doing.
+    if (changed || !cacheOnly) render();
   }
 }
 
@@ -1460,12 +1512,12 @@ function renderSignalTable(rows) {
 }
 
 //: Whether a metric value is a bare number the eye should read as a column of figures --
-//: currency, percentage, multiple, or a range of two. Anything carrying a word ("0.0mo banked",
-//: "$86.79 (stale)", "$88 call · 04 Sep") is prose and reads left-aligned.
+//: currency, percentage, multiple, or a range of two. Anything carrying a word ("$88 call · 04 Sep",
+//: "$86.79 (stale)") is prose and reads left-aligned.
 //:
 //: Placeholders count as numeric so a column of figures with one missing value does not flip
 //: itself to left-aligned for the sake of a dash.
-const NUMERIC_VALUE = /^[$+\-]?[\d.,]+\s*[%x×]?(\s*[–—-]\s*[$+\-]?[\d.,]+\s*[%x×]?)?$/;
+const NUMERIC_VALUE = /^[+-]?\$?[\d.,]+\s*[%x×]?(\s*[–—-]\s*[+-]?\$?[\d.,]+\s*[%x×]?)?$/;
 
 function isNumericValue(value) {
   const text = String(value ?? "").trim();
@@ -2595,7 +2647,7 @@ function renderDcaTuner(host, strategy) {
   if (hint) hint.textContent = `Dollars per month, per symbol · algorithms.${entry.config_key || strategy.key}.plan`;
   host.innerHTML = `<svg class="bubbleBoard" id="bubbleBoard" role="img"
     aria-label="Interactive buy and sell budget bubbles"></svg>
-    <p class="cardHint">${escapeHtml(plan?.effect || "")} Scroll a bubble to change its budget, or select one and type the amount. Zero an amount to remove it. Drag between buckets, double-click to add.
+    <p class="cardHint">${escapeHtml(plan?.effect || "")} Scroll a bubble to change its budget, or select one and type the amount. Drag between buckets, drag one off the buckets to remove it, double-click to add.
       <span id="planSaveStatus" class="saveStatus">${escapeHtml(planSaveStatusText())}</span></p>`;
   renderDca();
 }
@@ -2612,8 +2664,13 @@ function renderConfigForm(host, strategy) {
   // The plan has its own editor on this page, so it is not also offered as a raw JSON box.
   // saveCurrentConfig merges over the loaded config rather than replacing it, so leaving it
   // out of the form does not drop it on save.
-  const fields = Object.entries(entry.config || {}).filter(([key]) => !isPlanField(strategy.key, key));
   const docs = entry.explainer?.parameters || {};
+  // Ordered by the explainer, not by the config file. The file's order is whatever the last
+  // writer happened to produce -- the dashboard rewrites that section from its own state -- so
+  // reading order from it made the form reshuffle itself between saves. The explainer's order
+  // is deliberate: the knobs you actually reach for first, and related ones adjacent.
+  const fields = orderedConfigFields(entry.config || {}, docs)
+    .filter(([key]) => !isPlanField(strategy.key, key));
   host.innerHTML = fields.length
     ? `<div class="configForm">${fields.map(([key, value]) => renderConfigField(key, value, docs[key])).join("")}</div>`
     : `<p class="emptyState">This algorithm has no tunable parameters.</p>`;
@@ -2621,6 +2678,19 @@ function renderConfigForm(host, strategy) {
   // it would otherwise offer a button that saves an empty object over its config section.
   const actions = $("#configActions");
   if (actions) actions.hidden = !fields.length;
+}
+
+//: Config entries in the explainer's order, with anything undocumented kept at the end rather
+//: than dropped -- a knob with no description is still a knob, and hiding it would make a saved
+//: value invisible and unremovable.
+function orderedConfigFields(config, docs) {
+  const documented = Object.keys(docs);
+  const rank = new Map(documented.map((key, index) => [key, index]));
+  return Object.entries(config).sort(([a], [b]) => {
+    const ra = rank.has(a) ? rank.get(a) : Number.MAX_SAFE_INTEGER;
+    const rb = rank.has(b) ? rank.get(b) : Number.MAX_SAFE_INTEGER;
+    return ra === rb ? a.localeCompare(b) : ra - rb;
+  });
 }
 
 function renderBacktestTab(body, strategy) {
@@ -2671,7 +2741,7 @@ function renderOverviewTab(body, strategy, deployment) {
   const backtest = state.backtests[strategy.key];
   body.innerHTML = `
     <div class="cardGrid">
-      <section class="card">
+      <section class="card is-wide">
         <h2>How it works</h2>
         <p class="cardBody">${escapeHtml(strategy.logic)}</p>
         <div class="chipRow">
@@ -2704,17 +2774,23 @@ function renderOverviewTab(body, strategy, deployment) {
 }
 
 function renderSignalsTab(body, strategy) {
+  // Cache-first: whatever snapshot was last computed stays on screen -- even while a refresh
+  // runs in the background -- and nothing is fetched just because the tab opened.
   const payload = state.signals[strategy.key];
   const loading = Boolean(state.signalLoading[strategy.key]);
   // Already ordered by the algorithm: what the run changed first, then holdings, then the rest.
   const rows = payload?.rows || [];
+  const asOf = payload && !payload.error && payload.updated_at
+    ? `<span class="cardHint">as of ${escapeHtml(formatActivityTime(payload.updated_at))}</span>`
+    : "";
   body.innerHTML = `
     <section class="card">
       <div class="cardHead">
         <h2>Live signals</h2>
         <div class="cardHeadActions">
+          ${asOf}
           <button class="ctl" type="button" id="refreshUniverseButton" ${state.universeRefreshing ? "disabled" : ""}>Refresh universe</button>
-          <button class="ctl" type="button" id="refreshSignalsButton" ${loading ? "disabled" : ""}>${loading ? "Loading." : "Refresh"}</button>
+          <button class="ctl" type="button" id="refreshSignalsButton" ${loading ? "disabled" : ""}>${loading ? "Refreshing." : "Refresh"}</button>
         </div>
       </div>
       ${(payload?.summary || []).length ? `<div class="metricRow">
@@ -2723,16 +2799,19 @@ function renderSignalsTab(body, strategy) {
       <div class="signalRows" id="signalRows">
         ${state.universeProposal || state.universeRefreshing
           ? renderUniverseProposalRows()
-          : loading
-            ? `<p class="emptyState">Fetching live signal snapshot.</p>`
-            : payload?.error
-              ? `<p class="emptyState">${escapeHtml(payload.error)}</p>`
-              : rows.length
-                ? renderSignalTable(rows)
-                : renderSignalFallbackRows(strategy, payload, (strategy.signals || []).slice(0, 5))}
+          : rows.length
+            ? renderSignalTable(rows)
+            : loading
+              ? `<p class="emptyState">Fetching live signal snapshot.</p>`
+              : payload?.error
+                ? `<p class="emptyState">${escapeHtml(payload.error)}</p>`
+                : payload
+                  ? renderSignalFallbackRows(strategy, payload, (strategy.signals || []).slice(0, 5))
+                  : `<p class="emptyState">No live signals cached yet. Hit Refresh to compute them.</p>`}
       </div>
     </section>`;
-  if (!payload && !loading) ensureSignals(strategy.key);
+  // Cache-first, like the Backtest tab: probe for a stored snapshot without ever computing.
+  if (!payload && !loading) loadSignals(strategy.key, false, { cacheOnly: true });
 }
 
 //: The bot's own journal, not the broker's feed: it is the only record that knows which
@@ -3031,8 +3110,8 @@ function wireEvents() {
     if (event.target.closest("#saveConfigButton")) return saveCurrentConfig(route.id);
     if (event.target.closest("#runBacktestButton")) return loadBacktest(route.id, true);
     if (event.target.closest("#refreshSignalsButton")) {
-      delete state.signals[route.id];
-      return loadSignals(route.id);
+      // Background refresh: the cached snapshot stays on screen until the new one lands.
+      return loadSignals(route.id, true);
     }
     const signalRow = event.target.closest("[data-signal-symbol]");
     if (signalRow) {

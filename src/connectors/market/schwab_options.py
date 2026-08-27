@@ -134,9 +134,15 @@ def _contract_from_row(
         ask=float(ask),
         mark=float(mark),
         delta=delta,
+        # Limits are generous rather than tight: they exist to catch the -999 sentinel, and a
+        # real greek on a near-dated contract can be large without being wrong.
+        gamma=_greek(row.get("gamma"), limit=100.0),
+        theta=_greek(row.get("theta"), limit=100.0),
+        vega=_greek(row.get("vega"), limit=100.0),
         open_interest=int(json_number(row.get("openInterest")) or 0),
         volume=int(json_number(row.get("totalVolume")) or 0),
         implied_volatility=_greek(row.get("volatility"), limit=100.0),
+        quote_time_ms=int(json_number(row.get("quoteTimeInLong")) or 0),
     )
 
 

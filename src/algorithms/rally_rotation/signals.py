@@ -27,7 +27,7 @@ from ...core.interfaces import (
     SignalView,
 )
 from .config import RallyRotationConfig
-from .gates import blocking, entry_checks, exit_checks, mark_blocking
+from .gates import blocking, entry_checks, mark_blocking
 from ..base import _score_of
 
 
@@ -47,7 +47,6 @@ def build_signals(
             "signal": 0,
             "score": float(row.get("base_score", 0.0)),
             "base_score": float(row.get("base_score", 0.0)),
-            "score_unsmoothed": float(row.get("score_unsmoothed", 0.0)),
             "score_components": {k: float(v) for k, v in (row.get("score_components") or {}).items()},
             "rank": int(row.get("rank") or 0),
             "eligible": 1 if row.get("eligible") else 0,
@@ -58,16 +57,9 @@ def build_signals(
             "realized_volatility": float(row.get("annual_volatility", 0.0)),
             "abs_return": float(row.get("abs_return", 0.0)),
             "fast_return": float(row.get("fast_return", 0.0)),
-            "nano_return": float(row.get("nano_return", 0.0)),
-            "vol_5d": float(row.get("vol_5d", 0.0)),
-            "range_expansion": float(row.get("range_expansion", 0.0)),
-            "volume_ratio": float(row.get("volume_ratio", 0.0)),
-            "trend_ma_distance": float(row.get("trend_ma_distance", 0.0)),
-            "trend_return": float(row.get("trend_return", 0.0)),
             "daily_bars": int(row.get("daily_bars", 0)),
             "enough_history": bool(row.get("enough_history")),
             "above_moving_average": bool(row.get("above_moving_average")),
-            "social_score": float(row.get("sentiment_score", 0.0)),
             # What this symbol would be worth in the defensive book, so the hold/rotate pass can
             # build one without re-reading market data.
             "defensive_weight": float(defensive_book.get(symbol, 0.0)),
@@ -105,18 +97,18 @@ def finalize(
         row["signal"] = 1 if weight > 0 else 0
         is_defensive = symbol in defensive
         row["defensive"] = is_defensive
-        # A held name is judged against the exit band; anything else against the entry gates.
-        # Showing a holding its entry gates is the single most misleading thing this view could
-        # do -- it would report a name as failing tests it is not being asked to pass.
+        # One list, for held and unheld alike, because that is what actually decides: a name
+        # that fails these is dropped from the ranking and therefore sold. The view used to show
+        # a holding a separate widened band that nothing consulted.
         #
-        # The defensive sleeve gets neither, because it is not selected by them: it is held
-        # precisely when nothing else qualifies, so a momentum score decides nothing about it.
-        # It was being scored and gated like a candidate anyway -- SGOV sitting at "5/6" while
-        # holding the entire book, as though one more gate would have changed something.
+        # The defensive sleeve gets no gates at all, because it is not selected by them: it is
+        # held precisely when nothing else qualifies, so a momentum score decides nothing about
+        # it. It was being scored and gated like a candidate anyway -- SGOV sitting at "5/6"
+        # while holding the entire book, as though one more gate would have changed something.
         if is_defensive:
             checks: list[Check] = []
         else:
-            market = exit_checks(row, config) if was_held else entry_checks(row, config)
+            market = entry_checks(row, config)
             checks = mark_blocking([*market, *notes.get(symbol, [])])
         action = _action(weight, was_held, is_defensive, bool(row["eligible"]))
         row["action"] = action
@@ -229,11 +221,5 @@ def _summary(plan: AlgorithmPlan, rows: list[SignalRow]) -> list[dict[str, str]]
         # The one condition that overrides everything below it: too thin a cache is not a
         # bearish reading, and the deck should not let it be mistaken for one.
         summary.append({"label": "Data", "value": str(data.get("detail") or "insufficient")})
-    if "market_sentiment" in plan.metadata:
-        sentiment = plan.metadata["market_sentiment"]
-        summary.append({
-            "label": "Sentiment",
-            "value": "No recent records" if not sentiment else f"{float(sentiment):+.2f}",
-        })
     summary.append({"label": "Universe", "value": str(len(rows))})
     return summary

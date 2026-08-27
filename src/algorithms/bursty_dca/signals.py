@@ -133,7 +133,6 @@ def _checks(row: dict[str, Any]) -> list[dict[str, Any]]:
     floor_dollars = float(row["floor_dollars"])
     conviction = float(row["conviction"])
     willingness = float(row["willingness"])
-    backlog = float(row["backlog_months"])
     z = float(valuation.get("detail", {}).get("z") or 0.0)
 
     checks = [
@@ -158,10 +157,7 @@ def _checks(row: dict[str, Any]) -> list[dict[str, Any]]:
             # multiple and never fails. The allowance is what can actually stop a run, and it
             # surfaces as the order size rather than as a gate of its own.
             ok=True,
-            # Signed months, because "0.8 months behind" and "0.8 months ahead" pull the
-            # multiple in opposite directions and read identically without the word.
-            value=f"{willingness:.2f}x · {abs(backlog):.1f}mo "
-                  + ("banked" if backlog >= 0 else "over"),
+            value=f"{willingness:.2f}x · {_signed_dollars(state.accrued)}",
             limit="",
             blocking=False,
         ),
@@ -232,7 +228,6 @@ def signal_view(plan: AlgorithmPlan, *, unknown: list[str]) -> SignalView:
     view that went blank when the algorithm was off would give no way to check what it would do
     before turning it on.
     """
-    quotes = dict(plan.metadata.get("price_quotes") or {})
     ma_days = int(plan.metadata.get("regime_ma_days") or 0)
     rows = [
         SignalRow(
@@ -241,13 +236,10 @@ def signal_view(plan: AlgorithmPlan, *, unknown: list[str]) -> SignalView:
             headline=str(values["reason"]),
             metrics=[
                 {"label": "Budget", "value": _signed_dollars(values["monthly_budget"]) + "/mo"},
-                {"label": "Next order", "value": _order_size(values)},
-                # ``Next order`` over ``Budget``, so the two columns it is derived from sit
-                # beside it. Named for the budget rather than "the plan", which in this
-                # algorithm also names the whole bubble board.
-                {"label": "vs budget", "value": f"{float(values['plan_multiple']):.2f}x"},
+                {"label": "Upcoming", "value": _order_size(values)},
+                {"label": "Invested", "value": _invested(values)},
                 {"label": "Backlog", "value": _backlog(values)},
-                {"label": "Price", "value": _price(values, quotes.get(symbol))},
+                {"label": "Price", "value": _price(values)},
                 # The reference the price is scored against. Without it the σ figure on the
                 # gate row is unfalsifiable -- a reader can see "0.4σ above average" but not
                 # what the average was, so there is no way to sanity-check it against a chart.
@@ -289,6 +281,11 @@ def _order_size(values: dict[str, Any]) -> str:
     return _signed_dollars(size) if size else "--"
 
 
+def _invested(values: dict[str, Any]) -> str:
+    """What this month has actually deployed, as filled notional -- ``$0`` is a fresh month."""
+    return _signed_dollars(float(values["deployed_this_month"]))
+
+
 def _average_label(ma_days: int) -> str:
     """``150d avg`` rather than ``Average``: the window is the setting a reader would change."""
     return f"{ma_days}d avg" if ma_days > 0 else "Average"
@@ -309,23 +306,17 @@ def _average(values: dict[str, Any]) -> str:
 
 
 def _backlog(values: dict[str, Any]) -> str:
-    """Signed months of budget, worded rather than signed with a minus.
+    """The backlog itself, in budget dollars: positive is lagged, negative is rushed.
 
-    ``-0.8`` and ``0.8`` months pull the size in opposite directions, and a bare minus sign in
-    a column of dollar amounts reads as a short rather than as a debt.
+    Not the months ratio -- that divides by a setting and reads as a duration -- and not
+    words for the sign: sitting between ``Budget`` and ``Invested``, the balance speaks
+    for itself and the sign is the whole story.
     """
-    months = float(values["backlog_months"])
-    return f"{abs(months):.1f}mo " + ("banked" if months >= 0 else "over")
+    return _signed_dollars(float(values["accrued"]))
 
 
-def _price(values: dict[str, Any], quote: dict[str, Any] | None) -> str:
+def _price(values: dict[str, Any]) -> str:
     close = values.get("close")
     if not close:
         return "--"
-    # "stale", not "delayed": ``current: False`` means the price came from the DuckDB bar cache
-    # via ``prices_from_store`` rather than from a live quote, so it is the last stored close --
-    # not a lagging live feed. Marked only when the feed actually said so, because treating
-    # *absent* provenance as stale labelled every price on any path that records no quote
-    # metadata (a backtest, a replay), which is the same as not marking them at all.
-    stale = quote is not None and not quote.get("current")
-    return f"${float(close):,.2f}" + (" (stale)" if stale else "")
+    return f"${float(close):,.2f}"

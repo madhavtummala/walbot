@@ -1,192 +1,155 @@
 """Tuning for Options Flip.
 
-**Kept deliberately small.** Every field here is a decision someone might genuinely want to make
-differently. Everything else is either derived from one of these or fixed at a value there is no
-good reason to vary -- window lengths, anti-churn thresholds, bar resolutions. Those were config
-once, and with thirty-one knobs nobody could tell which six mattered.
+A bull-regime, pullback-entry, rebound-exit long-call strategy. Three gates decide whether a
+candidate trades: is the bull thesis intact, are the entry and target levels ones comparable
+sessions actually reached, and does the base case pay through the full greeks.
 
-Three worth understanding before changing anything:
+Everything not here is a constant below -- window lengths, tolerances, the ATR period -- because
+none of those is a decision anyone would make differently. The measurements behind these defaults
+are in ``docs/options-flip.md``; the reasoning is on each field.
 
-``target_fill_probability`` is not a discount. It says what fraction of comparable past sessions
-would have reached the entry bid, so 0.6 means "bid where six days in ten would have filled me".
-It is the only entry-price knob, and unlike a percentage it means the same thing on every symbol.
-
-``target_delta`` chooses the *strike*, and delta is the moneyness dial: ~0.50 is at the money,
-higher is in the money, lower is out. The default 0.45 is slightly out of the money, which for a
-one-to-two-day hold balances paying for intrinsic value against needing a move the model is not
-predicting.
-
-``stop_loss_pct`` is the loss cap, as a fraction of the premium paid. The stop is a *market*
-order once triggered, so it sells into the bid and the realised loss can overshoot the cap on a
-wide market. That slippage is accepted rather than gated: there is no spread ceiling, because
-both legs of this strategy rest as limits and never cross the spread. ``min_open_interest`` is
-the liquidity test -- whether a resting order finds a counterparty at all, which is the question
-a spread figure does not answer.
-
-``entry_decay_power`` shapes the walk-in, and it is the knob that decides how often this trades
-at all. See the field for the curve.
+Two pairs read together and should be set together. ``entry_reach`` and ``target_reach`` are both
+"the share of comparable sessions that reached this level", so they are probabilities you can
+reason about rather than offsets. ``entry_patience`` and ``exit_patience`` are both "how
+stubbornly this side holds its price as its clock runs out", higher being more patient -- and they
+are deliberately asymmetric, because an unfilled entry costs only the opportunity while an unsold
+position at the deadline is sold at whatever is offered.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-#: Fixed rather than configurable. Each of these was a knob; none of them is a decision.
-#:
-#: ``EXCURSION_LOOKBACK_DAYS`` is a statistical window -- long enough for a stable quantile, short
-#: ``VOLATILITY_WINDOW`` is the conventional 20 sessions. ``PREMARKET_MIN_BARS`` is a
-#: data-quality floor, not a strategy view.
-#: How far from ``target_delta`` a strike may sit and still be considered. Wide enough that a
-#: chain with coarse strikes still offers candidates, narrow enough that the delta genuinely
-#: characterises the contract.
-DELTA_TOLERANCE = 0.15
-#: Delta distances are compared in buckets of this size, so strikes that are equally close to the
-#: target compete on liquidity rather than on a third decimal place. Without it the ranking below
-#: would be decided entirely by delta and the liquidity keys would never be reached.
-DELTA_BUCKET = 0.05
-
 VOLATILITY_WINDOW = 20
-PREMARKET_MIN_BARS = 15
+INTRADAY_BAR_MINUTES = 5
 
-#: Anti-churn on re-pricing a resting order, as a fraction of the wanted price and as a fraction
-#: of the bid/ask spread. The larger of the two applies.
-#:
-#: The spread term is what makes this work on an illiquid contract. 2% of a $1.27 option is 2.5
-#: cents, which on a market quoted 1.20/1.35 is a sixth of the spread -- a move the market cannot
-#: distinguish, and re-placing the order for it is a round trip that buys nothing. On a tight
-#: name (SPY at 0.5% wide) the price term governs and nothing changes.
+#: Anti-churn on re-pricing a resting order, as a fraction of the wanted price and of the spread.
+#: The larger applies. The spread term is what makes this work on an illiquid contract: 2% of a
+#: $1.27 option is 2.5 cents, which on a market quoted 1.20/1.35 is a sixth of the spread -- a
+#: move the market cannot distinguish, and re-placing for it is a round trip that buys nothing.
 REPRICE_MIN_PRICE_FRACTION = 0.02
 REPRICE_MIN_SPREAD_FRACTION = 0.25
-#: The same idea for the exit bracket, which only moves when the target improves materially.
-RATCHET_MIN_IMPROVEMENT = 0.03
-#: The window the trend's return is measured over.
-TREND_LOOKBACK_DAYS = 5
-INTRADAY_BAR_MINUTES = 5
-#: How far past ``min_dte`` to ask the chain for. Affects the size of the request, nothing else.
-CHAIN_DTE_SPAN = 35
+
+#: How far from ``target_delta`` a strike may sit and still be considered.
+DELTA_TOLERANCE = 0.08
+#: Delta distances compete in buckets of this size, so strikes equally close to the target are
+#: decided on liquidity rather than on a third decimal place.
+DELTA_BUCKET = 0.05
+
+#: How far past ``min_dte`` to ask the chain for.
+#:
+#: A monthly expiry inside the search lands in the same delta bucket as the weekly and then wins
+#: the liquidity tiebreak on parked open interest -- and it is the worse contract. Measured live
+#: at delta 0.75 on a $1,500 cap: IBIT's 10-day expiry bought 5 contracts for $174 of edge per 1%
+#: move against $51 of two-day theta, while the 24-day monthly bought 3 for $100 against $20. At
+#: a fixed dollar cap the same delta costs more premium the further out you go, so every dollar
+#: controls less underlying.
+CHAIN_DTE_SPAN = 11
+
+#: The trend stack, and the ATR window. Conventional values, and none of them is a decision
+#: anyone made differently on purpose -- 20/50 is the standard pair and 14 is Wilder's.
+REGIME_FAST_MA_DAYS = 20
+REGIME_SLOW_MA_DAYS = 50
+ATR_DAYS = 14
+#: Minutes that define the opening range.
+OPENING_RANGE_MINUTES = 30
+#: How close a past session's position-versus-open must be to today's to count as comparable,
+#: and how many sessions of intraday history the samples are drawn from.
+BUCKET_TOLERANCE = 0.01
+#: Latest an entry may still be armed, as a share of the session remaining. An entry that fills
+#: at the close has no session left to rebound in.
+ENTRY_CUTOFF_FRACTION = 0.25
+#: Oldest a chain quote may be. This codebase has already been burned by a stale one.
+MAX_QUOTE_AGE_SECONDS = 300.0
+#: Implied-volatility assumptions, in points. The base case eases as a move plays out; the bad
+#: case firms, which is how a correct-looking entry still loses.
+IV_EASE_BASE = -1.0
+IV_FIRM_BAD = 1.0
 
 
 @dataclass(frozen=True)
 class OptionsFlipConfig:
-    # ── universe ─────────────────────────────────────────────────────
-    #: Each symbol runs its own independent lifecycle, so this is a portfolio of one-contract
-    #: positions rather than a shortlist to pick a winner from.
+    # Ordered by how much each one moves the outcome, most consequential first. Related knobs
+    # stay adjacent where their importance is comparable.
+
+    #: Symbols to consider. Empty means the account's tradable universe.
     symbols: list[str] = field(default_factory=list)
 
-    # ── direction ────────────────────────────────────────────────────
-    #: Longer = slower to change sides, fewer whipsaws.
-    trend_ma_period: int = 20
-    #: How far the symbol must have moved, over ``TREND_LOOKBACK_DAYS``, to count as trending.
-    trend_min_return: float = 0.005
-    #: Pre-market move required in the trend's direction, as a multiple of the symbol's own
-    #: typical daily move -- normalised, so one value works across a mixed symbol list.
-    #: Pre-market can only ever veto; it never sets a direction. Raise it to trade fewer days.
-    premarket_confirm_min: float = 0.25
+    #: Contracts per position -- the unit of risk. A long call cannot lose more than its
+    #: premium, so the unit *is* the loss cap.
+    contracts_per_trade: int = 1
 
-    # ── contract ─────────────────────────────────────────────────────
-    #: Roughly two weeks. Far enough out that a one-to-two-day hold is not fighting the steepest
-    #: part of the theta curve, near enough that the contract still moves with the underlying.
-    min_dte: int = 10
-    #: The delta to aim the strike at. One number rather than a band, because a band's midpoint
-    #: was doing the choosing anyway and stating the two edges only created a way to set them
-    #: inconsistently -- ``delta_max: 1.2`` is unreachable for a call, and shifted the target
-    #: without ever saying so.
-    #:
-    #: Delta is the moneyness dial: ~0.50 is at the money, higher is in the money, lower is out.
-    #: Higher also means more dollars per point of underlying move -- expected profit works out to
-    #: exactly ``delta × band × 100``, since the contract's own price cancels -- but it is paid for
-    #: with premium that is mostly intrinsic value, and a larger loss if the stop hits.
-    #:
-    #: Puts use the same number negated. Candidates within :data:`DELTA_TOLERANCE` of it are
-    #: eligible; see ``contracts.select_contract`` for how they are ranked.
-    target_delta: float = 0.45
-    #: Open interest floor. The real liquidity test -- it asks whether a resting order will find
-    #: a counterparty at all, which no spread figure answers.
-    #:
-    #: Deliberately modest, because open interest varies by more than an order of magnitude with
-    #: the expiry rather than the symbol: measured across in-band strikes, SPY's monthly carries a
-    #: median above 2,000 while its next weekly carries 78, and some weeklies are at zero. A floor
-    #: set for monthlies rejects every weekly; this one admits a liquid near-dated strike while
-    #: still refusing a dead one.
+    #: Loss cap as a fraction of the debit. **Zero disables the stop**, and does so completely:
+    #: the bracket becomes a lone profit target. Premium falls on theta and implied volatility
+    #: with the directional case intact, so a premium stop cuts winners for reasons unrelated to
+    #: the thesis. With a bounded unit the deadline is the risk control that remains.
+    stop_loss_pct: float = 0.0
+
+    #: Sessions to hold before the deadline exit takes over. It also sets the horizon the target
+    #: is priced over -- the run available grows with the hold -- so the two cannot be set apart.
+    max_hold_sessions: int = 4
+
+    #: Where the target sits, as the share of comparable *pulled-back* sessions that reached it.
+    #: Lower is more ambitious and reached less often.
+    target_reach: float = 0.42
+
+    #: Share of the modelled gain the sell limit asks for on the day of entry. Asking for part
+    #: of the move is what makes the exit executable rather than theoretical.
+    exit_gain_share: float = 0.70
+
+    #: How stubbornly the sell holds its ask as the deadline approaches; higher is more patient.
+    #: The impatient side by design: a position reaching its deadline unsold is sold at whatever
+    #: is offered, so conceding early is cheaper than conceding at gunpoint.
+    exit_patience: float = 0.7
+
+    #: Where the entry sits, as the share of comparable sessions that reached it. Lower is a
+    #: deeper, cheaper entry that fills less often.
+    entry_reach: float = 0.55
+
+    #: How stubbornly the buy holds its price as the session runs out; higher is more patient.
+    #: The patient side by design: chasing a rising ask turns a pullback trade into a momentum
+    #: one, and an unfilled entry costs only the opportunity. It never crosses the mark.
+    entry_patience: float = 1.5
+
+    #: Smallest predicted move worth opening for, in dollars per contract, gross of commission.
+    #: The strictest gate in the set, and the one that decides how often this trades at all.
+    min_profit_per_contract: float = 15.0
+
+    #: The delta to aim the strike at. Higher earns more per point of underlying move, costs
+    #: premium that is mostly intrinsic, and buys a contract fewer people trade.
+    target_delta: float = 0.62
+
+    #: Sessions the dip and run quantiles are learned from. Long enough that one exceptional
+    #: stretch cannot set the tail, since a short window is read back out as a forecast.
+    level_lookback_days: int = 80
+
+    #: Smallest trend strength a candidate must carry, in the symbol's own sigma. A threshold,
+    #: not a rank: it means the same on a quiet symbol as on a violent one.
+    min_trend_strength: float = 0.50
+
+
+    #: Dollar ceiling per position, priced at the ask. Zero means no cap. It trims the unit and
+    #: never sets it.
+    max_notional_per_trade: float = 1500.0
+
+    #: Nearest expiry to trade. Under a week the theta curve is steepest.
+    min_dte: int = 7
+
+    #: Open interest floor -- whether a resting order finds a counterparty at all. It does not
+    #: catch cost; that is ``max_spread_pct``.
     min_open_interest: int = 100
 
-    # ── entry ────────────────────────────────────────────────────────
-    target_fill_probability: float = 0.6
-    #: How the bid walks in from the predicted low toward the contract's mid through the session:
-    #: ``decay = fraction_of_session_remaining ** entry_decay_power``, and the bid sits that
-    #: fraction of the way back toward the predicted low.
-    #:
-    #: **Lower is more patient.** With a predicted low of 99.00 against a mid of 100.00:
-    #:
-    #: ===========  ==========  ==========  ==========
-    #: time         power 1.0   power 0.5   power 0.25
-    #: ===========  ==========  ==========  ==========
-    #: 12:45          99.50       99.29       99.16
-    #: 14:22          99.75       99.50       99.29
-    #: 15:55          99.99       99.89       99.66
-    #: ===========  ==========  ==========  ==========
-    #:
-    #: At 1.0 it converges on the mid by the close, so a day that never dipped still fills near
-    #: fair value. Below 1.0 the bid is still short of the mid at the last fire of the day, so it
-    #: effectively never converges -- more no-trade days, and every fill at a price you chose.
-    #:
-    #: It never crosses the spread. The bid converges toward the *midpoint*, not the ask: this
-    #: order exists to be paid for patience, and paying the offer to guarantee a fill discards
-    #: the whole edge on exactly the days the prediction was wrong.
-    entry_decay_power: float = 1.0
+    #: Ceiling on the quoted spread, as a fraction of the mid. The entry rests and never
+    #: crosses, but the exit has to get out and the stop is denominated in premium.
+    max_spread_pct: float = 0.06
 
-    # ── exit ─────────────────────────────────────────────────────────
-    #: The loss cap, as a fraction of the premium paid. Held at the exchange, never moved.
-    stop_loss_pct: float = 0.10
-    #: The profit target's counterpart to ``target_fill_probability``. Lower is more ambitious.
-    exit_fill_probability: float = 0.5
-    #: Sessions to hold before flattening, counted in market days from the fill.
-    #:
-    #: It also sets the horizon the *exit target* is priced over, which is the more consequential
-    #: half. The move available over two sessions is much larger than over one -- median upside on
-    #: these symbols runs 0.99% in a day and 1.74% in two -- so a longer hold does not merely give
-    #: the position more time, it raises what the position is asking for.
-    max_hold_sessions: int = 2
-    #: Sessions of history the excursion distribution is estimated from.
-    #:
-    #: **Shortening this does not make the strategy more short-term.** The excursion is already a
-    #: single-session measure; this only controls how many samples the quantile is taken over.
-    #: Measured across these symbols the estimate is stable from 20 to 90 sessions and moves by
-    #: less than a tenth of a percent; at 10 it doubles, which is a sample of ten talking, not the
-    #: market. Shorten it only to track a genuine regime change, and not below about 30.
-    excursion_lookback_days: int = 60
+    #: Largest opening gap *down* still an ordinary session, in ATR. Downside only: an up-gap is
+    #: followed by a smaller pullback, so it is favourable and merely harder to fill into.
+    max_gap_down_atr: float = 1.0
 
-    # ── gates ────────────────────────────────────────────────────────
-    #: Ceiling on annualised realised volatility. Past it, the premium already prices a bigger
-    #: move than the model is forecasting, so a correctly-called direction still loses -- and the
-    #: stop is far likelier to be taken out by noise on the way.
-    #:
-    #: There is deliberately no *floor*. A quiet symbol produces a narrow band, a narrow band
-    #: produces a small expected profit, and ``min_expected_profit`` already refuses it -- in
-    #: dollars, which is what actually matters, rather than in a volatility percentage that has to
-    #: be translated in your head.
+    #: Ceiling on annualised realised volatility. Past it the premium already prices a bigger
+    #: move than the model forecasts, so a correct call still loses.
     max_annual_volatility: float = 0.80
-
-    #: Smallest expected profit worth trading, in dollars **per contract**, gross of commissions.
-    #:
-    #: Per contract rather than per position on purpose: a floor on the position total is
-    #: satisfiable by buying more of a marginal trade, so raising ``contracts_per_position``
-    #: would quietly loosen the quality bar. Whether a setup is worth taking cannot depend on how
-    #: much of it you buy -- size is a separate decision, bounded by ``max_notional_per_trade``.
-    #:
-    #: A different axis from ``trend_min_return``, which is why both exist. That one asks whether
-    #: the *underlying* is trending hard enough to have a direction at all; this asks whether the
-    #: *contract* stands to move enough dollars to be worth the round trip. A strong trend on a
-    #: cheap low-delta contract clears the first and fails this one -- which is precisely the
-    #: trade that looks right on every other gate and still loses money once costs are paid.
-    #:
-    #: Gross because the deck reports gross; set it above your own round-trip commission with
-    #: room to spare. Set to 0 to take any positive expectation.
-    min_expected_profit: float = 25.0
-
-    # ── sizing ───────────────────────────────────────────────────────
-    contracts_per_position: int = 1
-    max_notional_per_trade: float = 1000.0
 
     # ── derived ──────────────────────────────────────────────────────
     # Views of the fields above, exposed as properties so call sites read exactly as they did
@@ -194,24 +157,48 @@ class OptionsFlipConfig:
     # ``load_tuning`` walks dataclass fields, and a property is not one.
 
     @property
+    def regime_fast_ma_days(self) -> int:
+        return REGIME_FAST_MA_DAYS
+
+    @property
+    def regime_slow_ma_days(self) -> int:
+        return REGIME_SLOW_MA_DAYS
+
+    @property
+    def atr_days(self) -> int:
+        return ATR_DAYS
+
+    @property
+    def opening_range_minutes(self) -> int:
+        return OPENING_RANGE_MINUTES
+
+    @property
+    def bucket_tolerance(self) -> float:
+        return BUCKET_TOLERANCE
+
+    @property
+    def entry_cutoff_fraction(self) -> float:
+        return ENTRY_CUTOFF_FRACTION
+
+    @property
+    def max_quote_age_seconds(self) -> float:
+        return MAX_QUOTE_AGE_SECONDS
+
+    @property
+    def iv_change_base(self) -> float:
+        return IV_EASE_BASE
+
+    @property
+    def iv_change_bad(self) -> float:
+        return IV_FIRM_BAD
+
+    @property
     def max_dte(self) -> int:
         return self.min_dte + CHAIN_DTE_SPAN
 
     @property
-    def trend_lookback_days(self) -> int:
-        return TREND_LOOKBACK_DAYS
-
-    @property
     def volatility_window(self) -> int:
         return VOLATILITY_WINDOW
-
-    @property
-    def premarket_min_bars(self) -> int:
-        return PREMARKET_MIN_BARS
-
-    @property
-    def ratchet_min_improvement(self) -> float:
-        return RATCHET_MIN_IMPROVEMENT
 
     @property
     def intraday_bar_minutes(self) -> int:
@@ -220,9 +207,15 @@ class OptionsFlipConfig:
     @property
     def required_daily_bars(self) -> int:
         """Enough history for the slowest of the daily measures, plus room for short months."""
-        return max(self.trend_ma_period, self.excursion_lookback_days, VOLATILITY_WINDOW) + 10
+        return max(self.regime_slow_ma_days, self.atr_days, VOLATILITY_WINDOW) + 10
 
     @property
     def required_intraday_minutes(self) -> int:
-        """One full session. Today's high, low and open are all this needs to see."""
-        return 390
+        """Enough sessions to build the band, not one.
+
+        One session was right when the only intraday reading was today's open. The band averages
+        the same minute-of-day across ``level_lookback_days`` past sessions, so a 390-minute
+        window leaves it with a sample of one. Found in a live run that priced a signal from a
+        one-session sample.
+        """
+        return 390 * (max(int(self.level_lookback_days), 1) + 1)

@@ -73,32 +73,59 @@ def test_a_history_requirement_needs_no_grid_to_be_meaningful() -> None:
     assert wanted.preferred_bar_minutes == 0
 
 
-def test_algorithms_state_horizons_in_minutes_not_bars() -> None:
-    """No algorithm counts in bars any more, so none of them pins a bar size."""
+def test_algorithms_state_horizons_in_days_not_bars_or_minutes() -> None:
+    """No algorithm counts in bars any more, and rally rotation no longer counts in minutes."""
     from src.algorithms.rally_rotation.config import RallyRotationConfig
 
-    # Still stated in minutes, but rally rotation reads daily bars only, so it asks for no
-    # intraday window at all rather than one it would not look at.
+    # Rally rotation reads daily bars only, so it asks for no intraday window at all rather
+    # than one it would not look at.
     assert RallyRotationConfig().required_history_minutes == 0
 
-    # The horizons are now whole sessions: 4680 is twelve of them.
-    assert RallyRotationConfig().selection_horizon_macro_minutes == 12 * 390
+    # The horizons are stated in market days, which is the only unit a daily-bar score can
+    # resolve. Twelve sessions, where the config used to say 4680 minutes.
+    assert RallyRotationConfig().macro_days == 12
 
 
-def test_a_minutes_key_wins_over_a_stale_bars_key() -> None:
-    """Once saved in minutes, a leftover bars key must not override it."""
+def test_the_newest_horizon_key_wins_over_every_stale_one() -> None:
+    """Four generations of key can sit in one saved config; the newest has to win.
+
+    Bars on a 15-minute grid, then market minutes, then days under a long name, then days under
+    a short one. A reader that preferred an older key would silently replay a horizon nobody had
+    set since three migrations ago.
+    """
+    from src.algorithms.rally_rotation.algorithm import RallyRotationAlgorithm
 
     class _Runtime:
         algorithm_configs = {
             "rally_rotation": {
-                "selection_horizon_macro": 320,
-                "selection_horizon_macro_minutes": 2400,
+                "selection_horizon_macro": 320,           # bars           -> 12 days
+                "selection_horizon_macro_minutes": 2400,  # minutes        -> 6 days
+                "selection_horizon_macro_days": 40,       # the long spelling
+                "macro_days": 60,                         # the one that counts
             }
         }
 
-    from src.algorithms.rally_rotation.algorithm import RallyRotationAlgorithm
+    assert RallyRotationAlgorithm(_Runtime()).tuning(_Runtime()).macro_days == 60
 
-    assert RallyRotationAlgorithm(_Runtime()).tuning(_Runtime()).selection_horizon_macro_minutes == 2400
+    class _LongDays:
+        algorithm_configs = {"rally_rotation": {"selection_horizon_macro": 320,
+                                                "selection_horizon_macro_minutes": 2400,
+                                                "selection_horizon_macro_days": 40}}
+
+    assert RallyRotationAlgorithm(_LongDays()).tuning(_LongDays()).macro_days == 40
+
+    class _Older:
+        algorithm_configs = {"rally_rotation": {"selection_horizon_macro": 320,
+                                                "selection_horizon_macro_minutes": 2400}}
+
+    # 2400 minutes / 390 = 6.15 sessions, rounded to the nearest whole day.
+    assert RallyRotationAlgorithm(_Older()).tuning(_Older()).macro_days == 6
+
+    class _Oldest:
+        algorithm_configs = {"rally_rotation": {"selection_horizon_macro": 320}}
+
+    # 320 bars x 15 minutes = 4800 minutes = 12.3 sessions.
+    assert RallyRotationAlgorithm(_Oldest()).tuning(_Oldest()).macro_days == 12
 
 
 def test_live_signals_are_ordered_by_score_not_by_its_magnitude() -> None:

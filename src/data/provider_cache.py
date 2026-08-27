@@ -35,7 +35,7 @@ def load_cached_payload(
     with _connect(db_path) as connection:
         row = connection.execute(
             """
-            SELECT payload
+            SELECT payload, expires_at
             FROM api_cache
             WHERE category = ? AND provider = ? AND cache_key = ?
             """,
@@ -43,6 +43,18 @@ def load_cached_payload(
         ).fetchone()
     if not row:
         logger.debug("Cache miss: %s/%s [%s]", category, provider, cache_key)
+        return None
+    # ``expires_at`` was written on every row and read on none, so every TTL in the config was
+    # decorative and a cached quote was served for ever. Found live: a run on 2026-08-25 priced
+    # IBIT at 36.15 and GLD at 405.77 from rows fetched on 2026-08-17 and expired thirty minutes
+    # later, while the venue was quoting 45.04 and 426.65 -- an eight-day-old price, delivered
+    # with ``current: True``, to an algorithm that sizes real orders from it.
+    #
+    # Enforced here rather than at each caller because the TTL is the cache's own promise; a
+    # caller that has to remember to check it is a caller that will eventually forget.
+    expires_at = _timestamp(row[1])
+    if expires_at is not None and expires_at <= _now():
+        logger.debug("Cache expired: %s/%s [%s] at %s", category, provider, cache_key, expires_at)
         return None
     try:
         logger.debug("Cache hit: %s/%s [%s]", category, provider, cache_key)

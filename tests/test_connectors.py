@@ -50,6 +50,42 @@ def use_provider(monkeypatch, name, *, bars=None, price=None):
     return _Stub
 
 
+def test_a_freshly_fetched_quote_is_actually_cached(monkeypatch) -> None:
+    """The cache write on the fetch path has to be callable, not merely reached.
+
+    ``save_cached_payload`` takes ``ttl_seconds`` as a required positional argument, and the
+    quote path omitted it. Nothing caught that: the call only runs when a symbol is *not*
+    already cached, and the ``TypeError`` was swallowed by the provider-fallback handler, which
+    reported "provider schwab failed" and discarded the whole batch. Live, that surfaced as
+    "quotes for only 5/7 symbols" -- the five that happened to be cached -- and downstream as an
+    options bracket with no mark to price itself from.
+    """
+    from src.connectors import base
+    from src.connectors.base import MarketDataProvider
+
+    saved: list[tuple[tuple, dict]] = []
+    monkeypatch.setattr(base, "load_cached_payload", lambda *_a, **_kw: None)
+    monkeypatch.setattr(base, "save_cached_payload",
+                        lambda *args, **kwargs: saved.append((args, kwargs)))
+
+    class _Stub(MarketDataProvider):
+        name = "ttl_probe"
+
+        def fetch_bars(self, symbols, **kwargs):
+            return {}
+
+        def fetch_price(self, symbols, **kwargs):
+            return {symbol: {"price": 1.23, "current": True} for symbol in symbols}
+
+    resolved = _Stub(Config()).price(["AAA", "BBB"], force_refresh=True)
+
+    assert sorted(resolved) == ["AAA", "BBB"], "a fetched quote must reach the caller"
+    assert len(saved) == 2, "and must be written to the cache"
+    for args, kwargs in saved:
+        # However the argument is passed, it has to be there: this is the whole bug.
+        assert "ttl_seconds" in kwargs or len(args) >= 5, f"no ttl_seconds in {args}/{kwargs}"
+
+
 def test_market_quote_fetch_falls_back_to_next_provider(monkeypatch, caplog) -> None:
     calls = []
     saved = []
@@ -820,3 +856,22 @@ def test_the_lazy_registry_resolves_under_every_dict_accessor() -> None:
     assert all(callable(f) for _, f in EOD_BAR_REGISTRY.items())
     assert all(callable(f) for f in EOD_BAR_REGISTRY.copy().values())
     assert all(callable(EOD_BAR_REGISTRY[name]) for name in EOD_BAR_REGISTRY)
+
+
+def test_an_expired_cache_row_is_a_miss_not_a_hit(tmp_path) -> None:
+    """``expires_at`` was written on every row and read on none.
+
+    Every TTL in the config was decorative and a cached quote was served for ever. Found live: a
+    run on 2026-08-25 priced IBIT at 36.15 from a row fetched on 2026-08-17 and expired thirty
+    minutes later, while the venue quoted 45.04 -- an eight-day-old price handed to an algorithm
+    that sizes real orders from it.
+    """
+    from src.data.provider_cache import load_cached_payload, save_cached_payload
+
+    db = str(tmp_path / "cache.duckdb")
+    save_cached_payload("market_data", "schwab", "IBIT", {"price": 36.15}, 3600, db_path=db)
+    assert load_cached_payload("market_data", "schwab", "IBIT", db_path=db) == {"price": 36.15}
+
+    # Same row, written with a TTL that has already elapsed.
+    save_cached_payload("market_data", "schwab", "IBIT", {"price": 36.15}, -1, db_path=db)
+    assert load_cached_payload("market_data", "schwab", "IBIT", db_path=db) is None

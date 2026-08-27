@@ -74,6 +74,11 @@ def select_contract(
     # One target, negated for puts. Candidates sit within DELTA_TOLERANCE of it.
     target = float(config.target_delta) * (1.0 if direction == CALL else -1.0)
     min_interest = int(config.min_open_interest)
+    # A spread ceiling as well as an open-interest floor, because they catch different failures
+    # and only one of them is about cost. IAU's Sep-4 84 call carried 164 open -- clearing the
+    # floor comfortably -- and quoted 8.2% wide against a 10% stop, spending four fifths of the
+    # risk budget before the direction call was tested.
+    max_spread = float(getattr(config, "max_spread_pct", 0.0) or 0.0)
 
     considered = 0
     best_effort: OptionContract | None = None
@@ -87,7 +92,11 @@ def select_contract(
         # trading nothing can still show what it was looking at.
         candidate = min(in_band, key=lambda c: _rank(c, target))
         best_effort = best_effort or candidate
-        liquid = [contract for contract in in_band if contract.open_interest >= min_interest]
+        liquid = [
+            contract for contract in in_band
+            if contract.open_interest >= min_interest
+            and (max_spread <= 0 or 0 < contract.spread_pct <= max_spread)
+        ]
         if liquid:
             best = min(liquid, key=lambda c: _rank(c, target))
             checks.append(Check(
@@ -100,7 +109,10 @@ def select_contract(
                 label="Liquid enough to trade",
                 ok=True,
                 value=f"{len(liquid)} of {len(in_band)} tradable at {expiry:%d %b}",
-                limit=f"OI ≥ {min_interest}",
+                limit=(
+                    f"OI ≥ {min_interest}"
+                    + (f", spread ≤ {max_spread:.1%}" if max_spread > 0 else "")
+                ),
             ))
             checks.append(Check(
                 label="Contract chosen",
@@ -142,12 +154,30 @@ def affordable_contracts(contract: OptionContract, config: Any) -> int:
 
     Priced at the ask rather than the mid because the cap is a statement about money that could
     actually leave the account, and a marketable order pays the offer.
+
+    ``contracts_per_trade`` is the unit and the cap only ever *trims* it, so the two say
+    different things rather than the same thing twice: the unit is the risk you intend to take
+    and the cap is the money you refuse to exceed. A cap of zero means no cap, deliberately --
+    on an expensive underlying a cap set for a cheap one rejects every contract, and the
+    strategy then looks broken rather than priced out.
+
+    Whole contracts because no venue sells a fraction of one.
     """
-    wanted = max(int(config.contracts_per_position), 1)
+    # ``None`` is a legitimate state, not an error: no strike cleared the filters. Answering
+    # zero here beats making every caller guard, which is how a crash reached the dashboard --
+    # one call site checked and another passed the best-effort candidate straight through.
+    if contract is None:
+        return 0
     cost = (contract.ask or contract.midpoint) * 100.0
     if cost <= 0:
         return 0
-    return max(min(wanted, int(float(config.max_notional_per_trade) // cost)), 0)
+    wanted = max(int(getattr(config, "contracts_per_trade", 1) or 1), 1)
+    cap = float(getattr(config, "max_notional_per_trade", 0.0) or 0.0)
+    # A cap of zero means "no cap" -- deliberately, because on an expensive underlying the cap
+    # rejects every contract and the strategy looks broken rather than priced out.
+    if cap <= 0:
+        return wanted
+    return max(min(wanted, int(cap // cost)), 0)
 
 
 def fill_missing_deltas(

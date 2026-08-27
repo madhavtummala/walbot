@@ -210,7 +210,7 @@ def test_a_non_alpaca_account_is_not_reported_from_alpaca(monkeypatch) -> None:
 
     _patch_payloads(monkeypatch, "create_trading_client", fail)
 
-    payload = api_payloads.positions_payload("schwab_individual")
+    payload = api_payloads.positions_payload("schwab2")
 
     assert payload["equity"] == 4321.0
     assert payload["cash"] == 321.0

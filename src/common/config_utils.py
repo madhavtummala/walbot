@@ -13,6 +13,8 @@ import math
 import os
 from typing import Any, Mapping, Sequence, TypeVar
 
+from ..data.bars import TRADING_MINUTES_PER_DAY
+
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
@@ -248,9 +250,59 @@ def load_tuning(
                 section, field.name, int(default), legacy_key=field.metadata.get("legacy_key")
             )
             continue
+        if coerce is as_int and field.name.endswith("_days") and field.metadata.get("legacy_minutes_key"):
+            values[field.name] = days_knob(
+                section, field.name, int(default),
+                legacy_minutes_key=str(field.metadata["legacy_minutes_key"]),
+                legacy_key=field.metadata.get("legacy_key"),
+                legacy_days_key=field.metadata.get("legacy_days_key"),
+            )
+            continue
         values[field.name] = coerce(section.get(field.name), default)
 
     return cls(**values)
+
+
+def days_knob(
+    raw: dict[str, Any],
+    key: str,
+    default: int,
+    *,
+    legacy_minutes_key: str,
+    legacy_key: str | None = None,
+    legacy_days_key: str | None = None,
+) -> int:
+    """Read a knob counted in *market days*, converting a config still written in minutes.
+
+    Horizons on this algorithm have been counted in bars on a 15-minute grid, then in market
+    minutes, then in days under a longer name, and now in days under a short one. Only days are
+    legible -- every minute value in a saved config is an exact multiple of 390 that each reader
+    has to divide back out -- so the older spellings are migrated rather than supported, newest
+    winning wherever more than one is present.
+
+    Rounds to the nearest whole day. A minute value that is not a whole number of sessions never
+    described anything the daily-bar score could resolve anyway.
+    """
+    if not isinstance(raw, dict):
+        return default
+    for candidate in (key, legacy_days_key):
+        if candidate and candidate in raw:
+            try:
+                return int(raw[candidate])
+            except (TypeError, ValueError):
+                return default
+    if legacy_minutes_key not in raw and (not legacy_key or legacy_key not in raw):
+        return default
+    minutes = minutes_knob(raw, legacy_minutes_key, default * TRADING_MINUTES_PER_DAY, legacy_key=legacy_key)
+    days = max(round(minutes / TRADING_MINUTES_PER_DAY), 1)
+    if legacy_minutes_key not in _warned_legacy_keys:
+        _warned_legacy_keys.add(legacy_minutes_key)
+        logger.info(
+            "Config knob %s is counted in minutes; reading it as %s=%s (%s minutes / %s). "
+            "Save the algorithm from the dashboard to store it in days.",
+            legacy_minutes_key, key, days, minutes, TRADING_MINUTES_PER_DAY,
+        )
+    return days
 
 
 def minutes_knob(raw: dict[str, Any], key: str, default: int, *, legacy_key: str | None = None) -> int:

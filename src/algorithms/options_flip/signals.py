@@ -61,9 +61,14 @@ def _metrics(signal: dict[str, Any]) -> list[dict[str, str]]:
     algorithm stands down, and "no trade today" tells you nothing about whether the setup was
     close or hopeless. The contract, its cost, and the band it expects to transact in do.
 
-    Kept to four columns, because every extra one squeezes the reason text the row is built
-    around. The spread is not among them: it is no longer a gate, and it is already visible on the
-    chosen-contract line in the expanded panel.
+    Four columns -- contract, price, band, profit -- because every extra one squeezes the reason
+    text the row is built around.
+
+    ``Band`` is the *underlying's* noise band, not the contract's price range. That is the object
+    the algorithm actually decides on: price outside it is a direction and price inside it is no
+    trade, so a reader comparing the band against the price can see how close the symbol came
+    without opening the panel. The premium range it implies is a translation of it and stays in
+    the expanded view.
     """
     estimate = signal.get("estimate") or {}
     metrics: list[dict[str, str]] = []
@@ -73,10 +78,8 @@ def _metrics(signal: dict[str, Any]) -> list[dict[str, str]]:
     if not estimate.get("contract") and (direction := str(signal.get("direction") or "")):
         metrics.append({"label": "Direction", "value": direction.upper()})
 
-    if premarket := signal.get("premarket_change"):
-        metrics.append({"label": "Pre-market", "value": f"{float(premarket):+.2%}"})
-    # Guarded on the contract, not on the dict: direction and pre-market are merged in even when
-    # no contract was found, so the dict is never empty.
+    # Guarded on the contract, not on the dict: the direction is merged in even when no contract
+    # was found, so the dict is never empty.
     if not estimate.get("contract"):
         return metrics
 
@@ -88,11 +91,19 @@ def _metrics(signal: dict[str, Any]) -> list[dict[str, str]]:
     # of every listed option and the contract count is a config setting, so the product carried
     # no information the reader did not already have.
     metrics.append({"label": "Price", "value": f"${mark:.2f}"})
-    # Low and high in one cell, and without the dollar totals beside each: the totals are the
-    # per-contract figure times a round number that is already in the Cost column.
+    # The underlying's band, low and high in one cell. Against the symbol's own price this is the
+    # whole entry decision in one column.
+    # The two levels the trade would transact between, with how often each is reached. Against
+    # the symbol's own price this is the whole entry decision in one column.
+    entry = float(estimate.get("entry_underlying", 0.0) or 0.0)
+    target = float(estimate.get("target_underlying", 0.0) or 0.0)
     metrics.append({
-        "label": "Est. band",
-        "value": f"${float(estimate.get('estimated_low', 0.0)):.2f} – ${float(estimate.get('estimated_high', 0.0)):.2f}",
+        "label": "Band",
+        "value": (
+            f"${entry:,.2f} → ${target:,.2f} "
+            f"({float(estimate.get('p_touch', 0.0)):.0%}/{float(estimate.get('p_target', 0.0)):.0%})"
+            if target > 0 else "—"
+        ),
     })
 
     # Gross. It assumes *both* ends fill -- entry at the predicted low, exit at the predicted
