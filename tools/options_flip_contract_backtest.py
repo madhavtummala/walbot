@@ -37,7 +37,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-from datetime import date, datetime, time
+from datetime import date
 
 import pandas as pd
 
@@ -52,7 +52,7 @@ from src.algorithms.options_flip.levels import conditional_levels
 from src.algorithms.options_flip.lifecycle import HELD, plan_symbol
 from src.algorithms.options_flip.option_band import choose_band, prepare_option_bars
 from src.algorithms.options_flip.regime import bull_regime
-from src.core.options import CALL, black_scholes_delta, osi_symbol
+from src.core.options import CALL, black_scholes_delta
 from src.data.bars import read_history
 
 logger = logging.getLogger("optflip_contract")

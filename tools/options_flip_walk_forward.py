@@ -50,7 +50,6 @@ from src.core.interfaces import AlgorithmContext
 from src.core.options import CALL, OptionContract, osi_symbol, parse_osi
 
 from .options_flip_contract_backtest import (
-    CACHE,
     EXPIRY,
     SYMBOLS,
     _bs_delta,

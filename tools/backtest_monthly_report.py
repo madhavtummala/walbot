@@ -18,7 +18,6 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.algorithms.rally_rotation.config import RallyRotationConfig
 from tools.attribution import _parse_overrides
 from tools.config_sweep import Sweep, deployed_tuning
 

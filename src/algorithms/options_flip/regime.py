@@ -6,15 +6,14 @@ wrong, and passing four out of five means the fifth is telling you something.
 
 **The trend readings come from Rally Rotation's features, not from its score.** ``base_scores``
 ranks names against each other and needs a universe to rank within; with two symbols the top one
-scores positive by construction, which is exactly the defect
-``docs/rally-rotation-simplification.md`` diagnoses. What ports is the per-symbol, absolute
-material -- a return over a horizon, a position against a moving average, an annualised
-volatility to divide by -- and that is what this module reads.
+scores positive by construction. What ports is the per-symbol, absolute material -- a return
+over a horizon, a position against a moving average, an annualised volatility to divide by --
+and that is what this module reads.
 
-**Stated in sigma and in ATR, never in raw percent.** The same document's finding: VEA held the
-book on a 20-day move of +3.0% against 17% annualised volatility, which is 0.6 sigma and is
-noise, while XBI was locked out by -8.4% that was -1.7 sigma for a 31%-volatility ETF. A gap
-threshold in percent has the identical defect, so gaps are measured against ATR.
+**Stated in sigma and in ATR, never in raw percent.** Measured on Rally Rotation's own universe:
+VEA held the book on a 20-day move of +3.0% against 17% annualised volatility, which is 0.6
+sigma and is noise, while XBI was locked out by -8.4% that was -1.7 sigma for a 31%-volatility
+ETF. A gap threshold in percent has the identical defect, so gaps are measured against ATR.
 
 **Earnings are not checked.** Every symbol this strategy trades is an ETF or a trust, which do
 not report. A calendar gate would be a permanently-true check, and a permanently-true check on

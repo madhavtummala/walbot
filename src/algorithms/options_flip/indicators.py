@@ -5,9 +5,10 @@ codebase before; the strategy previously reasoned in raw percentages and in a me
 from the open, neither of which says how big a move is *for this symbol on this day*.
 
 **Everything here is a per-symbol, absolute measurement.** Nothing is ranked against a universe,
-so a two-symbol run and a forty-symbol run compute the same numbers -- which is the defect that
-``docs/rally-rotation-simplification.md`` diagnoses in a cross-sectional score, and the reason
-that algorithm's *features* port here while its ``base_scores`` does not.
+so a two-symbol run and a forty-symbol run compute the same numbers. Rally Rotation's own score
+is cross-sectional -- it answers "which of these is leading", which only means something relative
+to the rest of that run's universe -- so that algorithm's per-symbol *features* port here while
+its cross-sectional ``base_scores`` does not.
 """
 
 from __future__ import annotations

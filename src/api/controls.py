@@ -224,7 +224,8 @@ def binding_refusal(binding: dict[str, Any] | None, origin: str) -> str:
     scheduler enforced it in ``bot_runtime._binding_enabled`` and the MCP tools enforced
     nothing at all, so an agent could trade a binding that was switched off, or one the
     scheduler was driving at the same time. A rule that only one of two callers applies is the
-    same failure mode as an algorithm implemented twice -- see docs/refactor-consolidation-plan.md.
+    same failure mode as an algorithm implemented twice -- fixed the same way, one function
+    both callers go through.
     """
     if not binding:
         return "No binding is configured for it"

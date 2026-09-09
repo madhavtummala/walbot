@@ -22,7 +22,6 @@ from unittest import mock
 import pandas as pd
 
 from src.algorithms.options_flip.algorithm import OptionsFlipAlgorithm
-from src.algorithms.options_flip.config import OptionsFlipConfig
 
 from .options_flip_walk_forward import walk_forward
 

@@ -134,8 +134,9 @@ class Sweep:
         """A window, either as ``12m`` (the last N months) or ``START:END`` (explicit dates).
 
         Explicit dates exist because ``_period_start`` anchors everything to *now*, so every
-        ``Nm`` window ends today and they nest inside one another. Nested windows cannot be
-        independent evidence -- see ``docs/config-exploration.md``.
+        ``Nm`` window ends today and they nest inside one another -- ``3m`` is a subset of
+        ``6m``, not a second, independent replay of the same config. Explicit ``START:END``
+        ranges are what let a sweep compare genuinely disjoint windows instead.
         """
         if ":" in period:
             start, _, end = period.partition(":")

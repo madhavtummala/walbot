@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from src import mcp_server
 from src.api import controls as controls_module
 from src.core.config import Config
+from src.core.interfaces import AlgorithmPlan, DesiredOrder, OrderRequest
 
 
 class DummyMCP:
@@ -74,6 +75,58 @@ def test_plan_payload_round_trips_through_the_agent() -> None:
     # Opaque to the agent, but it has to survive the round trip untouched: ``execute`` commits
     # the state on the plan it is given, so a payload that dropped it would reset the ledger.
     assert restored.state == {"accrued": 12.0}
+
+
+def test_desired_orders_round_trip_through_the_agent() -> None:
+    """An order-book algorithm's plan (Options Flip) has to survive the same round trip.
+
+    ``intents`` is empty for this shape -- the proposal lives entirely in ``desired_orders``.
+    Losing it here is not a display gap: ``place_orders`` rebuilds a plan from whatever comes
+    back and hands it to ``execute``, which reconciles against exactly this list -- an empty
+    one cancels every order a held position currently has resting, stop included.
+    """
+    plan = AlgorithmPlan(
+        strategy="options_flip",
+        desired_orders=[
+            DesiredOrder(
+                key="GLD:target",
+                request=OrderRequest(
+                    symbol="GLD   260918C00380000", action="sell", quantity=1,
+                    order_type="limit", limit_price=33.02, time_in_force="gtc",
+                    asset_type="option", extra={"position_intent": "sell_to_close"},
+                ),
+                replace_tolerance=0.02,
+            ),
+        ],
+    )
+    payload = mcp_server._plan_payload(plan)
+    assert payload["intents"] == []
+    assert payload["desired_orders"][0]["key"] == "GLD:target"
+
+    restored = mcp_server._plan_from_payload(payload)
+    assert len(restored.desired_orders) == 1
+    order = restored.desired_orders[0]
+    assert order.key == "GLD:target"
+    assert order.request.symbol == "GLD   260918C00380000"
+    assert order.request.limit_price == 33.02
+    assert order.request.time_in_force == "gtc"
+    assert order.replace_tolerance == 0.02
+
+
+def test_signals_pass_through_whole_for_a_non_rally_shape() -> None:
+    """Was a fixed whitelist of Rally Rotation's own fields (score/reason/...), which silently
+    emptied an Options Flip signal -- its row carries ``checks``/``estimate``/``contract``
+    instead, none of which that list named."""
+    plan = AlgorithmPlan(
+        strategy="options_flip",
+        signals={"GLD": {"state": "held", "headline": "Holding GLD 380 call", "checks": [
+            {"label": "Holding VWAP", "ok": True, "value": "above", "blocking": False},
+        ], "estimate": {"direction": "call", "contract": "GLD   260918C00380000"}}},
+    )
+    payload = mcp_server._plan_payload(plan)
+    assert payload["signals"]["GLD"]["headline"] == "Holding GLD 380 call"
+    assert payload["signals"]["GLD"]["checks"][0]["label"] == "Holding VWAP"
+    assert payload["signals"]["GLD"]["estimate"]["contract"] == "GLD   260918C00380000"
 
 
 def test_an_agents_edited_intents_are_the_ones_that_get_placed(monkeypatch) -> None:

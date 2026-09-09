@@ -19,7 +19,7 @@ from src.api.controls import (
     resolve_binding_for_origin,
 )
 from src.core.config import get_config
-from src.core.interfaces import MODE_TARGET, AlgorithmPlan, Intent
+from src.core.interfaces import MODE_TARGET, AlgorithmPlan, DesiredOrder, Intent, OrderRequest
 from src.core.pipeline import UnknownBrokerageError, read_snapshot, resolve_brokerage
 from src.core.runner import execute_algorithm, run_algorithm
 from src.data.order_journal import record_orders
@@ -37,11 +37,53 @@ logger = logging.getLogger(__name__)
 DEFAULT_ALGORITHM = "rally_rotation"
 
 
+def _order_request_payload(request: OrderRequest) -> dict[str, Any]:
+    return {
+        "symbol": request.symbol, "action": request.action, "quantity": request.quantity,
+        "order_type": request.order_type, "limit_price": request.limit_price,
+        "stop_price": request.stop_price, "client_order_id": request.client_order_id,
+        "time_in_force": request.time_in_force, "asset_type": request.asset_type,
+        "strategy": request.strategy,
+        "children": [_order_request_payload(child) for child in request.children],
+        "extra": dict(request.extra),
+    }
+
+
+def _order_request_from_payload(payload: dict[str, Any]) -> OrderRequest:
+    return OrderRequest(
+        symbol=str(payload["symbol"]), action=str(payload["action"]),
+        quantity=float(payload["quantity"]),
+        order_type=str(payload.get("order_type") or "market"),
+        limit_price=payload.get("limit_price"), stop_price=payload.get("stop_price"),
+        client_order_id=payload.get("client_order_id"),
+        time_in_force=str(payload.get("time_in_force") or "day"),
+        asset_type=str(payload.get("asset_type") or "equity"),
+        strategy=str(payload.get("strategy") or "single"),
+        children=tuple(_order_request_from_payload(child) for child in (payload.get("children") or [])),
+        extra=dict(payload.get("extra") or {}),
+    )
+
+
 def _plan_payload(plan: AlgorithmPlan) -> dict[str, Any]:
     """Serialise a plan for the agent, keeping only what review and execution need.
 
     ``state`` rides along opaquely. The agent has no business reading an accrued budget, but
     it has to hand it back untouched: the plan it returns is the plan that gets committed.
+
+    ``signals`` is passed through whole rather than through a fixed key list. It used to
+    whitelist Rally Rotation's own shape (``score``/``reason``/``signal``/...), which silently
+    dropped everything an order-book algorithm like Options Flip actually reports -- its signal
+    carries ``checks``, ``estimate`` and ``contract`` instead, none of which that whitelist
+    named, so an agent reviewing an Options Flip plan saw five empty fields and nothing real.
+    Every algorithm's signal row is already plain JSON-able data (see ``options_flip.algorithm.
+    _signal``, ``rally_rotation``'s own row builder), so there is nothing left to filter.
+
+    ``desired_orders`` carries an order-book algorithm's actual proposal -- the resting
+    buy/sell/stop legs Options Flip's ``plan()`` builds instead of ``intents``. Omitting it here
+    was a real bug, not a simplification: ``place_orders`` rebuilds an ``AlgorithmPlan`` from
+    whatever the agent sends back, and a plan rebuilt with no ``desired_orders`` reconciles
+    against an empty wanted-set, which cancels every order the position currently has resting
+    at the broker (a live stop and target included) and replaces them with nothing.
     """
     return {
         "strategy": plan.strategy,
@@ -51,17 +93,16 @@ def _plan_payload(plan: AlgorithmPlan) -> dict[str, Any]:
             {"symbol": intent.symbol, "kind": intent.kind, "value": round(intent.value, 6)}
             for intent in plan.intents
         ],
-        "latest_prices": {symbol: round(price, 4) for symbol, price in plan.latest_prices.items()},
-        "signals": {
-            symbol: {
-                "score": row.get("score"),
-                "reason": row.get("reason"),
-                "signal": row.get("signal"),
-                "score_components": row.get("score_components"),
-                "realized_volatility": row.get("realized_volatility"),
+        "desired_orders": [
+            {
+                "key": order.key,
+                "request": _order_request_payload(order.request),
+                "replace_tolerance": order.replace_tolerance,
             }
-            for symbol, row in plan.signals.items()
-        },
+            for order in plan.desired_orders
+        ],
+        "latest_prices": {symbol: round(price, 4) for symbol, price in plan.latest_prices.items()},
+        "signals": dict(plan.signals),
         "allocation_mode": plan.metadata.get("allocation_mode"),
         "state": plan.state,
     }
@@ -74,6 +115,14 @@ def _plan_from_payload(payload: dict[str, Any]) -> AlgorithmPlan:
         intents=[
             Intent(symbol=str(row["symbol"]).upper(), kind=str(row.get("kind") or "weight"), value=float(row["value"]))
             for row in (payload.get("intents") or [])
+        ],
+        desired_orders=[
+            DesiredOrder(
+                key=str(row["key"]),
+                request=_order_request_from_payload(row["request"]),
+                replace_tolerance=float(row.get("replace_tolerance") or 0.0),
+            )
+            for row in (payload.get("desired_orders") or [])
         ],
         signals=payload.get("signals") or {},
         latest_prices={str(k).upper(): float(v) for k, v in (payload.get("latest_prices") or {}).items()},
@@ -142,10 +191,20 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
     def get_algorithm_plan(algorithm: str = DEFAULT_ALGORITHM, binding_id: str = "") -> dict[str, Any]:
         """Run the algorithm against market data and return the plan it proposes.
 
-        Returns the intents it wants to act on, the score and reason behind each symbol, and
-        the prices the plan was built from. Nothing is submitted and nothing is remembered.
-        Pass the whole payload back to place_orders -- it carries the prices and the state that
-        step needs.
+        The proposal lives in one of two places depending on the algorithm's shape, and reading
+        the wrong one for a given strategy will look like an empty plan:
+
+        - Allocation strategies (Bursty DCA, Rally Rotation) propose a *portfolio*: read
+          ``intents`` (what to hold) and ``mode`` (whether the list is the complete target or
+          only the symbols to touch). ``signals`` explains the reasoning per symbol.
+        - Options Flip proposes an *order book* instead: ``intents`` is always empty for it.
+          Read ``desired_orders`` for what should be resting at the broker right now (entry bid,
+          or a held position's target/stop), and ``signals[symbol]`` for the reasoning --
+          ``checks`` (each gate, pass/fail and why), ``estimate`` (the band prediction and
+          greeks-priced profit), and ``contract``/``state``/``headline``.
+
+        Pass the whole payload back to place_orders unchanged, or edited -- it carries the
+        prices and the state that step needs regardless of which proposal shape it holds.
 
         Deliberately runs whatever it is asked to, switched on or not: computing a plan is the
         same read-only act as a backtest, and "what would this do right now" is worth answering
@@ -202,20 +261,21 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
 
     @mcp.tool()
     def place_orders(algorithm_plan: dict[str, Any], binding_id: str = "") -> dict[str, Any]:
-        """Submit orders for a reviewed plan, and return the resulting weight changes.
+        """Submit orders for a reviewed plan. The response shape depends on the plan's own shape.
 
         ``algorithm_plan`` is the payload get_algorithm_plan returned. Pass it back unchanged to
-        submit the proposal as-is, or edit its ``intents`` first -- that list is the complete
-        intended action, so a held symbol dropped from a weight plan is sold to zero. Everything
-        else in the payload must come back untouched: it carries the prices that size the shares
-        and the state the algorithm will commit. Submits immediately.
+        submit the proposal as-is, or edit it first. Everything not deliberately edited must
+        come back untouched: ``latest_prices`` and ``state`` are committed as given, not
+        recomputed. Submits immediately.
 
         Only accepts bindings this agent drives -- switched on, with an empty ``cron``. Call
         list_bindings to see which those are, and name ``binding_id`` when one algorithm is
         bound to more than one account.
 
-        Orders are fitted to the account's available funds before submission, so ``status``
-        distinguishes three different things and only one of them is worth reacting to:
+        **Allocation strategies (Bursty DCA, Rally Rotation) -- edit ``intents``.** That list is
+        the complete intended action under ``mode: "target"``, so a held symbol dropped from it
+        is sold to zero. Orders are fitted to the account's available funds before submission,
+        so ``status`` distinguishes:
 
         - ``submitted`` -- every leg went out at the size asked for.
         - ``submitted_reduced`` -- the batch was deliberately trimmed to what the account can
@@ -227,6 +287,17 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
 
         ``funding`` explains how the batch was paid for -- buying power, the reserve held
         back, sale proceeds, and any cash-equivalent holdings liquidated to cover a shortfall.
+
+        **Options Flip -- edit ``desired_orders``, never ``intents`` (it is always empty for
+        this strategy).** Each entry is one resting order the algorithm wants at the broker
+        right now, keyed by role (``SYMBOL:entry`` / ``:target`` / ``:stop``). Missing or
+        dropping a key here is not "leave it as-is" -- reconciliation cancels whatever is not
+        in this list, so an edited payload missing a held position's ``:stop`` cancels that
+        stop at the broker. If you did not mean to touch a symbol, leave every one of its keys
+        exactly as returned. The response carries no ``funding``/``diff``: read
+        ``order_results`` (each entry ``submitted``/``replaced``/``cancelled``/``unchanged``/
+        ``rejected``, with the order id and reason where relevant) and ``working_orders`` (what
+        is now actually resting).
         """
         plan = _plan_from_payload(algorithm_plan)
         # Resolved from configuration, never from the payload: ``algorithm_plan`` is whatever
