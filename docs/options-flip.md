@@ -22,7 +22,7 @@ GATE 1       is the bull thesis intact today?
 
 GATE 2       where would we transact, and how often is each level reached?
   levels       E = P - k_entry  x ATR      k_entry  = quantile(dip, 1 - entry_reach)
-               T = E + k_target x ATR      k_target = quantile(run | dipped, 1 - target_reach)
+               T = E + k_target x ATR      k_target = quantile(run | dipped, 1 - exit_reach)
                dip over ONE session (the entry is abandoned at the close);
                run over max_hold_sessions (the target has the whole hold)
 
@@ -48,15 +48,15 @@ the ATR period -- because none of those is a decision anyone would make differen
 | `min_trend_strength` | `0.50` |
 | `max_candidates` | `3` |
 | `contracts_per_trade` | `1` |
-| `max_notional_per_trade` | `1500.0` |
-| `max_hold_sessions` | `4` |
-| `stop_loss_pct` | `0.0` (disabled) |
-| `entry_reach` | `0.55` |
-| `entry_patience` | `1.5` |
-| `target_reach` | `0.42` |
+| `max_notional_per_trade` | `3500.0` |
+| `max_hold_sessions` | `6` |
+| `stop_loss_pct` | `0.5` |
+| `entry_reach` | `0.40` |
+| `entry_patience` | `2.0` |
+| `exit_reach` | `0.35` |
 | `exit_gain_share` | `0.70` |
-| `exit_patience` | `0.7` |
-| `target_delta` | `0.62` |
+| `exit_patience` | `1.5` |
+| `target_delta` | `0.8` |
 | `min_dte` | `7` |
 | `min_open_interest` | `100` |
 | `max_spread_pct` | `0.06` |
@@ -65,13 +65,17 @@ the ATR period -- because none of those is a decision anyone would make differen
 | `max_annual_volatility` | `0.8` |
 | `level_lookback_days` | `80` |
 
-Two pairs read together. ``entry_reach``/``target_reach`` are both "the share of comparable
+Two pairs read together. ``entry_reach``/``exit_reach`` are both "the share of comparable
 sessions that reached this level", so they are probabilities rather than offsets.
 ``entry_patience``/``exit_patience`` are both "how stubbornly this side holds its price as its
-clock runs out", higher being more patient -- and they are deliberately asymmetric.
+clock runs out", higher being more patient. They started deliberately asymmetric (entry patient,
+exit impatient); a combo sweep over a real month (``tools/options_flip_config_combo_sweep.py``)
+found holding the exit firmer instead was the more reliable choice on that data, so both are
+tuned patient now -- see the field-level rationale in ``config.py`` if a later month argues the
+original asymmetry back.
 
 An ``atr_multiple`` knob briefly widened both levels on top of the quantiles. It was removed:
-setting it to 1.15 was exactly ``entry_reach: 0.55`` and ``target_reach: 0.42``, the same levels
+setting it to 1.15 was exactly ``entry_reach: 0.55`` and ``exit_reach: 0.42``, the same levels
 to a tenth of a cent, but expressed as a multiplier whose reach probability you only learned
 afterwards. Two knobs for one decision, and the worse of the two units.
 

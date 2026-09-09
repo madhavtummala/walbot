@@ -142,6 +142,13 @@ class OptionContract:
     bid: float = 0.0
     ask: float = 0.0
     mark: float = 0.0
+    #: Contracts resting at the NBBO, in contracts. Zero means the provider did not say --
+    #: treated as unknown rather than as "nothing resting", the same convention ``quote_time_ms``
+    #: uses for staleness. A one-sided size (bid quoted, ask thin) is evidence of standing
+    #: pressure on this contract specifically, distinct from ``volume``, which is what already
+    #: traded rather than what is offered right now.
+    bid_size: int = 0
+    ask_size: int = 0
     delta: float = 0.0
     #: The rest of the greeks the chain publishes. Delta alone prices a *small* move in the
     #: underlying and nothing else, which is not what a multi-day option position is exposed to:

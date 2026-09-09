@@ -154,13 +154,13 @@ def conditional_levels(
     # ~5,000 opportunities and armed two trades -- a gate that fires twice in six months is not
     # selective, it is broken.
     #
-    # Conditioning on the dip makes ``target_reach`` mean exactly what it says: the share of
+    # Conditioning on the dip makes ``exit_reach`` mean exactly what it says: the share of
     # comparable days that pulled back this far *and then* ran far enough to pay. That is the
     # number the trade actually depends on, and it makes a separate minimum redundant -- the
     # target is placed at the reach the caller asked for, so it cannot disagree with itself.
     dipped = pool[pool["dip"].values >= k_entry]
     runs = dipped["run"].values if len(dipped) >= floor else pool["run"].values
-    k_target = float(np.quantile(runs, 1.0 - float(config.target_reach)))
+    k_target = float(np.quantile(runs, 1.0 - float(config.exit_reach)))
     p_target = float((runs >= k_target).mean()) if len(runs) else 0.0
 
     entry = price - k_entry * atr

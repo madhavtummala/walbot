@@ -55,8 +55,8 @@ const STRATEGIES = [
     status: "Live",
     horizon: "1-2 sessions",
     risk: "High",
-    logic: "Reads a multi-day trend per symbol and requires pre-market to confirm it -- disagreement means no trade that day. Picks the nearest contract at least min_dte out inside a delta band, then rests a limit buy priced from how far comparable past sessions pulled back before going the right way, walking it in as the day's budget depletes. On a fill an OCO goes to the broker: a profit limit that only ratchets up, and a stop that never moves. Flat within max_hold_sessions.",
-    signals: ["Multi-day trend", "Pre-market confirmation", "Excursion budget", "Delta band and spread", "Exchange-side OCO"],
+    logic: "Reads a multi-day trend per symbol and requires pre-market to confirm it -- disagreement means no trade that day. Picks the nearest contract at least min_dte out inside a delta band, then rests a limit buy priced from how far comparable past sessions pulled back before going the right way, walking it in as the day's budget depletes. On a fill, two independent orders rest at the exchange: a profit target that concedes toward the mark as the deadline nears, and a stop that never moves -- not a broker-side OCO pair, since the lifecycle already re-derives which one is wanted from the position every run. Flat within max_hold_sessions.",
+    signals: ["Multi-day trend", "Pre-market confirmation", "Excursion budget", "Delta band and spread", "Independent target and stop"],
   },
 ];
 
@@ -136,6 +136,41 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+// -- theme (light / dark) ----------------------------------------------------------------
+
+const THEME_KEY = "walbot-theme";
+
+function applyTheme(theme) {
+  const dark = theme === "dark";
+  document.documentElement?.setAttribute("data-theme", dark ? "dark" : "light");
+  const toggle = $("#themeToggle");
+  toggle?.setAttribute("aria-pressed", String(dark));
+  const label = $("#themeToggleLabel");
+  if (label) label.textContent = dark ? "Light" : "Dark";
+}
+
+function initTheme() {
+  const saved = (() => {
+    try {
+      return window.localStorage.getItem(THEME_KEY);
+    } catch {
+      return null;
+    }
+  })();
+  const prefersDark = window.matchMedia?.("(prefers-color-scheme: dark)").matches;
+  applyTheme(saved === "dark" || saved === "light" ? saved : (prefersDark ? "dark" : "light"));
+}
+
+function toggleTheme() {
+  const dark = document.documentElement?.getAttribute("data-theme") !== "dark";
+  applyTheme(dark ? "dark" : "light");
+  try {
+    window.localStorage.setItem(THEME_KEY, dark ? "dark" : "light");
+  } catch {
+    /* storage unavailable; the switch still holds for this session */
+  }
 }
 
 async function api(path, options = {}) {
@@ -2532,16 +2567,32 @@ function accountDividendsTable(positions) {
           <tr><th>Date</th><th>Symbol</th><th class="num">Amount</th></tr>
         </thead>
         <tbody>
-          ${positions.dividend_rows.map((row) => `
+          ${positions.dividend_rows.map((row) => {
+            const security = dividendSecurity(row);
+            return `
             <tr>
               <td>${escapeHtml(row.date || "")}</td>
-              <td><strong>${escapeHtml(row.symbol || "Cash")}</strong>${
-                row.description ? `<span class="tableNote">${escapeHtml(row.description)}</span>` : ""}</td>
+              <td><strong>${escapeHtml(security.label)}</strong>${
+                security.note ? `<span class="tableNote">${escapeHtml(security.note)}</span>` : ""}</td>
               <td class="num ${row.amount >= 0 ? "gain" : "loss"}">${escapeHtml(money(row.amount, 2))}</td>
-            </tr>`).join("")}
+            </tr>`;
+          }).join("")}
         </tbody>
       </table>
     </div>`;
+}
+
+// A broker reports the *cash* leg of a distribution, not the security that paid it: Schwab
+// names the instrument for the payment currency (``CURRENCY_USD``) and leaves the fund's name
+// in the description. There is no ticker on the transaction to recover, so a currency leg is
+// shown by its full name rather than a code that is not a symbol. Cash interest has neither,
+// and was already rendered as "Cash".
+function dividendSecurity(row) {
+  const symbol = String(row.symbol || "").toUpperCase();
+  if (!symbol || symbol === "USD" || symbol.startsWith("CURRENCY_")) {
+    return { label: row.description || "Cash" };
+  }
+  return { label: symbol, note: row.description };
 }
 
 function accountOrdersTable(activity) {
@@ -2740,15 +2791,15 @@ function renderBacktestTab(body, strategy) {
 function renderOverviewTab(body, strategy, deployment) {
   const backtest = state.backtests[strategy.key];
   body.innerHTML = `
-    <div class="cardGrid">
-      <section class="card is-wide">
+    <div class="overviewGrid">
+      <section class="card overviewHow">
         <h2>How it works</h2>
         <p class="cardBody">${escapeHtml(strategy.logic)}</p>
         <div class="chipRow">
           ${(strategy.signals || []).map((signal) => `<span class="chip">${escapeHtml(signal)}</span>`).join("")}
         </div>
       </section>
-      <section class="card">
+      <section class="card overviewGlance">
         <h2>At a glance</h2>
         <dl class="factList">
           <div><dt>Horizon</dt><dd>${escapeHtml(strategy.horizon)}</dd></div>
@@ -2759,17 +2810,17 @@ function renderOverviewTab(body, strategy, deployment) {
           <div><dt>${escapeHtml(BACKTEST_LABEL)} backtest</dt><dd>${backtest ? escapeHtml(percent(backtest.total_return)) : "--"}</dd></div>
         </dl>
       </section>
-    </div>
-    <section class="card">
-      <div class="cardHead">
-        <h2>Orders this algorithm placed</h2>
-        <div class="cardHeadActions">
-          ${deployment ? `<span class="cardHint">on <a class="factLink" href="#/account/${escapeHtml(deployment.account_id)}">${escapeHtml(accountLabel(deployment.account_id))}</a></span>` : ""}
-          <button class="ctl" type="button" id="refreshAlgoOrdersButton">Refresh</button>
+      <section class="card overviewOrders">
+        <div class="cardHead">
+          <h2>Orders this algorithm placed</h2>
+          <div class="cardHeadActions">
+            ${deployment ? `<span class="cardHint">on <a class="factLink" href="#/account/${escapeHtml(deployment.account_id)}">${escapeHtml(accountLabel(deployment.account_id))}</a></span>` : ""}
+            <button class="ctl" type="button" id="refreshAlgoOrdersButton">Refresh</button>
+          </div>
         </div>
-      </div>
-      ${algorithmOrdersTable(state.algorithmActivity[strategy.key])}
-    </section>`;
+        ${algorithmOrdersTable(state.algorithmActivity[strategy.key])}
+      </section>
+    </div>`;
   ensureAlgorithmActivity(strategy.key);
 }
 
@@ -3195,6 +3246,8 @@ function wireEvents() {
     if (event.target.closest("#schwabAuthPill")) connectSchwab();
   });
 
+  $("#themeToggle")?.addEventListener("click", toggleTheme);
+
   $("#symbolEntry")?.addEventListener("keydown", (event) => {
     if (event.key === "Enter") commitSymbolEntry();
     if (event.key === "Escape") hideSymbolEntry();
@@ -3285,4 +3338,5 @@ async function init() {
   render();
 }
 
+initTheme();
 init();

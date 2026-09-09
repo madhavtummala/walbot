@@ -201,13 +201,21 @@ class LiveContextSource(ContextSource):
         it knows -- an underlying, a DTE window -- and cannot accidentally read across the
         moment the context describes.
         """
-        from ..connectors.market.schwab_options import fetch_option_chain, fetch_premarket_summary
+        from ..connectors.market.schwab_options import (
+            fetch_option_chain,
+            fetch_option_price_history,
+            fetch_premarket_summary,
+        )
 
         handles: dict[str, Any] = {}
         if getattr(requirements, "needs_option_chains", False):
             def option_chain(underlying: str, **kwargs: Any):
                 return fetch_option_chain(config, underlying, as_of=self.timestamp().date(), **kwargs)
             handles["option_chain"] = option_chain
+
+            def option_history(osi: str, **kwargs: Any):
+                return fetch_option_price_history(config, osi, as_of=self.timestamp(), **kwargs)
+            handles["option_history"] = option_history
         if getattr(requirements, "needs_premarket", False):
             def premarket(symbol: str):
                 return fetch_premarket_summary(config, symbol, as_of=self.timestamp())

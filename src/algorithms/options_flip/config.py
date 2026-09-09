@@ -8,7 +8,7 @@ Everything not here is a constant below -- window lengths, tolerances, the ATR p
 none of those is a decision anyone would make differently. The measurements behind these defaults
 are in ``docs/options-flip.md``; the reasoning is on each field.
 
-Two pairs read together and should be set together. ``entry_reach`` and ``target_reach`` are both
+Two pairs read together and should be set together. ``entry_reach`` and ``exit_reach`` are both
 "the share of comparable sessions that reached this level", so they are probabilities you can
 reason about rather than offsets. ``entry_patience`` and ``exit_patience`` are both "how
 stubbornly this side holds its price as its clock runs out", higher being more patient -- and they
@@ -79,19 +79,29 @@ class OptionsFlipConfig:
     #: premium, so the unit *is* the loss cap.
     contracts_per_trade: int = 1
 
-    #: Loss cap as a fraction of the debit. **Zero disables the stop**, and does so completely:
-    #: the bracket becomes a lone profit target. Premium falls on theta and implied volatility
-    #: with the directional case intact, so a premium stop cuts winners for reasons unrelated to
-    #: the thesis. With a bounded unit the deadline is the risk control that remains.
-    stop_loss_pct: float = 0.0
+    #: Loss cap as a fraction of the debit. Zero disables the stop entirely, and the bracket
+    #: becomes a lone profit target -- the earlier default here, on the reasoning that premium
+    #: falls on theta and implied volatility with the directional case still intact, so a stop
+    #: struck off the fill can cut a winner for reasons unrelated to the thesis. A hard floor is
+    #: worth the tradeoff anyway: with the stop disabled, a held position's only defense is the
+    #: deadline's converge-to-market, which does not fire until ``max_hold_sessions`` is up --
+    #: a real reversal inside that window otherwise rides all the way down unchecked. 50% is
+    #: loose enough to survive ordinary theta/IV drift without acting as a tight trailing stop.
+    stop_loss_pct: float = 0.5
 
     #: Sessions to hold before the deadline exit takes over. It also sets the horizon the target
     #: is priced over -- the run available grows with the hold -- so the two cannot be set apart.
-    max_hold_sessions: int = 4
+    #: Raised from 4: a combo sweep over August (``tools/options_flip_config_combo_sweep.py``)
+    #: found 2 sessions a clear loser (-$410 total, forcing more deadline-convergence exits
+    #: before the target had room to arrive) and 8 a clear winner (+$298 vs +$89 baseline); 6 is
+    #: the same direction without going as far on one month's evidence alone.
+    max_hold_sessions: int = 6
 
-    #: Where the target sits, as the share of comparable *pulled-back* sessions that reached it.
-    #: Lower is more ambitious and reached less often.
-    target_reach: float = 0.42
+    #: Where the exit sits, as the share of comparable *pulled-back* sessions that reached it.
+    #: Lower is more ambitious and reached less often. Lowered from 0.42: the single-knob sweep
+    #: found an easier target (0.30) beat a harder one (0.70) on total P/L ($134 vs -$24); 0.35
+    #: leans the same direction without the smaller sample the extreme carried.
+    exit_reach: float = 0.35
 
     #: Share of the modelled gain the sell limit asks for on the day of entry. Asking for part
     #: of the move is what makes the exit executable rather than theoretical.
@@ -99,17 +109,25 @@ class OptionsFlipConfig:
 
     #: How stubbornly the sell holds its ask as the deadline approaches; higher is more patient.
     #: The impatient side by design: a position reaching its deadline unsold is sold at whatever
-    #: is offered, so conceding early is cheaper than conceding at gunpoint.
-    exit_patience: float = 0.7
+    #: is offered, so conceding early is cheaper than conceding at gunpoint. Raised from 0.7:
+    #: this was the single biggest reliable lever in both sweeps -- holding firmer (1.5) more
+    #: than doubled total P/L over the impatient default ($230 vs $89 solo; the combo that raised
+    #: only this, hold-length and reach -- leaving delta untouched -- was the best-supported
+    #: result of the whole combo sweep at $484 on a real 17-trade sample, not one lucky fill).
+    exit_patience: float = 1.5
 
     #: Where the entry sits, as the share of comparable sessions that reached it. Lower is a
-    #: deeper, cheaper entry that fills less often.
-    entry_reach: float = 0.55
+    #: deeper, cheaper entry that fills less often. Lowered from 0.55: the sweep found a
+    #: shallower entry (0.35) beat a deeper one (0.75) on total P/L ($259 vs $184); 0.40 leans
+    #: the same direction.
+    entry_reach: float = 0.40
 
     #: How stubbornly the buy holds its price as the session runs out; higher is more patient.
     #: The patient side by design: chasing a rising ask turns a pullback trade into a momentum
-    #: one, and an unfilled entry costs only the opportunity. It never crosses the mark.
-    entry_patience: float = 1.5
+    #: one, and an unfilled entry costs only the opportunity. It never crosses the mark. Raised
+    #: from 1.5: the sweep found more patience (3.0) beat less (0.5) on total P/L ($144 vs -$60);
+    #: 2.0 leans the same direction without the smaller trade count the extreme carried.
+    entry_patience: float = 2.0
 
     #: Smallest predicted move worth opening for, in dollars per contract, gross of commission.
     #: The strictest gate in the set, and the one that decides how often this trades at all.
@@ -117,7 +135,7 @@ class OptionsFlipConfig:
 
     #: The delta to aim the strike at. Higher earns more per point of underlying move, costs
     #: premium that is mostly intrinsic, and buys a contract fewer people trade.
-    target_delta: float = 0.62
+    target_delta: float = 0.8
 
     #: Sessions the dip and run quantiles are learned from. Long enough that one exceptional
     #: stretch cannot set the tail, since a short window is read back out as a forecast.
@@ -129,8 +147,17 @@ class OptionsFlipConfig:
 
 
     #: Dollar ceiling per position, priced at the ask. Zero means no cap. It trims the unit and
-    #: never sets it.
-    max_notional_per_trade: float = 1500.0
+    #: never sets it. ``target_delta`` moved to 0.8 this session -- a deep-ITM call is mostly
+    #: intrinsic value, so it costs close to the underlying's own move rather than a cheap
+    #: time-value premium. Measured on the August walk-forward, GLD's chosen contract at that
+    #: delta ran $2,000-$3,400; the old $1,500 cap (sized for a shallower delta) silently
+    #: zeroed every one of those days with a "Worth trading" profit estimate of $225-$437 and
+    #: no other check blocking -- see the "Affordable" check this cap now surfaces. Raised to
+    #: sit above that range. SMH's chosen contract ran $6,000-$8,000 in the same window and
+    #: stays capped out deliberately: SMH never clears the trend gate on this data anyway, and
+    #: a cap sized to fit it would put five times the money at risk per GLD trade for no
+    #: measured benefit.
+    max_notional_per_trade: float = 3500.0
 
     #: Nearest expiry to trade. Under a week the theta curve is steepest.
     min_dte: int = 7

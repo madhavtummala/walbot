@@ -30,7 +30,7 @@ from ...core.interfaces import MARKET_TZ
 from ...core.options import CALL, PUT, OptionContract
 from ..http import _bearer_auth_header, _request_json
 from ..sources import EOD_MARKET_CATEGORY, MARKET_CATEGORY, ProviderUnavailable, _schwab_token
-from .schwab import PRICE_HISTORY_URL
+from .schwab import PRICE_HISTORY_URL, _candles_to_bars
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +88,46 @@ def fetch_option_chain(
     return contracts
 
 
+def fetch_option_price_history(
+    config: Any,
+    osi: str,
+    *,
+    interval_minutes: int = 5,
+    lookback_days: int = 30,
+    as_of: datetime | None = None,
+) -> pd.DataFrame:
+    """Historical bars for one option contract, by its OSI symbol, for band prediction.
+
+    Contracts chosen this session need their *own* price history so the strategy can predict the
+    contract's band in premium rather than translating the underlying's. ``pricehistory`` takes a
+    single symbol, and an OSI string is a symbol like any other, so this is the same endpoint and
+    shape as the equity path -- the contract is just keyed differently.
+
+    The sample is capped at ``lookback_days`` since a contract only lists a few weeks before its
+    expiry, and the whole window is re-read each run so a getting-richer sample is never stale.
+    """
+    token = _schwab_token(config, MARKET_CATEGORY)
+    if not token:
+        raise ProviderUnavailable("Schwab access token is not configured")
+
+    end = as_of or datetime.now(timezone.utc)
+    start = end - timedelta(days=max(int(lookback_days), 1))
+    payload = _request_json(
+        "schwab", MARKET_CATEGORY, PRICE_HISTORY_URL,
+        {
+            "symbol": str(osi).upper(),
+            "frequencyType": "minute",
+            "frequency": int(interval_minutes),
+            "startDate": int(start.timestamp() * 1000),
+            "endDate": int(end.timestamp() * 1000),
+            "needExtendedHoursData": "false",
+            "needPreviousClose": "false",
+        },
+        headers=_bearer_auth_header(token),
+    )
+    return _candles_to_bars(payload)
+
+
 def _contracts_from_map(exp_map: dict[str, Any], underlying: str, option_type: str) -> list[OptionContract]:
     """Flatten Schwab's ``{"2025-01-17:14": {"150.0": [row]}}`` nesting into contracts.
 
@@ -133,6 +173,8 @@ def _contract_from_row(
         bid=float(bid),
         ask=float(ask),
         mark=float(mark),
+        bid_size=int(json_number(row.get("bidSize")) or 0),
+        ask_size=int(json_number(row.get("askSize")) or 0),
         delta=delta,
         # Limits are generous rather than tight: they exist to catch the -999 sentinel, and a
         # real greek on a near-dated contract can be large without being wrong.

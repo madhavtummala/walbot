@@ -6,8 +6,11 @@ contract at least ``min_dte`` out inside a delta band, and rest a limit buy at t
 low -- an absolute price level derived from how far comparable past sessions pulled back before
 going the right way. Walk that bid in toward the contract's midpoint as the session runs down, at
 a pace ``entry_decay_power`` sets; it never crosses the spread, so a day the market never comes
-to simply does not trade. On a fill, an OCO goes to the exchange: a profit limit that only ever
-ratchets up, and a stop that never moves. Be flat within ``max_hold_sessions``.
+to simply does not trade. On a fill, two independent resting orders go to the exchange: a profit
+limit that concedes ground each session, and (when enabled) a stop struck off the fill that
+never moves. Not a broker-side OCO pair -- the lifecycle already re-derives what should be
+resting from the broker's own positions every run, which is the invariant an OCO would
+otherwise exist to hold. Be flat within ``max_hold_sessions``.
 
 **Why the orders live at the broker.** This runs on a five-minute cron, and the day's low lasts
 about ninety seconds. A poller cannot buy it -- it can only ever transact at whatever the mark
@@ -44,12 +47,13 @@ from ...core.options import CALL, is_osi_symbol, parse_osi
 from ...data.state_store import algorithm_state_key, save_state
 from ..base import BaseAlgorithm
 from ..rally_rotation.memory import market_day, sessions_since
-from ..reconcile import ORDER_IDS_KEY, broker_supports_oco, reconcile_orders
+from ..reconcile import ORDER_IDS_KEY, reconcile_orders
 from .config import OptionsFlipConfig
 from .contracts import affordable_contracts, fill_missing_deltas, select_contract
 from .candidates import scoring_parameters, trend_strength
 from .indicators import average_true_range, quote_age_seconds
 from .levels import conditional_levels
+from .option_band import choose_band, prepare_option_bars
 from .pricing import expected_profit, max_debit, scenarios
 from .regime import bull_regime
 from .excursion import option_price_for, session_fraction_remaining
@@ -165,15 +169,35 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
         # a position it did not open -- the stop exists precisely for that case.
         if held_contract:
             memory = _refresh_held(memory, held_contract, context, session, cfg)
+            mark = float(memory.get("mark", 0.0) or 0.0)
+            delta = float(memory.get("delta", 0.0) or 0.0)
+            exit_level = _held_exit_target(intraday, session, cfg, underlying_now, daily)
+            _hist, _today = _split_sessions(intraday, session["market_day"])
+            sell_ok = _sell_ok(daily, _today, underlying_now, cfg)
+            under_translation = (
+                {
+                    "entry": 0.0,
+                    "target": option_price_for(
+                        exit_level, underlying_now=underlying_now,
+                        option_mark=mark, delta=delta,
+                    ),
+                }
+                if (mark > 0 and exit_level > 0) else None
+            )
+            band = _option_band_for(
+                held_contract, context, cfg, session, under_now=underlying_now,
+                delta=delta, mark=mark, under_translation=under_translation,
+            )
             return plan_symbol(
                 symbol, memory=memory, held_contract=held_contract,
                 direction=str(memory.get("direction") or ""), contract=None,
                 contracts=int(memory.get("contracts", 1) or 1),
                 underlying_now=underlying_now,
                 entry_target=0.0,
-                exit_target=_held_exit_target(intraday, session, cfg, underlying_now, daily),
+                exit_target=exit_level,
                 checks=[], config=cfg, session=session,
-                oco=broker_supports_oco(getattr(context.config, "account_id", "")),
+                target_premium=float(band.get("target", 0.0)) or None,
+                sell_ok=sell_ok,
             )
 
         history, today = _split_sessions(intraday, session["market_day"])
@@ -213,7 +237,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
         # The entry is placed *at* the ``entry_reach`` quantile, so its own reach is that
         # number by construction and needs no separate floor. What still has to be checked is the
         # conditional half: of the days that dipped this far, how many then paid.
-        # ``target_reach`` places the target at the reach it asks for, so the only remaining
+        # ``exit_reach`` places the target at the reach it asks for, so the only remaining
         # question is whether a sample exists at all, and whether there is session left to work.
         levels_ok = levels["p_target"] > 0.0 and levels["entry"] > 0.0 and in_time
         checks = checks + [Check(
@@ -233,7 +257,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
                 f"{levels['p_target']:.0%} of those went on to ${levels['target']:,.2f} "
                 f"({levels['k_target']:.2f} ATR above the entry)"
             ),
-            limit=f"placed at the {float(cfg.target_reach):.0%} reach quantile of the days that dipped",
+            limit=f"placed at the {float(cfg.exit_reach):.0%} reach quantile of the days that dipped",
             blocking=levels["p_target"] <= 0.0,
         ), Check(
             label="Time to work",
@@ -266,6 +290,20 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
             estimate = _estimate_row(
                 priced, levels, outcomes, profit, ceiling, contracts, regime, cfg,
             )
+            wanted_contracts = max(int(getattr(cfg, "contracts_per_trade", 1) or 1), 1)
+            notional_cap = float(getattr(cfg, "max_notional_per_trade", 0.0) or 0.0)
+            if contract is not None and notional_cap > 0:
+                contract_cost = (contract.ask or contract.midpoint) * 100.0
+                checks = checks + [Check(
+                    label="Affordable",
+                    ok=contracts > 0,
+                    value=(
+                        f"${contract_cost:,.0f}/contract against a ${notional_cap:,.0f} cap "
+                        f"— {contracts} of {wanted_contracts} wanted"
+                    ),
+                    limit=f"≤ ${notional_cap:,.0f} per contract, whole contracts only",
+                    blocking=contracts <= 0,
+                )]
             checks = checks + [Check(
                 label="Worth trading",
                 ok=worth_it,
@@ -295,6 +333,57 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
             contracts = 0
         direction = CALL if (eligible and vol_ok and levels_ok and trending and contracts > 0) else ""
 
+        # ── option band: the contract's own history, for intra-day prediction ──────────
+        # Gates and the entry *level* stay on the underlying -- ``levels["entry"]`` is what
+        # decides whether today is worth arming. But the *premium* the resting bid is placed at
+        # comes from here when the contract has spoken for itself: the band's own entry, in
+        # dollars, feeds ``plan_symbol`` as ``entry_premium`` below, the same input the held
+        # branch already trusts on the sell side. Measured on real Sep-18 option history
+        # (``tools/options_flip_contract_backtest.py --band``), the option band's sell logic beat
+        # the static delta translation +5.8pp mean return on the same 21 fills -- the entry side
+        # gets the same treatment now rather than staying on the cruder translation alone. An
+        # absurd band (thin-sample artifact) falls back to the translation automatically, inside
+        # :func:`.option_band.choose_band`, so this is never a regression from the old behaviour.
+        band_source = "none"
+        band = None
+        if priced is not None and levels["entry"] > 0 and levels.get("target", 0.0) > 0:
+            under_translation = {
+                "entry": option_price_for(
+                    levels["entry"], underlying_now=underlying_now,
+                    option_mark=priced.midpoint, delta=priced.delta,
+                ),
+                "target": option_price_for(
+                    levels["target"], underlying_now=underlying_now,
+                    option_mark=priced.midpoint, delta=priced.delta,
+                ),
+            }
+            band = _option_band_for(
+                priced.osi_symbol, context, cfg, session, under_now=underlying_now,
+                delta=priced.delta, mark=priced.midpoint,
+                under_translation=under_translation,
+            )
+            band_source = str(band.get("source") or "none")
+            checks = checks + [Check(
+                label="Option band",
+                ok=True,
+                value=(
+                    f"entry ${float(band.get('entry', 0.0)):.2f} → "
+                    f"${float(band.get('target', 0.0)):.2f} from "
+                    + ("the premium's own history" if band_source == "option" else "the underlying")
+                    + f" ({int(band.get('sample', 0))} sessions)"
+                ),
+                limit="this contract's own low and run, in premium; absurds fall back",
+            )]
+            if estimate:
+                # What the resting bid is actually priced from -- the band's own entry, which is
+                # the translation whenever the option's own history was too thin or too absurd to
+                # trust (see ``choose_band``'s fallback), and the option's own low the rest of the
+                # time. Reporting the translation here regardless of ``band_source`` would show a
+                # number the order never used.
+                estimate["entry_premium"] = float(band.get("entry", 0.0))
+                estimate["band_source"] = band_source
+                estimate["band_sample"] = int(band.get("sample", 0))
+
         outcome = plan_symbol(
             symbol, memory=memory, held_contract="",
             # Momentum gates the order, not the analysis. Passing the *real* direction -- empty
@@ -304,7 +393,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
             contract=contract, contracts=contracts, underlying_now=underlying_now,
             entry_target=levels["entry"], exit_target=float(levels.get("target", 0.0)),
             checks=checks, config=cfg, session=session,
-            oco=broker_supports_oco(getattr(context.config, "account_id", "")),
+            entry_premium=(float(band.get("entry", 0.0)) or None) if band is not None else None,
         )
         if estimate and contract is None:
             estimate["tradable"] = False
@@ -615,6 +704,7 @@ def _estimate_row(contract, levels, outcomes, profit, ceiling, contracts, regime
         "atr": regime.get("atr", 0.0),
         "vwap": regime.get("vwap", 0.0),
         "gap_atr": regime.get("gap_atr", 0.0),
+        "volume_imbalance": regime.get("volume_imbalance", 0.0),
     }
 
 
@@ -664,6 +754,54 @@ def _held_exit_target(intraday, session, cfg, underlying_now: float, daily) -> f
         atr=atr, config=cfg,
     )
     return float(levels.get("target", 0.0))
+
+
+def _option_band_for(
+    osi, context, cfg, session,
+    *, under_now: float, delta: float, mark: float, under_translation,
+):
+    """The entry/target band for a chosen contract, in premium, from its own price history.
+
+    Graceful by construction: if the ``option_history`` capability is missing, the fetch fails,
+    or the sample is too thin, :func:`.option_band.choose_band` falls back to the underlying-delta
+    translation (``under_translation``), so band prediction never takes the entry or exit down
+    with it. ``mark`` doubles as the option's session-open proxy when its own bars have no print
+    for today yet -- that only affects the ``distance_from_open`` state, never the order price.
+    """
+    reader = (context.extra or {}).get("option_history")
+    option_bars = None
+    if reader is not None:
+        try:
+            raw = reader(str(osi).upper())
+            option_bars = prepare_option_bars(raw) if raw is not None and not raw.empty else None
+        except Exception as exc:  # noqa: BLE001 - band prediction must never break the plan
+            logger.warning("Options Flip could not read option history for %s: %s", osi, exc)
+    if option_bars is not None and not option_bars.empty:
+        option_bars["tmp_day"] = pd.to_datetime(option_bars["ts"]).dt.date
+        session_open = mark
+        today_open = option_bars[option_bars["tmp_day"] == date.fromisoformat(session["market_day"])]
+        if not today_open.empty:
+            session_open = float(today_open.iloc[0]["open"]) or mark
+        option_bars = option_bars.drop(columns=["tmp_day"])
+    else:
+        session_open = mark
+    proxy = type("_C", (), {"delta": delta, "midpoint": mark})()
+    return choose_band(
+        option_bars, minute=_decision_minute(session, cfg), option_mark=mark,
+        session_open=session_open, config=cfg, max_hold=int(cfg.max_hold_sessions) or 1,
+        underlying_translation=under_translation, contract=proxy, underlying_now=under_now,
+    )
+
+
+def _sell_ok(daily, today, price: float, cfg) -> bool:
+    """Whether the bull-run gate is still open, re-read on the sales side of a held position.
+
+    ``_plan_one`` short-circuits before the entry gates for a held position, so the regime has to
+    be checked here rather than assumed -- a position's bracket must not keep asking a premium
+    target the market is no longer expected to pay.
+    """
+    eligible, _, _ = bull_regime(daily, today, price=price, config=cfg)
+    return bool(eligible)
 
 
 def _refresh_held(memory, held_contract, context, session, cfg) -> dict[str, Any]:

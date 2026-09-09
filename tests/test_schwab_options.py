@@ -29,6 +29,7 @@ def chain_payload() -> dict:
                 "140.0": [{
                     "symbol": "QQQM  260305C00140000", "strikePrice": 140.0,
                     "bid": 3.00, "ask": 3.10, "mark": 3.05, "delta": 0.45,
+                    "bidSize": 12, "askSize": 4,
                     "openInterest": 1500, "totalVolume": 800, "volatility": 22.0,
                 }],
                 "145.0": [{
@@ -79,8 +80,13 @@ class TestOptionChain:
         assert call.expiry == date(2026, 3, 5)
         assert call.delta == 0.45
         assert call.open_interest == 1500
+        assert call.bid_size == 12
+        assert call.ask_size == 4
         assert call.dte(date(2026, 2, 10)) == 23
         assert any(c.option_type == PUT and c.delta == -0.44 for c in contracts)
+        # The put row carries no bidSize/askSize -- absence reads as unknown (0), not a crash.
+        put = next(c for c in contracts if c.option_type == PUT)
+        assert put.bid_size == 0 and put.ask_size == 0
 
     def test_the_dte_window_is_applied_in_the_request(self, captured) -> None:
         calls, fake = captured

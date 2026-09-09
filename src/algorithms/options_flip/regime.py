@@ -28,7 +28,14 @@ from typing import Any
 import pandas as pd
 
 from ...core.interfaces import Check
-from .indicators import average_true_range, ma_slope, moving_average, opening_range, session_vwap
+from .indicators import (
+    average_true_range,
+    directional_volume,
+    ma_slope,
+    moving_average,
+    opening_range,
+    session_vwap,
+)
 
 
 def bull_regime(
@@ -145,6 +152,25 @@ def bull_regime(
         blocking=not vwap_ok,
     ))
 
+
+    # ── directional volume: is today's tape buyer- or seller-heavy so far? ─────────────
+    # A reading, not a gate, for the same reason the slope is: it is genuine information about
+    # today's tape and has not been measured to reject anything. Promote it to a blocking check
+    # only once it has earned that the way ``entry_reach``/``exit_reach`` did -- against
+    # forward returns, not intuition.
+    volume_split = directional_volume(intraday_today)
+    readings["volume_imbalance"] = volume_split["imbalance"]
+    checks.append(Check(
+        label="Directional volume",
+        ok=True,
+        value=(
+            f"{volume_split['imbalance']:+.0%} imbalance "
+            f"(buy {volume_split['buy_volume']:,.0f} / sell {volume_split['sell_volume']:,.0f})"
+            if (volume_split["buy_volume"] + volume_split["sell_volume"]) > 0
+            else "no directional volume yet"
+        ),
+        limit="reported, not gated -- buy/sell split by each bar's own open-to-close",
+    ))
 
     eligible = all(not check.blocking for check in checks)
     return eligible, readings, checks

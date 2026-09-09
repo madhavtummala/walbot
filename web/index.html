@@ -5,7 +5,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Walbot</title>
-  <link rel="stylesheet" href="/static/app.css?v=20260823-options-flip" />
+  <link rel="stylesheet" href="/static/app.css?v=20260828-darkmode" />
+  <link rel="stylesheet" href="/static/app-dark.css?v=20260828-darkmode" />
 </head>
 
 <body>
@@ -27,6 +28,12 @@
       </section>
 
       <div class="navFooter" id="navFooter"></div>
+
+      <button class="themeToggle" id="themeToggle" type="button"
+        aria-pressed="false" aria-label="Toggle dark mode">
+        <span class="themeToggleIcon" aria-hidden="true"></span>
+        <span class="themeToggleLabel" id="themeToggleLabel">Dark</span>
+      </button>
     </nav>
 
     <main class="content" id="content" tabindex="-1"></main>
@@ -40,7 +47,7 @@
     aria-label="Monthly budget for the selected symbol" />
   <output id="toast" aria-live="polite"></output>
   <script src="/static/vendor/cronstrue.min.js?v=2.50.0"></script>
-  <script src="/static/app.js?v=20260823-options-flip"></script>
+  <script src="/static/app.js?v=20260828-darkmode"></script>
 </body>
 
 </html>

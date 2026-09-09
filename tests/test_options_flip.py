@@ -16,6 +16,7 @@ from src.algorithms.options_flip.config import OptionsFlipConfig
 from src.algorithms.options_flip.contracts import affordable_contracts, select_contract
 from src.algorithms.options_flip.indicators import (
     average_true_range,
+    directional_volume,
     ma_slope,
     moving_average,
     opening_range,
@@ -30,6 +31,7 @@ from src.algorithms.options_flip.excursion import (
     target_price,
 )
 from src.algorithms.options_flip.lifecycle import BIDDING, FLAT, HELD, plan_symbol
+from src.algorithms.options_flip.option_band import choose_band, option_daily_atr, prepare_option_bars
 from src.core.interfaces import MARKET_TZ
 from src.core.options import CALL, PUT, OptionContract, is_osi_symbol, osi_symbol, parse_osi
 
@@ -326,26 +328,32 @@ class TestLifecycle:
         kwargs.update(overrides)
         return plan_symbol("QQQM", **kwargs)
 
-    def test_a_held_position_gets_an_oco_bracket(self) -> None:
+    def test_a_held_position_gets_two_independent_orders(self) -> None:
+        """Target and stop rest as two separate orders, not one broker-side OCO/bracket -- the
+        lifecycle already re-derives what should be resting from the broker's positions every
+        run, which is the invariant an OCO would otherwise exist to hold."""
         outcome = self.held()
         assert outcome.state == HELD
-        request = outcome.orders[0].request
-        assert request.strategy == "oco"
-        assert len(request.children) == 2
-        kinds = {child.order_type for child in request.children}
-        assert kinds == {"limit", "stop"}
-        assert all(child.action == "sell" for child in request.children)
-        assert all(child.time_in_force == "gtc" for child in request.children)
+        requests = {order.key.split(":")[-1]: order.request for order in outcome.orders}
+        assert set(requests) == {"target", "stop"}
+        for request in requests.values():
+            assert request.strategy == "single" and not request.children
+            assert request.action == "sell" and request.time_in_force == "gtc"
+        assert requests["target"].order_type == "limit"
+        assert requests["stop"].order_type == "stop"
+
+    def _stop(self, outcome):
+        return next(o.request for o in outcome.orders if o.key.endswith(":stop"))
 
     def test_the_stop_is_anchored_to_the_fill_not_the_mark(self) -> None:
-        stop = next(c for c in self.held().orders[0].request.children if c.order_type == "stop")
+        stop = self._stop(self.held())
         # The fill was 2.00 and the cap is stop_loss_pct below it -- of the *premium*, not of the
         # underlying, and measured from the fill rather than from wherever the mark now sits.
         assert stop.stop_price == pytest.approx(2.00 * (1 - cfg().stop_loss_pct), abs=0.01)
 
     def test_the_stop_does_not_move_when_the_mark_rises(self) -> None:
-        low = next(c for c in self.held(memory={"mark": 2.10}).orders[0].request.children if c.order_type == "stop")
-        high = next(c for c in self.held(memory={"mark": 3.50}).orders[0].request.children if c.order_type == "stop")
+        low = self._stop(self.held(memory={"mark": 2.10}))
+        high = self._stop(self.held(memory={"mark": 3.50}))
         assert low.stop_price == high.stop_price
 
     def test_the_target_ratchets_up(self) -> None:
@@ -360,9 +368,16 @@ class TestLifecycle:
     def test_at_the_deadline_the_ask_converges_on_the_market(self) -> None:
         # The last fire of the final session: nothing of the walk-in is left, so the ask sits at
         # the mark rather than at a price the position is no longer allowed to wait for.
+        #
+        # ``max_hold_sessions``/``exit_patience`` are pinned here rather than left on the module
+        # default -- this is a mechanism test (does the deadline branch converge to the mark at
+        # all), and it should keep passing however the deployed tuning is set. It broke silently
+        # the first time the default ``exit_patience`` was tuned past the value this scenario
+        # was written against, which is exactly what pinning now prevents.
         outcome = self.held(
             memory={"sessions_held": 2, "mark": 2.40, "target": 0.0},
             session=session(fraction_remaining=0.0),
+            config=cfg(max_hold_sessions=2, exit_patience=0.7),
         )
         # The exact number follows the decay step, which is derived from the hold length; what
         # this pins is that the deadline ask sits between the mark and the undecayed target.
@@ -656,6 +671,23 @@ class TestIndicators:
         """A name below 'the 50-day average' computed from 30 bars is a data gap, not a fact."""
         assert moving_average(pd.Series([1.0] * 30), 50) == 0.0
 
+    def test_directional_volume_splits_by_each_bars_own_open_to_close(self) -> None:
+        """No tick data exists, so a bar that closed above its own open votes 'buy'."""
+        frame = pd.DataFrame({
+            "open": [10.0, 10.0, 10.0], "close": [10.5, 9.5, 10.0],
+            "volume": [7.0, 3.0, 5.0],
+        })
+        split = directional_volume(frame)
+        assert split["buy_volume"] == pytest.approx(7.0)
+        assert split["sell_volume"] == pytest.approx(3.0)
+        # A flat bar's volume counts toward neither, so the denominator is buy + sell only.
+        assert split["imbalance"] == pytest.approx(0.4)
+
+    def test_directional_volume_with_no_volume_column_is_neutral(self) -> None:
+        empty = pd.DataFrame({"open": [], "close": []})
+        assert directional_volume(empty) == {"buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
+        assert directional_volume(None) == {"buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
+
 
 class TestScenarioPricing:
     """Delta alone prices a small move and nothing else."""
@@ -692,7 +724,7 @@ class TestScenarioPricing:
 class TestStopDisabled:
     """A long call cannot lose more than its premium, so the unit is the loss cap."""
 
-    def _held(self, oco=True, **over):
+    def _held(self, **over):
         memory = {"state": HELD, "direction": CALL, "contracts": 1, "fill_price": 2.00,
                   "bid": 2.00, "mark": 2.20, "delta": 0.45, "sessions_held": 0}
         memory.update(over.pop("memory", {}))
@@ -701,29 +733,24 @@ class TestStopDisabled:
             direction=CALL, contract=None, contracts=1, underlying_now=100.0,
             entry_target=0.0, exit_target=102.0, checks=[],
             config=cfg(**over), session={"fraction_remaining": 0.5, "market_day": "2026-02-02"},
-            oco=oco,
         )
 
     def test_no_stop_order_ever_reaches_the_exchange(self) -> None:
-        """Zero means no stop leg is constructed on any path, OCO or not."""
-        for oco in (True, False):
-            outcome = self._held(stop_loss_pct=0.0, oco=oco)
-            legs = []
-            for order in outcome.orders:
-                legs.append(order.request)
-                legs.extend(order.request.children or [])
-            assert all(leg.order_type == "limit" for leg in legs), legs
-            assert all(not leg.stop_price for leg in legs), legs
-            assert [o.key for o in outcome.orders] == ["QQQM:target"]
+        """Zero means no stop leg is constructed at all."""
+        outcome = self._held(stop_loss_pct=0.0)
+        legs = [order.request for order in outcome.orders]
+        assert all(leg.order_type == "limit" for leg in legs), legs
+        assert all(not leg.stop_price for leg in legs), legs
+        assert [o.key for o in outcome.orders] == ["QQQM:target"]
 
-    def test_the_shapes_do_not_share_a_key(self) -> None:
-        """So turning the stop off cancels the bracket rather than editing it in place."""
-        assert self._held(stop_loss_pct=0.0).orders[0].key == "QQQM:target"
-        assert self._held(stop_loss_pct=0.10).orders[0].key == "QQQM:bracket"
+    def test_the_stop_key_appears_and_disappears_with_the_setting(self) -> None:
+        """Turning the stop off drops the ``:stop`` key entirely, which the reconciler reads as
+        'no longer wanted' -- it cancels the resting stop rather than editing it in place. The
+        target's own key never changes either way, since there is no longer a second shape."""
+        assert [o.key for o in self._held(stop_loss_pct=0.0).orders] == ["QQQM:target"]
+        assert {o.key for o in self._held(stop_loss_pct=0.10).orders} == {"QQQM:target", "QQQM:stop"}
 
     def test_no_stop_rests_the_target_alone(self) -> None:
-        """A bracket with one leg is not a bracket, and an OCO around a single order is a shape
-        the venue would hold pointlessly."""
         outcome = self._held(stop_loss_pct=0.0)
         assert len(outcome.orders) == 1
         request = outcome.orders[0].request
@@ -731,11 +758,13 @@ class TestStopDisabled:
         assert request.action == "sell" and request.order_type == "limit"
         assert not request.children
 
-    def test_a_live_stop_still_rests_the_pair(self) -> None:
+    def test_a_live_stop_rests_as_two_independent_orders(self) -> None:
         outcome = self._held(stop_loss_pct=0.10)
-        request = outcome.orders[0].request
-        assert request.strategy == "oco"
-        assert {c.order_type for c in request.children} == {"limit", "stop"}
+        requests = {order.key.split(":")[-1]: order.request for order in outcome.orders}
+        assert set(requests) == {"target", "stop"}
+        assert requests["target"].order_type == "limit"
+        assert requests["stop"].order_type == "stop"
+        assert requests["target"].strategy == "single" and requests["stop"].strategy == "single"
 
     def test_the_deck_says_the_premium_is_the_cap(self) -> None:
         outcome = self._held(stop_loss_pct=0.0)
@@ -764,7 +793,7 @@ class TestExitTargetIsALevel:
             entry_target=0.0,
             exit_target=104.0,          # a level: 4 dollars above spot
             checks=[], config=cfg(stop_loss_pct=0.0),
-            session={"fraction_remaining": 0.5, "market_day": "2026-02-02"}, oco=True,
+            session={"fraction_remaining": 0.5, "market_day": "2026-02-02"},
         )
         ask = float(outcome.orders[0].request.limit_price)
         # 4 dollars of underlying at a 0.50 delta is 2.00 of premium on top of the 2.20 mark;
@@ -779,7 +808,7 @@ class TestExitTargetIsALevel:
             held_contract="QQQM  260220C00100000", direction=CALL, contract=None, contracts=1,
             underlying_now=100.0, entry_target=0.0, exit_target=0.0, checks=[],
             config=cfg(stop_loss_pct=0.0),
-            session={"fraction_remaining": 0.5, "market_day": "2026-02-02"}, oco=True,
+            session={"fraction_remaining": 0.5, "market_day": "2026-02-02"},
         )
         for order in outcome.orders:
             assert float(order.request.limit_price or 0) < 100.0
@@ -809,6 +838,24 @@ class TestEveryConfiguredSymbolGetsARow:
         assert "max_candidates" not in {f.name for f in fields(OptionsFlipConfig())}
 
 
+class TestOptionBandFeedsTheEntry:
+    """The band computed for the deck must actually reach the resting bid, not just the sell side.
+
+    Measured on real Sep-18 option history (``tools/options_flip_contract_backtest.py --band``),
+    the option band beat the static delta translation by +5.8pp mean return on the sell side --
+    the reason to wire it into the entry too. A prior version computed ``band`` purely as a deck
+    diagnostic and never passed it into ``plan_symbol``, so the entry silently stayed on the
+    cruder translation regardless of how good the contract's own history was.
+    """
+
+    def test_plan_one_passes_the_bands_entry_as_entry_premium(self) -> None:
+        import inspect
+        from src.algorithms.options_flip.algorithm import OptionsFlipAlgorithm
+
+        source = inspect.getsource(OptionsFlipAlgorithm._plan_one)
+        assert "entry_premium=" in source
+
+
 class TestAsymmetricPatience:
     """The two sides face different risks, so they concede on different curves."""
 
@@ -834,9 +881,16 @@ class TestAsymmetricPatience:
         assert all(a >= b for a, b in zip(asked, asked[1:])), "it must only ever give ground"
 
     def test_the_two_sides_are_configured_independently(self) -> None:
+        # Was ``entry_patience > 1.0 > exit_patience`` -- exit deliberately impatient, entry
+        # deliberately patient. A combo sweep over August (see
+        # ``tools/options_flip_config_combo_sweep.py``) found holding the exit firmer, not
+        # conceding it faster, was the single most reliable lever measured ($230 vs $89 solo,
+        # $484 across a real 17-trade sample when combined with a longer hold): both sides are
+        # patient now, by tuning rather than by original design. What this test still pins is
+        # only that they are set apart, not which one is larger -- if a future month's data
+        # argues the old asymmetry back, that assumption is the one to revisit.
         c = OptionsFlipConfig()
         assert c.entry_patience != c.exit_patience
-        assert c.entry_patience > 1.0 > c.exit_patience
 
 
 class TestRunHorizon:
@@ -955,3 +1009,134 @@ def test_the_tune_page_order_matches_the_config_dataclass() -> None:
     documented = list(EXPLAINERS["options_flip"]["parameters"])
     declared = [f.name for f in _fields(OptionsFlipConfig())]
     assert documented == declared
+
+
+def _option_bars(sessions: dict) -> pd.DataFrame:
+    """Raw per-session 5m option OHLC bars, keyed on ``timestamp`` like the Schwab fetch.
+
+    ``sessions`` maps an ISO date to ``[(minute, open, close), ...]``; high/low are derived so a
+    session that dips then runs reads the way real option bars do.
+    """
+    rows = []
+    for day, bars in sessions.items():
+        for minute, open_, close in bars:
+            low, high = min(open_, close), max(open_, close)
+            rows.append({
+                "timestamp": pd.Timestamp(f"{day} {minute // 60:02d}:{minute % 60:02d}",
+                                          tz=MARKET_TZ).tz_convert("UTC"),
+                "open": open_, "high": high, "low": low, "close": close, "volume": 10,
+            })
+    return pd.DataFrame(rows)
+
+
+def _dip_then_run_sessions(n: int, dip: float = 0.04, run: float = 0.03, base: float = 10.0):
+    """``n`` sessions that each dip below the open and then rally above it, in one session."""
+    sessions = {}
+    for i in range(n):
+        day = pd.Timestamp("2026-02-01") + pd.Timedelta(days=i)
+        open_ = base
+        low = open_ * (1 - dip)
+        high = open_ * (1 + run)
+        sessions[str(day.date())] = [
+            (585, open_, high), (600, high, low), (615, low, open_ * (1 + run)),
+            (660, open_ * (1 + run), open_ * (1 + run)),
+        ]
+    return sessions
+
+
+class TestOptionBand:
+    """Predicting the chosen contract's low and run from its own premium history."""
+
+    def test_prepare_option_bars_adds_market_time_columns(self) -> None:
+        frame = _option_bars(_dip_then_run_sessions(3))
+        bars = prepare_option_bars(frame)
+        assert {"ts", "minute", "day", "open", "high", "low", "close"} <= set(bars.columns)
+        assert bars["minute"].iloc[0] == 585
+        assert bars["ts"].dt.tz is not None
+
+    def test_daily_atr_is_computed_in_premium_from_the_contracts_own_bars(self) -> None:
+        frame = _option_bars(_dip_then_run_sessions(20, dip=0.04, run=0.03, base=10.0))
+        bars = prepare_option_bars(frame)
+        atr = option_daily_atr(bars, window=14)
+        assert atr > 0.0
+
+    def test_a_sane_option_band_is_preferred_over_the_translation(self) -> None:
+        frame = _option_bars(_dip_then_run_sessions(30, dip=0.06, run=0.08, base=10.0))
+        bars = prepare_option_bars(frame)
+        mark = 10.0
+        from src.algorithms.options_flip.option_band import _sane
+        band = choose_band(
+            bars, minute=600, option_mark=mark, session_open=mark, config=cfg(),
+            max_hold=1,
+            underlying_translation={"entry": 9.5, "target": 11.0}, contract=contract(),
+            underlying_now=100.0,
+        )
+        assert band["source"] == "option"
+        assert band["entry"] <= mark < band["target"]
+        assert _sane(band, mark)
+
+    def test_absurd_target_then_falls_back_to_the_translation(self) -> None:
+        # A target six times the premium is a thin-sample tail, not a forecast: it must not be
+        # rested as an order when a sane underlying translation exists.
+        band = choose_band(
+            None, minute=600, option_mark=10.0, session_open=10.0, config=cfg(),
+            max_hold=1,
+            underlying_translation={"entry": 9.5, "target": 11.0}, contract=contract(),
+            underlying_now=100.0,
+        )
+        assert band["source"] == "underlying"
+        assert band["target"] == pytest.approx(11.0)
+        assert band["entry"] == pytest.approx(9.5)
+
+    def test_no_history_and_no_translation_returns_an_empty_band(self) -> None:
+        band = choose_band(
+            None, minute=600, option_mark=10.0, session_open=10.0, config=cfg(),
+            max_hold=1, underlying_translation=None, contract=None, underlying_now=100.0,
+        )
+        assert band["entry"] == 0.0 and band["source"] == "none"
+
+
+class TestSellBand:
+    """The sales side re-predicts each run and sells at the mark when the band gives nothing."""
+
+    def held(self, **overrides):
+        memory = {
+            "state": HELD, "direction": CALL, "contracts": 1, "fill_price": 2.00,
+            "mark": 2.40, "delta": 0.45, "sessions_held": 0,
+            **overrides.pop("memory", {}),
+        }
+        kwargs = dict(
+            memory=memory, held_contract="QQQM 260220C00100000", direction=CALL,
+            contract=None, contracts=1, underlying_now=101.0, entry_target=0.0,
+            exit_target=103.0, checks=[], config=cfg(), session=session(),
+        )
+        kwargs.update(overrides)
+        return plan_symbol("QQQM", **kwargs)
+
+    def _target(self, outcome) -> float:
+        leg = next(o for o in outcome.orders if (o.request.children or [o.request])[0].order_type == "limit")
+        request = leg.request
+        child = next((c for c in request.children if c.order_type == "limit"), request)
+        return float(child.limit_price)
+
+    def test_a_sane_sell_band_ratchets_toward_it(self) -> None:
+        # A target premium comfortably above the mark is asked at the ratchet, not given away.
+        outcome = self.held(memory={"target": 2.50}, target_premium=3.00)
+        assert outcome.state == HELD
+        assert 2.40 < self._target(outcome) <= 3.00
+
+    def test_the_bull_gate_closed_and_the_position_reads_at_the_mark(self) -> None:
+        # `sell_ok=False` means "sell at the mark" -- the bracket asks the market's own price
+        # rather than a target the closed gate no longer endorses.
+        outcome = self.held(memory={"target": 3.00}, sell_ok=False)
+        assert self._target(outcome) == pytest.approx(2.40, abs=0.02)
+
+    def test_a_target_at_or_below_the_mark_also_reads_at_the_mark(self) -> None:
+        outcome = self.held(memory={"target": 3.00}, target_premium=2.20)
+        assert self._target(outcome) == pytest.approx(2.40, abs=0.02)
+
+    def test_no_sell_band_keeps_the_underlying_translation(self) -> None:
+        # Reverted to the existing behaviour: translate the underlying exit target.
+        outcome = self.held(memory={"target": 2.50}, target_premium=None, sell_ok=True)
+        target = self._target(outcome)
+        assert target > 2.40  # a sane translation still reaches for a profit

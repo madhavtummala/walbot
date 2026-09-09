@@ -1,0 +1,293 @@
+/* =======================================================================================
+   Dark theme.
+   Scoped to html[data-theme="dark"] so the light theme in app.css is left completely
+   untouched. The sidebar toggle in index.html sets this attribute (see app.js), and the
+   choice is persisted in localStorage, defaulting to the OS preference on first visit.
+   ======================================================================================= */
+
+html[data-theme="dark"] {
+  --bg-a: #0b1220;
+  --bg-b: #111827;
+  --pnl-tint: rgba(99, 102, 241, 0.12);
+  --panel: rgba(30, 41, 59, 0.62);
+  --ink: #e5e7eb;
+  --muted: #94a3b8;
+  --line: rgba(148, 163, 184, 0.18);
+  --good: #34d399;
+  --bad: #fb7185;
+  --shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+}
+
+html[data-theme="dark"] {
+  background: #0b1220;
+}
+
+html[data-theme="dark"] body {
+  color-scheme: dark;
+  background:
+    linear-gradient(135deg, rgba(99, 102, 241, 0.1), transparent 48%),
+    linear-gradient(132deg, #0b1220, #131b2e 45%, #111827),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.02) 0 1px, transparent 1px 34px);
+}
+
+html[data-theme="dark"] body.dca-off {
+  --bg-a: #0d1117;
+  --bg-b: #161b22;
+}
+
+/* -- translucent surfaces -------------------------------------------------------------- */
+
+html[data-theme="dark"] .card {
+  background: rgba(30, 41, 59, 0.62);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.35);
+}
+
+html[data-theme="dark"] .ctl {
+  background: rgba(30, 41, 59, 0.6);
+  border-color: var(--line);
+}
+
+html[data-theme="dark"] .ctl:hover:not(:disabled) {
+  background: rgba(51, 65, 85, 0.7);
+  border-color: rgba(148, 163, 184, 0.32);
+}
+
+html[data-theme="dark"] #tradingAccount,
+html[data-theme="dark"] #algorithmSelect {
+  background: rgba(30, 41, 59, 0.6);
+}
+
+html[data-theme="dark"] button {
+  background: rgba(30, 41, 59, 0.6);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.3);
+}
+
+html[data-theme="dark"] button:hover {
+  background: rgba(51, 65, 85, 0.7);
+  border-color: rgba(52, 87, 213, 0.5);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.4);
+}
+
+html[data-theme="dark"] .configField input,
+html[data-theme="dark"] .configField textarea {
+  background: rgba(8, 12, 22, 0.5);
+}
+
+html[data-theme="dark"] .tuneBody .configField {
+  background: rgba(30, 41, 59, 0.5);
+}
+
+html[data-theme="dark"] .strategySignals li {
+  background: rgba(51, 65, 85, 0.55);
+}
+
+html[data-theme="dark"] .signalSummary p,
+html[data-theme="dark"] .signalRows article {
+  background: rgba(30, 41, 59, 0.5);
+}
+
+html[data-theme="dark"] .signalRows article.signalFallback {
+  background: rgba(30, 41, 59, 0.5);
+}
+
+html[data-theme="dark"] .universeProposalHeader,
+html[data-theme="dark"] .universeProposalRow {
+  background: rgba(30, 41, 59, 0.46);
+}
+
+html[data-theme="dark"] .sidebar {
+  background: rgba(15, 23, 42, 0.72);
+}
+
+html[data-theme="dark"] .navToggle {
+  background: rgba(30, 41, 59, 0.92);
+}
+
+html[data-theme="dark"] .pill,
+html[data-theme="dark"] .chip,
+html[data-theme="dark"] .deployChip,
+html[data-theme="dark"] .metric {
+  background: rgba(51, 65, 85, 0.55);
+}
+
+html[data-theme="dark"] .statBlock {
+  background: rgba(30, 41, 59, 0.58);
+}
+
+html[data-theme="dark"] .tableWrap.is-scroll thead th {
+  background: rgba(15, 23, 42, 0.97);
+}
+
+html[data-theme="dark"] .metricPill,
+html[data-theme="dark"] .strategyMeta span,
+html[data-theme="dark"] .side {
+  background: rgba(148, 163, 184, 0.16);
+}
+
+/* -- hover / active overlays (inverted from dark-on-white to white-on-dark) ------------ */
+
+html[data-theme="dark"] .navItem:hover,
+html[data-theme="dark"] .navHealth:not(.is-muted):hover,
+html[data-theme="dark"] .themeToggle:hover,
+html[data-theme="dark"] .signalRow:hover td,
+html[data-theme="dark"] .signalRow:focus-visible td,
+html[data-theme="dark"] .chip.is-link:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+html[data-theme="dark"] .actionBadge.is-hold {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+html[data-theme="dark"] .navBadge {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+html[data-theme="dark"] .navItem.is-active .navBadge {
+  background: rgba(0, 0, 0, 0.22);
+}
+
+html[data-theme="dark"] .navItem.is-active {
+  background: #e5e7eb;
+  color: #0b1220;
+}
+
+html[data-theme="dark"] .navItem.is-active .navStat,
+html[data-theme="dark"] .navItem.is-active .gain,
+html[data-theme="dark"] .navItem.is-active .loss {
+  color: #0b1220;
+}
+
+html[data-theme="dark"] .deployChip:hover {
+  border-color: rgba(148, 163, 184, 0.32);
+}
+
+html[data-theme="dark"] .statusDot.is-off {
+  background: rgba(148, 163, 184, 0.4);
+}
+
+html[data-theme="dark"] .formula {
+  background: rgba(255, 255, 255, 0.045);
+}
+
+html[data-theme="dark"] .fieldEffect {
+  color: rgba(229, 231, 235, 0.55);
+}
+
+/* -- accent-tinted status surfaces ----------------------------------------------------- */
+
+html[data-theme="dark"] .tone-0 {
+  background: linear-gradient(135deg, rgba(52, 211, 153, 0.18), rgba(30, 41, 59, 0.6));
+}
+
+html[data-theme="dark"] .tone-1 {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.18), rgba(30, 41, 59, 0.6));
+}
+
+html[data-theme="dark"] .tone-2 {
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.16), rgba(30, 41, 59, 0.6));
+}
+
+html[data-theme="dark"] .tone-3 {
+  background: linear-gradient(135deg, rgba(45, 212, 191, 0.16), rgba(30, 41, 59, 0.6));
+}
+
+html[data-theme="dark"] .tone-4 {
+  background: linear-gradient(135deg, rgba(251, 113, 133, 0.14), rgba(30, 41, 59, 0.6));
+}
+
+html[data-theme="dark"] .actionBadge.is-enter { color: #34d399; background: rgba(52, 211, 153, 0.16); }
+html[data-theme="dark"] .actionBadge.is-exit { color: #fb7185; background: rgba(251, 113, 133, 0.16); }
+html[data-theme="dark"] .actionBadge.is-blocked { color: #fbbf24; background: rgba(251, 191, 36, 0.16); }
+
+html[data-theme="dark"] .signalRow.is-enter td,
+html[data-theme="dark"] .signalRow.is-exit td,
+html[data-theme="dark"] .signalRow.is-open td,
+html[data-theme="dark"] .signalDetailRow > td {
+  background: rgba(99, 102, 241, 0.12);
+}
+
+html[data-theme="dark"] .signalDetailRow > td {
+  box-shadow: inset 2px 0 0 rgba(99, 102, 241, 0.5);
+}
+
+html[data-theme="dark"] .pill.is-live {
+  border-color: rgba(52, 211, 153, 0.4);
+  background: rgba(52, 211, 153, 0.14);
+  color: #34d399;
+}
+
+html[data-theme="dark"] .pill.is-idle {
+  border-color: rgba(251, 191, 36, 0.36);
+  background: rgba(251, 191, 36, 0.14);
+  color: #fbbf24;
+}
+
+html[data-theme="dark"] .pill.is-off {
+  border-color: rgba(251, 113, 133, 0.34);
+  background: rgba(251, 113, 133, 0.14);
+  color: #fb7185;
+}
+
+html[data-theme="dark"] .side.is-buy {
+  background: rgba(52, 211, 153, 0.16);
+  color: #34d399;
+}
+
+html[data-theme="dark"] .side.is-sell {
+  background: rgba(251, 113, 133, 0.16);
+  color: #fb7185;
+}
+
+/* -- chart / svg ----------------------------------------------------------------------- */
+
+html[data-theme="dark"] .axis-line {
+  stroke: rgba(148, 163, 184, 0.2);
+}
+
+html[data-theme="dark"] .chart-crosshair {
+  stroke: rgba(148, 163, 184, 0.45);
+}
+
+html[data-theme="dark"] .chart-tooltip-bg {
+  fill: rgba(30, 41, 59, 0.96);
+  stroke: rgba(148, 163, 184, 0.25);
+}
+
+html[data-theme="dark"] .chart-axis-value-bg {
+  fill: rgba(229, 231, 235, 0.95);
+}
+
+html[data-theme="dark"] .chart-axis-value {
+  fill: #0b1220;
+}
+
+html[data-theme="dark"] .chart-hover-point {
+  fill: #0b1220;
+}
+
+html[data-theme="dark"] .trade-marker {
+  stroke: rgba(15, 23, 42, 0.98);
+}
+
+html[data-theme="dark"] .bucket-blob {
+  filter: drop-shadow(0 28px 48px rgba(0, 0, 0, 0.45));
+}
+
+html[data-theme="dark"] .asset circle {
+  stroke: rgba(15, 23, 42, 0.9);
+  filter: drop-shadow(0 17px 27px rgba(0, 0, 0, 0.4));
+}
+
+html[data-theme="dark"] .asset:hover circle,
+html[data-theme="dark"] .asset.dragging circle,
+html[data-theme="dark"] .asset.pinching circle {
+  filter: drop-shadow(0 24px 38px rgba(0, 0, 0, 0.5));
+}
+
+/* -- toast ----------------------------------------------------------------------------- */
+
+html[data-theme="dark"] #toast {
+  color: #0b1220;
+  background: #e5e7eb;
+}

@@ -974,6 +974,10 @@ body.dca-off .asset.live circle {
 }
 
 #symbolEntry {
+  /* Shown only while drafting on the bubble board, and hidden (no ``.show``) everywhere
+     else. ``display: none`` when hidden keeps it out of the layout: it otherwise keeps its
+     static position at the foot of the page and hands every other page a phantom scrollbar. */
+  display: none;
   position: absolute;
   z-index: 20;
   width: 24px;
@@ -997,6 +1001,7 @@ body.dca-off .asset.live circle {
 }
 
 #symbolEntry.show {
+  display: block;
   opacity: 1;
   pointer-events: auto;
   /* make the focused input visible only as a caret (text remains transparent) */
@@ -1015,6 +1020,9 @@ body.dca-off .asset.live circle {
    board would be showing the reader the same number twice. Sits over that label rather than
    the bubble's centre. */
 #amountEntry {
+  /* Hidden unless an edit is open; ``display: none`` then keeps this out of the layout so
+     it cannot stretch a page it is not on (see #symbolEntry). */
+  display: none;
   position: absolute;
   z-index: 20;
   width: 52px;
@@ -1038,6 +1046,7 @@ body.dca-off .asset.live circle {
 }
 
 #amountEntry.show {
+  display: block;
   visibility: visible;
   opacity: 1;
   pointer-events: auto;
@@ -1528,6 +1537,44 @@ h2 {
   background: rgba(17, 24, 39, 0.25);
 }
 
+.themeToggle {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  min-height: 0;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  text-align: left;
+  cursor: pointer;
+}
+
+.themeToggle:hover {
+  background: rgba(17, 24, 39, 0.05);
+}
+
+.themeToggleIcon {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 35% 35%, transparent 0 42%, currentColor 43% 58%, transparent 59%),
+    rgba(17, 24, 39, 0.06);
+}
+
+.themeToggleLabel {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .navToggle {
   display: none;
   position: fixed;
@@ -1653,35 +1700,84 @@ h2 {
   gap: 14px;
 }
 
-.cardGrid {
+/* The Overview's two rows: "How it works" and the facts card share the first (the prose
+   spans the width, facts keep a comfortable floor on the right), and the order journal sits
+   alone on a full-width row beneath -- it only grows with activity, so it stays out of the
+   way rather than squeezing the pair above it. */
+.overviewGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  /* Cards size to their content: a stretched card leaves dead space under a short table
-     while the one beside it scrolls, which reads as a rendering bug rather than a choice. */
-  align-items: start;
+  grid-template-areas: "how glance" "orders orders";
+  grid-template-columns: minmax(0, 1fr) minmax(240px, auto);
+  /* Stretched, not "start": "How it works" prose runs a different length per algorithm (four
+     lines on Bursty DCA, eight on Rally Rotation) while "At a glance" is always the same four
+     rows, so with "start" the shorter card floated at its own height and the row's bottom
+     edge never lined up. Stretching both to the row's height leaves blank padding under the
+     shorter card's content instead -- a plain box, not a jagged edge. */
+  align-items: stretch;
   gap: 14px;
 }
 
-/* The prose card on an algorithm's Overview shares the auto-fit row with the facts card, which
-   wrapped every sentence at half the page for no gain -- spanning the grid keeps each line one
-   length regardless of how the neighbour sizes. */
-.cardGrid > .card.is-wide {
-  grid-column: 1 / -1;
+.overviewGrid > .card.overviewHow {
+  grid-area: how;
+  min-width: 0;
+}
+
+.overviewGrid > .card.overviewGlance {
+  grid-area: glance;
+}
+
+.overviewGrid > .card.overviewOrders {
+  grid-area: orders;
+  min-width: 0;
 }
 
 /* Account page: positions sit above dividends in the left column, and the order feed takes
-   the remaining width so its wider rows never squeeze. */
+   the remaining width so its wider rows never squeeze. Stretched (not "start") so the lone
+   card on the right grows to match the two-panel stack on the left -- with "start" a quiet
+   account showing "No orders yet" left a card a few lines tall floating beside a much taller
+   stack, with a slab of empty page beneath it. See ".accountLayout > .card" below for how
+   that card fills the height it is given. */
 .accountLayout {
   display: grid;
   grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
-  align-items: start;
+  align-items: stretch;
   gap: 14px;
+}
+
+/* The right column's card (only child of .accountLayout that is not a stack) laid out as a
+   column so its table can grow into the height stretch gives it, instead of sizing to its
+   own content and leaving the rest of the card blank. */
+.accountLayout > .card {
+  display: flex;
+  flex-direction: column;
+}
+
+.accountLayout > .card .tableWrap.is-scroll {
+  flex: 1;
+  /* More specific than ".accountLayout .tableWrap.is-scroll" below, so it wins: the cap
+     that rule sets exists to keep the left *stack* of two panels within one screen, and does
+     not apply here -- this card is already bounded by the stack's own height. */
+  max-height: none;
+}
+
+.accountLayout > .card .emptyState {
+  flex: 1;
+  display: flex;
+  align-items: flex-start;
 }
 
 .accountStack {
   display: grid;
   gap: 14px;
   align-items: start;
+}
+
+/* The account page stacks two scrollable panels (positions and dividends) in its left column,
+   so a page-wide list cap would let the pair outgrow the viewport and put the *page* itself
+   on a scrollbar -- the thing the inner scroll exists to prevent. Cap each panel to a third
+   of the window height so the stack plus a dividend row that stays short all fit one screen. */
+.accountLayout .tableWrap.is-scroll {
+  max-height: min(30vh, 320px);
 }
 
 .card {
@@ -2308,7 +2404,8 @@ h2 {
     padding: 58px 12px 32px;
   }
 
-  .cardGrid {
+  .overviewGrid {
+    grid-template-areas: "how" "glance" "orders";
     grid-template-columns: minmax(0, 1fr);
   }
 

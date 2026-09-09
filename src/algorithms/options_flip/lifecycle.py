@@ -37,10 +37,9 @@ BIDDING = "bidding"
 HELD = "held"
 
 #: Suffixes for the reconciler's order keys. The key names the *role* an order plays for a
-#: symbol, so re-pricing across a session is one order rather than a dozen.
+#: symbol, so re-pricing across a session is one order rather than a dozen. Target and stop are
+#: always two independent orders -- see ``_bracket_orders`` -- never one broker-side bracket.
 ENTRY = "entry"
-BRACKET = "bracket"
-#: Used only where the broker cannot hold an OCO, so the two legs are separate orders.
 TARGET = "target"
 STOP = "stop"
 
@@ -76,7 +75,9 @@ def plan_symbol(
     checks: list[Check],
     config: Any,
     session: dict[str, Any],
-    oco: bool = True,
+    entry_premium: float | None = None,
+    target_premium: float | None = None,
+    sell_ok: bool = True,
 ) -> SymbolPlan:
     """The orders that should be resting for ``symbol`` right now.
 
@@ -84,11 +85,18 @@ def plan_symbol(
     empty when flat -- the authority on which state we are in. ``session`` carries the run's
     market-time facts (``fraction_remaining``, ``market_day``) so
     this function needs no clock.
+
+    ``entry_premium`` and ``target_premium`` are the option-band prediction in premium dollars
+    (see :mod:`.option_band`), supplied by the caller when the chosen contract has a usable price
+    history of its own. When they are ``None`` the caller has not yet collected that history, and
+    ``entry_target``/``exit_target`` (underlying levels) are translated through delta as the
+    cold-start fallback. ``sell_ok`` is the bull-run gate, re-read on the sales side: when it has
+    closed, a held position is sold at the mark rather than asked to keep waiting for a target.
     """
     if held_contract:
         return _held(
             symbol, memory, held_contract, contracts, underlying_now, exit_target,
-            checks, config, session, oco,
+            checks, config, session, target_premium=target_premium, sell_ok=sell_ok,
         )
     if memory.get("state") == BIDDING and not held_contract and session.get("day_changed"):
         # A bid that survived the night is not re-priced, it is abandoned: the excursion budget
@@ -96,7 +104,8 @@ def plan_symbol(
         logger.info("[%s] Options Flip abandoning yesterday's unfilled bid", symbol)
         memory = {}
     return _flat_or_bidding(
-        symbol, memory, direction, contract, contracts, underlying_now, entry_target, checks, config, session
+        symbol, memory, direction, contract, contracts, underlying_now, entry_target, checks, config, session,
+        entry_premium=entry_premium,
     )
 
 
@@ -111,6 +120,7 @@ def _flat_or_bidding(
     checks: list[Check],
     config: Any,
     session: dict[str, Any],
+    entry_premium: float | None = None,
 ) -> SymbolPlan:
     """No position: bid for one, or stand down."""
     if not direction or contract is None or contracts <= 0:
@@ -130,7 +140,8 @@ def _flat_or_bidding(
     floor_price = (
         option_price_for(entry_target, underlying_now=underlying_now,
                          option_mark=contract.midpoint, delta=contract.delta)
-        if entry_target > 0 else contract.midpoint
+        if (entry_target > 0 and entry_premium is None)
+        else (entry_premium if (entry_premium and entry_premium > 0) else contract.midpoint)
     )
     # Soft ratchet. The limit starts at the pullback level and gives ground toward the mark as
     # the session runs out, on a curve ``entry_patience`` shapes. It is deliberately the patient
@@ -207,7 +218,8 @@ def _held(
     checks: list[Check],
     config: Any,
     session: dict[str, Any],
-    oco: bool,
+    target_premium: float | None = None,
+    sell_ok: bool = True,
 ) -> SymbolPlan:
     """Holding a contract: maintain the bracket, ratchet the target, honour the deadline."""
     quantity = max(int(memory.get("contracts", contracts) or contracts), 1)
@@ -259,17 +271,38 @@ def _held(
             f"Holding {held_contract} — unpriced this run",
         )
 
-    modelled = _target_premium(mark, underlying_now, exit_target, direction, memory)
     entry_price = float(memory.get("bid", 0.0) or 0.0) or fill_price or mark
-    gain = max(modelled - entry_price, 0.0)
-    # Soft ratchet on the sell side, mirroring the entry's. ``exit_patience`` below 1 concedes
-    # early, which is the intended default: a position that reaches its deadline unsold is sold
-    # at whatever the market offers, and with the stop disabled the deadline is the only thing
-    # that ends a losing trade. Conceding early is cheaper than conceding at gunpoint.
-    elapsed = min(held_days / max(int(config.max_hold_sessions), 1), 1.0)
-    conceded = elapsed ** max(float(getattr(config, "exit_patience", 1.0)), 0.01)
-    asked = max(float(config.exit_gain_share) * (1.0 - conceded), 0.0)
-    target = round(max(entry_price + asked * gain, 0.01), 2)
+    # The bull-run gate is re-read on the sales side, and the sell band is re-predicted every run.
+    # When the gate has closed, or the freshly predicted target lies at or below the current mark,
+    # the position is sold at the mark rather than left waiting for a target the market is no
+    # longer expected to pay. Only a target above the mark is worth ratcheting toward.
+    if not sell_ok:
+        modelled = target = mark
+        asked = 0.0
+        gain = 0.0
+        rate = "bull gate closed"
+    elif target_premium is not None and (target_premium <= 0 or target_premium <= mark):
+        modelled = target = mark
+        asked = 0.0
+        gain = 0.0
+        rate = "band target at/below the mark"
+    else:
+        modelled = (
+            target_premium if target_premium and target_premium > 0
+            else _target_premium(mark, underlying_now, exit_target, direction, memory)
+        )
+        gain = max(modelled - entry_price, 0.0)
+        # Soft ratchet on the sell side, mirroring the entry's. ``exit_patience`` below 1 concedes
+        # early, which is the intended default: a position that reaches its deadline unsold is sold
+        # at whatever the market offers, and with the stop disabled the deadline is the only thing
+        # that ends a losing trade. Conceding early is cheaper than conceding at gunpoint. The
+        # "max_hold factor" the user asked for is exactly this: the prediction is dialled toward
+        # the mark as the sessions run out.
+        elapsed = min(held_days / max(int(config.max_hold_sessions), 1), 1.0)
+        conceded = elapsed ** max(float(getattr(config, "exit_patience", 1.0)), 0.01)
+        asked = max(float(config.exit_gain_share) * (1.0 - conceded), 0.0)
+        target = round(max(entry_price + asked * gain, 0.01), 2)
+        rate = None
 
     if deadline:
         # Out of time. Converge on the market across what is left of the session, so the ask is
@@ -296,7 +329,7 @@ def _held(
             f"Holding {held_contract} — unpriced this run",
         )
 
-    orders = _bracket_orders(symbol, held_contract, quantity, target, stop, config, oco=oco)
+    orders = _bracket_orders(symbol, held_contract, quantity, target, stop, config)
 
     unrealised = (mark / fill_price - 1.0) if fill_price > 0 and mark > 0 else 0.0
     checks = checks + [
@@ -308,18 +341,18 @@ def _held(
                 if fill_price > 0 else f"${target:.2f}"
             ),
             limit=(
-                f"asking {asked:.0%} of the modelled gain, session {held_days + 1} of "
-                f"{int(config.max_hold_sessions)} (patience "
-                f"{float(getattr(config, 'exit_patience', 1.0)):.1f})"
-                if not deadline else "deadline — converging on the market"
+                (f"asking {asked:.0%} of the modelled gain, session {held_days + 1} of "
+                 f"{int(config.max_hold_sessions)} (patience "
+                 f"{float(getattr(config, 'exit_patience', 1.0)):.1f})"
+                 if not deadline and rate is None else
+                 (f"sold at the mark — {rate}" if rate else "deadline — converging on the market"))
             ),
         ),
         Check(
             label="Protective stop",
             ok=True,
             value=(
-                (f"${stop:.2f} at the exchange" if oco
-                 else f"${stop:.2f} at the exchange, as a separate order")
+                f"${stop:.2f} at the exchange, as a separate order"
                 if stop > 0 else
                 f"none — the {quantity}-contract premium is the loss cap"
             ),
@@ -386,52 +419,40 @@ def _sell_leg(contract: str, quantity: int, **kwargs: Any) -> OrderRequest:
 
 
 def _bracket_orders(
-    symbol: str, contract: str, quantity: int, target: float, stop: float, config: Any, *, oco: bool
+    symbol: str, contract: str, quantity: int, target: float, stop: float, config: Any,
 ) -> list[DesiredOrder]:
-    """What should be resting against an open position -- a pair, or a lone target.
+    """What should be resting against an open position -- a target, or a target and a stop.
+
+    **Always two independent orders, never a broker-side OCO/bracket.** The invariant a bracket
+    exists to hold -- that only one side can ever fill -- is already this module's job: the
+    lifecycle is re-derived from ``context.positions`` every run regardless, so a flat symbol
+    already means "no sell orders wanted" whether the fill came from the target, the stop, or
+    (before this) a bracket's OCO leg. Paying for a broker-side invariant this code already
+    enforces itself was complexity bought twice, and Alpaca refuses any complex order class on
+    options anyway -- the OCO path only ever ran on the brokers that could take it.
 
     **A ``stop`` of zero means no stop order reaches the exchange at all.** Not a stop at a
-    distant price, not an OCO with one live leg: a single resting sell limit, and nothing else.
-    The strategy is then a resting buy limit followed by a resting sell limit, with the premium
-    of ``contracts_per_trade`` as the loss cap and the deadline as the exit that forces the
-    issue. ``oco`` is not consulted in that case, because there is no pair for a venue to hold.
+    distant price: a single resting sell limit, and nothing else. The strategy is then a
+    resting buy limit followed by a resting sell limit, with the premium of
+    ``contracts_per_trade`` as the loss cap and the deadline as the exit that forces the issue.
 
-    With a live stop and OCO the venue owns the invariant that only one side can fill, and the
-    bracket is one order. Without OCO -- Alpaca refuses any complex order class on options --
-    the same two legs go up independently, and that invariant becomes ours.
-
-    **The exposure that creates, stated plainly:** when one leg fills, the other is briefly live
-    against a position that no longer exists. The next reconciliation cancels it, because a flat
-    symbol wants no bracket, so the window is one run of the cadence rather than open-ended. Two
-    things keep it survivable in the meantime: the broker rejects a ``sell_to_close`` with
-    nothing to close, and the remaining leg is a *sell* of a contract we no longer hold rather
-    than anything that could open new exposure.
+    **The exposure two independent legs create, stated plainly:** when one fills, the other is
+    briefly live against a position that no longer exists. The next reconciliation cancels it,
+    because a flat symbol wants no sell orders, so the window is one run of the cadence rather
+    than open-ended. Two things keep it survivable in the meantime: the broker rejects a
+    ``sell_to_close`` with nothing to close, and the remaining leg is a *sell* of a contract we
+    no longer hold rather than anything that could open new exposure.
     """
     tolerance = REPRICE_MIN_PRICE_FRACTION
     limit_leg = _sell_leg(contract, quantity, order_type="limit", limit_price=target)
-    # Checked before anything else, so no code path below can construct a stop leg. Note the key
-    # is ``:target`` rather than ``:bracket``: turning the stop off on a position that already
-    # has a bracket resting therefore reads to the reconciler as "the bracket is no longer
-    # wanted, this target is", and it cancels the one and places the other. That is the intended
-    # transition and it is why the two shapes do not share a key.
+    # Checked before anything else, so no code path below can construct a stop leg.
     if stop <= 0:
         return [DesiredOrder(key=f"{symbol}:{TARGET}", request=limit_leg,
                              replace_tolerance=tolerance)]
     stop_leg = _sell_leg(contract, quantity, order_type="stop", stop_price=stop)
-    if not oco:
-        return [
-            DesiredOrder(key=f"{symbol}:{TARGET}", request=limit_leg, replace_tolerance=tolerance),
-            # No tolerance: the stop never moves, so any difference from what is resting means
-            # the resting order is not the one this position wants.
-            DesiredOrder(key=f"{symbol}:{STOP}", request=stop_leg),
-        ]
-    return [DesiredOrder(
-        key=f"{symbol}:{BRACKET}",
-        request=OrderRequest(
-            symbol=contract, action="sell", quantity=quantity, order_type="limit",
-            limit_price=target, asset_type="option", time_in_force="gtc", strategy="oco",
-            extra={"position_intent": "sell_to_close", "underlying": symbol},
-            children=(limit_leg, stop_leg),
-        ),
-        replace_tolerance=tolerance,
-    )]
+    return [
+        DesiredOrder(key=f"{symbol}:{TARGET}", request=limit_leg, replace_tolerance=tolerance),
+        # No tolerance: the stop never moves, so any difference from what is resting means
+        # the resting order is not the one this position wants.
+        DesiredOrder(key=f"{symbol}:{STOP}", request=stop_leg),
+    ]
