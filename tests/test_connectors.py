@@ -1083,3 +1083,42 @@ def test_option_contract_history_is_served_from_the_store(monkeypatch) -> None:
     second = schwab_options.fetch_option_price_history(Config(), osi)
     assert not second.empty, "the second call still answers"
     assert len(calls) == 1, "and does it without touching the provider again"
+
+
+def test_schwab_is_asked_for_an_option_in_its_own_spelling() -> None:
+    """Alpaca reports a position as ``USO260916C00142000``; Schwab wants the root padded to six.
+
+    Asking Schwab for the unpadded form returns an empty result rather than an error, so a
+    contract held at one broker and priced at another had no quote and no history, and nothing
+    reported a fault -- the mark fell through to whatever the cache last held and the band fell
+    back to translating the underlying through delta.
+    """
+    from src.connectors.market.schwab_osi import schwab_osi
+
+    assert schwab_osi("USO260916C00142000") == "USO   260916C00142000"
+    assert schwab_osi("USO   260916C00142000") == "USO   260916C00142000"
+    assert schwab_osi("AAPL260116C00150000") == "AAPL  260116C00150000"
+    # An ordinary ticker is not ours to rewrite.
+    assert schwab_osi("SPY") == "SPY"
+
+
+def test_an_option_quote_is_keyed_back_to_the_symbol_that_was_asked_for(monkeypatch) -> None:
+    """Requested in Schwab's spelling, returned in the caller's -- which is the one the
+    positions map uses, and the one every downstream lookup does."""
+    from src.connectors.market import schwab as market_schwab
+
+    asked: dict = {}
+
+    def fake_request(provider, category, url, params=None, headers=None):
+        asked.update(params or {})
+        return {"USO   260916C00142000": {"quote": {"lastPrice": 13.0}}}
+
+    monkeypatch.setattr(market_schwab, "_request_json", fake_request)
+    config = Config(
+        data_source_configs={"market_data": {"providers": {"schwab": {"access_token": "token"}}}}
+    )
+
+    quotes = market_schwab.Schwab(config).fetch_price(["USO260916C00142000"])
+
+    assert asked["symbols"] == "USO   260916C00142000", "asked in Schwab's spelling"
+    assert quotes["USO260916C00142000"]["price"] == 13.0, "answered in the caller's"

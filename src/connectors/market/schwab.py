@@ -22,6 +22,7 @@ from ..base import MarketDataProvider
 from ..frames import _empty_bars, _normalize_quote
 from ..grid import history_window
 from ..http import _bearer_auth_header, _request_json
+from .schwab_osi import schwab_osi
 from ..sources import (
     EOD_MARKET_CATEGORY,
     INTRADAY_MARKET_CATEGORY,
@@ -65,14 +66,21 @@ class Schwab(MarketDataProvider):
             raise ProviderUnavailable("Schwab access token is not configured")
 
         wanted = [symbol.upper() for symbol in symbols if symbol]
+        # Schwab spells an option symbol in the 21-character padded OSI form. Alpaca reports the
+        # same contract unpadded, so a position held there and quoted here asks for a symbol
+        # Schwab does not recognise -- and it answers with an empty row rather than an error, so
+        # the price falls silently through to whatever the cache last held. Requested in Schwab's
+        # spelling and keyed back to the caller's, which is the one the positions map uses.
+        as_schwab = {symbol: schwab_osi(symbol) for symbol in wanted}
         payload = _request_json(
             self.name, MARKET_CATEGORY, QUOTES_URL,
-            {"symbols": ",".join(wanted)}, headers=_bearer_auth_header(token),
+            {"symbols": ",".join(as_schwab[symbol] for symbol in wanted)},
+            headers=_bearer_auth_header(token),
         ) or {}
 
         quotes: dict[str, dict[str, Any]] = {}
         for symbol in wanted:
-            row = payload.get(symbol) or {}
+            row = payload.get(as_schwab[symbol]) or payload.get(symbol) or {}
             raw = row.get("quote", row) or {}
             price = json_number(raw.get("lastPrice"))
             if not price or price <= 0:

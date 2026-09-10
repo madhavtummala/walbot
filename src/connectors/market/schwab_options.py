@@ -28,6 +28,7 @@ import pandas as pd
 from ...common.config_utils import json_number
 from ...core.interfaces import MARKET_TZ
 from ...core.options import CALL, PUT, OptionContract
+from .schwab_osi import schwab_osi
 from ..http import _bearer_auth_header, _request_json
 from ..sources import EOD_MARKET_CATEGORY, MARKET_CATEGORY, ProviderUnavailable, _schwab_token
 from .schwab import PRICE_HISTORY_URL, _candles_to_bars
@@ -138,7 +139,9 @@ def fetch_option_price_history(
     end = as_of or datetime.now(timezone.utc)
     start = end - timedelta(days=max(int(lookback_days), 1))
 
-    osi_key = str(osi).upper()
+    # One spelling for the request and for the rows it is stored under, so a position reported
+    # unpadded by one broker and priced padded by another is a single series in the cache.
+    osi_key = schwab_osi(osi)
     grid = int(interval_minutes)
     held = _read_duckdb_bars(PROVIDER, osi_key, grid, start=start, end=end)
     frontier = last_complete_bar_end(grid)
@@ -158,7 +161,7 @@ def fetch_option_price_history(
     payload = _request_json(
         "schwab", MARKET_CATEGORY, PRICE_HISTORY_URL,
         {
-            "symbol": str(osi).upper(),
+            "symbol": osi_key,
             "frequencyType": "minute",
             "frequency": int(interval_minutes),
             "startDate": int(start.timestamp() * 1000),
