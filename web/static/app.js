@@ -273,6 +273,10 @@ function boardSpec(strategyKey) {
 //: This board's ceiling and scroll increment, and how one amount is written. ``count`` renders
 //: a plain integer with its unit; ``currency`` renders dollars.
 function maxAmount() { return boardSpec().max; }
+//: What a full-size bubble represents. The board's ceiling doubles as its drawing scale, so an
+//: algorithm sets that ceiling to a value it actually reaches -- one set far above them renders
+//: every real budget as a dot.
+function scaleAmount() { return boardSpec().max; }
 function wheelStep() { return boardSpec().step; }
 function amountLabel(value) {
   const spec = boardSpec();
@@ -330,7 +334,8 @@ function assignedSymbols(bucketName) {
 }
 
 function itemRadius(amount) {
-  return 18 + Math.sqrt(clamp(amount, 0, maxAmount()) / maxAmount()) * 24.4;
+  const scale = scaleAmount();
+  return 18 + Math.sqrt(clamp(amount, 0, scale) / scale) * 24.4;
 }
 
 function svgEl(tag, attrs = {}) {

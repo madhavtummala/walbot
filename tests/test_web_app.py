@@ -3,7 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import re
+
 import pandas as pd
+import pytest
 
 from src.api.web_app import controls_payload, status_payload, universe_payload
 
@@ -562,3 +564,37 @@ def test_the_bot_pill_describes_the_algorithms_not_the_container() -> None:
     # The dot carries it; the words only repeated the colour, so they live in the tooltip.
     assert "escapeHtml(runtime.label)" not in app_js
     assert "escapeHtml(runtime.note)" not in app_js
+
+
+def test_a_board_ceiling_is_a_value_the_board_actually_reaches() -> None:
+    """A bubble's radius goes as sqrt(amount / ceiling), so a ceiling set far above the values
+    in use renders every one of them as a dot -- a $25,000 ceiling drew a $1,000 position
+    smaller than a $400 DCA budget.
+
+    Both boards should put an ordinary entry in the middle of their scale, not the bottom.
+    """
+    from src.algorithms.bursty_dca.algorithm import BurstyDCAAlgorithm
+    from src.algorithms.options_flip.algorithm import OptionsFlipAlgorithm
+
+    # A typical entry on each board, as a fraction of that board's ceiling.
+    dca = 400 / BurstyDCAAlgorithm.tune_max_amount
+    flip = 1_000 / OptionsFlipAlgorithm.tune_max_amount
+    assert 0.1 <= dca <= 0.6 and 0.1 <= flip <= 0.6
+    assert flip == pytest.approx(dca, rel=0.01), "the same relative size on both boards"
+
+
+def test_the_budget_board_is_one_component_for_every_algorithm() -> None:
+    """Which buckets, what an amount means, how far it scales -- all declared per algorithm and
+    read through ``boardSpec``. Two boards that merely looked alike would drift."""
+    app_js, _, _ = _assets()
+
+    for builder in (
+        "renderBudgetBoard", "renderBoard", "buildNodes", "calculateLayout", "itemRadius",
+        "fitBucketRadii", "bucketColor", "nearestBucket", "boardSpec",
+    ):
+        assert app_js.count(f"function {builder}") == 1, f"{builder} must have one implementation"
+    # Nothing in the board branches on which algorithm it is drawing.
+    board = app_js[app_js.index("function itemRadius"):app_js.index("function renderDcaSummary")] \
+        if "function renderDcaSummary" in app_js else app_js[app_js.index("function itemRadius"):app_js.index("function planStrategyKey")]
+    for hardcoded in ('=== "buy"', '=== "sell"', '=== "call"', '=== "put"'):
+        assert hardcoded not in board, f"the board still branches on {hardcoded}"

@@ -260,8 +260,14 @@ class OptionsFlipConfig:
 #: own reader, and the Tune screen renders it through a purpose-built editor.
 PLAN_KEY = "plan"
 
-#: Hard ceiling on one symbol's budget, in dollars per position.
-MAX_ITEM_AMOUNT = 25_000.0
+#: Ceiling on one symbol's budget, in dollars per position -- and the amount a full-size
+#: bubble on the Tune board represents, since a bubble's radius goes as
+#: ``sqrt(amount / MAX_ITEM_AMOUNT)``. Those are the same number on purpose: a ceiling set far
+#: above the values actually used renders every one of them as a dot, which is what a $25,000
+#: ceiling did to an ordinary $1,000 position. Measured against the deployed config -- at delta
+#: 0.8 a GLD contract runs $1,300-$1,900, so a few contracts is $2,000-$8,000 and $5,000 puts a
+#: real position in the middle of the scale.
+MAX_ITEM_AMOUNT = 5_000.0
 
 #: The directions a budget can be set for. ``put`` is declared but not yet tradable -- the
 #: level model measures a dip-then-rebound and the regime gate is one-sided, so nothing can act
