@@ -332,3 +332,21 @@ def test_a_cancelled_order_still_reports_what_it_was() -> None:
     assert (result["reconciled"], result["action"], result["symbol"]) == (
         "cancelled", "buy", "QQQM  260220C00100000"
     )
+
+
+def test_a_rejected_order_still_reports_the_price_it_asked_for() -> None:
+    """The success branch carried the limit and the rejection branch did not, so a refused
+    order reached the journal as "1 requested" -- size and direction and nothing else, on
+    exactly the row a reader opens to work out why the broker said no.
+    """
+    class Refusing(FakeBrokerage):
+        def submit_order(self, request):
+            raise RuntimeError("account not eligible to trade uncovered option contracts")
+
+    outcome = run(Refusing([]), [DesiredOrder(key="QQQM:entry", request=bid(1.15))])
+
+    rejected = outcome["order_results"][0]
+    assert rejected["reconciled"] == "rejected"
+    assert rejected["limit_price"] == 1.15
+    assert rejected["order_type"] == "limit"
+    assert "uncovered" in rejected["reason"]

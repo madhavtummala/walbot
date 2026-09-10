@@ -170,10 +170,16 @@ def _submit(key: str, desired: DesiredOrder, brokerage: Any, order_ids: Dict[str
     except Exception as exc:
         # One rejected order must not abandon the rest of the book.
         logger.warning("Order %s rejected: %s", key, exc)
+        # The price it asked for is reported on a rejection too. The success branch below
+        # carries it and this one did not, so a refused order reached the journal as "1
+        # requested" -- size and direction and nothing else, on exactly the row a reader opens
+        # to work out why the broker said no. What it asked is the first thing they need.
         return _result(
             key, "rejected", "", symbol=desired.request.symbol,
             action=desired.request.action, quantity=float(desired.request.quantity),
             status="rejected", reason=str(exc),
+            limit_price=desired.request.limit_price, stop_price=desired.request.stop_price,
+            order_type=desired.request.order_type,
         )
     order_id = str(result.get("order_id", "") or "")
     if not order_id:
