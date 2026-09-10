@@ -99,6 +99,10 @@ def _metrics(signal: dict[str, Any]) -> list[dict[str, str]]:
         "value": f"${float(estimate.get('expected_profit', 0.0)):,.0f}",
     })
 
+    # Only a held position has one, and only there is it the answer to "what am I risking".
+    if (stop := float(estimate.get("stop_price", 0.0) or 0.0)) > 0:
+        metrics.append({"label": "Stop", "value": f"${stop:.2f}"})
+
     return metrics
 
 

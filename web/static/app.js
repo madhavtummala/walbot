@@ -1516,8 +1516,11 @@ function gateDetail(row) {
   if (!row.checks?.length) {
     return `<p class="gateEmpty">No gates were recorded for ${escapeHtml(row.symbol)} on this run.</p>`;
   }
+  // Gates only. A reading is measured alongside the decision and never part of it, and every
+  // one worth acting on is already a column on the row -- the band, the contract, the stop.
+  // Listing them here a second time made a deck of thirteen gates read as eighteen. They stay
+  // in the payload, where an agent or a debugging session can still reach them.
   const gates = row.checks.filter((check) => check.gate !== false);
-  const readings = row.checks.filter((check) => check.gate === false);
 
   const item = (check) => {
     const cls = check.ok ? "is-pass" : check.blocking ? "is-blocking" : "is-fail";
@@ -1531,12 +1534,6 @@ function gateDetail(row) {
   // A reading carries no verdict, because it has nothing to pass or fail. Kept on the row
   // rather than dropped: on a held position the resting target and stop are readings, and they
   // are the two most useful lines there.
-  const reading = (check) => `<li class="gateItem is-reading">
-      <span class="gateVerdict"></span>
-      <span class="gateLabel">${escapeHtml(check.label)}</span>
-      <span class="gateValue">${escapeHtml(check.value || "—")}</span>
-      <span class="gateLimit"></span>
-    </li>`;
 
   const blocked = gates.filter((check) => !check.ok).length;
   return `
@@ -1545,10 +1542,7 @@ function gateDetail(row) {
         ? `${blocked} of ${gates.length} ${gates.length === 1 ? "gate" : "gates"} refused this row`
         : `${gates.length === 1 ? "the one gate" : `all ${gates.length} gates`} cleared`
     )}</p>
-    <ul class="gateList">${gates.map(item).join("")}</ul>
-    ${readings.length ? `
-      <p class="gateHeading is-readings">Measured, not gated</p>
-      <ul class="gateList is-readings">${readings.map(reading).join("")}</ul>` : ""}`;
+    <ul class="gateList">${gates.map(item).join("")}</ul>`;
 }
 
 function renderSignalTable(rows) {

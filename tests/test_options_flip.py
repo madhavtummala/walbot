@@ -477,12 +477,19 @@ class TestStrikeSelection:
         assert best is not None and best.strike == 88.0
 
     def test_the_chosen_contract_reports_what_decided_it(self) -> None:
-        _b, _c, checks = select_contract(
+        """Delta and the liquidity the tie was broken on, on the contract itself.
+
+        These used to be a "Contract chosen" reading beside the deck's Contract column, which
+        already named the strike, expiry and delta -- three of its five fields repeated on a
+        second line. The two it alone carried moved onto that column instead.
+        """
+        best, _c, checks = select_contract(
             self.chain(), direction=CALL, as_of=date(2026, 2, 1), config=cfg()
         )
-        chosen = next(c for c in checks if c.label == "Contract chosen")
-        # Delta, and the liquidity the tie was broken on -- the three inputs to the ranking.
-        assert "delta" in chosen.value and "vol" in chosen.value and "OI" in chosen.value
+
+        assert best is not None
+        assert best.open_interest > 0 and best.spread_pct > 0
+        assert not any(c.label == "Contract chosen" for c in checks), "it repeated the column"
 
     def test_the_target_moves_the_strike(self) -> None:
         best, _c, _k = select_contract(
@@ -1532,13 +1539,34 @@ def test_a_check_that_can_refuse_nothing_is_not_a_gate() -> None:
     assert not wrong, "; ".join(wrong)
 
 
-def test_the_deck_separates_gates_from_readings() -> None:
-    """One list is what decided the outcome; the other is what was measured alongside it."""
+def test_the_deck_shows_gates_and_nothing_else() -> None:
+    """A reading is measured alongside the decision and never part of it, and every one worth
+    acting on is already a column -- the band, the contract, the stop.
+
+    They stay in the payload, where an agent or a debugging session can reach them; they are
+    just not a second list under the gates.
+    """
     from pathlib import Path
 
     app_js = (Path(__file__).resolve().parents[1] / "web/static/app.js").read_text()
 
-    # The pip strip counts hurdles only -- a reading is neither cleared nor failed.
+    # Both the pip strip and the expanded list filter to gates.
     assert "const checks = allChecks.filter((check) => check.gate !== false);" in app_js
-    assert 'const readings = row.checks.filter((check) => check.gate === false);' in app_js
-    assert "Measured, not gated" in app_js
+    assert "const gates = row.checks.filter((check) => check.gate !== false);" in app_js
+    assert "Measured, not gated" not in app_js
+
+
+def test_a_held_row_still_reports_the_price_it_is_protected_at() -> None:
+    """The stop appeared only as a reading, and the deck no longer renders those. It is the one
+    price on a held row nothing else carries, so it became a column."""
+    from src.algorithms.options_flip.algorithm import _held_estimate_row
+    from src.algorithms.options_flip.signals import _metrics
+
+    estimate = _held_estimate_row(
+        {"contract": "USO   260916C00142000", "fill_price": 8.85, "target": 17.83,
+         "contracts": 1, "delta": 0.97, "stop": 4.42},
+        band={"source": "option", "sample": 10}, mark=13.0, exit_level=162.87, sell_ok=True,
+    )
+    labels = {m["label"]: m["value"] for m in _metrics({"estimate": estimate})}
+
+    assert labels["Stop"] == "$4.42"

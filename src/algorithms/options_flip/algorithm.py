@@ -370,6 +370,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
             worth_it = profit["per_contract"] >= float(cfg.min_profit_per_contract)
             estimate = _estimate_row(
                 priced, levels, outcomes, profit, ceiling, contracts, regime, cfg,
+                as_of=date.fromisoformat(session["market_day"]),
             )
             # What the board funded, and what that bought at today's ask. Reported because the
             # translation is the one place a budget becomes a position: a symbol funded below
@@ -396,14 +397,6 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
                 ),
                 limit=f"≥ ${float(cfg.min_profit_per_contract):,.0f} per contract, gross",
                 blocking=not worth_it,
-            ), Check(
-                label="Max debit",
-                ok=ceiling > 0,
-                value=(
-                    f"${ceiling:.2f} — the entry limit is never raised past this, "
-                    f"derived from the base case rather than chosen"
-                ),
-                gate=False,
             )]
             if not worth_it:
                 contracts = 0
@@ -449,18 +442,6 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
                 under_translation=under_translation,
             )
             band_source = str(band.get("source") or "none")
-            checks = checks + [Check(
-                label="Option band",
-                ok=True,
-                value=(
-                    f"entry ${float(band.get('entry', 0.0)):.2f} → "
-                    f"${float(band.get('target', 0.0)):.2f} from "
-                    + ("the premium's own history" if band_source == "option" else "the underlying")
-                    + f" ({int(band.get('sample', 0))} sessions)"
-                    + " — this contract's own low and run, in premium; absurds fall back"
-                ),
-                gate=False,
-            )]
             if estimate:
                 # What the resting bid is actually priced from -- the band's own entry, which is
                 # the translation whenever the option's own history was too thin or too absurd to
@@ -810,7 +791,9 @@ def _decision_minute(session: dict[str, Any], cfg: Any) -> int:
     return max(min(int(session.get("minute") or first_fire), cutoff), first_fire)
 
 
-def _estimate_row(contract, levels, outcomes, profit, ceiling, contracts, regime, cfg) -> dict[str, Any]:
+def _estimate_row(
+    contract, levels, outcomes, profit, ceiling, contracts, regime, cfg, *, as_of: date,
+) -> dict[str, Any]:
     """What the deck needs to judge the setup, on the days it trades and the days it does not.
 
     Every field is reported whether or not an order goes out. "No trade today" says nothing about
@@ -819,9 +802,14 @@ def _estimate_row(contract, levels, outcomes, profit, ceiling, contracts, regime
     """
     return {
         "contract": contract.osi_symbol,
+        # Carries what the retired "Contract chosen" check reported: the top-level column
+        # already named the strike, expiry and delta, so the check repeated three of its five
+        # fields. What it alone had -- days left, and whether the contract is tradable -- is
+        # here instead of on a second line saying the same thing twice.
         "contract_label": (
             f"${contract.strike:g} {contract.option_type} · {contract.expiry:%d %b} · "
-            f"delta {contract.delta:+.2f}"
+            f"{contract.dte(as_of)}d · delta {contract.delta:+.2f} · "
+            f"OI {contract.open_interest:,} · {contract.spread_pct:.1%} wide"
         ),
         "mark": contract.midpoint,
         "spread_pct": contract.spread_pct,
@@ -891,6 +879,10 @@ def _held_estimate_row(memory, band, mark: float, exit_level: float, sell_ok: bo
         # for the contracts it would open. Reported rather than omitted: "what do I make if
         # this target fills" is the question a held row exists to answer.
         "expected_profit": max(asking - fill_price, 0.0) * 100.0 * contracts,
+        # Promoted to a column of its own. It used to appear only as a reading, and the deck no
+        # longer renders those -- which would have hidden the one price on a held row that
+        # nothing else reports: what the position is protected at.
+        "stop_price": float(memory.get("stop", 0.0) or 0.0),
         "band_source": str(band.get("source") or "none"),
         "band_sample": int(band.get("sample", 0)),
         "sell_ok": sell_ok,

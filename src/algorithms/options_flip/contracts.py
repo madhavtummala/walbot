@@ -114,18 +114,6 @@ def select_contract(
                     + (f", spread ≤ {max_spread:.1%}" if max_spread > 0 else "")
                 ),
             ))
-            checks.append(Check(
-                label="Contract chosen",
-                ok=True,
-                value=(
-                    f"{best.osi_symbol} — ${best.strike:g} {best.option_type}, "
-                    f"delta {best.delta:+.2f}, {best.dte(as_of)}d, "
-                    f"vol {best.volume}, OI {best.open_interest}, "
-                    f"{best.bid:.2f}/{best.ask:.2f} ({best.spread_pct:.1%} wide)"
-                    f" — nearest delta {target:+.2f}, then volume"
-                ),
-                gate=False,
-            ))
             return best, candidate, checks
 
     # Nothing anywhere in the window cleared both filters.
