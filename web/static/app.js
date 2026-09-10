@@ -1494,7 +1494,11 @@ function priceAgeBadge(row) {
 //: The gate strip: one pip per check, in the order the algorithm applied them. Filled is a pass,
 //: hollow a fail, and the blocking one is marked separately -- several gates can fail at once
 //: while only the first decided anything.
-function gateStrip(checks) {
+//: Readings are excluded here and shown separately below: a pip is a hurdle cleared or not,
+//: and something that can never refuse a trade is neither. Twelve gates rendered as eighteen
+//: pips, which read as a stricter strategy than the one that is running.
+function gateStrip(allChecks) {
+  const checks = allChecks.filter((check) => check.gate !== false);
   if (!checks.length) return `<span class="gateStrip is-empty" title="No gates applied to this row">—</span>`;
   const pips = checks.map((check) => {
     const cls = check.ok ? "is-pass" : check.blocking ? "is-blocking" : "is-fail";
@@ -1512,7 +1516,10 @@ function gateDetail(row) {
   if (!row.checks?.length) {
     return `<p class="gateEmpty">No gates were recorded for ${escapeHtml(row.symbol)} on this run.</p>`;
   }
-  const items = row.checks.map((check) => {
+  const gates = row.checks.filter((check) => check.gate !== false);
+  const readings = row.checks.filter((check) => check.gate === false);
+
+  const item = (check) => {
     const cls = check.ok ? "is-pass" : check.blocking ? "is-blocking" : "is-fail";
     return `<li class="gateItem ${cls}">
       <span class="gateVerdict">${check.ok ? "PASS" : "FAIL"}</span>
@@ -1520,8 +1527,28 @@ function gateDetail(row) {
       <span class="gateValue">${escapeHtml(check.value || "—")}</span>
       <span class="gateLimit">${check.limit ? escapeHtml(`needs ${check.limit}`) : ""}</span>
     </li>`;
-  }).join("");
-  return `<ul class="gateList">${items}</ul>`;
+  };
+  // A reading carries no verdict, because it has nothing to pass or fail. Kept on the row
+  // rather than dropped: on a held position the resting target and stop are readings, and they
+  // are the two most useful lines there.
+  const reading = (check) => `<li class="gateItem is-reading">
+      <span class="gateVerdict"></span>
+      <span class="gateLabel">${escapeHtml(check.label)}</span>
+      <span class="gateValue">${escapeHtml(check.value || "—")}</span>
+      <span class="gateLimit"></span>
+    </li>`;
+
+  const blocked = gates.filter((check) => !check.ok).length;
+  return `
+    <p class="gateHeading">${escapeHtml(
+      blocked
+        ? `${blocked} of ${gates.length} ${gates.length === 1 ? "gate" : "gates"} refused this row`
+        : `${gates.length === 1 ? "the one gate" : `all ${gates.length} gates`} cleared`
+    )}</p>
+    <ul class="gateList">${gates.map(item).join("")}</ul>
+    ${readings.length ? `
+      <p class="gateHeading is-readings">Measured, not gated</p>
+      <ul class="gateList is-readings">${readings.map(reading).join("")}</ul>` : ""}`;
 }
 
 function renderSignalTable(rows) {

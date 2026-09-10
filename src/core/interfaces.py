@@ -248,6 +248,15 @@ class Check:
     #: Whether failing this is what actually decided the outcome. Several gates can fail at
     #: once; the blocking one is the answer to "why", and the rest are context.
     blocking: bool = False
+    #: Whether this check can refuse the trade at all.
+    #:
+    #: ``blocking`` says what happened *this run*; this says what the check is *for*. A reading
+    #: -- today's tape, which contract was picked, where a prediction came from -- is measured
+    #: and worth showing, but it is not a hurdle, and rendering it beside the gates made a deck
+    #: of twelve gates read as one of eighteen. Defaults to ``True`` so a check is a gate unless
+    #: it says otherwise, which is the safe direction: a real gate rendered as a reading would
+    #: hide the reason a trade was refused.
+    gate: bool = True
 
 
 @dataclass(frozen=True)

@@ -1503,3 +1503,42 @@ def test_only_a_real_requirement_goes_in_a_checks_limit() -> None:
                 offenders.append(f"{path.name}: {text[:60]}")
 
     assert not offenders, "a check's limit must read as a requirement: " + "; ".join(offenders)
+
+
+def test_a_check_that_can_refuse_nothing_is_not_a_gate() -> None:
+    """``blocking`` says what happened this run; ``gate`` says what the check is for.
+
+    The deck rendered both alike, so twelve gates read as eighteen -- a stricter strategy than
+    the one that runs. Readings stay on the row because two of them, the resting target and the
+    stop, are the most useful lines on a held position; they are just not hurdles.
+    """
+    import ast
+    import pathlib
+
+    wrong = []
+    for path in pathlib.Path("src/algorithms/options_flip").glob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not (isinstance(node, ast.Call) and getattr(node.func, "id", "") == "Check"):
+                continue
+            kw = {k.arg: k.value for k in node.keywords}
+            blocking, gate = kw.get("blocking"), kw.get("gate")
+            can_block = blocking is not None and not (
+                isinstance(blocking, ast.Constant) and not blocking.value
+            )
+            declared_reading = isinstance(gate, ast.Constant) and gate.value is False
+            if can_block and declared_reading:
+                wrong.append(f"{path.name}:{node.lineno} blocks but declares gate=False")
+
+    assert not wrong, "; ".join(wrong)
+
+
+def test_the_deck_separates_gates_from_readings() -> None:
+    """One list is what decided the outcome; the other is what was measured alongside it."""
+    from pathlib import Path
+
+    app_js = (Path(__file__).resolve().parents[1] / "web/static/app.js").read_text()
+
+    # The pip strip counts hurdles only -- a reading is neither cleared nor failed.
+    assert "const checks = allChecks.filter((check) => check.gate !== false);" in app_js
+    assert 'const readings = row.checks.filter((check) => check.gate === false);' in app_js
+    assert "Measured, not gated" in app_js

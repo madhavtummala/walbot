@@ -403,6 +403,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
                     f"${ceiling:.2f} — the entry limit is never raised past this, "
                     f"derived from the base case rather than chosen"
                 ),
+                gate=False,
             )]
             if not worth_it:
                 contracts = 0
@@ -458,6 +459,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
                     + f" ({int(band.get('sample', 0))} sessions)"
                     + " — this contract's own low and run, in premium; absurds fall back"
                 ),
+                gate=False,
             )]
             if estimate:
                 # What the resting bid is actually priced from -- the band's own entry, which is
@@ -698,6 +700,7 @@ def _pick_contract(context, symbol, direction, session, cfg, spot=0.0, annual_vo
                 "the chain returned none; delta computed from realised volatility "
                 "(a provider greek is preferred when one is quoted)"
             ),
+            gate=False,
         )] + checks
     return best, candidate, checks
 

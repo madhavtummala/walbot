@@ -2465,3 +2465,16 @@ h2 {
     white-space: normal;
   }
 }
+
+/* A reading has no verdict to render, so its row is quieter than a gate's and its verdict
+   column stays empty rather than claiming a PASS it never earned. */
+.gateHeading {
+  margin: 4px 0 6px;
+  font-size: 11px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.gateHeading.is-readings { margin-top: 14px; }
+.gateItem.is-reading { opacity: .72; }
+.gateItem.is-reading .gateLabel { font-weight: 400; }

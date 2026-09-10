@@ -94,6 +94,7 @@ def bull_regime(
         # Deliberately no ``limit``: this is a reading, and ``limit`` means "what it had to be".
         # The deck prefixes that field with "needs", so prose there rendered as
         # "needs reported, not gated" -- a requirement stated for a check that requires nothing.
+        gate=False,
     ))
 
     above_fast = bool(price > fast > 0)
@@ -168,6 +169,7 @@ def bull_regime(
             else "no directional volume yet"
         ),
         # A reading, so no ``limit`` -- see the trend check above.
+        gate=False,
     ))
 
     eligible = all(not check.blocking for check in checks)

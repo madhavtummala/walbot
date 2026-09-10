@@ -124,6 +124,7 @@ def select_contract(
                     f"{best.bid:.2f}/{best.ask:.2f} ({best.spread_pct:.1%} wide)"
                     f" — nearest delta {target:+.2f}, then volume"
                 ),
+                gate=False,
             ))
             return best, candidate, checks
 

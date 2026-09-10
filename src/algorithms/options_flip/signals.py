@@ -129,4 +129,8 @@ def _check(raw: Any) -> Check:
         value=str(data.get("value", "")),
         limit=str(data.get("limit", "")),
         blocking=bool(data.get("blocking", False)),
+        # Defaults to True so a check that predates the field, or one whose algorithm never
+        # sets it, is treated as a gate. A real gate shown as a reading would hide the reason a
+        # trade was refused; a reading shown as a gate is merely noisy.
+        gate=bool(data.get("gate", True)),
     )

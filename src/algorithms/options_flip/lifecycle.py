@@ -193,6 +193,7 @@ def _flat_or_bidding(
         )
         + f" — pullback limit, patience {float(getattr(config, 'entry_patience', 1.0)):.1f}; "
           f"never above the mark, abandoned unfilled at the close",
+        gate=False,
     )]
     memory = {
         "state": BIDDING,
@@ -392,6 +393,7 @@ def _held(
                    f"{1.0 - gate_decay:.0%} converged to the mark")
                 + ("" if not deadline else f" — deadline, {1.0 - day_decay:.0%} converged to the market")
             ),
+            gate=False,
         ),
         Check(
             label="Protective stop",
@@ -403,6 +405,7 @@ def _held(
                 f"none — the {quantity}-contract premium is the loss cap, and the deadline is "
                 f"the exit that forces the issue"
             ),
+            gate=False,
         ),
         Check(
             label="Hold deadline",
