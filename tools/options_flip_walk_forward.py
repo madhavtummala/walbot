@@ -245,7 +245,10 @@ def walk_forward(symbol: str, config: Any) -> tuple[pd.DataFrame, pd.DataFrame, 
     # calling ``plan()`` in a loop is to answer "what would production do for this symbol",
     # not to replay the live account's other, unrelated bindings.
     symbols_patch = mock.patch.object(
-        OptionsFlipAlgorithm, "_symbols", staticmethod(lambda cfg, config: [symbol])
+        # One argument now: ``_symbols`` became an instance method reading the board when the
+        # separate ``symbols`` knob was retired. The old two-argument static signature made this
+        # harness raise on every run.
+        OptionsFlipAlgorithm, "_symbols", lambda self, config: [symbol]
     )
     daily = _load_daily(symbol)
     intraday = _load_intraday(symbol)
