@@ -234,18 +234,28 @@ def _held(
     sell_ok: bool = True,
 ) -> SymbolPlan:
     """Holding a contract: maintain the bracket, ratchet the target, honour the deadline."""
-    quantity = max(int(memory.get("contracts", contracts) or contracts), 1)
+    # The caller's count first: it is the broker's own position size. Memory is the intent this
+    # algorithm had at entry, which a partial fill or a hand-trimmed position makes wrong -- and
+    # an exit sized above what is held is rejected outright, leaving the position unprotected.
+    quantity = max(int(contracts or memory.get("contracts", 0) or 1), 1)
     fill_price = float(memory.get("fill_price", 0.0) or 0.0)
     mark = float(memory.get("mark", 0.0) or 0.0)
     direction = str(memory.get("direction") or CALL)
 
-    # Struck off the entry *limit*, recorded when the order was placed, and never recomputed.
-    # Not off the fill: the limit is known at submission time, which is what lets the stop ride
-    # up attached to the entry as one bracket. Not off the current mark either -- that would be a
-    # trailing stop, a different strategy, and one that ratchets the risk floor upward on exactly
-    # the noise this stop exists to sit beneath.
+    # Struck off what the position actually cost, and not off the current mark -- that would be
+    # a trailing stop, a different strategy, and one that ratchets the risk floor upward on
+    # exactly the noise this stop exists to sit beneath.
+    #
+    # It used to anchor to the entry *limit* instead, because the limit is known at submission
+    # time and the stop once rode up attached to the entry as one bracket. That is no longer how
+    # it is placed -- ``_bracket_orders`` rests two independent orders after the fill -- and a
+    # limit buy fills at or below its price, so anchoring there set the floor above where the
+    # configured percentage puts it and cut positions short of their stated loss cap.
     recorded = float(memory.get("stop", 0.0) or 0.0)
-    anchor = float(memory.get("bid", 0.0) or 0.0) or fill_price
+    anchor = fill_price or float(memory.get("bid", 0.0) or 0.0)
+    # A recorded stop is kept only while there is no fill to do better with.
+    if fill_price > 0:
+        recorded = 0.0
     stop_pct = float(config.stop_loss_pct)
     # Zero disables the stop. The bracket then rests the profit target alone and the deadline is
     # the only exit that forces the issue -- which is the intended shape for a bounded-loss long
@@ -331,10 +341,23 @@ def _held(
     if decay < 1.0:
         target = round(max(mark + (target - mark) * decay, 0.01), 2)
 
+    # A missing mark makes every price below degenerate -- the modelled gain collapses to zero
+    # and the schedule floors at the entry -- so the last known ask is re-asserted instead of a
+    # breakeven one computed from nothing.
+    if mark <= 0 and float(memory.get("target", 0.0) or 0.0) > 0:
+        target = float(memory["target"])
     if target <= 0:
-        # A quote the feed missed -- and no recorded fill to anchor on either -- leaves nothing
-        # to price a bracket from. Resting nothing says so rather than crashing the run: with no
-        # fill recorded there is no book of ours at the broker for an empty plan to cancel.
+        # Fall back to the price this position was last asking, rather than resting nothing.
+        #
+        # Resting nothing does not mean "leave things as they are": the reconciler cancels every
+        # recorded order that a run stops wanting, so a single missed quote withdrew the live
+        # profit target *and the protective stop* from an open position, and re-placed them on
+        # the next fire. A transient feed gap should not open a hole in the protection -- so the
+        # last known prices are re-asserted, which the reconciler sees as unchanged and leaves
+        # alone. Only a position that has never had a target rests nothing, and that one has no
+        # orders at the broker to withdraw.
+        target = float(memory.get("target", 0.0) or 0.0)
+    if target <= 0:
         return SymbolPlan(
             symbol, HELD, [],
             {**memory, "state": HELD, "contract": held_contract},

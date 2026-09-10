@@ -1373,3 +1373,75 @@ def test_a_held_position_reprices_its_delta_as_the_underlying_moves() -> None:
 
     assert deep["delta"] > 0.8, "deep in the money, delta near one"
     assert fallen["delta"] < deep["delta"] / 2, "re-priced downward rather than carried from the fill"
+
+
+# --------------------------------------------------------------------------------------
+# What rests against an open position. Each of these left a real position unprotected.
+# --------------------------------------------------------------------------------------
+
+
+_OSI = "USO   260916C00142000"
+_SESSION = {"market_day": "2026-09-10", "fraction_remaining": 0.5}
+
+
+def _held_plan(memory: dict, contracts: int = 2, **kwargs):
+    from src.algorithms.options_flip.config import OptionsFlipConfig
+    from src.algorithms.options_flip.lifecycle import plan_symbol
+
+    return plan_symbol(
+        "USO", memory=dict(memory), held_contract=_OSI, direction="call", contract=None,
+        contracts=contracts, underlying_now=150.0, entry_target=0.0,
+        exit_target=kwargs.pop("exit_target", 160.0), checks=[],
+        config=OptionsFlipConfig(), session=_SESSION, **kwargs,
+    )
+
+
+def test_the_exit_is_sized_from_the_broker_not_from_remembered_intent() -> None:
+    """A partial fill, a hand-trimmed position or one opened elsewhere all leave the remembered
+    intent saying something the account does not hold.
+
+    An exit sized above the position is rejected outright, which leaves an open position with
+    no protection resting against it at all -- the worst of the available outcomes.
+    """
+    from src.algorithms.options_flip.algorithm import _held_quantities
+
+    assert _held_quantities({_OSI: 2.0}) == {"USO": 2}
+
+    plan = _held_plan(
+        {"contract": _OSI, "contracts": 5, "fill_price": 8.85, "delta": 0.9, "mark": 7.20},
+        contracts=2,
+    )
+
+    assert [order.request.quantity for order in plan.orders] == [2, 2]
+
+
+def test_a_run_that_cannot_price_the_contract_keeps_the_protection_resting() -> None:
+    """Resting nothing does not mean "leave things as they are".
+
+    The reconciler cancels every recorded order a run stops wanting, so a single missed quote
+    withdrew the live profit target *and* the protective stop from an open position and
+    re-placed them on the next fire. The last known prices are re-asserted instead, which the
+    reconciler reads as unchanged.
+    """
+    plan = _held_plan(
+        {"contract": _OSI, "contracts": 2, "fill_price": 8.85, "mark": 0.0,
+         "target": 15.22, "stop": 4.42},
+        exit_target=0.0,
+    )
+
+    resting = {order.key: (order.request.limit_price or order.request.stop_price)
+               for order in plan.orders}
+    assert resting == {"USO:target": 15.22, "USO:stop": 4.42}
+
+
+def test_the_stop_is_struck_off_what_the_position_cost() -> None:
+    """A limit buy fills at or below its price, so anchoring the stop to the entry *limit* put
+    the floor above where the configured percentage belongs and cut positions short of their
+    stated loss cap."""
+    plan = _held_plan(
+        {"contract": _OSI, "contracts": 2, "fill_price": 8.00, "bid": 10.00,
+         "stop": 5.00, "mark": 9.00, "delta": 0.9},
+    )
+
+    stops = [o.request.stop_price for o in plan.orders if o.request.order_type == "stop"]
+    assert stops == [4.00], "50% below the $8.00 fill, not the $10.00 bid"

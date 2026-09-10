@@ -194,6 +194,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
         symbols_memory = dict(state.get("symbols") or {})
         session = _session_facts(context.timestamp, cfg)
         held = _held_contracts(context.positions)
+        held_counts = _held_quantities(context.positions)
 
         universe = self._symbols(context.config)
         # Resolved once for the whole run rather than per symbol: it is one read of the config
@@ -208,6 +209,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
                 symbol, context, cfg, session,
                 memory=dict(symbols_memory.get(symbol) or {}),
                 held_contract=held.get(symbol, ""),
+                held_quantity=held_counts.get(symbol, 0),
                 plan_board=plan_board,
             )
             orders.extend(outcome.orders)
@@ -227,7 +229,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
             },
         )
 
-    def _plan_one(self, symbol, context, cfg, session, *, memory, held_contract, plan_board=None):
+    def _plan_one(self, symbol, context, cfg, session, *, memory, held_contract, held_quantity=0, plan_board=None):
         """One symbol, start to finish: direction, contract, budget, orders."""
         daily = context.daily_bars_by_symbol.get(symbol)
         intraday = context.intraday_bars_by_symbol.get(symbol)
@@ -260,7 +262,8 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
             outcome = plan_symbol(
                 symbol, memory=memory, held_contract=held_contract,
                 direction=str(memory.get("direction") or ""), contract=None,
-                contracts=int(memory.get("contracts", 1) or 1),
+                # The broker's count, not the remembered intent -- see ``_held_quantities``.
+                contracts=int(held_quantity or memory.get("contracts", 1) or 1),
                 underlying_now=underlying_now,
                 entry_target=0.0,
                 exit_target=exit_level,
@@ -583,6 +586,27 @@ def _session_facts(now: datetime, cfg: OptionsFlipConfig) -> dict[str, Any]:
 def _parse_time(value: str) -> time:
     hour, _, minute = str(value or "").partition(":")
     return time(int(hour or 0), int(minute or 0))
+
+
+def _held_quantities(positions: dict[str, Any]) -> dict[str, int]:
+    """Contracts actually held, keyed by underlying.
+
+    The broker's own count, which is the only number an exit may be sized from: a partial fill,
+    a hand-trimmed position or one opened outside this algorithm all leave the remembered
+    intent saying something the account does not hold. Sizing the sell from memory produced an
+    order the broker rejects -- and a rejected exit is an open position with no protection
+    resting against it at all.
+    """
+    held: dict[str, int] = {}
+    for symbol, quantity in (positions or {}).items():
+        count = int(float(quantity or 0))
+        if count <= 0 or not is_osi_symbol(symbol):
+            continue
+        try:
+            held[parse_osi(symbol)["underlying"]] = count
+        except ValueError:
+            continue
+    return held
 
 
 def _held_contracts(positions: dict[str, Any]) -> dict[str, str]:
