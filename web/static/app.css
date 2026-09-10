@@ -860,7 +860,9 @@ body.dca-off .bucket-blob {
   opacity: 0.16;
 }
 
-.bucket-blob.sell {
+/* Offset so the two blobs never pulse in lockstep. Keyed on position rather than on the name
+   "sell", which left a call/put board with two synchronised blobs. */
+.bucket-blob.is-second {
   animation-delay: -1.4s;
 }
 

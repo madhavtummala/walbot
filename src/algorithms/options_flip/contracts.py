@@ -149,17 +149,24 @@ def select_contract(
     return None, best_effort, checks
 
 
-def affordable_contracts(contract: OptionContract, config: Any) -> int:
-    """How many contracts the per-trade notional cap allows, at this contract's ask.
+def affordable_contracts(
+    contract: OptionContract, config: Any, *, budget: float = 0.0
+) -> int:
+    """How many contracts to open, at this contract's ask.
 
-    Priced at the ask rather than the mid because the cap is a statement about money that could
+    Priced at the ask rather than the mid because this is a statement about money that could
     actually leave the account, and a marketable order pays the offer.
 
-    ``contracts_per_trade`` is the unit and the cap only ever *trims* it, so the two say
-    different things rather than the same thing twice: the unit is the risk you intend to take
-    and the cap is the money you refuse to exceed. A cap of zero means no cap, deliberately --
-    on an expensive underlying a cap set for a cheap one rejects every contract, and the
-    strategy then looks broken rather than priced out.
+    **A per-symbol budget sizes the position; the global knobs only trim it.** The budget is
+    stated in dollars because dollars are what a long call actually risks -- it cannot lose more
+    than its premium, so the budget *is* the loss cap, and it means the same thing on GLD's $17
+    premium as on IBIT's $2.50. A contract count does not: the same unit on those two symbols is
+    a six-fold difference in money at risk, and it drifts again as premium moves. Measured over
+    August, one global ``contracts_per_trade: 1`` put ~$1,750 per GLD position against ~$250 per
+    IBIT one, which is a position-sizing decision nobody made on purpose.
+
+    Falls back to ``contracts_per_trade`` when a symbol has no budget on the board, so an
+    account that never opens the board behaves exactly as it did before.
 
     Whole contracts because no venue sells a fraction of one.
     """
@@ -171,12 +178,18 @@ def affordable_contracts(contract: OptionContract, config: Any) -> int:
     cost = (contract.ask or contract.midpoint) * 100.0
     if cost <= 0:
         return 0
-    wanted = max(int(getattr(config, "contracts_per_trade", 1) or 1), 1)
+
+    budget = max(float(budget or 0.0), 0.0)
+    if budget > 0:
+        wanted = int(budget // cost)
+    else:
+        wanted = max(int(getattr(config, "contracts_per_trade", 1) or 1), 1)
+
     cap = float(getattr(config, "max_notional_per_trade", 0.0) or 0.0)
     # A cap of zero means "no cap" -- deliberately, because on an expensive underlying the cap
     # rejects every contract and the strategy looks broken rather than priced out.
     if cap <= 0:
-        return wanted
+        return max(wanted, 0)
     return max(min(wanted, int(cap // cost)), 0)
 
 

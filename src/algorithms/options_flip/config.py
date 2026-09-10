@@ -19,6 +19,9 @@ position at the deadline is sold at whatever is offered.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
+
+from ...common.config_utils import as_float
 
 VOLATILITY_WINDOW = 20
 INTRADAY_BAR_MINUTES = 5
@@ -264,3 +267,78 @@ class OptionsFlipConfig:
         one-session sample.
         """
         return 390 * (max(int(self.level_lookback_days), 1) + 1)
+
+
+# =========================================================================================
+# Per-symbol budgets: what each name may spend, rather than one number for all of them.
+# =========================================================================================
+
+#: Where the budget board lives inside this algorithm's config section --
+#: ``algorithms.options_flip.plan``, read and written through ``/api/algorithm-config`` like
+#: every other knob. Same key Bursty DCA uses for the same reason: a nested structure needs its
+#: own reader, and the Tune screen renders it through a purpose-built editor.
+PLAN_KEY = "plan"
+
+#: Hard ceiling on one symbol's budget, in dollars per position.
+MAX_ITEM_AMOUNT = 25_000.0
+
+#: The directions a budget can be set for. ``put`` is declared but not yet tradable -- the
+#: level model measures a dip-then-rebound and the regime gate is one-sided, so nothing can act
+#: on a put budget until both are mirrored. Declared anyway because the *shape* is what makes
+#: adding them config rather than a rewrite: every consumer already keys on direction, so the
+#: put side arrives as a populated bucket instead of a new code path.
+BUCKETS = ("call", "put")
+
+
+def raw_plan(config: Any, algorithm_id: str) -> dict[str, Any]:
+    """The board as written in ``algorithms.<algorithm_id>.plan``, unsanitized.
+
+    Read off the config object rather than carried on :class:`OptionsFlipConfig`, which is a
+    flat dataclass of scalars coerced by declared type -- a nested structure does not survive
+    that path, which is exactly why Bursty DCA reads its plan the same way.
+    """
+    section = (getattr(config, "algorithm_configs", {}) or {}).get(algorithm_id) or {}
+    plan = section.get(PLAN_KEY)
+    return plan if isinstance(plan, dict) else {}
+
+
+def sanitize_plan(plan: dict[str, Any] | None, universe: set[str]) -> dict[str, Any]:
+    """Normalize a budget board and keep only symbols present in the configured universe.
+
+    An absent or empty plan sanitizes to empty buckets -- never a built-in default, which would
+    let clearing the board leave the algorithm still trading. A symbol with no budget is a
+    symbol that does not trade, which is what makes the board the whole statement of what this
+    algorithm may do rather than a filter layered over a separate list.
+    """
+    sanitized: dict[str, Any] = {}
+
+    for bucket in BUCKETS:
+        raw_items = ((plan or {}).get(bucket) or {}).get("items") or []
+        seen: set[str] = set()
+        items: list[dict[str, Any]] = []
+        for item in raw_items:
+            symbol = str(item.get("symbol", "")).strip().upper()
+            if not symbol or symbol not in universe or symbol in seen:
+                continue
+            seen.add(symbol)
+            items.append({
+                "symbol": symbol,
+                "amount": min(max(as_float(item.get("amount"), default=0.0), 0.0), MAX_ITEM_AMOUNT),
+            })
+        sanitized[bucket] = {"amount": sum(item["amount"] for item in items), "items": items}
+
+    return sanitized
+
+
+def symbol_budget(plan: dict[str, Any] | None, symbol: str, direction: str) -> float:
+    """This symbol's budget for one direction, in dollars. 0.0 when the board does not fund it.
+
+    Zero is meaningful rather than a missing value: a symbol absent from the board is one this
+    algorithm may not open a position in, and :func:`contracts_for_budget` sizes it to nothing.
+    """
+    bucket = (plan or {}).get(str(direction).strip().lower()) or {}
+    wanted = str(symbol).strip().upper()
+    for item in bucket.get("items") or []:
+        if str(item.get("symbol", "")).strip().upper() == wanted:
+            return max(as_float(item.get("amount"), default=0.0), 0.0)
+    return 0.0

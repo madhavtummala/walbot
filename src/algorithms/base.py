@@ -139,6 +139,15 @@ class BaseAlgorithm:
     #: Name of a purpose-built Tune-screen editor, or None for the generic parameter form.
     tune_editor: str | None = None
 
+    #: The buckets a ``budgets`` board splits its symbols across, and what each amount means.
+    #: Declared by the algorithm because only it knows: DCA divides a monthly budget into buy
+    #: and sell, Options Flip divides a per-position dollar cap into call and put. The dashboard
+    #: used to hardcode ``["buy", "sell"]``, which made the board unusable for any algorithm
+    #: whose buckets were named anything else.
+    tune_buckets: tuple[str, ...] = ("buy", "sell")
+    #: One line under the board saying what a bubble's number is, in the algorithm's own terms.
+    tune_budget_hint: str = "Dollars per month, per symbol"
+
     #: Order-sizing floors. ``None`` takes the account's own setting (right for a portfolio
     #: algorithm); ``0.0`` switches the floor off (right for one that states increments, e.g.
     #: DCA, where a drift threshold would suppress the exact trade the plan asked for).

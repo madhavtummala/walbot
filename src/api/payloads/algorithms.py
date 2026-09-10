@@ -96,6 +96,14 @@ def _tune_editor(strategy: str) -> str | None:
 
 
 
+def _tune_attr(strategy: str, name: str, default: Any) -> Any:
+    """One Tune-screen declaration off the algorithm class, with a fallback for unknown ids."""
+    try:
+        return getattr(get_algorithm_class(strategy), name, default)
+    except (KeyError, TypeError, ValueError):
+        return default
+
+
 def algorithm_config_payload(strategy: str) -> dict[str, Any]:
     """The saved tuning for one algorithm, read from the key it actually lives under."""
     strategy = canonical_algorithm_id(strategy)[:80]
@@ -114,6 +122,11 @@ def algorithm_config_payload(strategy: str) -> dict[str, Any]:
         "config": values,
         # Declared by the algorithm class: None means the generic parameter form.
         "tune_editor": _tune_editor(strategy),
+        # Which buckets that editor splits symbols across, and what an amount means. Asked of
+        # the algorithm rather than hardcoded in the dashboard, which is what limited the board
+        # to algorithms whose buckets happened to be named buy and sell.
+        "tune_buckets": [str(b) for b in _tune_attr(strategy, "tune_buckets", ("buy", "sell"))],
+        "tune_budget_hint": str(_tune_attr(strategy, "tune_budget_hint", "") or ""),
         "explainer": explainer_for(strategy),
     }
 

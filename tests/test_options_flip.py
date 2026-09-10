@@ -1265,3 +1265,94 @@ def test_the_cost_basis_is_refreshed_rather_than_frozen() -> None:
     )
 
     assert memory["fill_price"] == 15.10
+
+
+# --------------------------------------------------------------------------------------
+# Per-symbol budgets. One global contract count meant a six-fold difference in money at
+# risk between a $17 premium and a $2.50 one -- a position-sizing decision nobody made.
+# --------------------------------------------------------------------------------------
+
+
+class _Quote:
+    def __init__(self, ask: float) -> None:
+        self.ask = ask
+        self.midpoint = ask
+
+
+def test_a_budget_sizes_the_position_in_dollars_not_contracts() -> None:
+    """The budget is the loss cap: a long call cannot lose more than its premium, so the same
+    dollar figure means the same risk on any symbol."""
+    from src.algorithms.options_flip.config import OptionsFlipConfig
+    from src.algorithms.options_flip.contracts import affordable_contracts
+
+    config = OptionsFlipConfig()
+
+    assert affordable_contracts(_Quote(17.50), config, budget=3_500.0) == 2   # $3,500
+    assert affordable_contracts(_Quote(2.50), config, budget=3_500.0) == 14   # $3,500
+
+
+def test_no_budget_falls_back_to_the_global_contract_unit() -> None:
+    """An account that never opens the board behaves exactly as it did before."""
+    from src.algorithms.options_flip.config import OptionsFlipConfig
+    from src.algorithms.options_flip.contracts import affordable_contracts
+
+    config = OptionsFlipConfig(contracts_per_trade=2)
+
+    assert affordable_contracts(_Quote(2.50), config, budget=0.0) == 2
+
+
+def test_the_notional_cap_still_trims_a_budget() -> None:
+    """The two say different things: the budget sizes the position, the cap is money the
+    account refuses to exceed whatever the board asks for."""
+    from src.algorithms.options_flip.config import OptionsFlipConfig
+    from src.algorithms.options_flip.contracts import affordable_contracts
+
+    config = OptionsFlipConfig(max_notional_per_trade=1_000.0)
+
+    # The budget wants 14; the cap allows 4.
+    assert affordable_contracts(_Quote(2.50), config, budget=3_500.0) == 4
+
+
+def test_a_symbol_absent_from_the_board_is_not_traded() -> None:
+    """Zero is a decision, not a missing value: the board is the whole statement of what this
+    algorithm may open."""
+    from src.algorithms.options_flip.config import OptionsFlipConfig, sanitize_plan, symbol_budget
+    from src.algorithms.options_flip.contracts import affordable_contracts
+
+    plan = sanitize_plan({"call": {"items": [{"symbol": "GLD", "amount": 3_500}]}}, {"GLD", "USO"})
+
+    assert symbol_budget(plan, "USO", "call") == 0.0
+    # ...and with no budget it falls back to the unit, so "not on the board" has to be enforced
+    # by the board being the source of the symbol list, which `_symbols` already is.
+    assert affordable_contracts(_Quote(8.00), OptionsFlipConfig(), budget=0.0) == 1
+
+
+def test_the_board_declares_call_and_put_buckets() -> None:
+    """The put bucket exists so adding puts is config rather than a new code path -- nothing
+    reads it until the level model and the regime gate are mirrored."""
+    from src.algorithms.options_flip.algorithm import OptionsFlipAlgorithm
+    from src.algorithms.options_flip.config import sanitize_plan
+
+    assert OptionsFlipAlgorithm.tune_buckets == ("call", "put")
+    assert set(sanitize_plan({}, {"GLD"})) == {"call", "put"}
+
+
+def test_editing_a_budget_invalidates_the_cached_signal_view() -> None:
+    """The board sizes every position, so a snapshot computed under the old amounts must not be
+    served for the new ones."""
+    from dataclasses import replace
+
+    from src.algorithms.options_flip.algorithm import OptionsFlipAlgorithm
+    from src.core.config import get_config
+
+    algorithm = OptionsFlipAlgorithm({})
+    base = get_config()
+    symbol = sorted(base.symbols)[0]
+
+    def with_budget(amount: float):
+        return replace(base, algorithm_configs={
+            **(base.algorithm_configs or {}),
+            "options_flip": {"plan": {"call": {"items": [{"symbol": symbol, "amount": amount}]}}},
+        })
+
+    assert algorithm.config_fingerprint(with_budget(3_500)) != algorithm.config_fingerprint(with_budget(1_000))

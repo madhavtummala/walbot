@@ -48,7 +48,7 @@ from ...data.state_store import algorithm_state_key, save_state
 from ..base import BaseAlgorithm
 from ..rally_rotation.memory import market_day, sessions_since
 from ..reconcile import ORDER_IDS_KEY, reconcile_orders
-from .config import OptionsFlipConfig
+from .config import BUCKETS, OptionsFlipConfig, raw_plan, sanitize_plan, symbol_budget
 from .contracts import affordable_contracts, fill_missing_deltas, select_contract
 from .candidates import scoring_parameters, trend_strength
 from .indicators import average_true_range, quote_age_seconds
@@ -72,7 +72,15 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
     algorithm_id = "options_flip"
     tuning_class = OptionsFlipConfig
 
-    #: Contracts are sized by count against a notional cap, so neither portfolio floor applies.
+    #: Per-symbol dollar budgets are a nested structure rather than a list of scalars, so the
+    #: Tune screen renders them through the same bubble board Bursty DCA uses. The buckets differ
+    #: -- call and put rather than buy and sell -- and the editor keys off ``BUCKETS``.
+    tune_editor = "budgets"
+    tune_buckets = BUCKETS
+    tune_budget_hint = "Dollars per position, per symbol — the most this side may risk at once"
+
+    #: Contracts are sized by a per-symbol dollar budget, trimmed by a notional cap, so neither
+    #: portfolio floor applies.
     min_trade_dollars = 0.0
     rebalance_threshold = 0.0
 
@@ -92,6 +100,18 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
     #: progresses and the underlying moves; between fires the resting order and the exchange-side
     #: stop are doing the actual work.
     cron = "*/5 9-15 * * 1-5"
+
+    def budget_plan(self, config: Any) -> dict[str, Any]:
+        """The per-symbol dollar budgets, filtered to what is actually tradable."""
+        from ...data.universe import tradable_symbols
+
+        return sanitize_plan(raw_plan(config, self.algorithm_id), tradable_symbols(config))
+
+    def config_fingerprint(self, config: Any) -> dict[str, Any]:
+        """The board sizes every position, so editing an amount changes what this algorithm
+        would do -- and a cached signal view computed under the old amounts must not be served
+        for the new ones."""
+        return {**super().config_fingerprint(config), "plan": self.budget_plan(config)}
 
     @staticmethod
     def _symbols(cfg: OptionsFlipConfig, config: Any) -> list[str]:
@@ -134,6 +154,9 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
         held = _held_contracts(context.positions)
 
         universe = self._symbols(cfg, context.config)
+        # Resolved once for the whole run rather than per symbol: it is one read of the config
+        # document, and every symbol must be sized against the same board.
+        plan_board = self.budget_plan(context.config)
         # No ranking, and nothing shared between symbols. Each is scored from its own bars
         # inside ``_plan_one``, so adding or removing a name cannot change what the others do.
         symbols = sorted({*universe, *held}) if universe else sorted(held)
@@ -143,6 +166,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
                 symbol, context, cfg, session,
                 memory=dict(symbols_memory.get(symbol) or {}),
                 held_contract=held.get(symbol, ""),
+                plan_board=plan_board,
             )
             orders.extend(outcome.orders)
             signals[symbol] = _signal(outcome)
@@ -161,7 +185,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
             },
         )
 
-    def _plan_one(self, symbol, context, cfg, session, *, memory, held_contract):
+    def _plan_one(self, symbol, context, cfg, session, *, memory, held_contract, plan_board=None):
         """One symbol, start to finish: direction, contract, budget, orders."""
         daily = context.daily_bars_by_symbol.get(symbol)
         intraday = context.intraday_bars_by_symbol.get(symbol)
@@ -292,24 +316,37 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
                 spot=underlying_now, config=cfg,
             )
             ceiling = max_debit(priced, outcomes, config=cfg)
-            contracts = affordable_contracts(priced, cfg) if contract else 0
+            budget = symbol_budget(plan_board, symbol, CALL)
+            contracts = affordable_contracts(priced, cfg, budget=budget) if contract else 0
             profit = expected_profit(outcomes, contracts or 1, config=cfg)
             worth_it = profit["per_contract"] >= float(cfg.min_profit_per_contract)
             estimate = _estimate_row(
                 priced, levels, outcomes, profit, ceiling, contracts, regime, cfg,
             )
-            wanted_contracts = max(int(getattr(cfg, "contracts_per_trade", 1) or 1), 1)
             notional_cap = float(getattr(cfg, "max_notional_per_trade", 0.0) or 0.0)
-            if contract is not None and notional_cap > 0:
+            # What set the size, named so the deck says which control the reader should reach
+            # for: the symbol's own budget when the board funds it, the global unit otherwise.
+            if budget > 0:
+                wanted_contracts = int(budget // ((contract.ask or contract.midpoint) * 100.0)) if contract else 0
+                sized_by = f"${budget:,.0f} budget for {symbol}"
+            else:
+                wanted_contracts = max(int(getattr(cfg, "contracts_per_trade", 1) or 1), 1)
+                sized_by = f"{wanted_contracts} contract unit (no budget set for {symbol})"
+            if contract is not None and (notional_cap > 0 or budget > 0):
                 contract_cost = (contract.ask or contract.midpoint) * 100.0
+                capped = notional_cap > 0 and contracts < wanted_contracts
                 checks = checks + [Check(
                     label="Affordable",
                     ok=contracts > 0,
                     value=(
-                        f"${contract_cost:,.0f}/contract against a ${notional_cap:,.0f} cap "
-                        f"— {contracts} of {wanted_contracts} wanted"
+                        f"${contract_cost:,.0f}/contract — {contracts} of {wanted_contracts} "
+                        f"from the {sized_by}"
+                        + (f", trimmed by the ${notional_cap:,.0f} cap" if capped else "")
                     ),
-                    limit=f"≤ ${notional_cap:,.0f} per contract, whole contracts only",
+                    limit=(
+                        f"≤ ${notional_cap:,.0f} per position, whole contracts only"
+                        if notional_cap > 0 else "whole contracts only"
+                    ),
                     blocking=contracts <= 0,
                 )]
             checks = checks + [Check(

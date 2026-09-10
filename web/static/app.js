@@ -1,5 +1,9 @@
 const SVG_NS = "http://www.w3.org/2000/svg";
-const BUCKET_NAMES = ["buy", "sell"];
+//: Fallback only. Which buckets a budget board splits its symbols across is the algorithm's
+//: own declaration -- DCA divides a month into buy and sell, Options Flip divides a
+//: per-position cap into call and put -- and it arrives on the config payload as
+//: ``tune_buckets``. This is what the board uses before that payload has loaded.
+const DEFAULT_BUCKET_NAMES = ["buy", "sell"];
 const MAX_AMOUNT = 2000;
 //: The algorithm declares which purpose-built editor its Tune screen needs, and the config
 //: payload carries the answer. This used to be a hardcoded list of "the DCA algorithms" here,
@@ -252,6 +256,13 @@ function planStrategyKey() {
   return state.planStrategy || DEFAULT_ALGORITHM_KEY;
 }
 
+//: The buckets the board should draw, for whichever algorithm's plan is open. Read from the
+//: loaded config so one board serves every budgets algorithm; falls back until it arrives.
+function bucketNames(strategyKey) {
+  const declared = state.algorithmConfigs[strategyKey || planStrategyKey()]?.tune_buckets;
+  return Array.isArray(declared) && declared.length ? declared : DEFAULT_BUCKET_NAMES;
+}
+
 //: Whether an algorithm wants the budget board, as reported by /api/algorithm-config. False
 //: until that config has loaded, which is the same condition the board's own guards test.
 function usesBudgetsEditor(strategyKey) {
@@ -264,7 +275,7 @@ function currentPlan() {
   const config = state.algorithmConfigs[planStrategyKey()]?.config;
   if (!config) return null;
   if (!config.plan || typeof config.plan !== "object") config.plan = {};
-  BUCKET_NAMES.forEach((bucketName) => {
+  bucketNames().forEach((bucketName) => {
     if (!config.plan[bucketName] || typeof config.plan[bucketName] !== "object") {
       config.plan[bucketName] = { amount: 0, items: [] };
     }
@@ -338,7 +349,7 @@ function calculateLayout() {
 }
 
 function fitBucketRadii() {
-  BUCKET_NAMES.forEach((bucketName) => {
+  bucketNames().forEach((bucketName) => {
     const bucket = state.layout.buckets[bucketName];
     const areaRadius = Math.sqrt(
       bucketItems(bucketName).reduce((sum, item) => sum + (itemRadius(item.amount) + 12) ** 2, 0),
@@ -358,7 +369,9 @@ function pointFromPosition(position, bucket, radius) {
 function fallbackPosition(index, count, bucketName) {
   if (count <= 1) return { x: 0, y: 0 };
   const ring = Math.sqrt((index + 1) / (count + 1));
-  const angle = index * GOLDEN_ANGLE + (bucketName === "sell" ? 0.9 : 0);
+  // Offset the second bucket's spiral so two boards of the same size do not sit in identical
+  // arrangements. Keyed on position rather than on the name "sell", so it works for call/put.
+  const angle = index * GOLDEN_ANGLE + (bucketNames().indexOf(bucketName) === 1 ? 0.9 : 0);
   return {
     x: Math.cos(angle) * ring * 0.68,
     y: Math.sin(angle) * ring * 0.68,
@@ -385,7 +398,11 @@ function distance(point, bucket) {
 
 function nearestBucket(point) {
   const buckets = state.layout.buckets;
-  return distance(point, buckets.buy) <= distance(point, buckets.sell) ? "buy" : "sell";
+  // Whichever declared bucket the point is closest to. Named buckets were compared directly
+  // here, which silently returned "buy"/"sell" on a board drawing call and put.
+  return bucketNames().reduce((closest, name) =>
+    distance(point, buckets[name]) < distance(point, buckets[closest]) ? name : closest
+  );
 }
 
 function bucketAtPoint(point) {
@@ -447,7 +464,7 @@ function buildNodes() {
   // Nodes belong to the plan they were built from. Recorded so nothing can write one
   // algorithm's bubbles into another's plan -- see syncNodesToPlan.
   state.nodesStrategy = planStrategyKey();
-  BUCKET_NAMES.forEach((bucketName) => {
+  bucketNames().forEach((bucketName) => {
     const bucket = state.layout.buckets[bucketName];
     const items = bucketItems(bucketName);
     items.forEach((item, index) => {
@@ -491,7 +508,7 @@ function syncNodesToPlan() {
   // there is nothing here worth carrying across.
   if (state.nodesStrategy !== planStrategyKey()) return;
   state.nodes.forEach(syncNodeToPlan);
-  BUCKET_NAMES.forEach((bucketName) => setBucketItems(bucketName, bucketItems(bucketName)));
+  bucketNames().forEach((bucketName) => setBucketItems(bucketName, bucketItems(bucketName)));
 }
 
 function renderBoard() {
@@ -507,12 +524,12 @@ function renderBoard() {
   svg.classList.toggle("resize-mode", Boolean(state.selected));
   svg.replaceChildren();
 
-  BUCKET_NAMES.forEach((bucketName) => {
+  bucketNames().forEach((bucketName) => {
     const bucket = state.layout.buckets[bucketName];
     const color = bucketColor(bucketName);
     const blob = svgEl("path", {
       id: `${bucketName}-blob`,
-      class: `bucket-blob ${bucketName}`,
+      class: `bucket-blob ${bucketName} ${bucketNames().indexOf(bucketName) === 1 ? "is-second" : "is-first"}`,
       fill: color,
       stroke: bucketStrokeColor(bucketName),
       d: organicPath(bucketName),
@@ -584,7 +601,7 @@ function renderInvalidAsset(svg, node) {
 }
 
 function updateBoardElements(phase = 0) {
-  BUCKET_NAMES.forEach((bucketName) => {
+  bucketNames().forEach((bucketName) => {
     const blob = $(`#${bucketName}-blob`);
     const total = $(`#${bucketName}-total`);
     if (blob) blob.setAttribute("d", organicPath(bucketName, phase));
@@ -614,7 +631,7 @@ function startAnimation() {
 }
 
 function stepPhysics() {
-  BUCKET_NAMES.forEach((bucketName) => {
+  bucketNames().forEach((bucketName) => {
     const bucket = state.layout.buckets[bucketName];
     const nodes = state.nodes.filter((node) => node.bucketName === bucketName);
     nodes.forEach((node, index) => {
@@ -1073,17 +1090,17 @@ function removeSymbol(bucketName, symbol) {
 }
 
 function moveAsset(node) {
-  const fromItems = BUCKET_NAMES.flatMap((bucketName) =>
+  const fromItems = bucketNames().flatMap((bucketName) =>
     bucketItems(bucketName).map((item) => ({ bucketName, item })),
   );
   const found = fromItems.find(({ item }) => item.symbol === node.symbol);
   if (!found) return;
-  BUCKET_NAMES.forEach((bucketName) => {
+  bucketNames().forEach((bucketName) => {
     currentPlan()[bucketName].items = bucketItems(bucketName).filter((item) => item.symbol !== node.symbol);
   });
   found.item.amount = node.amount;
   currentPlan()[node.bucketName].items.push(found.item);
-  BUCKET_NAMES.forEach((bucketName) => setBucketItems(bucketName, bucketItems(bucketName)));
+  bucketNames().forEach((bucketName) => setBucketItems(bucketName, bucketItems(bucketName)));
   schedulePlanSave();
 }
 
@@ -2696,7 +2713,10 @@ function renderDcaTuner(host, strategy) {
     host.innerHTML = `<p class="emptyState">Loading budgets.</p>`;
     return;
   }
-  if (hint) hint.textContent = `Dollars per month, per symbol · algorithms.${entry.config_key || strategy.key}.plan`;
+  // The algorithm says what a bubble's number means -- a month of budget for DCA, a position's
+  // risk for Options Flip -- so the board does not have to assume one reading.
+  const unitHint = entry.tune_budget_hint || "Dollars per month, per symbol";
+  if (hint) hint.textContent = `${unitHint} · algorithms.${entry.config_key || strategy.key}.plan`;
   host.innerHTML = `<svg class="bubbleBoard" id="bubbleBoard" role="img"
     aria-label="Interactive buy and sell budget bubbles"></svg>
     <p class="cardHint">${escapeHtml(plan?.effect || "")} Scroll a bubble to change its budget, or select one and type the amount. Drag between buckets, drag one off the buckets to remove it, double-click to add.
@@ -3311,7 +3331,7 @@ function wireEvents() {
       }
     }
     if ((event.key === "Delete" || event.key === "Backspace") && state.selected) {
-      const found = BUCKET_NAMES.flatMap((bucketName) =>
+      const found = bucketNames().flatMap((bucketName) =>
         bucketItems(bucketName).map((item) => ({ bucketName, item })),
       ).find(({ item }) => item.symbol === state.selected);
       if (found) {

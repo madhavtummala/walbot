@@ -181,13 +181,9 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
     },
     "options_flip": {
         "summary": (
-            "A bull-regime, pullback-entry, rebound-exit long-call trade on a deadline-aware "
-            "limit schedule. Candidates come from Rally Rotation's ranking of its risk-on "
-            "universe. Three gates decide whether one trades: the bull thesis has to be intact "
-            "today, the entry and target levels have to be ones comparable sessions actually "
-            "reached, and the base case -- priced through the full greeks, net of execution and "
-            "fee reserves -- has to clear the floor. A limit controls price and never guarantees "
-            "a fill, so missed entries and missed exits are modelled rather than assumed away."
+            "Buys calls on trending symbols, bidding at a pullback level comparable sessions "
+            "actually reached and selling into the rebound. Every price is a limit, so a missed "
+            "fill is an outcome the model prices rather than one it assumes away."
         ),
         "formula": [
             "strength(i) = sum over horizons of w_h x return_h / (annual_vol x sqrt(days_h/252))",
