@@ -29,6 +29,7 @@ delta, and how many sessions a position has been held.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import asdict, replace
 from datetime import date, datetime, time
 from typing import Any
@@ -43,7 +44,7 @@ from ...core.interfaces import (
     Check,
     SignalView,
 )
-from ...core.options import CALL, is_osi_symbol, parse_osi
+from ...core.options import CALL, black_scholes_delta, is_osi_symbol, parse_osi
 from ...data.state_store import algorithm_state_key, save_state
 from ..base import BaseAlgorithm
 from ..rally_rotation.memory import market_day, sessions_since
@@ -65,6 +66,9 @@ logger = logging.getLogger(__name__)
 #: What a symbol's bubble starts at when a board is seeded from a config that named no
 #: per-position ceiling. One position's worth, not a portfolio's.
 DEFAULT_SEED_BUDGET = 3_500.0
+
+#: Trading days a year, for annualising a daily volatility estimate.
+TRADING_DAYS_PER_YEAR = 252
 
 REGULAR_OPEN = time(9, 30)
 REGULAR_CLOSE = time(16, 0)
@@ -266,8 +270,11 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
             )
             # The band re-predicts every run regardless of state, so a held position should not go
             # dark once it fills -- same estimate shape as the flat/bidding case, below.
+            # ``outcome.memory`` rather than ``memory``: the resting sell order's price is
+            # resolved inside ``plan_symbol`` and written there, so the pre-plan copy has no
+            # ``target`` and the band's far end rendered as $0.00.
             return replace(outcome, estimate=_held_estimate_row(
-                memory, band, mark, exit_level, sell_ok,
+                outcome.memory or memory, band, mark, exit_level, sell_ok,
             ))
 
         history, today = _split_sessions(intraday, session["market_day"])
@@ -454,6 +461,9 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
                 # time. Reporting the translation here regardless of ``band_source`` would show a
                 # number the order never used.
                 estimate["entry_premium"] = float(band.get("entry", 0.0))
+                # The far end as well, so the premium band has both ends. Only the entry was
+                # carried, which rendered as "$16.56 -> $0.00".
+                estimate["target_premium"] = float(band.get("target", 0.0) or 0.0)
                 estimate["band_source"] = band_source
                 estimate["band_sample"] = int(band.get("sample", 0))
 
@@ -804,18 +814,34 @@ def _estimate_row(contract, levels, outcomes, profit, ceiling, contracts, regime
 def _held_estimate_row(memory, band, mark: float, exit_level: float, sell_ok: bool) -> dict[str, Any]:
     """What the deck needs to judge a held position, refreshed every run like the flat estimate.
 
-    Unlike :func:`_estimate_row`, there is no contract to price scenarios from -- the entry
-    already happened -- so this reports the exit side only: the re-predicted band, and where the
-    position sits against its own fill.
+    Two bands, because a held position is priced in two currencies and the reader needs both.
+    The *premium* band is what the position is actually doing -- what it cost and what the
+    resting sell order is asking right now -- and it is the one that belongs beside the mark.
+    The *underlying* band is where that ask comes from: the level model's target for the stock,
+    translated into premium through delta.
+
+    This used to report the underlying band alone, against an entry hardcoded to zero because a
+    held position has no entry left to make. That rendered as "$0.00 -> $161.01" next to a
+    $7.20 mark -- an underlying-scale number in a field the reader reads as premium, with a
+    placeholder for its other end.
     """
     fill_price = float(memory.get("fill_price", 0.0) or 0.0)
+    # The resting sell order's price, as this run resolved it -- not the modelled ceiling. That
+    # is what the position is asking, so it is what the band's far end should say.
+    asking = float(memory.get("target", 0.0) or 0.0)
     return {
         "contract": str(memory.get("contract", "")),
+        "contract_label": str(memory.get("contract", "")),
         "fill_price": fill_price,
         "mark": mark,
         "unrealised_pct": (mark / fill_price - 1.0) if fill_price > 0 and mark > 0 else 0.0,
+        # The premium band: what it cost, and what it is asking.
+        "entry_premium": fill_price,
+        "target_premium": asking or float(band.get("target", 0.0) or 0.0),
+        # The underlying band behind it. ``entry_underlying`` is deliberately the price now
+        # rather than zero: for a held position the interesting span is from here to the target.
+        "entry_underlying": float(memory.get("underlying_now", 0.0) or 0.0),
         "target_underlying": exit_level,
-        "target_premium": float(band.get("target", 0.0)),
         "band_source": str(band.get("source") or "none"),
         "band_sample": int(band.get("sample", 0)),
         "sell_ok": sell_ok,
@@ -962,8 +988,79 @@ def _refresh_held(memory, held_contract, context, session, cfg) -> dict[str, Any
         memory["sessions_held"] = sessions_since(filled_day, datetime.fromisoformat(session["market_day"]))
     except ValueError:
         memory["sessions_held"] = 0
+    # Delta is re-derived every run, not carried from the fill.
+    #
+    # It translates an underlying target into a premium one, and it is not a property of the
+    # trade -- it is a property of where the underlying sits *now*. A USO 142 call six days out
+    # is delta 0.90 at spot 150 and delta 0.10 at spot 134, so a delta frozen at entry
+    # overstates the target premium by 4% while the trade works and by 373% once it has gone
+    # badly wrong. That error runs the dangerous way: the position asks an impossible price
+    # exactly when it should be conceding, and the deadline is then the only thing that closes
+    # it. Derived from the contract's terms and the underlying's realised volatility -- the
+    # same Black-Scholes fallback ``fill_missing_deltas`` uses when Schwab will not quote one,
+    # and the only route available here, since a held symbol's chain is no longer fetched.
+    previous = float(memory.get("delta", 0.0) or 0.0)
+    current = _recover_delta(held_contract, context, session, cfg)
+    if current:
+        memory["delta"] = current
+        if previous and abs(current - previous) > 0.05:
+            logger.info(
+                "Options Flip re-priced %s delta %.3f -> %.3f as the underlying moved",
+                held_contract, previous, current,
+            )
+    elif not previous:
+        logger.warning(
+            "Options Flip has no delta for %s and could not derive one; its exit target will "
+            "sit at the mark until the underlying can be priced",
+            held_contract,
+        )
+    memory["underlying_now"] = _underlying_price(held_contract, context)
     memory["state"] = HELD
     return memory
+
+
+def _underlying_price(osi: str, context) -> float:
+    """The held contract's underlying price, for the deck's underlying band."""
+    try:
+        underlying = str(parse_osi(osi)["underlying"]).upper()
+    except Exception:  # noqa: BLE001 - an unreadable symbol has no underlying to price
+        return 0.0
+    return float((getattr(context, "latest_prices", None) or {}).get(underlying, 0.0) or 0.0)
+
+
+def _recover_delta(osi: str, context, session, cfg) -> float:
+    """Black-Scholes delta for a held contract whose stored one is missing.
+
+    Priced off the underlying's own realised volatility over ``volatility_window`` sessions,
+    which is what the contract-selection path falls back to as well, so a recovered delta and a
+    freshly quoted one mean the same thing.
+    """
+    try:
+        parsed = parse_osi(osi)
+    except Exception:  # noqa: BLE001 - an unreadable symbol simply has no delta to recover
+        return 0.0
+    underlying = str(parsed["underlying"]).upper()
+    # Read defensively: recovery is a best-effort repair, so a context that cannot answer
+    # leaves the delta missing rather than failing the run.
+    spot = float((getattr(context, "latest_prices", None) or {}).get(underlying, 0.0) or 0.0)
+    daily = (getattr(context, "daily_bars_by_symbol", None) or {}).get(underlying)
+    if spot <= 0 or daily is None or getattr(daily, "empty", True):
+        return 0.0
+    closes = daily["close"].astype(float)
+    window = max(int(cfg.volatility_window), 2)
+    returns = closes.pct_change().dropna().tail(window)
+    if returns.empty:
+        return 0.0
+    annual_vol = float(returns.std()) * math.sqrt(TRADING_DAYS_PER_YEAR)
+    if annual_vol <= 0:
+        return 0.0
+    market_day = date.fromisoformat(session["market_day"])
+    years = max((parsed["expiry"] - market_day).days, 0) / 365.0
+    if years <= 0:
+        return 0.0
+    return float(black_scholes_delta(
+        spot, float(parsed["strike"]), years, annual_vol, str(parsed["option_type"])
+    ))
 
 
 def _signal(outcome) -> dict[str, Any]:

@@ -1333,3 +1333,43 @@ def test_editing_a_budget_invalidates_the_cached_signal_view() -> None:
         })
 
     assert algorithm.config_fingerprint(with_budget(3_500)) != algorithm.config_fingerprint(with_budget(1_000))
+
+
+def test_a_held_position_reprices_its_delta_as_the_underlying_moves() -> None:
+    """Delta is a property of where the underlying sits now, not of the trade.
+
+    A USO 142 call six days out is delta ~0.90 at spot 150 and ~0.10 at spot 134, so a delta
+    frozen at the fill overstates the target premium by 4% while the trade works and by nearly
+    400% once it has gone badly wrong -- asking an impossible price exactly when the position
+    should be conceding.
+    """
+    import pandas as pd
+
+    from src.algorithms.options_flip.algorithm import _refresh_held
+    from src.algorithms.options_flip.config import OptionsFlipConfig
+
+    osi = "USO   260916C00142000"
+
+    def context_at(spot: float):
+        closes = [spot * (1 + 0.01 * ((i % 5) - 2)) for i in range(40)]
+
+        class Context:
+            latest_prices = {osi: 7.20, "USO": spot}
+            cost_basis: dict[str, float] = {}
+            daily_bars_by_symbol = {"USO": pd.DataFrame({
+                "timestamp": pd.date_range("2026-07-01", periods=40, freq="B", tz="UTC"),
+                "close": closes, "open": closes, "high": closes, "low": closes,
+                "volume": [1_000] * 40,
+            })}
+
+        return Context()
+
+    session = {"market_day": "2026-09-10"}
+    config = OptionsFlipConfig()
+
+    deep = _refresh_held({"contract": osi, "fill_price": 8.85}, osi, context_at(150.0), session, config)
+    # Same stored memory, now well below the strike.
+    fallen = _refresh_held(dict(deep), osi, context_at(130.0), session, config)
+
+    assert deep["delta"] > 0.8, "deep in the money, delta near one"
+    assert fallen["delta"] < deep["delta"] / 2, "re-priced downward rather than carried from the fill"
