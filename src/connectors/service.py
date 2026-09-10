@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 import pandas as pd
@@ -168,53 +168,20 @@ def fetch_market_history(
     fine = _run_provider_fallback(
         symbols, providers, fetchers, config, category=INTRADAY_MARKET_CATEGORY, label="History"
     )
-    if start_date is not None or end_date is not None:
-        # An explicit range is a cache-warming request for one grid, not a signal window.
-        return fine
-    return _extend_with_cached_history(fine, lookback_minutes, requested_minutes)
-
-
-def _extend_with_cached_history(
-    fine_bars: dict[str, pd.DataFrame],
-    lookback_minutes: int,
-    requested_minutes: int,
-) -> dict[str, pd.DataFrame]:
-    """Back-fill each symbol's window from coarser cached bars where the fine ones run out.
-
-    This is what makes a minute-stated horizon honest across the board: a 4800-minute lookback
-    is roughly twelve sessions, which the intraday cache reaches once it has been running, but
-    a fresh deployment or a long-horizon knob would otherwise score every symbol flat. Daily
-    bars answer the far end of the window perfectly well for a return measured in minutes.
-    """
-    from ..data.bars import coverage_minutes
-    from ..data.bars import read_history
-
-    end = datetime.now(timezone.utc)
-    extended: dict[str, pd.DataFrame] = {}
-    for symbol, bars in fine_bars.items():
-        if not bars.empty and coverage_minutes(bars) >= lookback_minutes:
-            extended[symbol] = bars
-            continue
-        try:
-            blended = read_history(symbol, lookback_minutes=lookback_minutes, end=end)
-        except Exception as exc:
-            logger.warning("Cached history read failed for %s; using fine bars alone: %s", symbol, exc)
-            extended[symbol] = bars
-            continue
-        if blended.empty:
-            extended[symbol] = bars
-            continue
-        if not bars.empty:
-            work = bars.copy()
-            if "interval_minutes" not in work:
-                work["interval_minutes"] = int(requested_minutes)
-            blended = pd.concat([blended, work], ignore_index=True)
-        extended[symbol] = (
-            blended.sort_values("timestamp")
-            .drop_duplicates(subset=["timestamp"], keep="last")
-            .reset_index(drop=True)
-        )
-    return extended
+    # Returned at the resolution that was asked for, short if that is all there is.
+    #
+    # This used to back-fill a short window from *daily* bars, which was compensating for a
+    # coverage bug rather than for missing history: the cache was consulted only for whether it
+    # was current, never for whether it reached the start of the window, so a short cache was
+    # served as complete and the blend papered over it. The fetch fills the window properly now.
+    #
+    # And the substitution was not harmless. ``excursion_samples`` buckets bars by minute-of-day
+    # and never looks at ``interval_minutes``, so a daily bar blended into a five-minute series
+    # is counted as an intraday observation carrying a whole session's range -- which is what
+    # the dip and rebound quantiles are learned from. A too-wide level model reads as a market
+    # fact rather than a data gap. Callers that genuinely want a blended horizon ask
+    # ``read_history`` for one directly; the replay does.
+    return fine
 
 
 def fetch_eod_market_bars(

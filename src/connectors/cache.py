@@ -47,10 +47,33 @@ def _last_session_close(local: pd.Timestamp) -> pd.Timestamp:
         candidate -= pd.Timedelta(days=1)
     return candidate
 
-#: How much calendar time a bar count can span. A session is 6.5 of 24 hours and weekends
-#: carry none at all, so N trading bars reach roughly four times further back in wall-clock
-#: terms. Over-reaching costs nothing -- the store answers the range it has.
-_CALENDAR_SLACK = 4
+#: Trading minutes in a regular session, for converting a bar count to calendar time.
+_SESSION_MINUTES = 390
+
+
+def window_start_for(bar_count: int, interval_minutes: int, window_end: pd.Timestamp) -> pd.Timestamp:
+    """The calendar instant ``bar_count`` bars of ``interval_minutes`` reaches back to.
+
+    Counted in *sessions* rather than by a slack multiplier: bars only exist for 390 minutes of
+    each weekday, so the conversion is how many sessions the count covers and then how far back
+    those weekdays sit. A flat multiplier had to over-reach to stay safe, which asked the
+    provider for more history than the window needed on every cold fetch.
+    """
+    if bar_count <= 0 or interval_minutes <= 0:
+        return window_end
+    minutes = int(bar_count) * int(interval_minutes)
+    if int(interval_minutes) >= DAILY_INTERVAL_MINUTES:
+        sessions = int(bar_count)
+    else:
+        sessions = max(int(-(-minutes // _SESSION_MINUTES)), 1)
+    # Weekends carry no bars, so N sessions span N*7/5 calendar days. One extra session of
+    # slack absorbs holidays, which are rare enough not to be worth a calendar for.
+    calendar_days = int(-(-(sessions + 1) * 7 // 5))
+    local = window_end.tz_convert(MARKET_TZ)
+    start = (local.normalize() - pd.Timedelta(days=calendar_days)) + pd.Timedelta(
+        hours=_SESSION_OPEN[0], minutes=_SESSION_OPEN[1]
+    )
+    return start.tz_convert("UTC")
 
 
 def _merge_bars(held: pd.DataFrame, fetched: pd.DataFrame) -> pd.DataFrame:
@@ -292,15 +315,13 @@ def _write_duckdb_bars(
     symbol: str,
     interval_minutes: int,
     bars: pd.DataFrame,
-    *,
-    ttl_seconds: int | None,
 ) -> None:
     if bars.empty:
         return
     try:
         from ..data.duckdb_store import write_market_bars
 
-        write_market_bars(provider, symbol, int(interval_minutes), bars, ttl_seconds=ttl_seconds)
+        write_market_bars(provider, symbol, int(interval_minutes), bars)
     except Exception as exc:
         logger.warning(
             "DuckDB market cache write failed provider=%s symbol=%s interval=%sm rows=%s: %s",

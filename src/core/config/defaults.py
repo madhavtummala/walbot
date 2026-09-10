@@ -70,8 +70,6 @@ EOD_MARKET_DATA_PROVIDER_ORDER: list[str] = []
 NEWS_SENTIMENT_PROVIDER_ORDER: list[str] = []
 DIVIDEND_PROVIDER_ORDER: list[str] = ["alpaca", "yfinance"]
 MARKET_DATA_CACHE_TTL_SECONDS = 1800
-INTRADAY_MARKET_DATA_CACHE_TTL_SECONDS = 900
-EOD_MARKET_DATA_CACHE_TTL_SECONDS = 1800
 #: Preferred resolution for fine-grained bars, in minutes. Providers that cannot serve it
 #: fall back to their nearest coarser grid.
 MARKET_DATA_BAR_MINUTES = 5

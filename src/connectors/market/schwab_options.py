@@ -32,6 +32,22 @@ from ..http import _bearer_auth_header, _request_json
 from ..sources import EOD_MARKET_CATEGORY, MARKET_CATEGORY, ProviderUnavailable, _schwab_token
 from .schwab import PRICE_HISTORY_URL, _candles_to_bars
 
+#: Whose rows these are in ``market_bars``. The same feed as the equity path, so a contract's
+#: bars sit beside its underlying's under one provider name.
+PROVIDER = "schwab"
+
+
+def _stamped(bars: pd.DataFrame, interval_minutes: int) -> pd.DataFrame:
+    """Bar-end stamps and the store's column set, so a cached read and a fresh fetch agree.
+
+    The same normalisation the equity path applies in ``_provider_bars``; without it a
+    contract's stored bars would sit one interval away from its freshly fetched ones and the
+    two would never dedupe.
+    """
+    from ...connectors.cache import _provider_bars
+
+    return _provider_bars(bars, interval_minutes) if bars is not None and not bars.empty else bars
+
 logger = logging.getLogger(__name__)
 
 CHAINS_URL = "https://api.schwabapi.com/marketdata/v1/chains"
@@ -104,14 +120,41 @@ def fetch_option_price_history(
     shape as the equity path -- the contract is just keyed differently.
 
     The sample is capped at ``lookback_days`` since a contract only lists a few weeks before its
-    expiry, and the whole window is re-read each run so a getting-richer sample is never stale.
+    expiry.
+
+    Served from the bar store like any other bars, and for the same reason: a contract's printed
+    bar is as immutable as an equity's, so re-reading the whole window every run re-downloaded a
+    fixed history on a five-minute cron. Only the gap between what is stored and the newest
+    complete bar is fetched. The rows are keyed by the OSI symbol, which the prune command
+    already retires on expiry -- see ``src/data/cache_prune``.
     """
-    token = _schwab_token(config, MARKET_CATEGORY)
-    if not token:
-        raise ProviderUnavailable("Schwab access token is not configured")
+    from ...connectors.cache import (
+        _merge_bars,
+        _read_duckdb_bars,
+        _write_duckdb_bars,
+        last_complete_bar_end,
+    )
 
     end = as_of or datetime.now(timezone.utc)
     start = end - timedelta(days=max(int(lookback_days), 1))
+
+    osi_key = str(osi).upper()
+    grid = int(interval_minutes)
+    held = _read_duckdb_bars(PROVIDER, osi_key, grid, start=start, end=end)
+    frontier = last_complete_bar_end(grid)
+    latest = None
+    if held is not None and not held.empty:
+        stamps = pd.to_datetime(held["timestamp"], utc=True, errors="coerce").dropna()
+        latest = stamps.max() if not stamps.empty else None
+    if latest is not None and latest >= frontier:
+        return held.reset_index(drop=True)
+    if latest is not None:
+        # Only the bars that have completed since the last read.
+        start = latest.to_pydatetime()
+
+    token = _schwab_token(config, MARKET_CATEGORY)
+    if not token:
+        raise ProviderUnavailable("Schwab access token is not configured")
     payload = _request_json(
         "schwab", MARKET_CATEGORY, PRICE_HISTORY_URL,
         {
@@ -125,7 +168,10 @@ def fetch_option_price_history(
         },
         headers=_bearer_auth_header(token),
     )
-    return _candles_to_bars(payload)
+    fetched = _candles_to_bars(payload)
+    if fetched is not None and not fetched.empty:
+        _write_duckdb_bars(PROVIDER, osi_key, grid, _stamped(fetched, grid))
+    return _merge_bars(held, _stamped(fetched, grid))
 
 
 def _contracts_from_map(exp_map: dict[str, Any], underlying: str, option_type: str) -> list[OptionContract]:

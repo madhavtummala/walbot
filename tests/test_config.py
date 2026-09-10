@@ -102,9 +102,7 @@ data_sources:
     assert config.market_data_provider_order == ["finnhub", "alpaca"]
     assert config.market_data_cache_ttl_seconds == 15
     assert config.intraday_market_data_provider_order == ["yfinance"]
-    assert config.intraday_market_data_cache_ttl_seconds == 9
     assert config.eod_market_data_provider_order == ["finnhub", "alpaca"]
-    assert config.eod_market_data_cache_ttl_seconds == 15
     assert config.news_sentiment_provider_order == ["stocktwits"]
     assert config.sentiment_data_provider_order == ["stocktwits"]
     assert config.news_sentiment_cache_ttl_seconds == 20
@@ -280,10 +278,8 @@ data_sources:
     config = get_config()
 
     assert config.intraday_market_data_provider_order == ["finnhub", "yfinance"]
-    assert config.intraday_market_data_cache_ttl_seconds == 7
     assert config.eod_market_data_provider_order == ["yfinance", "alpaca"]
     assert config.market_data_provider_order == ["yfinance", "alpaca"]
-    assert config.eod_market_data_cache_ttl_seconds == 11
     assert config.sentiment_data_provider_order == ["newsapi"]
     assert config.news_sentiment_provider_order == ["newsapi"]
     assert config.sentiment_data_cache_ttl_seconds == 13

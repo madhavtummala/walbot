@@ -26,15 +26,13 @@ from ..core.config import Config
 from ..data.duckdb_store import DAILY_INTERVAL_MINUTES
 from ..data.provider_cache import load_cached_payload, save_cached_payload
 from .cache import (
-    EOD_CACHE_TTL_SECONDS,
-    INTRADAY_CACHE_TTL_SECONDS,
-    _CALENDAR_SLACK,
     _merge_bars,
     _provider_horizon,
     _record_horizon,
     last_complete_bar_end,
     cached_bars_frontier,
     missing_ranges,
+    window_start_for,
     _provider_bars,
     _quote_cache_key,
     _read_duckdb_bars,
@@ -125,7 +123,6 @@ class MarketDataProvider(ABC):
         grid = resolve_bar_minutes(self.name, interval_minutes)
         if lookback_bars is None:
             lookback_bars = bars_for_minutes(int(lookback_minutes or 0), grid)
-        ttl_seconds = self._ttl_seconds(grid)
         wanted = [str(symbol).upper() for symbol in symbols]
 
         # The request as an absolute window. Callers state a relative lookback ("the last N
@@ -142,9 +139,7 @@ class MarketDataProvider(ABC):
             window_start = pd.Timestamp(start_date)
             window_start = window_start.tz_localize("UTC") if window_start.tzinfo is None else window_start.tz_convert("UTC")
         else:
-            # Calendar span for the bars asked for. Generous on purpose: nights and weekends
-            # carry no bars, so a span measured in trading minutes under-reaches badly.
-            window_start = window_end - pd.Timedelta(minutes=int(lookback_bars or 0) * grid * _CALENDAR_SLACK)
+            window_start = window_start_for(int(lookback_bars or 0), grid, window_end)
 
         resolved: dict[str, pd.DataFrame] = {}
         for symbol in wanted:
@@ -167,7 +162,7 @@ class MarketDataProvider(ABC):
             )
             for gap_start, gap_end in gaps:
                 fetched = self._fetch_range(
-                    symbol, grid, gap_start, gap_end, lookback_bars, ttl_seconds, **extra
+                    symbol, grid, gap_start, gap_end, lookback_bars, **extra
                 )
                 held = _merge_bars(held, fetched)
                 # A leading fetch that came back no earlier than what we already had is the
@@ -183,7 +178,7 @@ class MarketDataProvider(ABC):
 
     def _fetch_range(
         self, symbol: str, grid: int, start: Any, end: Any,
-        lookback_bars: int | None, ttl_seconds: int, **extra: Any,
+        lookback_bars: int | None, **extra: Any,
     ) -> pd.DataFrame:
         """One provider call for one gap, normalised and stored."""
         raw = self.fetch_bars(
@@ -204,14 +199,8 @@ class MarketDataProvider(ABC):
             return _empty_bars()
         frame = _provider_bars(normalize_intraday_frame(payload), grid, limit=None)
         if not frame.empty:
-            _write_duckdb_bars(self.name, str(symbol).upper(), grid, frame, ttl_seconds=ttl_seconds)
+            _write_duckdb_bars(self.name, str(symbol).upper(), grid, frame)
         return frame
-
-    def _ttl_seconds(self, interval_minutes: int) -> int:
-        """How long a bar at this resolution stays fresh."""
-        if interval_minutes >= DAILY_INTERVAL_MINUTES:
-            return int(getattr(self.config, "eod_market_data_cache_ttl_seconds", EOD_CACHE_TTL_SECONDS))
-        return int(getattr(self.config, "intraday_market_data_cache_ttl_seconds", INTRADAY_CACHE_TTL_SECONDS))
 
     # -- what a provider implements ---------------------------------------------------------
 

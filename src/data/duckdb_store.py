@@ -733,9 +733,11 @@ def write_market_bars(
     interval_minutes: int,
     bars: pd.DataFrame,
     *,
-    ttl_seconds: int | None = None,
     db_path: str | None = None,
 ) -> int:
+    """Store bars permanently. There is no TTL: a printed bar is immutable, so it has nothing
+    to expire into. Retention is a separate, explicit decision -- see ``src/data/cache_prune``.
+    """
     normalized = _normalize_bars(bars)
     if normalized.empty:
         return 0

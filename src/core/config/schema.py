@@ -12,7 +12,7 @@ from ...data.universe import load_tradable_names
 
 from ...common.config_utils import direct_or_env
 from .coercion import _algorithm_sections, _config_value, _normalize_data_sources, _parse_symbols, _provider_credential, _provider_secret, _section, _str_to_bool, reader
-from .defaults import ALGORITHM_EQUITY_CAP, ALPACA_BASE_URL, ALPACA_DATA_FEED, ALPHA_VANTAGE_MAX_SYMBOLS, ALPHA_VANTAGE_NEWS_CSV, ALPHA_VANTAGE_NEWS_LIMIT, ALPHA_VANTAGE_NEWS_LOOKBACK_DAYS, ALPHA_VANTAGE_REQUEST_DELAY_SECONDS, BACKTEST_PERIOD, BACKTEST_STARTING_EQUITY, CASH_BUFFER, CASH_EQUIVALENTS, DEFAULT_STRATEGY_ID, DIVIDEND_PROVIDER_ORDER, EOD_MARKET_DATA_CACHE_TTL_SECONDS, EOD_MARKET_DATA_PROVIDER_ORDER, HISTORY_EXTRA_BUFFER_DAYS, INTRADAY_MARKET_DATA_CACHE_TTL_SECONDS, INTRADAY_MARKET_DATA_PROVIDER_ORDER, KILL_SWITCH, MARKET_DATA_BAR_MINUTES, MARKET_DATA_CACHE_TTL_SECONDS, MARKET_DATA_PROVIDER_ORDER, MAX_PORTFOLIO_EXPOSURE, MAX_WEIGHT_PER_SYMBOL, MIN_TRADE_DOLLARS, MOMENTUM_LOOKBACK_DAYS, NEWS_SENTIMENT_CACHE_TTL_SECONDS, NEWS_SENTIMENT_PROVIDER_ORDER, REBALANCE_THRESHOLD, SYMBOLS, TRADABLES_CSV, TRANSACTION_COST_BPS, UNNAMED_ACCOUNT_ID
+from .defaults import ALGORITHM_EQUITY_CAP, ALPACA_BASE_URL, ALPACA_DATA_FEED, ALPHA_VANTAGE_MAX_SYMBOLS, ALPHA_VANTAGE_NEWS_CSV, ALPHA_VANTAGE_NEWS_LIMIT, ALPHA_VANTAGE_NEWS_LOOKBACK_DAYS, ALPHA_VANTAGE_REQUEST_DELAY_SECONDS, BACKTEST_PERIOD, BACKTEST_STARTING_EQUITY, CASH_BUFFER, CASH_EQUIVALENTS, DEFAULT_STRATEGY_ID, DIVIDEND_PROVIDER_ORDER, EOD_MARKET_DATA_PROVIDER_ORDER, HISTORY_EXTRA_BUFFER_DAYS, INTRADAY_MARKET_DATA_PROVIDER_ORDER, KILL_SWITCH, MARKET_DATA_BAR_MINUTES, MARKET_DATA_CACHE_TTL_SECONDS, MARKET_DATA_PROVIDER_ORDER, MAX_PORTFOLIO_EXPOSURE, MAX_WEIGHT_PER_SYMBOL, MIN_TRADE_DOLLARS, MOMENTUM_LOOKBACK_DAYS, NEWS_SENTIMENT_CACHE_TTL_SECONDS, NEWS_SENTIMENT_PROVIDER_ORDER, REBALANCE_THRESHOLD, SYMBOLS, TRADABLES_CSV, TRANSACTION_COST_BPS, UNNAMED_ACCOUNT_ID
 from .yaml_io import load_accounts_config, load_algorithm_bot_config, load_algorithms_config, load_connectors_config, load_universe_config
 
 from .accounts import UnknownAccountError, _normalize_accounts_config
@@ -74,8 +74,6 @@ class Config:
     dividend_provider_order: list[str] = field(default_factory=lambda: list(DIVIDEND_PROVIDER_ORDER))
     market_data_bar_minutes: int = MARKET_DATA_BAR_MINUTES
     market_data_cache_ttl_seconds: int = MARKET_DATA_CACHE_TTL_SECONDS
-    intraday_market_data_cache_ttl_seconds: int = INTRADAY_MARKET_DATA_CACHE_TTL_SECONDS
-    eod_market_data_cache_ttl_seconds: int = EOD_MARKET_DATA_CACHE_TTL_SECONDS
     news_sentiment_cache_ttl_seconds: int = NEWS_SENTIMENT_CACHE_TTL_SECONDS
     sentiment_data_cache_ttl_seconds: int = NEWS_SENTIMENT_CACHE_TTL_SECONDS
     data_source_configs: dict[str, Any] = field(default_factory=dict)
@@ -249,8 +247,6 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
         dividend_provider_order=read_dividend_sources("provider_order", DIVIDEND_PROVIDER_ORDER, env="DIVIDEND_PROVIDER_ORDER"),
         market_data_bar_minutes=read_intraday_market_sources("bar_minutes", MARKET_DATA_BAR_MINUTES, env="MARKET_DATA_BAR_MINUTES"),
         market_data_cache_ttl_seconds=read_market_sources("cache_ttl_seconds", MARKET_DATA_CACHE_TTL_SECONDS, env="MARKET_DATA_CACHE_TTL_SECONDS"),
-        intraday_market_data_cache_ttl_seconds=read_intraday_market_sources("cache_ttl_seconds", INTRADAY_MARKET_DATA_CACHE_TTL_SECONDS, env="INTRADAY_MARKET_DATA_CACHE_TTL_SECONDS"),
-        eod_market_data_cache_ttl_seconds=read_eod_market_sources("cache_ttl_seconds", EOD_MARKET_DATA_CACHE_TTL_SECONDS, env="EOD_MARKET_DATA_CACHE_TTL_SECONDS"),
         news_sentiment_cache_ttl_seconds=read_news_sources("cache_ttl_seconds", NEWS_SENTIMENT_CACHE_TTL_SECONDS, env="NEWS_SENTIMENT_CACHE_TTL_SECONDS"),
         sentiment_data_cache_ttl_seconds=read_sentiment_sources("cache_ttl_seconds", NEWS_SENTIMENT_CACHE_TTL_SECONDS, env="SENTIMENT_DATA_CACHE_TTL_SECONDS"),
         data_source_configs=data_sources,

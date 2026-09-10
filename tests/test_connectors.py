@@ -11,7 +11,7 @@ from src.connectors.market import alpaca as market_alpaca
 from src.connectors.market import finnhub as market_finnhub
 from src.connectors.market import schwab as market_schwab
 from src.connectors.news import stocktwits as news_stocktwits
-from src.connectors.cache import INTRADAY_CACHE_TTL_SECONDS, cache_is_current
+from src.connectors.cache import cache_is_current
 from src.connectors.frames import normalize_intraday_frame
 from src.connectors.grid import bars_for_minutes, resolve_bar_minutes
 from src.core.config import Config
@@ -368,7 +368,9 @@ def test_fetch_finnhub_intraday_bars_parses_and_caches_candles(monkeypatch) -> N
     # Written straight to the bar store, keyed by provider and resolution -- no payload cache
     # in front of it any more.
     assert saved["args"][:3] == ("finnhub", "SPY", 30)
-    assert saved["kwargs"]["ttl_seconds"] == INTRADAY_CACHE_TTL_SECONDS
+    # No TTL is passed, and none should be: a printed bar is immutable, so it has nothing to
+    # expire into. The argument used to be threaded here and ignored by the store.
+    assert "ttl_seconds" not in saved["kwargs"]
 
 
 def test_fetch_market_history_uses_yfinance_provider(monkeypatch) -> None:
@@ -381,7 +383,6 @@ def test_fetch_market_history_uses_yfinance_provider(monkeypatch) -> None:
 
     use_provider(monkeypatch, "yfinance", bars=fake_yfinance)
     # The window is fully covered by the provider, so no cached back-fill is consulted.
-    monkeypatch.setattr(connectors, "_extend_with_cached_history", lambda bars, *_args: bars)
 
     bars = connectors.fetch_market_history(["SPY"], config, lookback_minutes=1170, force_refresh=True)
 
@@ -1031,3 +1032,54 @@ def test_a_cold_cache_is_one_request_for_the_whole_window() -> None:
     gaps = _gaps(None, "2026-09-09 09:30", "2026-09-09 16:00", "2026-09-10 08:18")
 
     assert len(gaps) == 1
+
+
+# --------------------------------------------------------------------------------------
+# Option-contract history. A contract's printed bar is as immutable as an equity's.
+# --------------------------------------------------------------------------------------
+
+
+def test_option_contract_history_is_served_from_the_store(monkeypatch) -> None:
+    """It used to re-read its whole window every run, on a five-minute cron, bypassing the bar
+    store entirely -- the same fixed history downloaded again every time.
+
+    A contract's printed bar is as immutable as an equity's, so the first call stores it and
+    the second is answered without touching the provider.
+    """
+    from src.connectors.market import schwab_options
+
+    from src.connectors.cache import last_complete_bar_end
+
+    stored: dict[str, pd.DataFrame] = {}
+    calls: list[dict] = []
+    # Ending at the frontier, so a complete cache really is complete. Bars stopping short of it
+    # are correctly refetched -- that is the gap logic, not a cache miss.
+    base = last_complete_bar_end(5) - pd.Timedelta(minutes=10)
+
+    monkeypatch.setattr(schwab_options, "_schwab_token", lambda *_a, **_kw: "token")
+    monkeypatch.setattr(
+        "src.connectors.cache._read_duckdb_bars",
+        lambda provider, symbol, grid, **kw: stored.get(symbol, pd.DataFrame()),
+    )
+    monkeypatch.setattr(
+        "src.connectors.cache._write_duckdb_bars",
+        lambda provider, symbol, grid, frame: stored.__setitem__(symbol, frame),
+    )
+
+    def fake_request(*_args, **kwargs):
+        calls.append(kwargs)
+        return {"candles": [
+            {"datetime": int((base + pd.Timedelta(minutes=5 * i)).timestamp() * 1000),
+             "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0 + i / 10, "volume": 10}
+            for i in range(3)
+        ]}
+
+    monkeypatch.setattr(schwab_options, "_request_json", fake_request)
+
+    osi = "USO260916C00142000"
+    first = schwab_options.fetch_option_price_history(Config(), osi)
+    assert not first.empty and len(calls) == 1, "the first call fetches and stores"
+
+    second = schwab_options.fetch_option_price_history(Config(), osi)
+    assert not second.empty, "the second call still answers"
+    assert len(calls) == 1, "and does it without touching the provider again"
