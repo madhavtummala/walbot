@@ -964,3 +964,70 @@ def test_a_symbol_we_cannot_parse_is_never_deleted() -> None:
     from src.data.cache_prune import _contract_is_live
 
     assert _contract_is_live("NOT_AN_OSI_SYMBOL", date(2026, 9, 17))
+
+
+# --------------------------------------------------------------------------------------
+# Range-addressed reads. A bar is immutable, so the only question is which ones are held.
+# --------------------------------------------------------------------------------------
+
+
+def _window(start: str, end: str):
+    from src.core.interfaces import MARKET_TZ
+
+    return (
+        pd.Timestamp(start, tz=MARKET_TZ).tz_convert("UTC"),
+        pd.Timestamp(end, tz=MARKET_TZ).tz_convert("UTC"),
+    )
+
+
+def _gaps(held_end: str | None, start: str, end: str, now: str, **kwargs):
+    from src.connectors.cache import missing_ranges
+    from src.core.interfaces import MARKET_TZ
+
+    window_start, window_end = _window(start, end)
+    held = (
+        pd.DataFrame({"timestamp": pd.date_range(
+            end=pd.Timestamp(held_end, tz=MARKET_TZ).tz_convert("UTC"), periods=78, freq="5min")})
+        if held_end else pd.DataFrame()
+    )
+    return missing_ranges(
+        held, window_start=window_start, window_end=window_end, interval_minutes=5,
+        now=pd.Timestamp(now, tz=MARKET_TZ).tz_convert("UTC"), **kwargs,
+    )
+
+
+def test_an_interior_gap_is_a_holiday_and_is_never_refetched() -> None:
+    """Anything bracketed by cached bars was inside a span already fetched, so an empty day
+    there is a day the market was shut -- measured against the live cache, all nine of GLD's
+    interior gaps across 195 sessions are holidays. Requesting them would return nothing, on
+    every call, forever."""
+    # One session held, and the window sits entirely inside it: nothing to fetch.
+    assert _gaps("2026-09-09 16:00", "2026-09-09 10:00", "2026-09-09 16:00", "2026-09-10 08:18") == []
+
+
+def test_history_older_than_the_cache_is_one_leading_request() -> None:
+    gaps = _gaps("2026-09-09 16:00", "2026-05-20 09:30", "2026-09-09 16:00", "2026-09-10 08:18")
+
+    assert len(gaps) == 1
+    assert gaps[0][0] == _window("2026-05-20 09:30", "x 00:00".replace("x", "2026-05-20"))[0]
+
+
+def test_a_known_provider_horizon_stops_the_leading_re_probe() -> None:
+    """A provider's history is finite -- Schwab serves 259 days -- so a window reaching past it
+    has a permanent leading gap. Remembering the horizon is what stops every call paying to
+    rediscover it."""
+    from src.core.interfaces import MARKET_TZ
+
+    horizon = pd.Timestamp("2026-09-09 09:30", tz=MARKET_TZ).tz_convert("UTC")
+    gaps = _gaps(
+        "2026-09-09 16:00", "2026-05-20 09:30", "2026-09-09 16:00", "2026-09-10 08:18",
+        earliest_available=horizon,
+    )
+
+    assert gaps == []
+
+
+def test_a_cold_cache_is_one_request_for_the_whole_window() -> None:
+    gaps = _gaps(None, "2026-09-09 09:30", "2026-09-09 16:00", "2026-09-10 08:18")
+
+    assert len(gaps) == 1

@@ -20,14 +20,21 @@ from typing import Any
 
 import pandas as pd
 
+from src.common.timeutils import utc_now
+
 from ..core.config import Config
 from ..data.duckdb_store import DAILY_INTERVAL_MINUTES
 from ..data.provider_cache import load_cached_payload, save_cached_payload
 from .cache import (
     EOD_CACHE_TTL_SECONDS,
     INTRADAY_CACHE_TTL_SECONDS,
-    cache_is_current,
+    _CALENDAR_SLACK,
+    _merge_bars,
+    _provider_horizon,
+    _record_horizon,
+    last_complete_bar_end,
     cached_bars_frontier,
+    missing_ranges,
     _provider_bars,
     _quote_cache_key,
     _read_duckdb_bars,
@@ -120,75 +127,85 @@ class MarketDataProvider(ABC):
             lookback_bars = bars_for_minutes(int(lookback_minutes or 0), grid)
         ttl_seconds = self._ttl_seconds(grid)
         wanted = [str(symbol).upper() for symbol in symbols]
-        explicit_range = start_date is not None or end_date is not None
+
+        # The request as an absolute window. Callers state a relative lookback ("the last N
+        # minutes"), which cannot be asked of a store keyed by timestamp -- so it is resolved
+        # once, here, and everything below reasons about a range.
+        window_end = pd.Timestamp(end_date or utc_now())
+        window_end = window_end.tz_localize("UTC") if window_end.tzinfo is None else window_end.tz_convert("UTC")
+        # Clamped to the newest bar that can exist *before* the span is measured back from it.
+        # Measuring from "now" instead put the whole window past the frontier out of hours --
+        # a two-bar request at 08:00 asked for 06:00-08:00, which is after Wednesday's close,
+        # so it read as entirely in the future and reported no gaps at all.
+        window_end = min(window_end, last_complete_bar_end(grid))
+        if start_date is not None:
+            window_start = pd.Timestamp(start_date)
+            window_start = window_start.tz_localize("UTC") if window_start.tzinfo is None else window_start.tz_convert("UTC")
+        else:
+            # Calendar span for the bars asked for. Generous on purpose: nights and weekends
+            # carry no bars, so a span measured in trading minutes under-reaches badly.
+            window_start = window_end - pd.Timedelta(minutes=int(lookback_bars or 0) * grid * _CALENDAR_SLACK)
+
         resolved: dict[str, pd.DataFrame] = {}
-        stored: dict[str, pd.DataFrame] = {}
-        missing: list[str] = []
-
         for symbol in wanted:
-            if force_refresh:
-                missing.append(symbol)
-                continue
-            held = _read_duckdb_bars(self.name, symbol, grid, limit=lookback_bars)
-            # An explicit range is a cache-warming request for a specific window, so it is
-            # always served from the provider rather than from what happens to be stored.
-            if not explicit_range and cache_is_current(held, grid):
-                resolved[symbol] = held.tail(lookback_bars).reset_index(drop=True)
-            else:
-                stored[symbol] = held
-                missing.append(symbol)
-
-        if missing:
-            # Fetch the *gap*, not the window. Every bar before the cached frontier is complete
-            # and immutable -- a printed bar never changes -- so re-requesting the whole
-            # lookback re-downloads thousands of rows to arrive back at what is already stored.
-            # The batch starts at the earliest frontier among the symbols that need one, which
-            # over-fetches slightly for the more current of them and still bounds the request by
-            # the gap rather than by the horizon.
-            gap_start = start_date
-            if gap_start is None and not force_refresh:
-                frontiers = [
-                    frontier for frontier in
-                    (cached_bars_frontier(stored.get(symbol, _empty_bars())) for symbol in missing)
-                    if frontier is not None
-                ]
-                # Only when every symbol has history; one cold symbol needs the full window.
-                if frontiers and len(frontiers) == len(missing):
-                    gap_start = min(frontiers).to_pydatetime()
-
-            fresh = self.fetch_bars(
-                missing,
-                interval_minutes=grid,
-                lookback_bars=lookback_bars,
-                start_date=gap_start,
-                end_date=end_date,
-                **extra,
-            )
-            for symbol in missing:
-                key = str(symbol).upper()
-                raw = (fresh or {}).get(symbol, (fresh or {}).get(key))
-                frame = _provider_bars(
-                    normalize_intraday_frame(raw) if raw is not None else _empty_bars(),
-                    grid,
-                    start_date=start_date,
-                    end_date=end_date,
-                    limit=lookback_bars,
+            held = (
+                _empty_bars() if force_refresh
+                else _read_duckdb_bars(
+                    self.name, symbol, grid,
+                    start=window_start.to_pydatetime(), end=window_end.to_pydatetime(),
                 )
-                if not frame.empty:
-                    _write_duckdb_bars(self.name, key, grid, frame, ttl_seconds=ttl_seconds)
-                # Merged with what was already held, since the fetch covered only the gap.
-                previous = stored.get(key, _empty_bars())
-                if not previous.empty and not explicit_range:
-                    frame = (
-                        pd.concat([previous, frame], ignore_index=True)
-                        .drop_duplicates(subset="timestamp", keep="last")
-                        .sort_values("timestamp")
-                        .tail(lookback_bars)
-                        .reset_index(drop=True)
-                    )
-                resolved[key] = frame
+            )
+            gaps = (
+                [(window_start, window_end)] if force_refresh
+                else missing_ranges(
+                    held,
+                    window_start=window_start,
+                    window_end=window_end,
+                    interval_minutes=grid,
+                    earliest_available=_provider_horizon(self.name, symbol, grid),
+                )
+            )
+            for gap_start, gap_end in gaps:
+                fetched = self._fetch_range(
+                    symbol, grid, gap_start, gap_end, lookback_bars, ttl_seconds, **extra
+                )
+                held = _merge_bars(held, fetched)
+                # A leading fetch that came back no earlier than what we already had is the
+                # provider saying it has nothing further back. Recorded so the next call does
+                # not re-probe a horizon that cannot move -- Schwab serves 259 days and a
+                # longer window would otherwise pay for that discovery on every run.
+                if gap_start < (cached_bars_frontier(held) or gap_end):
+                    _record_horizon(self.name, symbol, grid, held, gap_start)
+
+            resolved[symbol] = held.tail(lookback_bars).reset_index(drop=True) if lookback_bars else held
 
         return {symbol: resolved.get(symbol, _empty_bars()) for symbol in wanted}
+
+    def _fetch_range(
+        self, symbol: str, grid: int, start: Any, end: Any,
+        lookback_bars: int | None, ttl_seconds: int, **extra: Any,
+    ) -> pd.DataFrame:
+        """One provider call for one gap, normalised and stored."""
+        raw = self.fetch_bars(
+            [symbol],
+            interval_minutes=grid,
+            lookback_bars=lookback_bars,
+            start_date=start.to_pydatetime() if hasattr(start, "to_pydatetime") else start,
+            end_date=end.to_pydatetime() if hasattr(end, "to_pydatetime") else end,
+            **extra,
+        )
+        # Keyed by name, never by truthiness: a DataFrame has no boolean value, so ``a or b``
+        # raises rather than falling through.
+        answers = raw or {}
+        payload = answers.get(symbol)
+        if payload is None:
+            payload = answers.get(str(symbol).upper())
+        if payload is None:
+            return _empty_bars()
+        frame = _provider_bars(normalize_intraday_frame(payload), grid, limit=None)
+        if not frame.empty:
+            _write_duckdb_bars(self.name, str(symbol).upper(), grid, frame, ttl_seconds=ttl_seconds)
+        return frame
 
     def _ttl_seconds(self, interval_minutes: int) -> int:
         """How long a bar at this resolution stays fresh."""

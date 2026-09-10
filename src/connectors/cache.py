@@ -47,6 +47,65 @@ def _last_session_close(local: pd.Timestamp) -> pd.Timestamp:
         candidate -= pd.Timedelta(days=1)
     return candidate
 
+#: How much calendar time a bar count can span. A session is 6.5 of 24 hours and weekends
+#: carry none at all, so N trading bars reach roughly four times further back in wall-clock
+#: terms. Over-reaching costs nothing -- the store answers the range it has.
+_CALENDAR_SLACK = 4
+
+
+def _merge_bars(held: pd.DataFrame, fetched: pd.DataFrame) -> pd.DataFrame:
+    """Combine cached and freshly fetched bars, newest write winning on a shared timestamp."""
+    frames = [frame for frame in (held, fetched) if frame is not None and not frame.empty]
+    if not frames:
+        return _empty_bars()
+    if len(frames) == 1:
+        return frames[0].sort_values("timestamp").reset_index(drop=True)
+    return (
+        pd.concat(frames, ignore_index=True)
+        .drop_duplicates(subset="timestamp", keep="last")
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+    )
+
+
+def _horizon_key(provider: str, symbol: str, interval_minutes: int) -> str:
+    return f"bar_horizon:{provider}:{str(symbol).upper()}:{int(interval_minutes)}"
+
+
+def _provider_horizon(provider: str, symbol: str, interval_minutes: int) -> pd.Timestamp | None:
+    """The earliest bar this provider has ever served for a symbol, if we have learned it.
+
+    A provider's history is finite -- Schwab serves 259 days of intraday -- so a window
+    reaching past it has a permanent leading gap. Without remembering the horizon, every call
+    re-requests it and gets the same nothing back, which is precisely the repeated-work
+    failure the TTL had.
+    """
+    from ..data.state_store import load_state
+
+    stored = load_state(_horizon_key(provider, symbol, interval_minutes), None)
+    if not stored:
+        return None
+    try:
+        return pd.Timestamp(stored).tz_convert("UTC")
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_horizon(
+    provider: str, symbol: str, interval_minutes: int, bars: pd.DataFrame, asked_from: pd.Timestamp
+) -> None:
+    """Remember that ``asked_from`` reached further back than the provider actually goes."""
+    from ..data.state_store import save_state
+
+    earliest = None
+    if bars is not None and not bars.empty:
+        stamps = pd.to_datetime(bars["timestamp"], utc=True, errors="coerce").dropna()
+        earliest = stamps.min() if not stamps.empty else None
+    if earliest is None or earliest <= asked_from:
+        return
+    save_state(_horizon_key(provider, symbol, interval_minutes), earliest.isoformat())
+
+
 def _quote_cache_key(symbol: str) -> str:
     return symbol.upper()
 
@@ -111,6 +170,57 @@ def cached_bars_frontier(bars: pd.DataFrame) -> pd.Timestamp | None:
         return None
     timestamps = pd.to_datetime(bars["timestamp"], utc=True, errors="coerce").dropna()
     return timestamps.max() if not timestamps.empty else None
+
+
+def missing_ranges(
+    bars: pd.DataFrame,
+    *,
+    window_start: pd.Timestamp,
+    window_end: pd.Timestamp,
+    interval_minutes: int,
+    earliest_available: pd.Timestamp | None = None,
+    now: datetime | None = None,
+) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    """The sub-ranges of ``[window_start, window_end]`` the cache cannot answer.
+
+    **Only the leading and trailing edges can be real holes.** Anything bracketed by cached
+    bars was already inside a fetched span, so if it is empty the market was shut -- measured
+    against the live cache, every one of GLD's nine interior gaps across 195 sessions is a
+    holiday (Christmas, New Year, MLK, Presidents' Day, Good Friday, Memorial Day, Juneteenth,
+    July 3rd). Treating those as holes would re-request them on every call, forever, and get
+    nothing back each time: the same failure the TTL had, in a new place.
+
+    So this returns at most two ranges, which is also the right shape for the cost. A provider
+    call is latency-bound -- one session costs 0.81s and eighty cost 1.10s -- so asking for a
+    generous contiguous span is nearly free while an extra round trip is not. Splitting a
+    holiday-riddled window into a dozen exact requests would be strictly slower than two.
+    """
+    frontier = last_complete_bar_end(interval_minutes, now)
+    window_end = min(window_end, frontier)
+    if window_end <= window_start:
+        return []
+
+    latest = cached_bars_frontier(bars)
+    if latest is None:
+        return [(window_start, window_end)]
+
+    stamps = pd.to_datetime(bars["timestamp"], utc=True, errors="coerce").dropna()
+    earliest = stamps.min()
+    gaps: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+
+    # Leading edge: history older than anything held. Skipped once the provider has told us it
+    # has nothing further back -- otherwise every call re-probes a horizon that will not move.
+    reach = window_start
+    if earliest_available is not None:
+        reach = max(reach, earliest_available)
+    if earliest - reach > pd.Timedelta(minutes=int(interval_minutes)):
+        gaps.append((reach, earliest))
+
+    # Trailing edge: bars that have completed since the last fetch.
+    if latest < frontier:
+        gaps.append((latest, window_end))
+
+    return gaps
 
 
 def cache_is_current(

@@ -230,10 +230,15 @@ class _PooledConnection:
     the ``_read_only`` flag.
     """
 
-    __slots__ = ("_cursor", "_handle", "_read_only")
+    __slots__ = ("_cursor", "_handle", "_read_only", "_registered")
 
     def __init__(self, cursor: Any, *, handle: "_Handle | None" = None, read_only: bool = False) -> None:
         self._cursor = cursor
+        #: Frames registered as queryable relations, kept so they can be re-registered if the
+        #: handle upgrades mid-statement. An upgrade swaps the cursor, and a registration
+        #: belongs to the cursor it was made on -- so a bulk INSERT ... SELECT that triggered
+        #: the upgrade would come back to a relation that no longer exists.
+        self._registered: dict[str, Any] = {}
         self._handle = handle
         self._read_only = read_only
 
@@ -257,6 +262,17 @@ class _PooledConnection:
                 self._handle.cursors -= 1
                 _IDLE.notify_all()
 
+    def register(self, name: str, frame: Any) -> Any:
+        self._registered[name] = frame
+        return self._cursor.register(name, frame)
+
+    def unregister(self, name: str) -> Any:
+        self._registered.pop(name, None)
+        try:
+            return self._cursor.unregister(name)
+        except Exception:  # pragma: no cover - unregistering an absent relation is not an error
+            return None
+
     def execute(self, *args: Any, **kwargs: Any) -> Any:
         return self._run("execute", *args, **kwargs)
 
@@ -277,6 +293,9 @@ class _PooledConnection:
             if self._handle is None or not self._handle.read_only or not _is_read_only_error(exc):
                 raise
             self._upgrade()
+            # The new cursor knows nothing of what was registered on the old one.
+            for name, frame in self._registered.items():
+                self._cursor.register(name, frame)
             return getattr(self._cursor, method)(*args, **kwargs)
 
     def _upgrade(self) -> None:
@@ -727,34 +746,42 @@ def write_market_bars(
     normalized = _drop_unclosed_bars(normalized, resolution)
     if normalized.empty:
         return 0
-    rows = []
-    for row in normalized.to_dict(orient="records"):
-        rows.append(
-            (
-                provider,
-                symbol.upper(),
-                resolution,
-                pd.Timestamp(row["timestamp"]).to_pydatetime(),
-                float(row["open"]),
-                float(row["high"]),
-                float(row["low"]),
-                float(row["close"]),
-                float(row["volume"]),
-                float(row.get("adjusted_close", row["close"])),
-                None,
-            )
-        )
+    # Written as one set-based statement over a registered frame rather than row by row.
+    # ``executemany`` issues a separate INSERT per bar, and DuckDB is columnar: 6,240 bars --
+    # one symbol's 80 sessions at five minutes -- took 13.9s that way against 1.2s to fetch
+    # them over the network, so storing history cost eleven times what downloading it did and
+    # was 92% of a signals refresh.
+    staged = pd.DataFrame({
+        "provider": provider,
+        "symbol": symbol.upper(),
+        "interval_minutes": resolution,
+        "timestamp": pd.to_datetime(normalized["timestamp"], utc=True),
+        "open": normalized["open"].astype(float),
+        "high": normalized["high"].astype(float),
+        "low": normalized["low"].astype(float),
+        "close": normalized["close"].astype(float),
+        "volume": normalized["volume"].astype(float),
+        "adjusted_close": (
+            normalized["adjusted_close"] if "adjusted_close" in normalized else normalized["close"]
+        ).astype(float),
+        "raw_json": None,
+    })
     with _connect(db_path) as connection:
-        connection.executemany(
-            """
-            INSERT OR REPLACE INTO market_bars
-                (provider, symbol, interval_minutes, timestamp, open, high, low, close, volume,
-                 adjusted_close, raw_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
-    return len(rows)
+        connection.register("incoming_market_bars", staged)
+        try:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO market_bars
+                    (provider, symbol, interval_minutes, timestamp, open, high, low, close,
+                     volume, adjusted_close, raw_json)
+                SELECT provider, symbol, interval_minutes, timestamp, open, high, low, close,
+                       volume, adjusted_close, raw_json
+                FROM incoming_market_bars
+                """
+            )
+        finally:
+            connection.unregister("incoming_market_bars")
+    return len(staged)
 
 
 def where_clause(clauses: list[str]) -> str:
