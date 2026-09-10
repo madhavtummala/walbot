@@ -150,18 +150,21 @@ def select_contract(
 
 
 def affordable_contracts(
-    contract: OptionContract, config: Any, *, wanted_contracts: int = 0
+    contract: OptionContract, config: Any, *, budget: float = 0.0
 ) -> int:
-    """How many contracts to open, at this contract's ask.
+    """How many whole contracts ``budget`` buys, at this contract's ask.
 
-    **The per-symbol board sets the size; ``max_notional_per_trade`` only trims it.** The two say
-    different things rather than the same thing twice: the board is the position you intend to
-    take, the cap is money the account refuses to exceed whatever the board asks for. Priced at
-    the ask rather than the mid because the cap is a statement about money that could actually
-    leave the account, and a marketable order pays the offer.
+    Priced at the ask rather than the mid because the budget is a statement about money that
+    could actually leave the account, and a marketable order pays the offer.
 
-    Falls back to the global ``contracts_per_trade`` when a symbol is not on the board, so an
-    account that never opens it behaves exactly as it did before.
+    One number decides the size. There used to be two -- a contract unit and a global dollar
+    ceiling that trimmed it -- which said the same thing twice and disagreed whenever premium
+    moved: the same unit was inside the ceiling one session and trimmed the next, so the size
+    you configured was not the size you got. A per-symbol dollar budget says everything the
+    global ceiling could, per symbol rather than once for all of them.
+
+    A symbol with no budget opens nothing. That is the board being the whole statement of what
+    this algorithm may trade: no bubble, no position.
 
     Whole contracts because no venue sells a fraction of one.
     """
@@ -173,17 +176,7 @@ def affordable_contracts(
     cost = (contract.ask or contract.midpoint) * 100.0
     if cost <= 0:
         return 0
-
-    wanted = int(max(wanted_contracts or 0, 0)) or max(
-        int(getattr(config, "contracts_per_trade", 1) or 1), 1
-    )
-
-    cap = float(getattr(config, "max_notional_per_trade", 0.0) or 0.0)
-    # A cap of zero means "no cap" -- deliberately, because on an expensive underlying the cap
-    # rejects every contract and the strategy looks broken rather than priced out.
-    if cap <= 0:
-        return max(wanted, 0)
-    return max(min(wanted, int(cap // cost)), 0)
+    return max(int(max(float(budget or 0.0), 0.0) // cost), 0)
 
 
 def fill_missing_deltas(

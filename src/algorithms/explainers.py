@@ -217,8 +217,16 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
         ],
         "parameters": {
             # Ordered by how much each one moves the outcome, most consequential first.
-            "symbols": {"what": "Symbols to consider. Empty means the account's tradable universe.", "effect": "This algorithm's own list -- another strategy's universe is never read, so retuning one cannot silently change what the other trades."},
-            "contracts_per_trade": {"what": "Contracts per position -- the unit of risk.", "effect": "A long call cannot lose more than its premium, so the unit IS the loss cap. That is what makes running without a stop coherent, and why this matters most when the stop is off."},
+            "plan": {
+                "what": "The dollar budget for each symbol, per position, set on the bubble board.",
+                "effect": (
+                    "The whole statement of what this algorithm may trade and how large: a "
+                    "symbol trades because it has a bubble, and the budget is its loss cap, "
+                    "since a long option cannot lose more than its premium. It replaced three "
+                    "knobs that said the same thing in different units and could disagree -- a "
+                    "symbol list, a global contract count, and a global dollar ceiling."
+                ),
+            },
             "stop_loss_pct": {"what": "Loss cap as a fraction of the debit. Zero disables the stop entirely.", "effect": "Disabled, the bracket becomes a lone profit target -- the earlier default, on the reasoning that premium falls on theta and implied volatility with the directional case intact, so a premium stop cuts winners for reasons unrelated to the thesis. Enabled, it is the only thing that ends a real reversal before the hold deadline."},
             "max_hold_sessions": {"what": "Sessions to hold before the deadline exit takes over.", "effect": "It also sets the horizon the target is priced over -- the run available grows with the hold -- so the two cannot be set apart. Pricing a long hold off a short target makes a correct direction unprofitable."},
             "target_delta": {"what": "The delta the strike is aimed at.", "effect": "Higher earns more per point of underlying move, costs premium that is mostly intrinsic, and buys a contract fewer people trade -- flow concentrates at and out of the money."},
@@ -230,7 +238,6 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "min_profit_per_contract": {"what": "Smallest predicted move worth opening for, in dollars per contract, gross of commission.", "effect": "The predicted band priced through the greeks. The strictest gate in the set, and the one that decides how often this trades at all."},
             "level_lookback_days": {"what": "Sessions the dip and run quantiles are learned from.", "effect": "Long enough that one exceptional stretch cannot set the tail. A short window is read back out as a forecast, which puts the target far beyond anything the symbol normally does."},
             "min_trend_strength": {"what": "Smallest trend strength a candidate must carry, in the symbol's own sigma.", "effect": "A threshold, not a rank: it means the same on a quiet symbol as on a violent one. Every symbol clearing it may be taken and none need be."},
-            "max_notional_per_trade": {"what": "Dollar ceiling per position, priced at the ask. Zero means no cap.", "effect": "It trims the unit and never sets it. Set it as a fraction of equity: on a cheap premium the unit buys a lot of contracts."},
             "min_dte": {"what": "Nearest expiry to trade, in days.", "effect": "Under a week the theta curve is steepest, and a very near expiry is theta-negative before direction is considered."},
             "min_open_interest": {"what": "Open interest floor on the chosen contract.", "effect": "Asks whether a resting order finds a counterparty at all. It does not catch cost -- that is max_spread_pct."},
             "max_spread_pct": {"what": "Ceiling on the quoted spread, as a fraction of the mid.", "effect": "The entry rests and never crosses, but the exit has to get out and the stop is denominated in premium. Open interest alone does not catch a wide market."},

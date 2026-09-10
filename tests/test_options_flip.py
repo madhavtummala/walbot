@@ -68,7 +68,8 @@ def cfg(**kwargs) -> OptionsFlipConfig:
     # matches them rather than tracking the deployed default, which is a tuning decision and not
     # what any of these assertions are about.
     kwargs.setdefault("target_delta", 0.45)
-    return OptionsFlipConfig(symbols=["QQQM"], **kwargs)
+    # No ``symbols`` argument: which symbols trade is the board's statement now, not a knob.
+    return OptionsFlipConfig(**kwargs)
 
 
 def session(**kwargs) -> dict:
@@ -216,21 +217,6 @@ class TestContractSelection:
         puts = [contract(option_type=PUT, delta=-0.45, osi_symbol="P1")]
         best, _candidate, _checks = select_contract(puts, direction=PUT, as_of=date(2026, 2, 1), config=cfg())
         assert best is not None and best.osi_symbol == "P1"
-
-    def test_the_notional_cap_alone_decides_the_contract_count(self) -> None:
-        """Size is one decision, stated in dollars. Whole contracts, and the cap is never exceeded."""
-        rich = contract(ask=6.00)
-        assert affordable_contracts(rich, cfg(max_notional_per_trade=1000)) == 1
-        # contracts_per_trade is the unit; the cap only ever trims it.
-        assert affordable_contracts(rich, cfg(max_notional_per_trade=2000)) == 1
-        assert affordable_contracts(rich, cfg(max_notional_per_trade=2000,
-                                              contracts_per_trade=3)) == 3
-        # A cap of zero means no cap, so an expensive underlying is priced in rather than out.
-        assert affordable_contracts(rich, cfg(max_notional_per_trade=0,
-                                              contracts_per_trade=2)) == 2
-        # A premium the budget cannot cover buys nothing rather than rounding up to one.
-        assert affordable_contracts(rich, cfg(max_notional_per_trade=500)) == 0
-
 
 # ── the state machine ────────────────────────────────────────────────────────
 
@@ -1025,13 +1011,19 @@ class TestStopDisabledRecordsNoStop:
 
 
 def test_the_tune_page_order_matches_the_config_dataclass() -> None:
-    """The dashboard renders in the explainer's order, so a drift here reshuffles the form."""
+    """The dashboard renders in the explainer's order, so a drift here reshuffles the form.
+
+    ``plan`` is documented first and is deliberately not a dataclass field: the board is a
+    nested structure living in the config section, exactly as Bursty DCA's is, so it cannot
+    ride on a flat dataclass of scalars. It is the headline control and reads first.
+    """
     from dataclasses import fields as _fields
     from src.algorithms.explainers import EXPLAINERS
 
     documented = list(EXPLAINERS["options_flip"]["parameters"])
+    assert documented[0] == "plan"
     declared = [f.name for f in _fields(OptionsFlipConfig())]
-    assert documented == declared
+    assert documented[1:] == declared
 
 
 def _option_bars(sessions: dict) -> pd.DataFrame:
@@ -1279,57 +1271,37 @@ class _Quote:
         self.midpoint = ask
 
 
-def test_the_board_sets_the_position_size_per_symbol() -> None:
-    """One global unit meant one size for every symbol. The board states it per name."""
+def test_the_board_sizes_a_position_in_dollars() -> None:
+    """The budget is the loss cap -- a long option cannot lose more than its premium -- so the
+    same dollar figure means the same risk on a $17 premium and a $2.50 one."""
     from src.algorithms.options_flip.config import OptionsFlipConfig
     from src.algorithms.options_flip.contracts import affordable_contracts
 
-    config = OptionsFlipConfig(max_notional_per_trade=0.0)
+    config = OptionsFlipConfig()
 
-    assert affordable_contracts(_Quote(17.50), config, wanted_contracts=2) == 2
-    assert affordable_contracts(_Quote(2.50), config, wanted_contracts=8) == 8
+    assert affordable_contracts(_Quote(17.50), config, budget=3_500.0) == 2    # $3,500
+    assert affordable_contracts(_Quote(2.50), config, budget=3_500.0) == 14    # $3,500
 
 
-def test_a_symbol_off_the_board_falls_back_to_the_global_unit() -> None:
-    """An account that never opens the board behaves exactly as it did before."""
+def test_a_budget_below_one_contract_opens_nothing() -> None:
+    """Rounded down, never up: a budget that cannot cover one contract is not a position."""
     from src.algorithms.options_flip.config import OptionsFlipConfig
     from src.algorithms.options_flip.contracts import affordable_contracts
 
-    config = OptionsFlipConfig(contracts_per_trade=2, max_notional_per_trade=0.0)
-
-    assert affordable_contracts(_Quote(2.50), config, wanted_contracts=0) == 2
+    assert affordable_contracts(_Quote(17.50), OptionsFlipConfig(), budget=1_000.0) == 0
 
 
-def test_the_notional_cap_still_trims_the_board_size() -> None:
-    """The two say different things: the board is the size you intend, the cap is money the
-    account refuses to exceed whatever the board asks for."""
-    from src.algorithms.options_flip.config import OptionsFlipConfig
+def test_a_symbol_absent_from_the_board_opens_nothing() -> None:
+    """No bubble, no position. The board is the whole statement of what may be traded, so
+    there is no global unit left for an unfunded symbol to fall back to."""
+    from src.algorithms.options_flip.config import OptionsFlipConfig, sanitize_plan, symbol_budget
     from src.algorithms.options_flip.contracts import affordable_contracts
 
-    config = OptionsFlipConfig(max_notional_per_trade=1_000.0)
+    plan = sanitize_plan({"call": {"items": [{"symbol": "GLD", "amount": 3_500}]}}, {"GLD", "USO"})
 
-    # The board wants 8 at $250 each; the cap allows 4.
-    assert affordable_contracts(_Quote(2.50), config, wanted_contracts=8) == 4
-
-
-def test_a_symbol_absent_from_the_board_reads_as_zero() -> None:
-    """Zero is a decision, not a missing value."""
-    from src.algorithms.options_flip.config import sanitize_plan, symbol_contracts
-
-    plan = sanitize_plan({"call": {"items": [{"symbol": "GLD", "amount": 3}]}}, {"GLD", "USO"})
-
-    assert symbol_contracts(plan, "GLD", "call") == 3
-    assert symbol_contracts(plan, "USO", "call") == 0
-
-
-def test_the_board_holds_whole_contracts_only() -> None:
-    """No venue sells a fraction of one, so a board offering 1.5 would offer an unsubmittable
-    size."""
-    from src.algorithms.options_flip.config import sanitize_plan, symbol_contracts
-
-    plan = sanitize_plan({"call": {"items": [{"symbol": "GLD", "amount": 2.7}]}}, {"GLD"})
-
-    assert symbol_contracts(plan, "GLD", "call") == 2
+    assert symbol_budget(plan, "GLD", "call") == 3_500.0
+    assert symbol_budget(plan, "USO", "call") == 0.0
+    assert affordable_contracts(_Quote(8.00), OptionsFlipConfig(), budget=0.0) == 0
 
 
 def test_the_board_declares_call_and_put_buckets() -> None:

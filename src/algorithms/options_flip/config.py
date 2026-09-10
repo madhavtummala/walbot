@@ -92,13 +92,6 @@ class OptionsFlipConfig:
     # Ordered by how much each one moves the outcome, most consequential first. Related knobs
     # stay adjacent where their importance is comparable.
 
-    #: Symbols to consider. Empty means the account's tradable universe.
-    symbols: list[str] = field(default_factory=list)
-
-    #: Contracts per position -- the unit of risk. A long call cannot lose more than its
-    #: premium, so the unit *is* the loss cap.
-    contracts_per_trade: int = 1
-
     #: Loss cap as a fraction of the debit. Zero disables the stop entirely, and the bracket
     #: becomes a lone profit target -- the earlier default here, on the reasoning that premium
     #: falls on theta and implied volatility with the directional case still intact, so a stop
@@ -167,18 +160,6 @@ class OptionsFlipConfig:
     min_trend_strength: float = 0.50
 
 
-    #: Dollar ceiling per position, priced at the ask. Zero means no cap. It trims the unit and
-    #: never sets it. ``target_delta`` moved to 0.8 this session -- a deep-ITM call is mostly
-    #: intrinsic value, so it costs close to the underlying's own move rather than a cheap
-    #: time-value premium. Measured on the August walk-forward, GLD's chosen contract at that
-    #: delta ran $2,000-$3,400; the old $1,500 cap (sized for a shallower delta) silently
-    #: zeroed every one of those days with a "Worth trading" profit estimate of $225-$437 and
-    #: no other check blocking -- see the "Affordable" check this cap now surfaces. Raised to
-    #: sit above that range. SMH's chosen contract ran $6,000-$8,000 in the same window and
-    #: stays capped out deliberately: SMH never clears the trend gate on this data anyway, and
-    #: a cap sized to fit it would put five times the money at risk per GLD trade for no
-    #: measured benefit.
-    max_notional_per_trade: float = 3500.0
 
     #: Nearest expiry to trade. Under a week the theta curve is steepest.
     min_dte: int = 10
@@ -279,8 +260,8 @@ class OptionsFlipConfig:
 #: own reader, and the Tune screen renders it through a purpose-built editor.
 PLAN_KEY = "plan"
 
-#: Hard ceiling on one symbol's position size, in contracts.
-MAX_ITEM_AMOUNT = 20
+#: Hard ceiling on one symbol's budget, in dollars per position.
+MAX_ITEM_AMOUNT = 25_000.0
 
 #: The directions a budget can be set for. ``put`` is declared but not yet tradable -- the
 #: level model measures a dip-then-rebound and the regime gate is one-sided, so nothing can act
@@ -303,7 +284,7 @@ def raw_plan(config: Any, algorithm_id: str) -> dict[str, Any]:
 
 
 def sanitize_plan(plan: dict[str, Any] | None, universe: set[str]) -> dict[str, Any]:
-    """Normalize a contracts board and keep only symbols present in the configured universe.
+    """Normalize a budget board and keep only symbols present in the configured universe.
 
     An absent or empty plan sanitizes to empty buckets -- never a built-in default, which would
     let clearing the board leave the algorithm still trading. A symbol with no budget is a
@@ -323,17 +304,22 @@ def sanitize_plan(plan: dict[str, Any] | None, universe: set[str]) -> dict[str, 
             seen.add(symbol)
             items.append({
                 "symbol": symbol,
-                # Whole contracts: no venue sells a fraction of one, so a board that let you
-                # type 1.5 would be offering a size that cannot be submitted.
-                "amount": int(min(max(as_float(item.get("amount"), default=0.0), 0.0), MAX_ITEM_AMOUNT)),
+                "amount": min(max(as_float(item.get("amount"), default=0.0), 0.0), MAX_ITEM_AMOUNT),
             })
         sanitized[bucket] = {"amount": sum(item["amount"] for item in items), "items": items}
 
     return sanitized
 
 
-def symbol_contracts(plan: dict[str, Any] | None, symbol: str, direction: str) -> int:
-    """How many contracts this symbol may open in one direction. 0 when the board omits it.
+def symbol_budget(plan: dict[str, Any] | None, symbol: str, direction: str) -> float:
+    """This symbol's budget for one direction, in dollars. 0.0 when the board omits it.
+
+    Dollars rather than a contract count because dollars are what a long option actually risks:
+    it cannot lose more than its premium, so the budget *is* the loss cap, and it means the same
+    thing on a $17 premium as on a $2.50 one. A contract count does not -- the same unit on two
+    symbols is a six-fold difference in money at risk, and it drifts again as premium moves.
+    That is also why there is no separate notional ceiling: a per-symbol dollar budget already
+    says everything a global dollar cap could, per symbol rather than once for all of them.
 
     Zero is meaningful rather than a missing value: a symbol absent from the board is one this
     algorithm may not open a position in.
@@ -342,5 +328,5 @@ def symbol_contracts(plan: dict[str, Any] | None, symbol: str, direction: str) -
     wanted = str(symbol).strip().upper()
     for item in bucket.get("items") or []:
         if str(item.get("symbol", "")).strip().upper() == wanted:
-            return int(max(as_float(item.get("amount"), default=0.0), 0.0))
-    return 0
+            return max(as_float(item.get("amount"), default=0.0), 0.0)
+    return 0.0

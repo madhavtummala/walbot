@@ -48,7 +48,7 @@ from ...data.state_store import algorithm_state_key, save_state
 from ..base import BaseAlgorithm
 from ..rally_rotation.memory import market_day, sessions_since
 from ..reconcile import ORDER_IDS_KEY, reconcile_orders
-from .config import BUCKETS, MAX_ITEM_AMOUNT, OptionsFlipConfig, raw_plan, sanitize_plan, symbol_contracts
+from .config import BUCKETS, MAX_ITEM_AMOUNT, OptionsFlipConfig, raw_plan, sanitize_plan, symbol_budget
 from .contracts import affordable_contracts, fill_missing_deltas, select_contract
 from .candidates import scoring_parameters, trend_strength
 from .indicators import average_true_range, quote_age_seconds
@@ -61,6 +61,10 @@ from .lifecycle import BIDDING, HELD, plan_symbol
 from .signals import signal_view
 
 logger = logging.getLogger(__name__)
+
+#: What a symbol's bubble starts at when a board is seeded from a config that named no
+#: per-position ceiling. One position's worth, not a portfolio's.
+DEFAULT_SEED_BUDGET = 3_500.0
 
 REGULAR_OPEN = time(9, 30)
 REGULAR_CLOSE = time(16, 0)
@@ -77,11 +81,10 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
     #: -- call and put rather than buy and sell -- and the editor keys off ``BUCKETS``.
     tune_editor = "budgets"
     tune_buckets = BUCKETS
-    tune_budget_hint = "Contracts per position, per symbol"
-    tune_unit = "count"
+    tune_budget_hint = "Dollars per position, per symbol"
+    tune_unit = "currency"
     tune_max_amount = float(MAX_ITEM_AMOUNT)
-    #: One contract, because that is the unit the venue actually trades.
-    tune_step = 1.0
+    tune_step = 25.0
 
     #: Contracts are sized by a per-symbol dollar budget, trimmed by a notional cap, so neither
     #: portfolio floor applies.
@@ -106,14 +109,17 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
     cron = "*/5 9-15 * * 1-5"
 
     def budget_plan(self, config: Any) -> dict[str, Any]:
-        """The per-symbol contract sizes, filtered to what is actually tradable.
+        """The board: which symbols this algorithm trades, and how many contracts of each.
 
-        An unset board seeds from this algorithm's own symbols at the global
-        ``contracts_per_trade``, which is exactly what those symbols would trade today -- so the
-        board opens showing the current behaviour rather than an empty canvas that reads as "this
-        algorithm trades nothing". Seeding only when the board is *entirely* empty is what keeps
-        it honest afterwards: once anything is saved, a symbol left off it is a symbol the reader
-        chose not to fund, and it stays at zero.
+        The board is the whole statement now. There is no separate ``symbols`` list and no
+        global ``contracts_per_trade`` -- a symbol trades because it has a bubble, and it trades
+        the size that bubble carries. Two controls that had to agree became one that cannot
+        disagree with itself.
+
+        A board that has never been saved seeds from the retired ``symbols`` key when the config
+        still carries one, so an existing deployment keeps trading exactly what it traded before
+        rather than silently going quiet on upgrade. That is a migration, not a knob: once the
+        board is saved the key is never read again.
         """
         from ...data.universe import tradable_symbols
 
@@ -122,13 +128,21 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
         if any(bucket.get("items") for bucket in board.values()):
             return board
 
-        cfg = self.tuning(config)
-        unit = max(int(getattr(cfg, "contracts_per_trade", 1) or 1), 1)
+        section = (getattr(config, "algorithm_configs", {}) or {}).get(self.algorithm_id) or {}
+        legacy = [str(symbol).upper() for symbol in (section.get("symbols") or [])]
+        # Each symbol inherits the retired per-position dollar ceiling, which is exactly what a
+        # position was allowed to cost before the board existed -- so an upgraded deployment
+        # keeps trading the same size rather than changing it silently.
+        budget = float(section.get("max_notional_per_trade") or 0.0) or DEFAULT_SEED_BUDGET
         seeded = [
-            {"symbol": symbol, "amount": unit}
-            for symbol in self._symbols(cfg, config)
-            if symbol in tradable
+            {"symbol": symbol, "amount": budget} for symbol in legacy if symbol in tradable
         ]
+        if seeded:
+            logger.info(
+                "Options Flip seeded its board from the retired symbols key: %s. Save the Tune "
+                "board to make this explicit; the key is not read once the board exists.",
+                ", ".join(item["symbol"] for item in seeded),
+            )
         board[CALL] = {"amount": sum(item["amount"] for item in seeded), "items": seeded}
         return board
 
@@ -138,27 +152,26 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
         for the new ones."""
         return {**super().config_fingerprint(config), "plan": self.budget_plan(config)}
 
-    @staticmethod
-    def _symbols(cfg: OptionsFlipConfig, config: Any) -> list[str]:
-        """The symbols to run, falling back to the configured universe when none are named.
+    def _symbols(self, config: Any) -> list[str]:
+        """Every symbol the board funds, in either direction.
 
-        Resolved in one place because ``requirements`` and ``plan`` must agree: if they disagree
-        the context loads bars for one set and the algorithm iterates another, and the difference
-        shows up as symbols that silently never trade.
+        Read from the board so ``requirements`` and ``plan`` cannot disagree. They used to be
+        two lists -- a ``symbols`` knob and the board -- and a symbol on one but not the other
+        either loaded bars nothing iterated or iterated with no bars loaded.
         """
-        named = [str(symbol).upper() for symbol in (cfg.symbols or [])]
-        if named:
-            return named
-        # This algorithm's own list, or the account's tradable universe. Rally Rotation's
-        # configured universe is deliberately *not* consulted: the two run different symbol
-        # lists on different accounts, and reading its section let one strategy's tuning
-        # silently decide the other's candidates. Only its scoring function is borrowed.
-        return [str(s).upper() for s in (getattr(config, "symbols", []) or [])]
+        board = self.budget_plan(config)
+        found: list[str] = []
+        for bucket in board.values():
+            for item in bucket.get("items") or []:
+                symbol = str(item.get("symbol", "")).upper()
+                if symbol and symbol not in found:
+                    found.append(symbol)
+        return sorted(found)
 
     def requirements(self, config: Any, current_positions: dict[str, int]) -> AlgorithmRequirements:
         cfg = self.tuning(config)
         return AlgorithmRequirements(
-            price_symbols=self._symbols(cfg, config),
+            price_symbols=self._symbols(config),
             daily_lookback_days=cfg.required_daily_bars,
             daily_ma_days=cfg.regime_slow_ma_days,
             intraday_lookback_minutes=cfg.required_intraday_minutes,
@@ -178,7 +191,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
         session = _session_facts(context.timestamp, cfg)
         held = _held_contracts(context.positions)
 
-        universe = self._symbols(cfg, context.config)
+        universe = self._symbols(context.config)
         # Resolved once for the whole run rather than per symbol: it is one read of the config
         # document, and every symbol must be sized against the same board.
         plan_board = self.budget_plan(context.config)
@@ -341,40 +354,27 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
                 spot=underlying_now, config=cfg,
             )
             ceiling = max_debit(priced, outcomes, config=cfg)
-            board_contracts = symbol_contracts(plan_board, symbol, CALL)
-            contracts = (
-                affordable_contracts(priced, cfg, wanted_contracts=board_contracts)
-                if contract else 0
-            )
+            budget = symbol_budget(plan_board, symbol, CALL)
+            contracts = affordable_contracts(priced, cfg, budget=budget) if contract else 0
             profit = expected_profit(outcomes, contracts or 1, config=cfg)
             worth_it = profit["per_contract"] >= float(cfg.min_profit_per_contract)
             estimate = _estimate_row(
                 priced, levels, outcomes, profit, ceiling, contracts, regime, cfg,
             )
-            notional_cap = float(getattr(cfg, "max_notional_per_trade", 0.0) or 0.0)
-            # What set the size, named so the deck says which control the reader should reach
-            # for: the symbol's own budget when the board funds it, the global unit otherwise.
-            if board_contracts > 0:
-                wanted_contracts = board_contracts
-                sized_by = f"{symbol}'s board size"
-            else:
-                wanted_contracts = max(int(getattr(cfg, "contracts_per_trade", 1) or 1), 1)
-                sized_by = f"the global unit ({symbol} is not on the board)"
-            if contract is not None and (notional_cap > 0 or board_contracts > 0):
+            # What the board funded, and what that bought at today's ask. Reported because the
+            # translation is the one place a budget becomes a position: a symbol funded below
+            # one contract's premium opens nothing, and the reader should see that rather than
+            # an unexplained "no trade".
+            if contract is not None and budget > 0:
                 contract_cost = (contract.ask or contract.midpoint) * 100.0
-                capped = notional_cap > 0 and contracts < wanted_contracts
                 checks = checks + [Check(
                     label="Affordable",
                     ok=contracts > 0,
                     value=(
-                        f"${contract_cost:,.0f}/contract — {contracts} of {wanted_contracts} "
-                        f"from {sized_by}"
-                        + (f", trimmed by the ${notional_cap:,.0f} cap" if capped else "")
+                        f"${contract_cost:,.0f}/contract against {symbol}'s ${budget:,.0f} "
+                        f"budget — {contracts} contract{'s' if contracts != 1 else ''}"
                     ),
-                    limit=(
-                        f"≤ ${notional_cap:,.0f} per position, whole contracts only"
-                        if notional_cap > 0 else "whole contracts only"
-                    ),
+                    limit=f"≤ ${budget:,.0f}, whole contracts only",
                     blocking=contracts <= 0,
                 )]
             checks = checks + [Check(
