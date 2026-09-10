@@ -12,6 +12,7 @@ from src.core.config import Config
 from src.api.payloads import backtest as backtest_module
 from src.execution import replay as replay_module
 from src.algorithms.registry import canonical_algorithm_id
+from src.data.state_store import ephemeral_state
 from src.api.api_payloads import (
     backtest_payload,
     controls_payload,
@@ -408,14 +409,20 @@ def test_dca_view_states_its_planned_total(monkeypatch) -> None:
     # through a brokerage even though nothing is placed.
     monkeypatch.setattr(runner, "resolve_brokerage", lambda config: _EmptyBook())
 
-    payload = strategy_signals_payload("bursty_dca")
+    # ``refresh`` because the view is cached now: a bare call is a cache probe, which reports a
+    # miss rather than paying to run the algorithm. Only an explicit refresh computes.
+    #
+    # Inside ``ephemeral_state`` because the algorithm carries an accrued budget between runs.
+    # Reading the live store made the headline depend on whatever this machine's account
+    # happened to have accrued, which is a different answer on every developer's laptop.
+    with ephemeral_state():
+        payload = strategy_signals_payload("bursty_dca", body={"refresh": True})
 
     rows = {row["symbol"]: row for row in payload["rows"]}
-    # No provider answers in a test environment, so the row explains the absence rather than
-    # reporting a size it could not have computed. The headline is asserted at all only to pin
-    # that a bucket always says *something* -- what it says with real bars is covered by the
-    # headline tests in test_dca_accrual.
-    assert rows["SPY"]["headline"] == "No price history"
+    # Asserted only as "the bucket says something": what it says with real bars is covered by
+    # the headline tests in test_dca_accrual, and pinning an exact string here made this test
+    # a hostage to price availability.
+    assert rows["SPY"]["headline"]
     assert payload["summary"][0] == {"label": "Mode", "value": "DCA"}
     assert payload["summary"][1] == {"label": "Planned", "value": "$250/month"}
     assert "Schedule" not in {row["label"] for row in payload["summary"]}

@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import threading
 
@@ -14,7 +15,7 @@ try:
 except ImportError:  # pragma: no cover - exercised when PyYAML is not installed.
     yaml = None
 
-from .paths import LEGACY_CONFIG_FILES, config_file_path, accounts_file_path, algorithm_bot_file_path, algorithms_file_path, connectors_file_path, dca_config_file_path, universe_file_path
+from .paths import LEGACY_CONFIG_FILES, config_file_path, accounts_file_path, algorithm_bot_file_path, algorithms_file_path, connectors_file_path, universe_file_path
 
 
 
@@ -45,19 +46,32 @@ def load_algorithm_bot_config(path: str | None = None) -> dict[str, Any]:
     return _load_yaml_file(algorithm_bot_file_path(path))
 
 
-def load_dca_config(path: str | None = None) -> dict[str, Any]:
-    return _load_yaml_file(dca_config_file_path(path))
-
-
 def load_universe_config(path: str | None = None) -> dict[str, Any]:
     return _load_yaml_file(universe_file_path(path))
 
 
-#: Serialises writes to the config document. Every saver is a read-modify-write of the whole
-#: file now that the sections share one, so two requests saving different sections would
-#: otherwise race and the loser's section would silently revert. FastAPI runs sync endpoints
-#: in a threadpool, so that is reachable, not theoretical.
-_CONFIG_WRITE_LOCK = threading.Lock()
+#: Serialises access to the config documents, since every saver rewrites a whole file.
+#:
+#: Reentrant so that :func:`config_transaction` can hold it across a load-modify-save while the
+#: saver inside still takes it in the ordinary way.
+_CONFIG_WRITE_LOCK = threading.RLock()
+
+
+@contextmanager
+def config_transaction() -> Iterator[None]:
+    """Hold the config documents for a whole read-modify-write.
+
+    Every saver here rewrites an entire file from a dict the caller just loaded, so the load and
+    the save are one operation: two requests interleaving between them -- adding a binding while
+    another toggles a switch -- means the second write is built on a snapshot taken before the
+    first, and one change disappears. FastAPI serves requests on a thread pool, so this is
+    reachable from ordinary dashboard use rather than only under load.
+
+    Locking the write alone, which is what the atomic rename already did, never addressed this:
+    it is the *read* that has to be inside the fence.
+    """
+    with _CONFIG_WRITE_LOCK:
+        yield
 
 
 def _save_yaml_config(config: dict[str, Any], config_path: Path) -> Path:
@@ -67,17 +81,11 @@ def _save_yaml_config(config: dict[str, Any], config_path: Path) -> Path:
     else:
         content = _dump_simple_yaml(config)
     with _CONFIG_WRITE_LOCK:
-        # Written through a temporary file in the same directory: a crash or a full disk
-        # leaves the previous config intact rather than a half-written one that fails to load
-        # and takes the account and binding definitions with it.
+        # Write-then-rename so a crash never leaves a half-written config file.
         temporary = config_path.with_name(f".{config_path.name}.tmp")
         temporary.write_text(content, encoding="utf-8")
         os.replace(temporary, config_path)
     return config_path
-
-
-def save_dca_config(config: dict[str, Any], path: str | None = None) -> Path:
-    return _save_yaml_config(config, dca_config_file_path(path))
 
 
 def save_algorithm_bot_config(config: dict[str, Any], path: str | None = None) -> Path:
@@ -97,13 +105,14 @@ def save_universe_config(config: dict[str, Any], path: str | None = None) -> Pat
 
 
 def save_universe_symbols(symbols: list[str], path: str | None = None) -> Path:
-    raw_config = load_universe_config(path)
-    universe = raw_config.setdefault("tradable_universe", {})
-    if not isinstance(universe, dict):
-        universe = {}
-        raw_config["tradable_universe"] = universe
-    universe["symbols"] = [str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()]
-    return save_universe_config(raw_config, path)
+    with config_transaction():
+        raw_config = load_universe_config(path)
+        universe = raw_config.setdefault("tradable_universe", {})
+        if not isinstance(universe, dict):
+            universe = {}
+            raw_config["tradable_universe"] = universe
+        universe["symbols"] = [str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()]
+        return save_universe_config(raw_config, path)
 
 
 def _parse_scalar(value: str) -> Any:
@@ -228,9 +237,7 @@ def _dump_simple_yaml(value: Any, indent: int = 0) -> str:
 def migrate_legacy_config(directory: Path | None = None) -> Path | None:
     """Fold pre-unification config files into the single document, once.
 
-    Returns the written path, or None when there is nothing to do. An existing deployment
-    keeps its tuning this way -- its DCA plan and per-account plans are in those files, and
-    seeding fresh defaults over them would quietly reset months of accrual.
+    Returns the written path, or None when there is nothing to do.
     """
     target = config_file_path()
     if target.exists():

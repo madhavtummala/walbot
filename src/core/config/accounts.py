@@ -1,9 +1,4 @@
-"""Resolving an account id to its broker.
-
-Separate because this decides where an order is sent: an account that cannot be resolved
-must raise rather than fall back, which is the difference between a blank dashboard panel
-and orders landing in the wrong book.
-"""
+"""Resolving an account id to its broker."""
 
 from __future__ import annotations
 
@@ -16,12 +11,7 @@ from .yaml_io import load_accounts_config
 
 
 class UnknownAccountError(KeyError):
-    """A named account is not in the accounts config.
-
-    Its own type so callers can tell "you asked for an account that does not exist" apart from
-    "the broker is unreachable". The first is a configuration mistake that must never be
-    papered over with a different account; the second is weather.
-    """
+    """A named account is not in the accounts config."""
 
     def __init__(self, account_id: str, known: list[str] | None = None) -> None:
         self.account_id = account_id
@@ -50,9 +40,8 @@ def _normalize_accounts_config(raw: dict[str, Any]) -> tuple[str, dict[str, dict
 def get_account_broker_type(account_id: str) -> str:
     """Resolve the broker type for a given account ID from accounts config.
 
-    Raises rather than guessing. This decides which brokerage an order is sent to, so
-    defaulting an unrecognised account to Alpaca is the one failure mode that could move real
-    money in the wrong account.
+    Raises rather than guessing, since defaulting an unrecognised account to a brokerage
+    could move real money in the wrong account.
     """
     raw = load_accounts_config()
     _, items = _normalize_accounts_config(raw)

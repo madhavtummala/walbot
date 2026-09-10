@@ -12,16 +12,15 @@ fallback that answers when the stream is not running.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any
 
 import pandas as pd
 
 from ...common.config_utils import json_number
-from ...data.bars import calendar_days_for
-from ...data.duckdb_store import DAILY_INTERVAL_MINUTES
 from ..base import MarketDataProvider
 from ..frames import _empty_bars, _normalize_quote
+from ..grid import history_window
 from ..http import _bearer_auth_header, _request_json
 from ..sources import (
     EOD_MARKET_CATEGORY,
@@ -99,15 +98,14 @@ class Schwab(MarketDataProvider):
         end_date: datetime | None = None,
         **extra: Any,
     ) -> dict[str, pd.DataFrame]:
-        daily = interval_minutes >= DAILY_INTERVAL_MINUTES
+        start, end, daily = history_window(
+            interval_minutes, lookback_bars, start_date=start_date, end_date=end_date
+        )
         category = EOD_MARKET_CATEGORY if daily else INTRADAY_MARKET_CATEGORY
         token = _schwab_token(self.config, category)
         if not token:
             raise ProviderUnavailable("Schwab access token is not configured")
 
-        end = end_date or datetime.now(timezone.utc)
-        span_days = lookback_bars if daily else calendar_days_for(lookback_bars * interval_minutes)
-        start = start_date or end - timedelta(days=max(span_days, 1))
         grid = (
             {"periodType": "year", "frequencyType": "daily", "frequency": 1}
             if daily

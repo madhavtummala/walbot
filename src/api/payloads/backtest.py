@@ -1,18 +1,10 @@
 """Replaying an algorithm over history, and caching the result.
 
-Split out of the single ``api_payloads`` module, which had grown to 1253 lines covering nine
-unrelated domains. The public names are unchanged and still importable from ``api_payloads``.
+Split out of the single ``api_payloads`` module. Public names are unchanged and still
+importable from ``api_payloads``.
 """
 
-
 from __future__ import annotations
-
-from .strategy_config import config_for_strategy_view
-
-from ...algorithms.registry import canonical_algorithm_id
-from ...brokerages.alpaca.client import create_data_client
-from ...algorithms.registry import get_algorithm_class
-from ...data.universe import resolve_project_path
 
 import json
 import logging
@@ -23,27 +15,25 @@ from typing import Any
 
 import pandas as pd
 
-
-from ...data import fetch_daily_bars
+from ...algorithms.registry import canonical_algorithm_id, get_algorithm_class
+from ...brokerages.alpaca.client import create_data_client
+from ...core.config import DEFAULT_STRATEGY_ID, get_config
 from ...core.cron import parse_cron
-from ...data.bars import TRADING_MINUTES_PER_DAY
-from ...execution.metrics import calculate_performance_metrics
-from ...data.duckdb_store import pooled_connections
-from ...execution.replay import replay
-from ...core.config import (
-    DEFAULT_STRATEGY_ID,
-    get_config,
-)
-from ...data.state_store import load_state, save_state
 from ...core.strategy_models import STRATEGY_LABELS, prepared_strategy_frame
+from ...data import fetch_daily_bars
+from ...data.bars import TRADING_MINUTES_PER_DAY
+from ...data.duckdb_store import pooled_connections
+from ...data.state_store import load_state, save_state
+from ...data.universe import resolve_project_path
+from ...execution.metrics import calculate_performance_metrics
+from ...execution.replay import replay
+from .strategy_config import config_for_strategy_view
 
 logger = logging.getLogger(__name__)
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 BACKTEST_CACHE_PATH = "data/backtest_cache.json"
-
 BACKTEST_CACHE_STATE_KEY = "backtest_cache"
 
 #: Bumped whenever the shape of a cached payload changes. ``_load_backtest_cache`` throws away
@@ -152,20 +142,16 @@ def _save_backtest_cache(cache: dict[str, Any], path: str = BACKTEST_CACHE_PATH)
 def _cache_key(strategy: str, period: str, account_id: str = "") -> str:
     """Hash of everything a cached backtest's validity depends on.
 
-    The algorithm declares its own half through ``config_fingerprint`` -- which is how DCA's
-    plan gets in without this function knowing DCA exists. It used to be passed a ``dca_plan``
-    argument threaded down from the request handler purely to reach this hash.
-
-    The account is part of the basis because some of that config is per account: two DCA
-    bindings on different accounts have different plans, and without this they collided on one
-    cache entry, so whichever ran first answered for both.
+    The algorithm declares its own half through ``config_fingerprint`` -- how DCA's plan gets
+    in without this function knowing DCA exists. The account is part of the basis too, since
+    some config is per account: without it, two DCA bindings on different accounts would
+    collide on one cache entry.
     """
     config = config_for_strategy_view(strategy, account_id)
     try:
         algorithm_basis = get_algorithm_class(strategy).from_config(config).config_fingerprint(config)
     except (KeyError, TypeError, ValueError):
-        # An unresolvable strategy still needs a stable key. Reporting it is the compute
-        # step's job -- failing here would turn a bad request id into an error from a hash.
+        # An unresolvable strategy still needs a stable key -- reporting it is compute's job.
         algorithm_basis = {"unresolved": strategy}
     cache_basis = {
         "strategy": strategy,
@@ -187,15 +173,8 @@ def _cache_key(strategy: str, period: str, account_id: str = "") -> str:
 
 
 def _json_backtest_rows(history_df: pd.DataFrame) -> list[dict[str, Any]]:
-    """The replay's rows as JSON, timestamps and all.
-
-    ISO 8601 rather than the ``%Y-%m-%d`` this used to emit. A daily replay is unaffected --
-    its bars land at midnight, so the frontend's ``new Date`` reads the same instant either way
-    -- but an intraday one was destroyed by the old format: every bar in a session formatted to
-    the same date string, so Options Flip's ~14,000 rows plotted at 179 distinct x-positions
-    with ~78 points stacked on each. The equity line was drawn through whichever of them came
-    last, and no marker or tooltip could ever address a single bar.
-    """
+    """The replay's rows as JSON, timestamps and all -- ISO 8601 with time of day, not just the
+    date, so an intraday replay's several-bars-per-session don't collapse onto one x-position."""
     rows_df = history_df.reset_index().copy()
     for column in rows_df.columns:
         if pd.api.types.is_datetime64_any_dtype(rows_df[column]):
@@ -203,29 +182,20 @@ def _json_backtest_rows(history_df: pd.DataFrame) -> list[dict[str, Any]]:
     return json.loads(rows_df.to_json(orient="records"))
 
 
+def _numeric_column(history_df: pd.DataFrame, column: str, fallback: str | None = None) -> pd.Series:
+    """``history_df[column]``, coerced to numeric with bad/missing values as 0.0."""
+    series = history_df.get(column, history_df.get(fallback, pd.Series(dtype=float)) if fallback else pd.Series(dtype=float))
+    return pd.to_numeric(series, errors="coerce").fillna(0.0)
+
+
 def _backtest_order_summary(history_df: pd.DataFrame) -> dict[str, Any]:
-    turnover = pd.to_numeric(history_df.get("turnover", pd.Series(dtype=float)), errors="coerce").fillna(0.0).abs()
-    order_counts = pd.to_numeric(history_df.get("order_count", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
-    planned_values = pd.to_numeric(
-        history_df.get("planned_order_value", pd.Series(dtype=float)),
-        errors="coerce",
-    ).fillna(0.0)
-    skipped_values = pd.to_numeric(
-        history_df.get("skipped_order_value", pd.Series(dtype=float)),
-        errors="coerce",
-    ).fillna(0.0)
-    scheduled_counts = pd.to_numeric(
-        history_df.get("scheduled_order_count", pd.Series(dtype=float)),
-        errors="coerce",
-    ).fillna(0.0)
-    skipped_counts = pd.to_numeric(
-        history_df.get("skipped_order_count", pd.Series(dtype=float)),
-        errors="coerce",
-    ).fillna(0.0)
-    gross_exposure = pd.to_numeric(
-        history_df.get("gross_exposure", history_df.get("invested", pd.Series(dtype=float))),
-        errors="coerce",
-    ).fillna(0.0).abs()
+    turnover = _numeric_column(history_df, "turnover").abs()
+    order_counts = _numeric_column(history_df, "order_count")
+    planned_values = _numeric_column(history_df, "planned_order_value")
+    skipped_values = _numeric_column(history_df, "skipped_order_value")
+    scheduled_counts = _numeric_column(history_df, "scheduled_order_count")
+    skipped_counts = _numeric_column(history_df, "skipped_order_count")
+    gross_exposure = _numeric_column(history_df, "gross_exposure", fallback="invested").abs()
     equity = pd.to_numeric(history_df.get("equity", pd.Series(dtype=float)), errors="coerce").replace(0, pd.NA)
     starting_equity_series = pd.to_numeric(history_df.get("equity", pd.Series(dtype=float)), errors="coerce").dropna()
     starting_equity = float(starting_equity_series.iloc[0]) if not starting_equity_series.empty else 0.0
@@ -323,7 +293,6 @@ def _backtest_response(
             "cash_account_only": True,
             "max_portfolio_exposure": sizing_config.max_portfolio_exposure,
             "max_weight_per_symbol": sizing_config.max_weight_per_symbol,
-            "max_longs": sizing_config.max_longs,
             "cash_buffer": sizing_config.cash_buffer,
         },
         "orders": _backtest_order_summary(history_df),
@@ -374,8 +343,7 @@ def _fetch_intraday_backtest_history(
 
     symbols = sorted(daily_history)
     start = _period_start(period)
-    # Fetch enough history to cover the lookback + the period itself.
-    span_days = max((pd.Timestamp.now(tz="UTC") - start).days + 10, 30)
+    span_days = max((pd.Timestamp.now(tz="UTC") - start).days + 10, 30)  # lookback + the period
     span_minutes = span_days * TRADING_MINUTES_PER_DAY + lookback_minutes
 
     intraday_history: dict[str, pd.DataFrame] = {}
@@ -395,8 +363,7 @@ def _fetch_intraday_backtest_history(
                 continue
             if bars.empty:
                 continue
-            # Filter to the desired bar resolution.
-            if "interval_minutes" in bars.columns:
+            if "interval_minutes" in bars.columns:  # filter to the desired resolution
                 bars = bars[bars["interval_minutes"] == bar_minutes]
             if bars.empty:
                 continue
@@ -423,33 +390,27 @@ def _configured_history_providers(config) -> list[str]:
 def _compute_backtest(strategy: str, period: str, account_id: str = "") -> dict[str, Any]:
     """Backtest by replaying the algorithm itself.
 
-    One path for every algorithm. There is no per-strategy branch here any more: whatever the
-    algorithm declares in ``requirements()`` is what the replay loads, and whatever ``analyze``
-    decides is what gets traded -- so a backtest cannot test different logic than the runtime.
-
-    Replayed against the account the strategy is deployed on, for the same reason the signal
-    view is: a DCA plan is per account, so the default account backtests a different plan than
-    the one the dashboard edits.
+    One path for every algorithm: whatever ``requirements()`` declares is what the replay
+    loads, and whatever ``plan`` decides is what gets traded, so a backtest cannot test
+    different logic than the runtime. Replayed against the account the strategy is deployed
+    on, since some config (e.g. a DCA plan) is per account.
     """
     starting_equity = _backtest_starting_equity()
     config = config_for_strategy_view(strategy, account_id)
     algorithm = get_algorithm_class(strategy).from_config(config)
-    # The class default, not a binding's cron: a backtest describes the strategy, and running
-    # the same period against two bindings' schedules would produce two curves for one strategy
-    # under a cache key that does not distinguish them.
+    # The class default, not a binding's cron -- a backtest describes the strategy, not a
+    # particular deployment's schedule.
     cron = parse_cron(algorithm.cron)
     requirements = algorithm.requirements(config, {})
 
-    # The fetch happens outside any pooled connection. It is network I/O that writes provider
-    # bars into the cache, and holding the database file open across minutes of provider calls
-    # locks every other process out -- the MCP server's reads abort with "Conflicting lock is
-    # held". Short-lived connections keep the file free while the fetch runs.
+    # Outside any pooled connection: this is network I/O writing provider bars into the cache,
+    # and holding the database file open across it locks every other process out.
     daily_history = _fetch_backtest_history(strategy, period, config)
     if not daily_history:
         raise RuntimeError("No historical bars were available for the backtest.")
 
-    # Detect intraday algorithms: those that declare intraday_lookback_minutes > 0
-    # get intraday bars and the replay steps at intraday intervals instead of daily.
+    # Algorithms declaring intraday_lookback_minutes > 0 get intraday bars and the replay
+    # steps at intraday intervals instead of daily.
     intraday_minutes = 0
     intraday_history: dict[str, pd.DataFrame] | None = None
     if requirements.intraday_lookback_minutes > 0:
@@ -469,8 +430,7 @@ def _compute_backtest(strategy: str, period: str, account_id: str = "") -> dict[
             config,
             daily_history=daily_history,
             trade_dates=trade_dates,
-            # Date-level only: the replay steps one bar per day and trades at its close, so
-            # there is no clock time for the minute and hour fields to match against.
+            # Date-level only -- the replay steps one bar per day and trades at its close.
             should_run=lambda date: cron.matches_date(date),
             starting_equity=starting_equity,
             history_providers=_configured_history_providers(config),
@@ -484,10 +444,9 @@ def _compute_backtest(strategy: str, period: str, account_id: str = "") -> dict[
         period=period,
         source="algorithm",
     )
-    # Surfaced, not buried: a window the bar cache cannot reach scores every symbol near
-    # zero, which would otherwise read as a poor strategy rather than an unsupported window.
+    # Surfaced, not buried: an unreachable window scores every symbol near zero, which would
+    # otherwise read as a poor strategy rather than an unsupported window.
     payload["coverage"] = coverage.as_dict()
-    # Which deployment this curve describes, for the same reason the signal view says so.
     payload["account_id"] = getattr(config, "account_id", "")
     return payload
 
@@ -495,9 +454,8 @@ def _compute_backtest(strategy: str, period: str, account_id: str = "") -> dict[
 def _unsupported_reason(strategy: str) -> str:
     """Why this algorithm cannot be replayed, or an empty string when it can.
 
-    Read off the class, without instantiating it: this is a property of the strategy, not of a
-    particular deployment's configuration, and building one would authenticate a brokerage just
-    to answer a question about what kind of algorithm it is.
+    Read off the class without instantiating it -- a property of the strategy, not of a
+    particular deployment, and instantiating would authenticate a brokerage just to answer it.
     """
     try:
         algorithm = get_algorithm_class(strategy)
@@ -519,9 +477,8 @@ def backtest_payload(body: dict[str, Any] | None = None) -> dict[str, Any]:
     cache_only = bool(body.get("cache_only") or body.get("cacheOnly"))
     account_id = str(body.get("account_id") or body.get("accountId") or "")[:80]
 
-    # Asked before the cache, and before any work: an algorithm that cannot be replayed should
-    # say so the same way every time, rather than answering from a stale cache written before it
-    # declared that, or surfacing a NotImplementedError from deep inside the replay as a 500.
+    # Asked before the cache and before any work, so an unreplayable algorithm says so
+    # consistently rather than surfacing a NotImplementedError as a 500.
     unsupported = _unsupported_reason(strategy)
     if unsupported:
         return {

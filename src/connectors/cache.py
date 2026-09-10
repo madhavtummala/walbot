@@ -1,8 +1,8 @@
 """Reading and writing what a provider already told us.
 
-Two layers, deliberately. The DuckDB bar store is the durable one and is keyed by resolution;
-``provider_cache`` is a short-lived payload cache in front of it, for the calls whose answers
-are not bars. Both are keyed by provider, so one provider's staleness never masks another's.
+Two layers: the DuckDB bar store is durable and keyed by resolution; ``provider_cache`` is a
+short-lived payload cache in front of it, for answers that are not bars. Both are keyed by
+provider, so one provider's staleness never masks another's.
 """
 
 from __future__ import annotations
@@ -36,25 +36,17 @@ def _provider_bars(
 ) -> pd.DataFrame:
     """Turn a parsed provider payload into bars this project's conventions agree with.
 
-    Every fetcher ends the same way -- stamp, clip to the requested range, keep the newest N --
-    so it lives here once rather than in ten near-identical tails.
-
-    The stamping is the part that matters. Providers timestamp a bar at its start; the close
-    is the price at its end. Doing that here, at the boundary where a payload becomes bars,
-    means the frame a fetcher *returns* and the rows it *stores* carry the same convention.
-    Normalising only on the way into the store left those two disagreeing by one interval,
-    and a read that blended fresh provider bars with cached ones got both -- the same bar
-    twice, an interval apart.
+    Stamp at bar *end* (providers timestamp at bar start), clip to the requested range, keep
+    the newest N. Must run before a bar is stored or returned so both paths share one
+    convention -- stamping only on write let a fresh read and a cached one disagree by one
+    interval and double up the same bar.
     """
     if parsed.empty:
         return parsed
     work = parsed.copy()
     work["timestamp"] = bar_end_timestamps(work["timestamp"], interval_minutes)
-    # Kept only so a provider that supplies its own adjusted series (Alpaca sends
-    # ``Adjustment.ALL``) has somewhere to put it, and so the frame's shape never depends on
-    # the symbol's dividend policy. Nothing in this module writes it any more: distributions
-    # are cash events, recorded in the ``dividends`` table and booked by the ledger, so a
-    # cached bar stays whatever the market actually printed.
+    # Dividends are cash events recorded separately; a bar's adjusted_close, if a provider
+    # supplies one, is kept as-is and never derived here.
     if "adjusted_close" not in work:
         work["adjusted_close"] = pd.to_numeric(work["close"], errors="coerce")
     work = filter_bar_range(work, start_date, end_date)
@@ -71,9 +63,8 @@ def _fresh_cached_bars(
 ) -> pd.DataFrame:
     """Cached bars if they are recent enough for their own resolution, else nothing.
 
-    One rule for every grid rather than one per category: a bar is stale once several of its
-    own intervals have passed. Daily bars get the session-boundary allowance they always had,
-    since the next one does not exist until the market closes again.
+    A bar is stale once several of its own intervals have passed; daily bars instead get a
+    session-boundary allowance since the next one doesn't exist until the market closes again.
     """
     if bars.empty or "timestamp" not in bars:
         return pd.DataFrame()
@@ -184,5 +175,3 @@ def _write_duckdb_sentiment(provider: str, records: list[dict[str, Any]], *, ttl
         write_sentiment_records(provider, records, ttl_seconds=ttl_seconds)
     except RuntimeError as exc:
         logger.debug("DuckDB sentiment cache unavailable: %s", exc)
-
-

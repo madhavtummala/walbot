@@ -10,12 +10,15 @@ what came back.
 from __future__ import annotations
 
 from dataclasses import replace
+import logging
 from typing import Any
 
 from src.algorithms.registry import get_algorithm_class
 from src.core.interfaces import AlgorithmPlan, Brokerage
 from src.core.market_context import build_algorithm_context
-from src.core.pipeline import read_snapshot, resolve_brokerage
+from src.core.pipeline import assert_tradable, read_snapshot, resolve_brokerage
+
+logger = logging.getLogger(__name__)
 
 
 def run_algorithm(
@@ -34,12 +37,14 @@ def run_algorithm(
     """
     algorithm = algorithm or get_algorithm_class(strategy).from_config(config)
     requirements = algorithm.requirements(config, {})
-    snapshot = read_snapshot(config, brokerage or resolve_brokerage(config))
+    book = brokerage or resolve_brokerage(config)
+    snapshot = read_snapshot(config, book)
     context = build_algorithm_context(
         config,
         requirements,
         algorithm_id=algorithm.algorithm_id,
         positions=snapshot.positions,
+        cost_basis=_cost_basis(book) if requirements.needs_cost_basis else {},
         equity=snapshot.equity,
         data_client=data_client,
     )
@@ -58,6 +63,25 @@ def run_algorithm(
     )
 
 
+def _cost_basis(brokerage: Brokerage) -> dict[str, float]:
+    """What the account paid per held symbol, from the broker's own position marks.
+
+    Best-effort: a brokerage that cannot report a cost basis leaves the symbol out, and the
+    algorithm falls back to whatever anchor it used before. A failed read must not take the run
+    down with it -- this is context for pricing an exit, not a precondition for trading.
+    """
+    try:
+        rows = brokerage.get_position_details()
+    except Exception as exc:  # noqa: BLE001 - an unavailable cost basis is not a failed run
+        logger.warning("Could not read cost basis: %s", exc)
+        return {}
+    return {
+        str(row["symbol"]): float(row.get("avg_entry_price") or 0.0)
+        for row in rows or []
+        if float(row.get("avg_entry_price") or 0.0) > 0
+    }
+
+
 def execute_algorithm(
     plan: AlgorithmPlan,
     config,
@@ -71,6 +95,14 @@ def execute_algorithm(
     Thin on purpose: the algorithm owns both halves -- ``place_orders`` knows nothing about
     strategies, and what a fill means for an accrued budget is a question only the algorithm
     can answer.
+
+    The pre-trade gates are asserted here rather than in any one driver, because this is the
+    single point every order path crosses. Raises :class:`TradingRefused` when one refuses.
     """
     algorithm = algorithm or get_algorithm_class(plan.strategy).from_config(config)
+    # Preferred from the plan, since that is what the run was actually built against; re-derived
+    # only when a caller hands over a plan that never went through ``run_algorithm`` -- the gate
+    # must not be skippable by omitting a metadata key.
+    requirements = plan.metadata.get("requirements") or algorithm.requirements(config, {})
+    assert_tradable(requirements, config, brokerage)
     return algorithm.execute(plan, config, brokerage, **kwargs)

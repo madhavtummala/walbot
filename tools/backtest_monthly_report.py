@@ -140,10 +140,10 @@ def run(period: str, overrides: dict[str, Any]):
                 end_wt = entries[-1][1]
                 print(f"  {sym:>6s}  {sessions:>8d}  {pct_month:>8.0%}  {avg_wt:>7.1%}  {start_wt:>9.1%}  {end_wt:>9.1%}")
         else:
-            print(f"\n  [no risk-on holdings this month]")
+            print("\n  [no risk-on holdings this month]")
 
         # Month-end book
-        print(f"\n  Month-end book:")
+        print("\n  Month-end book:")
         if end_weights:
             for sym, w in sorted(end_weights.items(), key=lambda x: -x[1]):
                 print(f"    {sym:>6s}  {w:>7.1%}")
@@ -157,7 +157,7 @@ def run(period: str, overrides: dict[str, Any]):
     total_algo = ending_eq / starting_eq - 1.0
 
     print(f"\n{'='*110}")
-    print(f"  YTD SUMMARY")
+    print("  YTD SUMMARY")
     print(f"{'='*110}")
     print(f"  SPY:    {total_spy:+.2%}")
     print(f"  Algo:   {total_algo:+.2%}")

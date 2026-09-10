@@ -1,30 +1,14 @@
 """What a market-data provider is, and what it gets for free.
 
-Two questions, and every provider answers both:
+Every provider answers two questions: ``price(symbols)`` (what each symbol trades at now) and
+``bars(symbols, interval_minutes=..., lookback_bars=...)`` (OHLCV history at a resolution -- one
+method, since intraday and EOD are the same request at different grids).
 
-``price(symbols)``
-    What each symbol trades at now.
-``bars(symbols, interval_minutes=..., lookback_bars=...)``
-    OHLCV history at a resolution. **One method, not two.** Intraday and EOD were never two
-    kinds of data, only two grids -- ``interval_minutes=5`` and ``interval_minutes=1440`` are
-    the same request -- and the bar store has always been keyed by resolution for exactly that
-    reason. Splitting them at the provider produced two registries, two config sections and two
-    copies of the same read-through in every provider.
+The base class owns caching, resolution negotiation and normalisation; a subclass implements
+``fetch_price`` and ``fetch_bars`` and returns raw vendor output.
 
-The contract is a *template method*, not a list of signatures. An earlier version of this file
-declared abstract methods and provided nothing, so implementing it was pure overhead and nothing
-ever did. Every provider stayed a loose function and each hand-rolled its own caching -- which
-drifted, as duplicated logic does: two of four bar providers checked a payload cache the other
-two did not, so the same question got a different answer depending on who served it.
-
-So the base owns the caching and asks a provider for the one thing only it knows: how to get raw
-frames out of its vendor. Declare ``name``, implement ``fetch_bars`` and ``fetch_price``, and
-never touch a cache, a TTL or a normaliser again.
-
-**Bars read through to DuckDB.** It is the durable store, keyed by provider and resolution, and
-``_fresh_cached_bars`` already applies the TTL. A short-lived payload cache in front of it only
-bought a second place for a stale bar to hide. Quotes keep the payload cache: they are not bars,
-and there is no bar store for them to live in.
+Bars read through to DuckDB (the durable, TTL'd store, keyed by provider and resolution).
+Quotes keep a short-lived payload cache instead, since there is no bar store for them to live in.
 """
 
 from __future__ import annotations
@@ -58,15 +42,13 @@ logger = logging.getLogger(__name__)
 class MarketDataProvider(ABC):
     """A source of prices and bars, with the read-through cache supplied.
 
-    Subclasses implement ``fetch_price`` and ``fetch_bars``, which are called only for what the
-    cache could not answer and return raw vendor output. Everything else -- resolution
-    negotiation, cache reads, normalisation, cache writes -- happens here, once.
+    Subclasses implement ``fetch_price`` and ``fetch_bars`` for whatever the cache could not
+    answer; everything else -- resolution negotiation, cache reads/writes, normalisation --
+    happens here.
     """
 
-    #: Registry key. The same string names this provider in ``config.*_provider_order``, in the
-    #: bar store and in the rate-limit table, so one identifier accounts for it everywhere. An
-    #: attribute rather than an argument because it used to be a string literal repeated through
-    #: each provider -- fourteen times in the worst of them.
+    #: Registry key. Names this provider in ``config.*_provider_order``, in the bar store and
+    #: in the rate-limit table.
     name: str = ""
 
     def __init__(self, config: Config) -> None:
@@ -80,8 +62,8 @@ class MarketDataProvider(ABC):
     def price(self, symbols: list[str], *, force_refresh: bool = False, **extra: Any) -> dict[str, dict[str, Any]]:
         """``{symbol: {"price": float, "timestamp": ..., "current": bool, ...}}``, cache first.
 
-        A symbol this provider cannot price is simply *absent*, so the caller falls through to
-        the next provider for that symbol alone rather than discarding the whole batch.
+        A symbol this provider cannot price is simply absent, so the caller falls through to
+        the next provider for that symbol alone.
         """
         wanted = [str(symbol).upper() for symbol in symbols]
         resolved: dict[str, dict[str, Any]] = {}
@@ -99,10 +81,6 @@ class MarketDataProvider(ABC):
             key = str(symbol).upper()
             if not quote:
                 continue
-            # ``ttl_seconds`` is required and has no default. Omitting it raised TypeError on
-            # every *fresh* quote -- never on a cached one -- so the failure only appeared when
-            # a symbol actually needed fetching, and surfaced as "provider failed" with the
-            # whole batch discarded rather than as the missing argument it was.
             save_cached_payload(
                 MARKET_CATEGORY,
                 self.name,
@@ -128,20 +106,15 @@ class MarketDataProvider(ABC):
         """OHLCV at ``interval_minutes``, oldest first, served from the store where possible.
 
         ``interval_minutes`` is a request, not a guarantee: a provider that cannot serve the
-        requested grid gets its nearest *coarser* one instead of failing, because horizons are
-        stated in market minutes and a coarser answer still answers the question. Give either
+        requested grid gets its nearest coarser one instead of failing. Give either
         ``lookback_bars`` or ``lookback_minutes`` -- the latter is converted once the grid is
-        known, which is the only point at which the conversion is correct.
+        known.
 
         Every frame returned has ``timestamp, open, high, low, close, volume, adjusted_close``,
-        stamped at bar *end* in UTC. Bars are what the market printed: nothing here folds a
-        distribution into a price -- those are recorded separately and booked as cash.
+        stamped at bar *end* in UTC. Bars are what the market printed; distributions are
+        recorded separately and booked as cash.
         """
         grid = resolve_bar_minutes(self.name, interval_minutes)
-        # Converted *after* resolution, never before: the caller asks for a preferred grid and
-        # the provider may serve a coarser one, so a bar count derived from the request would be
-        # wrong by exactly that ratio -- 235 five-minute bars asked of a provider that answers
-        # in fifteens, which needs 79.
         if lookback_bars is None:
             lookback_bars = bars_for_minutes(int(lookback_minutes or 0), grid)
         ttl_seconds = self._ttl_seconds(grid)
@@ -163,9 +136,6 @@ class MarketDataProvider(ABC):
                 resolved[symbol] = cached.tail(lookback_bars).reset_index(drop=True)
 
         if missing:
-            # The provider is handed the missing symbols as a *list*, so a vendor with a batch
-            # endpoint keeps its single call and one that must loop still loops -- internally,
-            # where that is its own business rather than a difference visible in the cache path.
             fresh = self.fetch_bars(
                 missing,
                 interval_minutes=grid,
@@ -190,11 +160,7 @@ class MarketDataProvider(ABC):
         return {symbol: resolved.get(symbol, _empty_bars()) for symbol in wanted}
 
     def _ttl_seconds(self, interval_minutes: int) -> int:
-        """How long a bar at this resolution stays fresh.
-
-        The one place the two grids are still treated differently, and for a real reason: a
-        daily bar is final once the session closes, a five-minute bar is stale in minutes.
-        """
+        """How long a bar at this resolution stays fresh."""
         if interval_minutes >= DAILY_INTERVAL_MINUTES:
             return int(getattr(self.config, "eod_market_data_cache_ttl_seconds", EOD_CACHE_TTL_SECONDS))
         return int(getattr(self.config, "intraday_market_data_cache_ttl_seconds", INTRADAY_CACHE_TTL_SECONDS))
@@ -205,8 +171,8 @@ class MarketDataProvider(ABC):
     def fetch_price(self, symbols: list[str], **extra: Any) -> dict[str, dict[str, Any]]:
         """Live quotes from the vendor, for the symbols the cache could not answer.
 
-        Build each one with :func:`~src.connectors.frames._normalize_quote` so provenance --
-        ``timestamp`` and ``current`` -- is recorded the same way by every provider.
+        Build each one with :func:`~src.connectors.frames._normalize_quote` so provenance
+        (``timestamp``, ``current``) is recorded the same way by every provider.
         """
         raise NotImplementedError
 
@@ -223,9 +189,9 @@ class MarketDataProvider(ABC):
     ) -> dict[str, pd.DataFrame]:
         """Raw frames from the vendor at ``interval_minutes``, for the symbols still missing.
 
-        Return whatever shape the vendor gives -- normalisation runs on it. A symbol the vendor
+        Return whatever shape the vendor gives; normalisation runs on it. A symbol the vendor
         has nothing for is simply absent from the mapping. Raise
         :class:`~src.connectors.sources.ProviderUnavailable` when the provider cannot answer at
-        all, so the dispatcher moves to the next one rather than recording an empty result.
+        all, so the dispatcher moves to the next one.
         """
         raise NotImplementedError

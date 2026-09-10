@@ -8,23 +8,17 @@ from src.algorithms.registry import canonical_algorithm_id
 from src.common.config_utils import as_bool
 from src.core.config import (
     DEFAULT_STRATEGY_ID,
+    config_transaction,
     load_algorithm_bot_config,
     save_algorithm_bot_config,
 )
 
 logger = logging.getLogger(__name__)
 
-#: An empty cron is how a binding says "no clock drives me" -- the job the ``mcp`` frequency
-#: used to do. It is the absence of a schedule rather than a special kind of one, which is what
-#: it always was: ``frequency_minutes`` returned ``None`` for it and every caller tested exactly
-#: that, never the number.
+#: Empty cron: no clock drives this binding (the job the legacy ``mcp`` frequency used to do).
 AGENT_DRIVEN_CRON = ""
 
-#: What a pre-cron binding's ``frequency`` becomes. Only ``mcp`` carried information, because
-#: only ``mcp`` was ever read: the numeric cadences were consumed solely as "not None", so a
-#: binding saved as ``15m`` and one saved as ``2hr`` were timed identically -- by the algorithm
-#: class, at its own cadence. Migrating them all to the algorithm's default cron preserves what
-#: they actually did rather than what their name claimed.
+#: What a pre-cron binding's ``frequency`` becomes when migrated.
 _LEGACY_AGENT_FREQUENCY = "mcp"
 
 
@@ -43,9 +37,8 @@ def algorithm_default_cron(strategy: Any) -> str:
 def normalize_cron(value: Any, strategy: Any = None) -> str:
     """A cron this system will actually run, or ``""`` for an agent-driven binding.
 
-    An unparseable expression falls back to the algorithm's default rather than to nothing.
-    Falling back to ``""`` would silently reclassify a scheduled binding as agent-driven, which
-    stops it trading altogether -- a typo in a text field must not be able to do that.
+    An unparseable expression falls back to the algorithm's default rather than to ``""``,
+    since that would silently reclassify a scheduled binding as agent-driven and stop it trading.
     """
     from src.core.cron import CronError, parse_cron
 
@@ -67,9 +60,7 @@ def cron_is_scheduled(cron: Any) -> bool:
     return bool(str(cron or "").strip())
 
 
-#: A binding is one algorithm pointed at one account, with its own on/off switch. The dashboard
-#: renders one panel per binding, and the runtime gives each its own scheduler loop, so several
-#: strategies can be tried in parallel against different accounts from a single deployment.
+#: One algorithm pointed at one account, with its own on/off switch and scheduler loop.
 DEFAULT_BINDING: dict[str, Any] = {
     "id": "",
     "strategy": DEFAULT_STRATEGY_ID,
@@ -100,9 +91,8 @@ def sanitize_binding(raw: dict[str, Any] | None, existing_ids: set[str], fallbac
     saved_strategy = str(raw.get("strategy") or DEFAULT_STRATEGY_ID)
     strategy = canonical_algorithm_id(saved_strategy)[:80]
     enabled = as_bool(raw.get("enabled"), default=False)
-    # "none" used to force the bot idle regardless of the enabled flag, so a config saved that
-    # way can hold enabled: true while the dashboard showed off. Migrating it to DCA without
-    # clearing the flag would start live trading on upgrade -- land in the off state instead.
+    # A legacy "none" strategy forced the bot idle regardless of "enabled"; migrating it must
+    # not flip a previously-idle binding into live trading.
     if saved_strategy.strip().lower() == "none":
         enabled = False
     return {
@@ -115,17 +105,10 @@ def sanitize_binding(raw: dict[str, Any] | None, existing_ids: set[str], fallbac
 
 
 def _binding_cron(raw: dict[str, Any], strategy: str) -> str:
-    """This binding's schedule, migrating a pre-cron ``frequency`` when that is all there is.
-
-    A binding saved before cron existed carries ``frequency`` and no ``cron``. ``mcp`` becomes
-    the empty cron, since that is the same statement; every other value becomes the algorithm's
-    default, because that is what those bindings were *actually* running at -- the number in the
-    name never reached the clock.
-    """
-    # An explicit ``cron`` is honoured whatever it says, empty included -- that is a binding
-    # stating it wants no clock. An *absent* key is a binding that has never chosen, which is
-    # not the same statement and must not land agent-driven by default: a deployment created
-    # from the dashboard would then sit switched on and never run, with nothing to say why.
+    """This binding's schedule, migrating a pre-cron ``frequency`` when that is all there is."""
+    # An explicit ``cron`` is honoured whatever it says, empty included. An *absent* key means
+    # this binding has never chosen, and must not land agent-driven by default -- a deployment
+    # created from the dashboard would then sit switched on and never run.
     if "cron" in raw:
         return normalize_cron(raw.get("cron"), strategy)
     legacy = str(raw.get("frequency") or "").strip().lower()
@@ -175,8 +158,7 @@ def sanitize_controls(controls: dict[str, Any] | None) -> dict[str, Any]:
 
     trading_account_id = str(raw.get("trading_account_id") or bindings[0]["account_id"] or "")[:80]
 
-    # The first binding is mirrored onto the pre-binding keys so anything still reading a single
-    # strategy -- saved backtests, the live runner's default, older callers -- keeps working.
+    # Mirrored onto the pre-binding keys for callers still reading a single strategy.
     primary = bindings[0]
     return {
         "trading_account_id": trading_account_id,
@@ -202,31 +184,18 @@ def find_binding(controls: dict[str, Any], binding_id: str) -> dict[str, Any] | 
 
 
 #: The two origins that can drive a binding into *placing orders*. Backtest and live-signal
-#: reads are deliberately not origins: they compute a proposal and submit nothing, so they run
-#: whatever they are asked to, switched on or not.
+#: reads are not origins: they compute a proposal and submit nothing.
 ORIGIN_SCHEDULE = "schedule"
 ORIGIN_MCP = "mcp"
 
 
 def binding_driver(binding: dict[str, Any] | None) -> str:
-    """Which origin is allowed to place this binding's orders.
-
-    Exactly one, always: clearing the cron does not *add* an agent driver, it hands the clock's
-    job to one. A binding is driven by the scheduler or by an agent, never both.
-    """
+    """Which origin is allowed to place this binding's orders. Exactly one, always."""
     return ORIGIN_SCHEDULE if cron_is_scheduled((binding or {}).get("cron")) else ORIGIN_MCP
 
 
 def binding_refusal(binding: dict[str, Any] | None, origin: str) -> str:
-    """Why ``origin`` may not place orders for ``binding``, or ``""`` if it may.
-
-    The single implementation of the rule, because it previously had one and a half: the
-    scheduler enforced it in ``bot_runtime._binding_enabled`` and the MCP tools enforced
-    nothing at all, so an agent could trade a binding that was switched off, or one the
-    scheduler was driving at the same time. A rule that only one of two callers applies is the
-    same failure mode as an algorithm implemented twice -- fixed the same way, one function
-    both callers go through.
-    """
+    """Why ``origin`` may not place orders for ``binding``, or ``""`` if it may."""
     if not binding:
         return "No binding is configured for it"
     if not binding.get("enabled"):
@@ -251,17 +220,8 @@ def bindings_for_strategy(controls: dict[str, Any], strategy: str) -> list[dict[
 def account_for_strategy(strategy: str, controls: dict[str, Any] | None = None) -> str:
     """The account a read-only view of ``strategy`` should be computed against.
 
-    Signal views and backtests are not origins -- they place nothing, so they run whatever they
-    are asked to and cannot refuse the way ``resolve_binding_for_origin`` does. They still have
-    to answer *for some account*, because some algorithms are configured per account: a DCA
-    plan is per account, so computing the view against the default account rendered one plan
-    while the dashboard's own editor wrote another, and neither view ever showed an edit.
-    Reading the binding is what makes the two agree.
-
-    An enabled binding wins over a switched-off one, since that is the deployment the view is
-    describing. ``""`` means no binding names this strategy, and the caller falls back to the
-    default account -- which is the right answer for an algorithm whose config is not per
-    account, and the only available one for a strategy that is not deployed anywhere.
+    An enabled binding wins over a switched-off one. ``""`` means no binding names this
+    strategy, and the caller falls back to the default account.
     """
     controls = controls if controls is not None else load_controls()
     candidates = bindings_for_strategy(controls, strategy)
@@ -281,9 +241,8 @@ def resolve_binding_for_origin(
     """The binding ``origin`` may act through, or ``(None, reason)``.
 
     Addressed by ``binding_id`` when the caller knows it. Falling back to ``strategy`` is for
-    callers that only know an algorithm name -- the MCP tools -- and it deliberately refuses
-    when the answer is ambiguous rather than picking: two bindings may share a strategy on
-    different accounts, and guessing which one to trade is guessing which account to trade.
+    callers that only know an algorithm name and deliberately refuses when ambiguous: two
+    bindings may share a strategy on different accounts.
     """
     controls = controls if controls is not None else load_controls()
     if binding_id:
@@ -299,8 +258,6 @@ def resolve_binding_for_origin(
     if len(eligible) == 1:
         return eligible[0], ""
     if not eligible:
-        # One candidate has one honest reason; several have several, so say them all rather
-        # than reporting whichever happened to be first.
         return None, "; ".join(f"{b['id']}: {binding_refusal(b, origin)}" for b in candidates)
     return None, (
         f"{strategy!r} has {len(eligible)} bindings an agent may drive "
@@ -333,19 +290,23 @@ def load_controls(path: str | None = None) -> dict[str, Any]:
 
 def save_controls(controls: dict[str, Any], path: str | None = None) -> dict[str, Any]:
     sanitized = sanitize_controls(controls)
-    algorithm_config = load_algorithm_bot_config(path)
-    algorithm_bot = algorithm_config.setdefault("algorithm_bot", {})
-    if not isinstance(algorithm_bot, dict):
-        algorithm_bot = {}
-        algorithm_config["algorithm_bot"] = algorithm_bot
-    algorithm_bot.update(
-        {
-            "trading_account_id": sanitized["trading_account_id"],
-            "bindings": sanitized["bindings"],
-            # Kept in step with the first binding so a rollback still reads a sane single bot.
-            "enabled": sanitized["equities"]["enabled"],
-            "strategy": sanitized["equities"]["strategy"],
-        }
-    )
-    save_algorithm_bot_config(algorithm_config, path)
+    # The load below and the save at the end are one operation: this rewrites the whole
+    # document from what it just read, so a concurrent save landing in between would be
+    # overwritten wholesale. See :func:`config_transaction`.
+    with config_transaction():
+        algorithm_config = load_algorithm_bot_config(path)
+        algorithm_bot = algorithm_config.setdefault("algorithm_bot", {})
+        if not isinstance(algorithm_bot, dict):
+            algorithm_bot = {}
+            algorithm_config["algorithm_bot"] = algorithm_bot
+        algorithm_bot.update(
+            {
+                "trading_account_id": sanitized["trading_account_id"],
+                "bindings": sanitized["bindings"],
+                # Kept in step with the first binding for rollback compatibility.
+                "enabled": sanitized["equities"]["enabled"],
+                "strategy": sanitized["equities"]["strategy"],
+            }
+        )
+        save_algorithm_bot_config(algorithm_config, path)
     return sanitized

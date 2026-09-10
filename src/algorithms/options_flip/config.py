@@ -36,6 +36,23 @@ DELTA_TOLERANCE = 0.08
 #: decided on liquidity rather than on a third decimal place.
 DELTA_BUCKET = 0.05
 
+#: Largest fraction the resting entry bid may move in one run. ``entry_patience`` bounds the
+#: *session-long* curve, but the ceiling it walks toward is the contract's own quoted mid, and
+#: on a thin contract that can itself jump between runs -- a stale print catching up, not a real
+#: repricing. Verified live on USO: the ratchet's own ``given_up`` moved from 0.141 to 0.151
+#: between two runs, a smooth step, while the resting bid jumped $8.07 to $10.27, which
+#: given_up alone cannot explain. A real gap still gets there, just over more than one run.
+ENTRY_MAX_REPRICE_PCT = 0.15
+
+#: Per consecutive run the sell-side bull-regime re-check reads closed, the fraction of the
+#: remaining gap to the mark given up -- ``_held`` treats a closed gate as a fast-forwarded
+#: deadline, reusing that same converge-to-the-mark step rather than a separate branch. A
+#: geometric decay, so it only ever gets arbitrarily close, never snaps, and resets to zero the
+#: moment the gate reopens: a brief flicker nudges the price a little rather than pricing the
+#: exit as if the thesis had already failed. Set to match the old run-counted version's walk
+#: speed (five sixths of the gap survives each run), verified live on GLD and USO.
+SELL_GATE_CONCESSION_RATE = 1.0 / 6.0
+
 #: How far past ``min_dte`` to ask the chain for.
 #:
 #: A monthly expiry inside the search lands in the same delta bucket as the weekly and then wins
@@ -91,11 +108,22 @@ class OptionsFlipConfig:
 
     #: Sessions to hold before the deadline exit takes over. It also sets the horizon the target
     #: is priced over -- the run available grows with the hold -- so the two cannot be set apart.
-    #: Raised from 4: a combo sweep over August (``tools/options_flip_config_combo_sweep.py``)
-    #: found 2 sessions a clear loser (-$410 total, forcing more deadline-convergence exits
-    #: before the target had room to arrive) and 8 a clear winner (+$298 vs +$89 baseline); 6 is
-    #: the same direction without going as far on one month's evidence alone.
+    #: Tried at 4 on the full-August walk-forward after the sell-side regime-gate fix: worse than
+    #: 6 on that data (77.8% win / +$125 vs 92.9% win / +$1,215), driven by one GLD position that
+    #: landed on a real one-day drop and hit its stop under the shorter horizon's different entry
+    #: timing. One month is not enough to call either value "correct" -- back to 6 pending a
+    #: proper sweep across hold lengths.
     max_hold_sessions: int = 6
+
+    #: The delta to aim the strike at. Higher earns more per point of underlying move, costs
+    #: premium that is mostly intrinsic, and buys a contract fewer people trade.
+    target_delta: float = 0.8
+
+    #: Where the entry sits, as the share of comparable sessions that reached it. Lower is a
+    #: deeper, cheaper entry that fills less often. Lowered from 0.55: the sweep found a
+    #: shallower entry (0.35) beat a deeper one (0.75) on total P/L ($259 vs $184); 0.40 leans
+    #: the same direction.
+    entry_reach: float = 0.40
 
     #: Where the exit sits, as the share of comparable *pulled-back* sessions that reached it.
     #: Lower is more ambitious and reached less often. Lowered from 0.42: the single-knob sweep
@@ -103,9 +131,12 @@ class OptionsFlipConfig:
     #: leans the same direction without the smaller sample the extreme carried.
     exit_reach: float = 0.35
 
-    #: Share of the modelled gain the sell limit asks for on the day of entry. Asking for part
-    #: of the move is what makes the exit executable rather than theoretical.
-    exit_gain_share: float = 0.70
+    #: How stubbornly the buy holds its price as the session runs out; higher is more patient.
+    #: The patient side by design: chasing a rising ask turns a pullback trade into a momentum
+    #: one, and an unfilled entry costs only the opportunity. It never crosses the mark. Raised
+    #: from 1.5: the sweep found more patience (3.0) beat less (0.5) on total P/L ($144 vs -$60);
+    #: 2.0 leans the same direction without the smaller trade count the extreme carried.
+    entry_patience: float = 2.0
 
     #: How stubbornly the sell holds its ask as the deadline approaches; higher is more patient.
     #: The impatient side by design: a position reaching its deadline unsold is sold at whatever
@@ -116,26 +147,13 @@ class OptionsFlipConfig:
     #: result of the whole combo sweep at $484 on a real 17-trade sample, not one lucky fill).
     exit_patience: float = 1.5
 
-    #: Where the entry sits, as the share of comparable sessions that reached it. Lower is a
-    #: deeper, cheaper entry that fills less often. Lowered from 0.55: the sweep found a
-    #: shallower entry (0.35) beat a deeper one (0.75) on total P/L ($259 vs $184); 0.40 leans
-    #: the same direction.
-    entry_reach: float = 0.40
-
-    #: How stubbornly the buy holds its price as the session runs out; higher is more patient.
-    #: The patient side by design: chasing a rising ask turns a pullback trade into a momentum
-    #: one, and an unfilled entry costs only the opportunity. It never crosses the mark. Raised
-    #: from 1.5: the sweep found more patience (3.0) beat less (0.5) on total P/L ($144 vs -$60);
-    #: 2.0 leans the same direction without the smaller trade count the extreme carried.
-    entry_patience: float = 2.0
+    #: Share of the modelled gain the sell limit asks for on the day of entry. Asking for part
+    #: of the move is what makes the exit executable rather than theoretical.
+    exit_gain_share: float = 0.70
 
     #: Smallest predicted move worth opening for, in dollars per contract, gross of commission.
     #: The strictest gate in the set, and the one that decides how often this trades at all.
     min_profit_per_contract: float = 15.0
-
-    #: The delta to aim the strike at. Higher earns more per point of underlying move, costs
-    #: premium that is mostly intrinsic, and buys a contract fewer people trade.
-    target_delta: float = 0.8
 
     #: Sessions the dip and run quantiles are learned from. Long enough that one exceptional
     #: stretch cannot set the tail, since a short window is read back out as a forecast.
@@ -160,7 +178,7 @@ class OptionsFlipConfig:
     max_notional_per_trade: float = 3500.0
 
     #: Nearest expiry to trade. Under a week the theta curve is steepest.
-    min_dte: int = 7
+    min_dte: int = 10
 
     #: Open interest floor -- whether a resting order finds a counterparty at all. It does not
     #: catch cost; that is ``max_spread_pct``.

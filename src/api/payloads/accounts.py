@@ -1,33 +1,31 @@
 """Account state: balances, holdings, income and broker activity.
 
-Split out of the single ``api_payloads`` module, which had grown to 1253 lines covering nine
-unrelated domains. The public names are unchanged and still importable from ``api_payloads``.
+Split out of the single ``api_payloads`` module. Public names are unchanged and still
+importable from ``api_payloads``.
 """
-
 
 from __future__ import annotations
 
-from ...brokerages.alpaca.client import create_trading_client
-from src.api.controls import load_controls
-
-import os
 import logging
+import os
 from typing import Any
-
 
 from alpaca.trading.enums import QueryOrderStatus
 from alpaca.trading.requests import GetOrdersRequest
 
+from ...brokerages.alpaca.client import create_trading_client
 from ...brokerages.paper.brokerage import PaperBrokerage
+from ...common.config_utils import json_number
 from ...core.config import (
     UnknownAccountError,
     get_account_broker_type,
     get_config,
     load_accounts_config,
+    config_transaction,
     save_accounts_config,
 )
-from ...common.config_utils import json_number
 from ...data.order_journal import load_order_journal
+from ..controls import load_controls
 
 logger = logging.getLogger(__name__)
 
@@ -67,10 +65,8 @@ def positions_payload(account_id: str = "") -> dict[str, Any]:
         "day_pl": None,
         "day_pl_percent": None,
         "total_pl": None,
-        # Income is reported beside price P/L rather than inside it. They answer different
-        # questions -- what the holdings are worth versus what they paid out -- and a cash
-        # sleeve earns almost entirely through the second one, which an "open P/L" figure
-        # alone shows as flat.
+        # Reported beside price P/L, not inside it -- different questions, and a cash sleeve
+        # earns almost entirely through the second one.
         "dividend_pl": None,
         "dividend_rows": [],
         "rows": [],
@@ -105,18 +101,11 @@ def positions_payload(account_id: str = "") -> dict[str, Any]:
     return payload
 
 
-#: How far back the account page totals income. Just under a year: comparable to a trailing
-#: yield, small enough to stay one request, and inside Schwab's transactions window, which
-#: rejects a range of exactly 365 days as "more than a year".
-DIVIDEND_ACTIVITY_DAYS = 364
-
-
 def _dividend_pl(config: Any) -> dict[str, Any]:
     """Income received, through the brokerage interface rather than per-broker branching.
 
-    Kept apart from ``total_pl`` deliberately. A distribution is cash that arrived, not a
-    change in what the holdings are worth, and folding the two together is what made a T-bill
-    sleeve look like it earned nothing at all.
+    Kept apart from ``total_pl``: a distribution is cash that arrived, not a change in what
+    the holdings are worth.
     """
     from datetime import datetime, timedelta, timezone
 
@@ -133,12 +122,6 @@ def _dividend_pl(config: Any) -> dict[str, Any]:
         "dividend_pl": float(sum(float(row.get("amount") or 0.0) for row in rows)),
         "dividend_rows": rows[:40],
     }
-
-
-#: Fields a deployment target carries. Secrets are deliberately absent: accounts reference the
-#: *names* of environment variables, so the dashboard can wire up a target without ever handling
-#: an API key. Setting the secret stays a deploy-time action on the host.
-ACCOUNT_FIELDS = ("label", "broker", "base_url", "data_feed", "api_key_env", "api_secret_env")
 
 
 def _account_items(raw: dict[str, Any]) -> dict[str, Any]:
@@ -187,48 +170,53 @@ def save_account_payload(body: dict[str, Any]) -> dict[str, Any]:
     if not account_id.replace("_", "").replace("-", "").isalnum():
         raise ValueError("Target id may only contain letters, numbers, dashes, and underscores.")
 
-    raw = load_accounts_config()
-    accounts = raw.setdefault("accounts", {})
-    if not isinstance(accounts, dict):
-        accounts = {}
-        raw["accounts"] = accounts
-    items = accounts.setdefault("items", {})
-    if not isinstance(items, dict):
-        items = {}
-        accounts["items"] = items
+    with config_transaction():
+        raw = load_accounts_config()
+        accounts = raw.setdefault("accounts", {})
+        if not isinstance(accounts, dict):
+            accounts = {}
+            raw["accounts"] = accounts
+        items = accounts.setdefault("items", {})
+        if not isinstance(items, dict):
+            items = {}
+            accounts["items"] = items
 
-    section = items.get(account_id) if isinstance(items.get(account_id), dict) else {}
-    for field_name in ACCOUNT_FIELDS:
-        if field_name in body:
-            section[field_name] = str(body.get(field_name) or "")
-    section.setdefault("broker", "alpaca")
-    items[account_id] = section
-    if not raw.get("default"):
-        raw["default"] = account_id
-    save_accounts_config(raw)
+        section = items.get(account_id) if isinstance(items.get(account_id), dict) else {}
+        for field_name in ACCOUNT_FIELDS:
+            if field_name in body:
+                section[field_name] = str(body.get(field_name) or "")
+        section.setdefault("broker", "alpaca")
+        items[account_id] = section
+        if not raw.get("default"):
+            raw["default"] = account_id
+        save_accounts_config(raw)
     return accounts_payload()
 
 
 def delete_account_payload(account_id: str) -> dict[str, Any]:
     account_id = str(account_id or "").strip()
-    raw = load_accounts_config()
-    items = _account_items(raw)
-    if account_id not in items:
-        raise ValueError(f"No deployment target named {account_id}.")
-    if len(items) <= 1:
-        raise ValueError("Keep at least one deployment target.")
+    with config_transaction():
+        raw = load_accounts_config()
+        items = _account_items(raw)
+        if account_id not in items:
+            raise ValueError(f"No deployment target named {account_id}.")
+        if len(items) <= 1:
+            raise ValueError("Keep at least one deployment target.")
 
-    controls = load_controls()
-    in_use = [b for b in (controls.get("bindings") or []) if str(b.get("account_id")) == account_id]
-    if in_use:
-        # Deleting a target out from under a running deployment would leave it pointed at an
-        # account that no longer resolves, which fails at order time rather than here.
-        raise ValueError(f"{account_id} still has {len(in_use)} deployment(s). Remove them first.")
+        # Inside the transaction: the bindings are read to decide whether this delete is
+        # allowed, so a deployment added between the check and the write would be left
+        # pointing at an account that no longer resolves.
+        controls = load_controls()
+        in_use = [b for b in (controls.get("bindings") or []) if str(b.get("account_id")) == account_id]
+        if in_use:
+            # Deleting a target out from under a running deployment would leave it pointed at an
+            # account that no longer resolves, which fails at order time rather than here.
+            raise ValueError(f"{account_id} still has {len(in_use)} deployment(s). Remove them first.")
 
-    items.pop(account_id)
-    if str(raw.get("default") or "") == account_id:
-        raw["default"] = next(iter(items), "")
-    save_accounts_config(raw)
+        items.pop(account_id)
+        if str(raw.get("default") or "") == account_id:
+            raw["default"] = next(iter(items), "")
+        save_accounts_config(raw)
     return accounts_payload()
 
 
@@ -341,10 +329,6 @@ def account_activity_payload(account_id: str = "", limit: int = 40) -> dict[str,
         logger.warning("Could not load activity for %s: %s", config.account_id, error)
         payload["error"] = str(error)
     return payload
-
-
-#: Broker payload fields arrive as strings, and an unparseable one must serialise as null
-#: rather than as a zero that reads like a real quantity.
 
 
 def _enum_value(value: Any) -> str:

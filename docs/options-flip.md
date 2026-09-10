@@ -39,31 +39,35 @@ EXIT         a limit at exit_gain_share of the modelled gain, conceding on an ex
 
 ## Configuration
 
-Twenty fields. Everything else is a constant in `config.py` -- window lengths, tolerances,
-the ATR period -- because none of those is a decision anyone would make differently.
+Nineteen fields. Everything else is a constant in `config.py` -- window lengths, tolerances,
+the ATR period, and two ratchet safety caps (`ENTRY_MAX_REPRICE_PCT`, `SELL_GATE_CONCESSION_RUNS`)
+-- because none of those is a decision anyone would make differently.
+
+Ordered by how much each one moves the outcome, most consequential first -- the same order
+`config.py`'s dataclass declares them in, which a test checks against `explainers.py` so the
+Tune page cannot drift from this table silently.
 
 | field | default |
 | --- | --- |
 | `symbols` | `[]` (empty means the account's tradable universe) |
-| `min_trend_strength` | `0.50` |
-| `max_candidates` | `3` |
 | `contracts_per_trade` | `1` |
-| `max_notional_per_trade` | `3500.0` |
-| `max_hold_sessions` | `6` |
 | `stop_loss_pct` | `0.5` |
-| `entry_reach` | `0.40` |
-| `entry_patience` | `2.0` |
-| `exit_reach` | `0.35` |
-| `exit_gain_share` | `0.70` |
-| `exit_patience` | `1.5` |
+| `max_hold_sessions` | `6` |
 | `target_delta` | `0.8` |
+| `entry_reach` | `0.40` |
+| `exit_reach` | `0.35` |
+| `entry_patience` | `2.0` |
+| `exit_patience` | `1.5` |
+| `exit_gain_share` | `0.70` |
+| `min_profit_per_contract` | `15.0` |
+| `level_lookback_days` | `80` |
+| `min_trend_strength` | `0.50` |
+| `max_notional_per_trade` | `3500.0` |
 | `min_dte` | `7` |
 | `min_open_interest` | `100` |
 | `max_spread_pct` | `0.06` |
-| `min_profit_per_contract` | `15.0` |
 | `max_gap_down_atr` | `1.0` |
 | `max_annual_volatility` | `0.8` |
-| `level_lookback_days` | `80` |
 
 Two pairs read together. ``entry_reach``/``exit_reach`` are both "the share of comparable
 sessions that reached this level", so they are probabilities rather than offsets.
@@ -78,6 +82,15 @@ An ``atr_multiple`` knob briefly widened both levels on top of the quantiles. It
 setting it to 1.15 was exactly ``entry_reach: 0.55`` and ``exit_reach: 0.42``, the same levels
 to a tenth of a cent, but expressed as a multiplier whose reach probability you only learned
 afterwards. Two knobs for one decision, and the worse of the two units.
+
+Two ratchet safety caps were briefly config fields (`entry_max_reprice_pct`,
+`sell_gate_debounce_runs`, `sell_gate_concession_runs`) and were folded back into module
+constants (`ENTRY_MAX_REPRICE_PCT`, `SELL_GATE_CONCESSION_RUNS` in `config.py`). Not because a
+knob is worse than a constant, but because the debounce counter they'd been guarding was
+unnecessary complexity on its own -- the exit side's gradual convergence, reusing the existing
+per-symbol `target` memory, already absorbs a brief gate flicker without a separate counter or
+threshold to tune. Nothing anyone would set differently by symbol or regime; see the comments
+above each constant in `config.py` for the live USO/GLD data that motivated them.
 
 Per-field reasoning lives in `config.py` and in the tuning descriptions in
 `src/algorithms/explainers.py`; both are checked against the dataclass, so neither can drift.

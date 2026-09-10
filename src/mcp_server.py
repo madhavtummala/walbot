@@ -20,7 +20,13 @@ from src.api.controls import (
 )
 from src.core.config import get_config
 from src.core.interfaces import MODE_TARGET, AlgorithmPlan, DesiredOrder, Intent, OrderRequest
-from src.core.pipeline import UnknownBrokerageError, read_snapshot, resolve_brokerage
+from src.core.pipeline import (
+    TradingRefused,
+    UnknownBrokerageError,
+    assert_account_tradable,
+    read_snapshot,
+    resolve_brokerage,
+)
 from src.core.runner import execute_algorithm, run_algorithm
 from src.data.order_journal import record_orders
 
@@ -311,9 +317,14 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
         # binding's account through run_once; this path simply never did.
         config = get_config(account_id=binding["account_id"] or None, strategy_id=plan.strategy)
 
-        if config.kill_switch:
-            logger.warning("Kill switch is enabled. Skipping order placement for %s.", plan.strategy)
-            return {"strategy": plan.strategy, "status": "skipped", "reason": "Kill switch is enabled"}
+        try:
+            # Refused before authenticating: there is no point reaching a venue we have already
+            # decided not to trade. The same rule is re-asserted inside ``execute_algorithm``,
+            # which is where it is actually enforced -- this is the early out, not the check.
+            assert_account_tradable(config)
+        except TradingRefused as refusal:
+            logger.warning("Refused to execute %s: %s", plan.strategy, refusal.reason)
+            return {"strategy": plan.strategy, "status": "skipped", "reason": refusal.reason}
 
         try:
             brokerage = resolve_brokerage(config)
@@ -321,7 +332,13 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
             return {"strategy": plan.strategy, "status": "error", "reason": str(exc)}
 
         try:
+            # The kill switch and the paper-only restriction are asserted inside, so this path
+            # no longer has to remember them -- and can no longer forget one, which is how a
+            # paper-only algorithm became executable against a live account from here.
             outcome = execute_algorithm(plan, config, brokerage)
+        except TradingRefused as refusal:
+            logger.warning("Refused to execute %s: %s", plan.strategy, refusal.reason)
+            return {"strategy": plan.strategy, "status": "skipped", "reason": refusal.reason}
         except ValueError as exc:
             return {"strategy": plan.strategy, "status": "error", "reason": str(exc)}
         # Journalled here as well as in the live runner: an agent-driven order is still

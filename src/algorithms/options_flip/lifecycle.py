@@ -27,7 +27,7 @@ from typing import Any
 
 from ...core.interfaces import Check, DesiredOrder, OrderRequest
 from ...core.options import CALL, OptionContract
-from .config import REPRICE_MIN_PRICE_FRACTION
+from .config import ENTRY_MAX_REPRICE_PCT, REPRICE_MIN_PRICE_FRACTION, SELL_GATE_CONCESSION_RATE
 from .excursion import option_price_for
 
 logger = logging.getLogger(__name__)
@@ -154,6 +154,18 @@ def _flat_or_bidding(
     )
     limit = min(floor_price + (contract.midpoint - floor_price) * given_up, contract.midpoint)
 
+    # A step cap independent of the ratchet curve: entry_patience bounds how the *formula*
+    # moves across a session, but the ceiling it walks toward is the contract's own quoted
+    # mid, and on a thin contract that quote can itself jump between runs rather than move
+    # smoothly -- a stale print catching up, not a real repricing. Re-asserting the mid cap
+    # after the clamp keeps the older invariant (never above the mark) intact regardless of
+    # which direction the clamp moved the price.
+    previous_bid = float(memory.get("bid", 0.0) or 0.0)
+    if previous_bid > 0:
+        max_step = previous_bid * ENTRY_MAX_REPRICE_PCT
+        limit = min(max(limit, previous_bid - max_step), previous_bid + max_step)
+        limit = min(limit, contract.midpoint)
+
     request = OrderRequest(
         symbol=contract.osi_symbol,
         action="buy",
@@ -271,21 +283,24 @@ def _held(
             f"Holding {held_contract} — unpriced this run",
         )
 
-    entry_price = float(memory.get("bid", 0.0) or 0.0) or fill_price or mark
+    # What the position cost, best evidence first: the broker's average entry price (recorded
+    # into ``fill_price`` by ``_refresh_held``), then the limit we bid, then the mark.
+    #
+    # The bid used to come first. It is an upper bound rather than a cost -- a limit buy fills
+    # at or below its price -- so anchoring to it asked the exit for a gain measured from a
+    # price the account never paid, and reported "+X% on the fill" against the same wrong
+    # number. It stays as the second choice because an upper bound is still a far better
+    # anchor than the current mark, which carries no relationship to cost at all.
+    entry_price = fill_price or float(memory.get("bid", 0.0) or 0.0) or mark
     # The bull-run gate is re-read on the sales side, and the sell band is re-predicted every run.
-    # When the gate has closed, or the freshly predicted target lies at or below the current mark,
-    # the position is sold at the mark rather than left waiting for a target the market is no
-    # longer expected to pay. Only a target above the mark is worth ratcheting toward.
-    if not sell_ok:
+    # When the freshly predicted target lies at or below the current mark, there is nothing left
+    # to ratchet toward and the position is priced at the mark outright -- this is a read of the
+    # model, not of the regime, so it is not debounced.
+    band_exhausted = target_premium is not None and (target_premium <= 0 or target_premium <= mark)
+    if band_exhausted:
         modelled = target = mark
         asked = 0.0
         gain = 0.0
-        rate = "bull gate closed"
-    elif target_premium is not None and (target_premium <= 0 or target_premium <= mark):
-        modelled = target = mark
-        asked = 0.0
-        gain = 0.0
-        rate = "band target at/below the mark"
     else:
         modelled = (
             target_premium if target_premium and target_premium > 0
@@ -302,14 +317,18 @@ def _held(
         conceded = elapsed ** max(float(getattr(config, "exit_patience", 1.0)), 0.01)
         asked = max(float(config.exit_gain_share) * (1.0 - conceded), 0.0)
         target = round(max(entry_price + asked * gain, 0.01), 2)
-        rate = None
 
-    if deadline:
-        # Out of time. Converge on the market across what is left of the session, so the ask is
-        # at the bid by the close rather than resting at a price the position may no longer wait
-        # for. This is the one step allowed to price below the entry: the deadline outranks the
-        # profit target, and a position still open past it is a worse risk than a small loss.
-        decay = float(session.get("fraction_remaining", 0.0))
+    # Sold outright, ahead of the schedule above, whenever either clock runs out: the deadline
+    # (out of *time*) or the bull-regime gate (out of *thesis*). Both converge the same way --
+    # toward the mark, across what is left of the relevant clock -- and both are allowed to price
+    # below the entry, since a position no longer worth waiting on is a worse risk than a small
+    # loss. The gate's clock is a streak of consecutive closed reads rather than a session
+    # fraction, so one flicker barely moves the target -- see ``SELL_GATE_CONCESSION_RATE``.
+    gate_streak = 0 if sell_ok else int(memory.get("gate_failed_streak", 0) or 0) + 1
+    gate_decay = (1.0 - SELL_GATE_CONCESSION_RATE) ** gate_streak
+    day_decay = float(session.get("fraction_remaining", 0.0)) if deadline else 1.0
+    decay = min(gate_decay, day_decay)
+    if decay < 1.0:
         target = round(max(mark + (target - mark) * decay, 0.01), 2)
 
     if target <= 0:
@@ -341,11 +360,13 @@ def _held(
                 if fill_price > 0 else f"${target:.2f}"
             ),
             limit=(
-                (f"asking {asked:.0%} of the modelled gain, session {held_days + 1} of "
-                 f"{int(config.max_hold_sessions)} (patience "
-                 f"{float(getattr(config, 'exit_patience', 1.0)):.1f})"
-                 if not deadline and rate is None else
-                 (f"sold at the mark — {rate}" if rate else "deadline — converging on the market"))
+                f"asking {asked:.0%} of the modelled gain, session {held_days + 1} of "
+                f"{int(config.max_hold_sessions)} (patience "
+                f"{float(getattr(config, 'exit_patience', 1.0)):.1f})"
+                + ("" if not band_exhausted else " — band target at/below the mark, sold outright")
+                + ("" if gate_streak <= 0 else f" — bull gate closed {gate_streak} run(s), "
+                   f"{1.0 - gate_decay:.0%} converged to the mark")
+                + ("" if not deadline else f" — deadline, {1.0 - day_decay:.0%} converged to the market")
             ),
         ),
         Check(
@@ -372,7 +393,10 @@ def _held(
 
     return SymbolPlan(
         symbol, HELD, orders,
-        {**memory, "state": HELD, "contract": held_contract, "target": target, "stop": stop},
+        {
+            **memory, "state": HELD, "contract": held_contract, "target": target, "stop": stop,
+            "gate_failed_streak": gate_streak,
+        },
         checks,
         f"Holding {held_contract} — {unrealised:+.0%}, target ${target:.2f}",
     )

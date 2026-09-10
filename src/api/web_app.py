@@ -43,14 +43,11 @@ def main() -> None:
                         help="Do not start the MCP tool server alongside the dashboard.")
     args = parser.parse_args()
 
-    # The same single-process arrangement the container uses, because the alternative -- running
-    # ``python -m src.mcp_server`` in a second terminal -- puts two processes on
-    # data/walbot.duckdb and DuckDB allows exactly one. Development that differs from
-    # deployment here reproduces a locking bug that deployment does not have.
-    #
-    # Not under --reload: uvicorn's reloader runs the app in a *child* process, so a thread
+    # Same single-process arrangement the container uses: DuckDB allows only one writer, so
+    # running the MCP server as a separate process would lock the other out.
+    # Not under --reload: uvicorn's reloader runs the app in a child process, so a thread
     # started here would serve MCP from the parent while the dashboard holds the database in
-    # the child -- the two-process split again, with the port bound by the wrong one.
+    # the child.
     if args.reload and not args.no_mcp_server:
         print("Reload mode: MCP tool server not started (it cannot share the reloader's child process).", flush=True)
     if not args.no_mcp_server and not args.reload:

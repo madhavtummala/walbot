@@ -43,6 +43,24 @@ def test_a_skipped_order_still_records_why() -> None:
 def test_journalling_never_raises_on_a_bad_payload() -> None:
     with ephemeral_state():
         assert record_orders("dca", "paper", []) == []
+
+
+def test_an_unchanged_order_is_not_journalled() -> None:
+    """The reconciler found nothing to do -- that is not an event worth a journal line.
+
+    A lifecycle algorithm polls every few minutes; "still correct, did nothing" every single
+    poll would fill the capped journal with no-op noise and push real actions out early.
+    """
+    with ephemeral_state():
+        written = record_orders("options_flip", "paper", [
+            {"symbol": "GLD", "action": "sell", "quantity": 1, "reconciled": "unchanged"},
+            {"symbol": "GLD", "action": "sell", "quantity": 1, "reconciled": "rejected", "status": "rejected"},
+        ])
+
+        assert len(written) == 1  # only the rejected row was journalled
+        rows = load_order_journal(strategy="options_flip")
+        assert len(rows) == 1
+        assert rows[0]["status"] == "rejected"
         assert record_orders("dca", "paper", ["not-a-dict"]) == []  # type: ignore[list-item]
 
 

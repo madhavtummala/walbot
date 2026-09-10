@@ -35,6 +35,14 @@ class AlgorithmContext:
     sentiment_scores: Dict[str, float] = field(default_factory=dict)
     market_sentiment: float = 0.0
     positions: Dict[str, int] = field(default_factory=dict)
+    #: Average entry price per held symbol, as the broker reports it -- what the account
+    #: actually paid, including the slippage between a limit and its fill. Only the broker knows
+    #: this: a limit buy fills at or below its price, so the order we placed is an upper bound
+    #: on the cost and never the cost itself. Loaded here rather than read mid-run because
+    #: ``plan`` may not call a brokerage. Empty unless
+    #: ``AlgorithmRequirements.needs_cost_basis`` asks for it, and empty in a replay, where the
+    #: entry price is whatever the simulated fill was.
+    cost_basis: Dict[str, float] = field(default_factory=dict)
     latest_prices: Dict[str, float] = field(default_factory=dict)
     equity: float = 0.0
     account_id: str = ""
@@ -75,6 +83,10 @@ class AlgorithmRequirements:
     #: Whether ``AlgorithmContext.state`` should be loaded for this run. Only algorithms that
     #: carry something between runs pay for the read.
     needs_state: bool = False
+    #: Whether ``AlgorithmContext.cost_basis`` should be loaded: what the account actually paid
+    #: for what it holds. A separate broker call, so only an algorithm that prices against its
+    #: own entry -- an unrealised P&L, a stop struck off the cost -- pays for it.
+    needs_cost_basis: bool = False
     paper_only: bool = False
     #: Whether ``extra["option_chain"]`` should be bound for this run: a callable taking an
     #: underlying and returning the quoted contracts around it.
@@ -418,6 +430,23 @@ class Brokerage(ABC):
     #: longer exists, until something cancels it. Declared so an algorithm can choose which shape
     #: to emit rather than discovering the difference from a rejection.
     supports_oco: bool = False
+
+    @property
+    def is_paper(self) -> bool:
+        """Whether orders sent here are simulated rather than executed with real money.
+
+        Asked of the brokerage because only it knows: the answer depends on which endpoint it
+        authenticated against, and no field outside it can be read for the same fact. The gate
+        that enforces ``AlgorithmRequirements.paper_only`` used to sniff for
+        ``paper-api.alpaca.markets`` in ``config.alpaca_base_url`` -- which is meaningless for a
+        Schwab account, and worse than meaningless, since that field defaults to the Alpaca
+        *paper* URL and so the check passed for every non-Alpaca account.
+
+        Defaults to ``False``: a venue that has not answered is treated as live, which is the
+        conservative direction. The cost of being wrong here is a paper-only strategy trading
+        real money.
+        """
+        return False
 
     @abstractmethod
     def get_account_state(self) -> Dict[str, Any]:

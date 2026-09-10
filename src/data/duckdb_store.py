@@ -340,25 +340,15 @@ def connection_is_read_only(connection: Any) -> bool:
 def pooled_connections(db_path: str | None = None, *, read_only: bool = False):
     """Hold one connection open for the duration of a batch job.
 
-    Opening a connection costs ~3ms and ``initialize_schema`` another ~2ms -- six
-    ``CREATE TABLE IF NOT EXISTS`` statements, a migration check and an ``UPDATE``. That is
-    nothing once and ruinous per read, and a backtest issues thousands of reads, which made
-    the *connection* rather than the query the dominant cost of replaying an algorithm.
+    Opening a connection and running its schema migrations costs a few ms -- nothing once, but
+    ruinous across a backtest's thousands of reads. Deliberately opt-in: DuckDB permits only one
+    read-write process at a time, so holding a connection permanently would lock out the API
+    server, the MCP server and every CLI tool.
 
-    Deliberately opt-in rather than always on. DuckDB permits a single read-write process at a
-    time, so a permanently-held connection locks every other process out entirely -- the API
-    server would shut out the MCP server, the warmup job and every CLI tool. Measured, not
-    assumed: a second process attempting a read against a held connection fails outright with
-    "Conflicting lock is held". Short-lived connections are what lets those coexist, so the
-    default stays short-lived and only batch work opts in.
-
-    ``read_only=True`` asks for DuckDB read-only mode, which is a different bargain with the
-    file lock: other *processes* can open their own read-only connections while the batch runs.
-    Within this process the mode is shared, so a thread that does need to write upgrades the
-    handle instead of failing -- see :meth:`_PooledConnection.execute`.
-
-    Nesting is safe, and so is opening a scope on a path another thread already scoped: both
-    join the existing handle and only the last scope out closes it.
+    ``read_only=True`` lets other *processes* open their own read-only connections concurrently;
+    within this process a thread that needs to write upgrades the handle instead of failing (see
+    :meth:`_PooledConnection.execute`). Nesting is safe, and so is a second scope on a path
+    another thread already scoped -- both share the handle, and only the last one out closes it.
     """
     resolved = str(resolve_project_path(db_path or DUCKDB_STATE_PATH))
     with _IDLE:
@@ -767,6 +757,18 @@ def write_market_bars(
     return len(rows)
 
 
+def where_clause(clauses: list[str]) -> str:
+    """``"WHERE a AND b"``, or ``""`` when ``clauses`` is empty."""
+    return f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+
+def count_and_delete(connection: Any, table: str, where: str, params: list[Any]) -> int:
+    """Delete rows matching ``where``/``params`` from ``table``, returning how many were dropped."""
+    deleted = int(connection.execute(f"SELECT COUNT(*) FROM {table} {where}", params).fetchone()[0] or 0)
+    connection.execute(f"DELETE FROM {table} {where}", params)
+    return deleted
+
+
 def _market_bar_filters(
     provider: str | None,
     symbols: list[str] | None,
@@ -784,7 +786,7 @@ def _market_bar_filters(
     if interval_minutes is not None:
         clauses.append("interval_minutes = ?")
         params.append(int(interval_minutes))
-    return (f"WHERE {' AND '.join(clauses)}" if clauses else ""), params
+    return where_clause(clauses), params
 
 
 def clear_market_bars(
@@ -796,9 +798,7 @@ def clear_market_bars(
 ) -> int:
     where, params = _market_bar_filters(provider, symbols, interval_minutes)
     with _connect(db_path) as connection:
-        deleted = int(connection.execute(f"SELECT COUNT(*) FROM market_bars {where}", params).fetchone()[0] or 0)
-        connection.execute(f"DELETE FROM market_bars {where}", params)
-        return deleted
+        return count_and_delete(connection, "market_bars", where, params)
 
 
 def market_bars_summary(

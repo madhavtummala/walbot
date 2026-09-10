@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .registry import register_market_provider, register_news_fetcher
+from .registry import register_market_provider, register_news_fetcher  # noqa: F401 - re-exported below
 
 #: Public name -> the module that defines it. Kept explicit rather than star-imported so the
 #: package's surface is legible in one place and a typo is an error rather than a silent miss.

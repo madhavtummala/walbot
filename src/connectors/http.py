@@ -1,8 +1,7 @@
 """Talking to a provider: credentials, requests, and telling a rate limit from an outage.
 
-The distinction :class:`ProviderRateLimited` draws is the point. An outage means try the next
-provider; a rate limit means this one is fine and will answer later, so it is recorded against
-the provider and the fallback happens anyway -- but the accounting differs.
+A rate limit (:class:`ProviderRateLimited`) is recorded against the provider but still falls
+back like any other failure; the accounting just differs from a plain outage.
 """
 
 from __future__ import annotations

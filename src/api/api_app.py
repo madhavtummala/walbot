@@ -18,6 +18,7 @@ from src.api.api_payloads import (
     algorithm_config_payload,
     apply_universe_payload,
     backtest_payload,
+    clear_algorithm_activity_payload,
     complete_schwab_auth_payload,
     controls_payload,
     recommend_universe_payload,
@@ -62,8 +63,6 @@ class NoCacheStaticFiles(StaticFiles):
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
     demote_uvicorn_access_logs_to_debug()
-    # Always started. A binding parked on "mcp" is simply never scheduled, so the loop costs
-    # nothing when nothing is switched on.
     bot_runtime.start()
     try:
         yield
@@ -132,11 +131,6 @@ def strategy_signals(
     refresh: bool = Query(default=False),
     cache_only: bool = Query(default=False),
 ) -> dict[str, Any]:
-    # ``account_id`` is optional: omitted, the strategy's binding decides. The dashboard sends
-    # it so the view it renders is the one whose plan its own editor is writing.
-    # ``cache_only`` probes the stored snapshot without computing -- how the dashboard opens
-    # on cached signals instead of recomputing every render -- and ``refresh`` forces the
-    # recompute behind the dashboard's Refresh button.
     return strategy_signals_payload(
         strategy=strategy,
         account_id=account_id,
@@ -183,8 +177,6 @@ def algorithm_config(strategy: str = Query(default=DEFAULT_STRATEGY_ID, max_leng
 @app.post("/api/algorithm-config")
 def save_algorithm_config(body: dict[str, Any]) -> dict[str, Any]:
     try:
-        # Passing a non-object through as {} would silently wipe the saved tuning, so the
-        # bad shape has to reach save_algorithm_config_payload and be rejected there.
         return save_algorithm_config_payload(
             str(body.get("strategy") or DEFAULT_STRATEGY_ID),
             body.get("config"),
@@ -207,6 +199,13 @@ def algorithm_activity(
     limit: int = Query(default=40, ge=1, le=200),
 ) -> dict[str, Any]:
     return algorithm_activity_payload(strategy=strategy, limit=limit)
+
+
+@app.post("/api/algorithm-activity/clear")
+def clear_algorithm_activity(
+    strategy: str = Query(default=DEFAULT_STRATEGY_ID, max_length=80),
+) -> dict[str, Any]:
+    return clear_algorithm_activity_payload(strategy=strategy)
 
 
 @app.get("/api/positions")
@@ -233,11 +232,7 @@ def schwab_callback(
     state: str = Query(default=""),
     error: str = Query(default=""),
 ) -> HTMLResponse:
-    """Land the Schwab consent redirect and trade the code for a refresh token.
-
-    Schwab drives the browser here, so the reply has to be a page rather than JSON. It hands
-    the outcome back to the dashboard tab that opened it and then gets out of the way.
-    """
+    """Land the Schwab consent redirect and trade the code for a refresh token."""
     if error:
         return _callback_page(False, f"Schwab denied the request: {error}")
     try:

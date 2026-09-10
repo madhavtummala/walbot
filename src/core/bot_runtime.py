@@ -9,7 +9,6 @@ from typing import Any
 from src.core.config import DEFAULT_STRATEGY_ID
 from ..api.controls import (
     ORIGIN_SCHEDULE,
-    algorithm_default_cron,
     binding_refusal,
     find_binding,
     load_controls,
@@ -21,6 +20,13 @@ from ..execution.live_runner import run_once
 
 logger = logging.getLogger(__name__)
 
+#: How many times one fire time may be attempted before it is given up on. A run fails for
+#: reasons that are usually transient -- a data provider timing out, a broker returning 503 --
+#: and the grace window is fifteen minutes against a 300s poll, so there is room for two more
+#: tries inside the minute the schedule actually named.
+MAX_RUN_ATTEMPTS = 3
+
+
 @dataclass
 class RuntimeState:
     enabled: bool = False
@@ -31,6 +37,11 @@ class RuntimeState:
     last_error: str = ""
     last_run_date: str = ""
     last_run_key: str = ""
+    #: Attempts made against ``last_run_key`` so far, successful or not.
+    attempts: int = 0
+    #: Set when a fire time was abandoned after ``MAX_RUN_ATTEMPTS``, so the dashboard can say
+    #: a scheduled run was missed rather than leaving silence to read as success.
+    last_missed_key: str = ""
 
 
 class _RuntimeLoop:
@@ -89,13 +100,20 @@ class _RuntimeLoop:
             return 300
 
     def _next_run_key(self) -> str | None:
+        """The fire time to run now, or ``None`` if there is nothing owed.
+
+        A key is owed until a run against it *succeeds*. Marking it done before the run made a
+        failure indistinguishable from a success: a single data-provider timeout silently
+        skipped that day's trading, and the only trace was a ``last_error`` in a status payload
+        nobody polls.
+        """
         if self._run_key_fn is None:
             return ""
         run_key = self._run_key_fn()
         if not run_key:
             return None
         with self._lock:
-            if self._state.last_run_key == run_key:
+            if self._state.last_run_key == run_key and self._state.attempts >= MAX_RUN_ATTEMPTS:
                 return None
         return str(run_key)
 
@@ -107,18 +125,40 @@ class _RuntimeLoop:
             self._state.last_started_at = datetime.now(timezone.utc).isoformat()
             self._state.last_error = ""
             if run_key:
+                # Counted before the attempt, not after, so a run that dies without returning
+                # (a hang killed by a restart) still consumes its try rather than retrying for
+                # the whole grace window.
+                self._state.attempts = self._state.attempts + 1 if self._state.last_run_key == run_key else 1
                 self._state.last_run_key = run_key
-        
-        logger.info("Starting %s run (key=%s)", self.name, run_key or "manual")
+            attempt = self._state.attempts
+
+        logger.info(
+            "Starting %s run (key=%s, attempt %s of %s)",
+            self.name, run_key or "manual", attempt, MAX_RUN_ATTEMPTS,
+        )
         try:
             self._run_fn(account_id or None, run_key)
             with self._lock:
                 self._state.last_run_date = date.today().isoformat()
+                # Succeeded, so the key is settled: no further attempt is owed even though the
+                # grace window may still be open.
+                self._state.attempts = MAX_RUN_ATTEMPTS
             logger.info("Completed %s run successfully", self.name)
         except Exception as exc:  # pragma: no cover - surfaced via status payload.
             logger.exception("%s runtime failed", self.name)
             with self._lock:
                 self._state.last_error = str(exc)
+                exhausted = run_key and attempt >= MAX_RUN_ATTEMPTS
+                if exhausted:
+                    self._state.last_missed_key = run_key
+            if exhausted:
+                # The last thing anyone will hear about this fire time. Logged at error rather
+                # than left to the retry loop, because from here the schedule simply moves on.
+                logger.error(
+                    "%s gave up on scheduled run %s after %s attempts; it will not run again "
+                    "until the next fire time. Last error: %s",
+                    self.name, run_key, MAX_RUN_ATTEMPTS, exc,
+                )
         finally:
             with self._lock:
                 self._state.running = False

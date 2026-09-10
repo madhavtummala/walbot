@@ -313,11 +313,19 @@ def test_one_algorithms_bubbles_are_never_written_into_anothers_plan() -> None:
 
 def test_signals_and_backtests_still_name_the_account_they_ran_for() -> None:
     """Accrual state stays per (algorithm, account), and the broker is per account, so a view
-    still has to say which deployment it describes even though the plan no longer varies."""
+    still has to say which deployment it describes even though the plan no longer varies.
+
+    The signals request builds its query with ``URLSearchParams`` rather than by interpolating
+    into a template string, which is why this no longer looks for an ``encodeURIComponent``
+    call: the encoding is the URL builder's job now.
+    """
     app_js, _, _ = _assets()
 
     assert "function accountForStrategy" in app_js
-    assert "account_id=${encodeURIComponent(account)}" in app_js
+    # Signals: account_id goes into the query the fetch is built from.
+    assert "const account = accountForStrategy(strategyKey);" in app_js
+    assert "account_id: account," in app_js
+    # Backtests: the same answer, in the request body.
     assert "account_id: accountForStrategy(strategyKey)," in app_js
 
 

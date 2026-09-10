@@ -1,5 +1,4 @@
-"""The ``Config`` dataclass and the one function that assembles it.
-"""
+"""The ``Config`` dataclass and the one function that assembles it."""
 
 from __future__ import annotations
 
@@ -13,7 +12,7 @@ from ...data.universe import load_tradable_names
 
 from ...common.config_utils import direct_or_env
 from .coercion import _algorithm_sections, _config_value, _normalize_data_sources, _parse_symbols, _provider_credential, _provider_secret, _section, _str_to_bool, reader
-from .defaults import ALGORITHM_EQUITY_CAP, ALPACA_BASE_URL, ALPACA_DATA_FEED, ALPHA_VANTAGE_MAX_SYMBOLS, ALPHA_VANTAGE_NEWS_CSV, ALPHA_VANTAGE_NEWS_LIMIT, ALPHA_VANTAGE_NEWS_LOOKBACK_DAYS, ALPHA_VANTAGE_REQUEST_DELAY_SECONDS, BACKTEST_PERIOD, BACKTEST_STARTING_EQUITY, CASH_BUFFER, CASH_EQUIVALENTS, DEFAULT_STRATEGY_ID, DIVIDEND_PROVIDER_ORDER, EOD_MARKET_DATA_CACHE_TTL_SECONDS, EOD_MARKET_DATA_PROVIDER_ORDER, HISTORY_EXTRA_BUFFER_DAYS, INTRADAY_MARKET_DATA_CACHE_TTL_SECONDS, INTRADAY_MARKET_DATA_PROVIDER_ORDER, KILL_SWITCH, LONG_MA_DAYS, MARKET_DATA_BAR_MINUTES, MARKET_DATA_CACHE_TTL_SECONDS, MARKET_DATA_PROVIDER_ORDER, MAX_LONGS, MAX_PORTFOLIO_EXPOSURE, MAX_WEIGHT_PER_SYMBOL, MIN_COMPOSITE_SCORE, MIN_TRADE_DOLLARS, MOMENTUM_LOOKBACK_DAYS, NEWS_SENTIMENT_CACHE_TTL_SECONDS, NEWS_SENTIMENT_PROVIDER_ORDER, PRICE_MOMENTUM_WEIGHT, REBALANCE_THRESHOLD, SHORT_MOMENTUM_LOOKBACK_DAYS, SOCIAL_LOOKBACK_DAYS, SOCIAL_MOMENTUM_WEIGHT, SYMBOLS, TARGET_ANNUAL_VOL, TRADABLES_CSV, TRANSACTION_COST_BPS, UNNAMED_ACCOUNT_ID, VOLUME_LOOKBACK_DAYS, VOLUME_MOMENTUM_WEIGHT
+from .defaults import ALGORITHM_EQUITY_CAP, ALPACA_BASE_URL, ALPACA_DATA_FEED, ALPHA_VANTAGE_MAX_SYMBOLS, ALPHA_VANTAGE_NEWS_CSV, ALPHA_VANTAGE_NEWS_LIMIT, ALPHA_VANTAGE_NEWS_LOOKBACK_DAYS, ALPHA_VANTAGE_REQUEST_DELAY_SECONDS, BACKTEST_PERIOD, BACKTEST_STARTING_EQUITY, CASH_BUFFER, CASH_EQUIVALENTS, DEFAULT_STRATEGY_ID, DIVIDEND_PROVIDER_ORDER, EOD_MARKET_DATA_CACHE_TTL_SECONDS, EOD_MARKET_DATA_PROVIDER_ORDER, HISTORY_EXTRA_BUFFER_DAYS, INTRADAY_MARKET_DATA_CACHE_TTL_SECONDS, INTRADAY_MARKET_DATA_PROVIDER_ORDER, KILL_SWITCH, MARKET_DATA_BAR_MINUTES, MARKET_DATA_CACHE_TTL_SECONDS, MARKET_DATA_PROVIDER_ORDER, MAX_PORTFOLIO_EXPOSURE, MAX_WEIGHT_PER_SYMBOL, MIN_TRADE_DOLLARS, MOMENTUM_LOOKBACK_DAYS, NEWS_SENTIMENT_CACHE_TTL_SECONDS, NEWS_SENTIMENT_PROVIDER_ORDER, REBALANCE_THRESHOLD, SYMBOLS, TRADABLES_CSV, TRANSACTION_COST_BPS, UNNAMED_ACCOUNT_ID
 from .yaml_io import load_accounts_config, load_algorithm_bot_config, load_algorithms_config, load_connectors_config, load_universe_config
 
 from .accounts import UnknownAccountError, _normalize_accounts_config
@@ -27,18 +26,8 @@ class Config:
     algorithm_id: str = DEFAULT_STRATEGY_ID
     symbols: list[str] = field(default_factory=lambda: list(SYMBOLS))
     momentum_lookback_days: int = MOMENTUM_LOOKBACK_DAYS
-    short_momentum_lookback_days: int = SHORT_MOMENTUM_LOOKBACK_DAYS
-    long_ma_days: int = LONG_MA_DAYS
-    volume_lookback_days: int = VOLUME_LOOKBACK_DAYS
-    social_lookback_days: int = SOCIAL_LOOKBACK_DAYS
     max_weight_per_symbol: float = MAX_WEIGHT_PER_SYMBOL
     max_portfolio_exposure: float = MAX_PORTFOLIO_EXPOSURE
-    max_longs: int = MAX_LONGS
-    min_composite_score: float = MIN_COMPOSITE_SCORE
-    price_momentum_weight: float = PRICE_MOMENTUM_WEIGHT
-    social_momentum_weight: float = SOCIAL_MOMENTUM_WEIGHT
-    volume_momentum_weight: float = VOLUME_MOMENTUM_WEIGHT
-    target_annual_vol: float = TARGET_ANNUAL_VOL
     cash_buffer: float = CASH_BUFFER
     cash_equivalents: list[str] = field(default_factory=lambda: list(CASH_EQUIVALENTS))
     min_trade_dollars: float = MIN_TRADE_DOLLARS
@@ -101,12 +90,8 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
     selected_account_id = str(account_id or os.getenv("TRADING_ACCOUNT_ID") or default_account_id)
     account_config = _section(account_items, selected_account_id)
     if not account_config and account_items:
-        # Asking for a *specific* account and getting a different one is never the right
-        # answer. This used to substitute the default silently, which meant an account page
-        # could show another account's money under the requested name -- and worse, that
-        # ``live_runner.run_once(account_id=...)`` would resolve a renamed or deleted binding
-        # to the default account and send its orders there. Falling back is only defensible
-        # when no account was named at all.
+        # A specifically-named account that doesn't exist must raise, not fall back silently
+        # -- otherwise orders for a renamed/deleted binding would land in the default account.
         if account_id and account_id != UNNAMED_ACCOUNT_ID:
             raise UnknownAccountError(str(account_id), sorted(account_items))
         selected_account_id = default_account_id if default_account_id in account_items else next(iter(account_items))
@@ -120,9 +105,7 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
     selected_strategy_id = canonical_algorithm_id(str(strategy_id or DEFAULT_STRATEGY_ID))
     algorithm = _section(algorithm_configs, selected_strategy_id)
     for legacy_id in LEGACY_ALGORITHM_IDS.get(selected_strategy_id, []):
-        # A renamed algorithm's tuning is still filed under its old id. Reading every retired
-        # id keeps saved tuning working through the rename instead of silently reverting to
-        # defaults.
+        # A renamed algorithm's tuning may still be filed under its old id.
         if algorithm:
             break
         algorithm = _section(algorithm_configs, legacy_id)
@@ -149,8 +132,7 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
     dividend_sources = _section(data_sources, "dividends")
     sentiment_sources = _section(data_sources, "sentiment_data")
 
-    # One reader per section: ``read_x("key", DEFAULT)`` casts by the default's type and looks
-    # for the key upper-cased in the environment. See ``coercion.reader``.
+    # One reader per section. See ``coercion.reader``.
     read_account_config = reader(account_config)
     read_algorithm = reader(algorithm)
     read_alpha_vantage = reader(alpha_vantage)
@@ -162,8 +144,7 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
     read_news_sources = reader(news_sources)
     read_sentiment_sources = reader(sentiment_sources)
 
-    # Env only, deliberately. It is a deployment-level brake for an emergency, not a control
-    # the dashboard offers: whether an algorithm trades is its binding's own switch.
+    # Env only: a deployment-level kill switch, not a dashboard control.
     kill_switch = _str_to_bool(os.getenv("KILL_SWITCH"), KILL_SWITCH)
     api_key = direct_or_env(account_config, "api_key", "api_key_env", "ALPACA_API_KEY")
     api_secret = direct_or_env(account_config, "api_secret", "api_secret_env", "ALPACA_API_SECRET")
@@ -225,21 +206,9 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
         algorithm_id=selected_strategy_id,
         symbols=symbols,
         momentum_lookback_days=read_algorithm("momentum_lookback_days", MOMENTUM_LOOKBACK_DAYS),
-        short_momentum_lookback_days=read_algorithm("short_momentum_lookback_days", SHORT_MOMENTUM_LOOKBACK_DAYS),
-        long_ma_days=read_algorithm("long_ma_days", LONG_MA_DAYS),
-        volume_lookback_days=read_algorithm("volume_lookback_days", VOLUME_LOOKBACK_DAYS),
-        social_lookback_days=read_algorithm("social_lookback_days", SOCIAL_LOOKBACK_DAYS),
         max_weight_per_symbol=read_algorithm("max_weight_per_symbol", MAX_WEIGHT_PER_SYMBOL),
         max_portfolio_exposure=read_algorithm("max_portfolio_exposure", MAX_PORTFOLIO_EXPOSURE),
-        max_longs=read_algorithm("max_longs", MAX_LONGS),
-        min_composite_score=read_algorithm("min_composite_score", MIN_COMPOSITE_SCORE),
-        price_momentum_weight=read_algorithm("price_momentum_weight", PRICE_MOMENTUM_WEIGHT),
-        social_momentum_weight=read_algorithm("social_momentum_weight", SOCIAL_MOMENTUM_WEIGHT),
-        volume_momentum_weight=read_algorithm("volume_momentum_weight", VOLUME_MOMENTUM_WEIGHT),
-        target_annual_vol=read_algorithm("target_annual_vol", TARGET_ANNUAL_VOL),
-        # Account-level, not per-algorithm: both describe how *this account* funds a batch,
-        # which is not something a strategy has an opinion about. Exposure is the strategy's
-        # call and it already has gross-exposure caps to say so with.
+        # Account-level, not per-algorithm: how the account funds a batch, not a strategy call.
         cash_buffer=read_account_config("cash_buffer", CASH_BUFFER),
         cash_equivalents=[str(s).strip().upper() for s in read_account_config("cash_equivalents", list(CASH_EQUIVALENTS)) if str(s).strip()],
         min_trade_dollars=read_algorithm("min_trade_dollars", MIN_TRADE_DOLLARS),

@@ -1,9 +1,7 @@
 """Dashboard payload builders.
 
-A facade. The implementations live in ``src/api/payloads/`` -- one module per domain -- after
-this file reached 1253 lines spanning accounts, universe, DCA, algorithms, controls,
-social, backtests and process status. Every name it used to export is still importable from
-here, resolved on attribute access so importing one domain does not drag in the other eight.
+A facade over ``src/api/payloads/`` (one module per domain). Every name is still importable
+from here, resolved on attribute access so importing one domain does not drag in the others.
 """
 
 from __future__ import annotations
@@ -48,6 +46,7 @@ _EXPORTS = {
     "accounts_payload": "accounts",
     "algorithm_activity_payload": "algorithms",
     "algorithm_config_payload": "algorithms",
+    "clear_algorithm_activity_payload": "algorithms",
     "apply_universe_payload": "universe",
     "backtest_payload": "backtest",
     "complete_schwab_auth_payload": "controls",

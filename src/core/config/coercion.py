@@ -87,13 +87,8 @@ def _config_value(section: dict[str, Any], key: str, env_name: str, default: Any
 def reader(section: dict[str, Any]) -> Callable[..., Any]:
     """A ``read(key, default)`` bound to one config section.
 
-    The cast follows the default's type and the environment variable defaults to the key in
-    upper case, which is the convention every one of these fields already followed. Spelling
-    all three out per field meant writing the default twice -- once to look up, once to fall
-    back on -- and the two could drift apart without anything failing.
-
-    Pass ``env=`` for the handful whose environment name is not simply the key: the options
-    knobs are stored as ``swing_dte_min`` but read ``OPTIONS_SWING_DTE_MIN``.
+    Casts by the default's type; the env var name defaults to the key upper-cased. Pass
+    ``env=`` when it isn't (e.g. ``swing_dte_min`` reads ``OPTIONS_SWING_DTE_MIN``).
     """
 
     def read(key: str, default: Any, *, env: str | None = None) -> Any:
@@ -106,8 +101,7 @@ def reader(section: dict[str, Any]) -> Callable[..., Any]:
             return _as_float(value, default)
         if isinstance(default, list):
             return _as_list(value, default)
-        # An explicitly null YAML key means "not set", so it takes the default rather than
-        # stringifying to "None" -- which is what several of these fields used to do.
+        # A null YAML key means "not set": take the default rather than stringify to "None".
         return default if value is None else str(value)
 
     return read

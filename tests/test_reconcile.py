@@ -149,14 +149,65 @@ def test_a_quantity_change_always_replaces() -> None:
     assert brokerage.replaced
 
 
-def test_an_order_that_filled_between_runs_is_not_cancelled() -> None:
-    # Recorded by us, absent from the broker's working set: it filled or was cancelled by hand.
+def test_an_order_absent_from_the_working_set_is_cancelled_before_being_forgotten() -> None:
+    """Recorded by us, absent from the broker's working set -- which has two causes that look
+    identical from here: it filled, or the listing was stale or partial.
+
+    So the id is not dropped on the strength of the listing alone. ``cancel_order`` is
+    contracted to treat an already-gone order as a success, which makes the call free in the
+    first case and the only thing that prevents a leak in the second: an id we stop tracking
+    without confirming is an order no later run can ever cancel.
+    """
     brokerage = FakeBrokerage([])
 
     outcome = run(brokerage, [], state={ORDER_IDS_KEY: {"QQQM:entry": "100"}})
 
-    assert brokerage.cancelled == []
+    assert brokerage.cancelled == ["100"]
+    # Confirmed gone, so now it is safe to forget.
     assert outcome["state"][ORDER_IDS_KEY] == {}
+
+
+def test_an_id_whose_cancel_fails_stays_recorded() -> None:
+    """The other half of the rule above: without a confirmation the id must survive the run,
+    or the order it names becomes untrackable."""
+    class Stuck(FakeBrokerage):
+        def cancel_order(self, order_id):
+            raise RuntimeError("broker unreachable")
+
+    brokerage = Stuck([])
+    outcome = run(brokerage, [], state={ORDER_IDS_KEY: {"QQQM:entry": "100"}})
+
+    assert outcome["state"][ORDER_IDS_KEY] == {"QQQM:entry": "100"}
+    assert outcome["order_results"][0]["reconciled"] == "cancel_failed"
+
+
+def test_an_order_placed_before_a_mid_pass_failure_is_still_recorded() -> None:
+    """An order that exists at the broker but not in our state is the one thing this system
+    cannot recover from -- nothing tracks it, so nothing can ever cancel it.
+
+    So ids are written as each order is placed rather than once the pass returns. Here the
+    broker dies while listing orders for the *second* symbol's leg; the first symbol's entry is
+    already live, and its id has to survive the exception that ends the run.
+    """
+    class DiesAfterOneSubmit(FakeBrokerage):
+        def submit_order(self, request):
+            if self.submitted:
+                raise RuntimeError("broker unreachable")
+            return super().submit_order(request)
+
+    brokerage = DiesAfterOneSubmit()
+    other = OrderRequest(
+        symbol="SPY   260220C00500000", action="buy", quantity=1,
+        order_type="limit", limit_price=2.0, asset_type="option",
+    )
+    outcome = run(brokerage, [
+        DesiredOrder(key="QQQM:entry", request=bid()),
+        DesiredOrder(key="SPY:entry", request=other),
+    ])
+
+    assert outcome["state"][ORDER_IDS_KEY] == {"QQQM:entry": "101"}
+    # The second never reached the broker, so there is nothing to record for it.
+    assert outcome["order_results"][1]["reconciled"] == "rejected"
 
 
 def test_a_cold_start_with_untracked_working_orders_leaves_them_alone() -> None:

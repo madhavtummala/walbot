@@ -4,9 +4,6 @@ One ``plan`` call, two passes over the universe. The first reads only bars -- fe
 eligibility, a proposed book. The second reads what is actually held and what previous runs saw,
 and turns that proposal into a decision: which holdings stay, which are rotated out, which
 challengers have earned a slot.
-
-They used to be two calls made at separate moments, which is what let the second one reach into
-the state store on its own. They are one pass now, and the memory arrives on the context.
 """
 
 from __future__ import annotations
@@ -56,9 +53,7 @@ class RallyRotationAlgorithm(BaseAlgorithm):
     tuning_class = RallyRotationConfig
 
     #: Once per session, at the open. Every feature is computed from daily bars, so a second
-    #: look before the close reads the same closes and cannot produce a different answer. This
-    #: was every 15 minutes, from when the score was built on intraday bars: left there it
-    #: re-ran the same decision ~26 times a session, against a backtest that only steps daily.
+    #: look before the close would read the same closes and cannot produce a different answer.
     cron = "30 9 * * 1-5"
 
     def requirements(self, config: Any, current_positions: dict[str, int]) -> AlgorithmRequirements:
@@ -67,24 +62,17 @@ class RallyRotationAlgorithm(BaseAlgorithm):
             price_symbols=sorted(set(settings.symbols) | set(current_positions)),
             daily_lookback_days=settings.required_daily_bars,
             daily_ma_days=settings.etf_ma_days,
-            # Nothing intraday: every feature comes from the daily bars above. Asking for an
-            # intraday window would make the live path fetch one on each run and the replay build
-            # a HistoryCache over it, both for data no gate reads.
+            # Nothing intraday: every feature comes from the daily bars above.
             intraday_lookback_minutes=settings.required_history_minutes,
-
-            # Eligibility history and the re-rank throttle both measure elapsed market days,
-            # which means both need what previous runs recorded and the day they recorded it on.
+            # Eligibility history and the re-rank throttle both measure elapsed market days.
             needs_state=True,
             # Unproven: keep it on paper until walk-forward results say otherwise.
             paper_only=True,
         )
 
     def sizing(self, config: Any) -> dict[str, float]:
-        """From this algorithm's own tuning rather than the account's.
-
-        The floors are part of the strategy here -- they are what the turnover brake is stated
-        in -- so they cannot come from an account-level default the way they do elsewhere.
-        """
+        """From this algorithm's own tuning, not the account's -- the floors are part of the
+        strategy here, the turnover brake's own unit."""
         settings = self.tuning(config)
         return {
             "min_trade_dollars": settings.minimum_trade_notional,
@@ -103,9 +91,9 @@ class RallyRotationAlgorithm(BaseAlgorithm):
         held = {symbol for symbol, weight in current.items() if weight > 0}
 
         state = dict(context.state)
-        # ``notes`` is how the selection pass explains itself. Without it the rows could only be
-        # re-derived from the market gates, and a name turned away by the settling period or the
-        # replacement margin -- having passed every market gate -- got an invented reason.
+        # How the selection pass explains itself -- not re-derivable from the market gates
+        # alone, since a name can be turned away by the settling period or replacement margin
+        # having passed every one of them.
         notes: dict[str, list[Check]] = {}
         weights = self._hold_or_rotate(context, settings, proposed, signals, current, held, state, notes)
 
@@ -127,11 +115,8 @@ class RallyRotationAlgorithm(BaseAlgorithm):
     def rank_universe(self, context: AlgorithmContext, settings: RallyRotationConfig) -> dict[str, Any]:
         """Features, scores, eligibility, ranking, and the book this pass would propose.
 
-        Pure in the ``AlgorithmContext`` sense -- no state, no clock, no brokerage -- which is
-        what lets the backtester drive the identical call the live runner does.
-
-        Returns each layer rather than only the weights, so a test or an audit can ask which step
-        rejected a name without re-running the four that came before it.
+        Pure in the ``AlgorithmContext`` sense -- no state, no clock, no brokerage. Returns each
+        layer rather than only the weights, so an audit can ask which step rejected a name.
         """
         features = {
             symbol: compute_features(symbol, context.daily_bars_by_symbol.get(symbol, pd.DataFrame()), settings)
@@ -143,9 +128,8 @@ class RallyRotationAlgorithm(BaseAlgorithm):
 
         data = universe_data_ok(scored, settings)
         ranked = self._rank(scored, settings)
-        # Always computed, whatever this pass proposes: the second half can decide to go
-        # defensive for reasons only it can see, and it cannot derive a defensive book from a
-        # risk-on proposal.
+        # Always computed: the second pass can decide to go defensive for reasons only it can
+        # see, and cannot derive a defensive book from a risk-on proposal.
         defensive_book = defensive_weights(scored, settings)
 
         qualified = [
@@ -199,12 +183,10 @@ class RallyRotationAlgorithm(BaseAlgorithm):
     ) -> dict[str, float]:
         """Hold/exit asymmetry, replacement margin, risk stops.
 
-        Mutates ``state`` in place, and records into ``notes`` every selection decision that the
+        Mutates ``state`` in place, and records into ``notes`` every selection decision the
         market gates cannot account for on their own.
         """
-        # ``context.timestamp`` is the only clock this pass reads. Every elapsed-time decision
-        # below has to measure against the moment this run describes, which in a replay is a
-        # date months ago.
+        # The only clock this pass reads -- in a replay, a date months ago.
         as_of = context.timestamp
         stamp = as_of.isoformat()
         defensive = {name.upper() for name in settings.defensive_universe}
@@ -223,11 +205,8 @@ class RallyRotationAlgorithm(BaseAlgorithm):
         risk_rows = {symbol: row for symbol, row in rows.items() if symbol not in defensive}
         rank_history = track_ranking(state, risk_rows, settings, as_of)
 
-        # The stops answer to no clock. Everything else -- ranking, entering, replacing and the
-        # considered exits -- happens on ``rerank_interval_days``, because they are the same
-        # decision seen from different sides and the score they rest on has a twelve-session
-        # horizon. Re-ranking every session asked it a question it cannot answer that fast, and
-        # the book paid the spread for the noise.
+        # The stops answer to no clock; ranking, entering, replacing and considered exits all sit
+        # on ``rerank_interval_days`` instead, since the score they rest on has a slow horizon.
         stopped = set()
         for symbol in held - defensive:
             check = crash_stop(rows.get(symbol, {}), settings)
@@ -237,11 +216,7 @@ class RallyRotationAlgorithm(BaseAlgorithm):
 
         due = action_due(state, "rerank", settings.rerank_interval_days, as_of)
         if not due:
-            # Between re-rankings the book may only shrink, and only for a stop. Everything else
-            # stays exactly where it is, which is the whole point of the throttle -- and is worth
-            # saying, because otherwise a qualifying name looks unaccountably passed over.
-            # Reachable only when the clock is set and readable -- that is what ``action_due``
-            # answering False means -- so this cannot be the cold-start case.
+            # Between re-rankings the book may only shrink, and only for a stop.
             waiting = Check(
                 label="Re-rank due",
                 ok=False,
@@ -261,9 +236,8 @@ class RallyRotationAlgorithm(BaseAlgorithm):
             self._record_slots(candidates, selection, settings, notes)
             chosen = [row for row in candidates if str(row["symbol"]) in selection]
             weights = score_to_weights(chosen, settings) if chosen else {}
-            # A holding that survived every exit test and still lost its place. Which of the two
-            # ways that happened is the whole content of the row, and neither is derivable from
-            # the gates: one is about the field, the other about there being no field at all.
+            # A holding that survived every exit test and still lost its place -- neither reason
+            # is derivable from the gates alone.
             for symbol in keep - set(weights):
                 notes.setdefault(symbol, []).append(Check(
                     label="Kept its slot",
@@ -289,15 +263,10 @@ class RallyRotationAlgorithm(BaseAlgorithm):
     ) -> list[dict[str, Any]]:
         """Everything selectable this run, ranked. Holdings face eligibility alone.
 
-        The settling period is an *entry* condition: a holding that would not be bought today is
-        not thereby worth selling, and applying it symmetrically sells a name the moment it stops
-        being a purchase.
-
-        Eligibility is not exempt, and that is deliberate rather than an oversight -- the
-        ``continue`` above drops an ineligible name whether it is held or not. An ineligible name
-        never reaches the ranked list, so ``resolve_positions`` cannot retain it and the position
-        is sold. ``exit_rank_max`` protects a holding that *slipped in rank*; it does nothing for
-        one that failed a gate.
+        The settling period is an *entry* condition: a holding that wouldn't be bought today
+        isn't thereby worth selling. Eligibility is not exempt though -- an ineligible name never
+        reaches the ranked list, so ``resolve_positions`` cannot retain it and it's sold;
+        ``exit_rank_max`` protects a holding that slipped in rank, not one that failed a gate.
         """
         candidates: list[dict[str, Any]] = []
         ordered = sorted(risk_rows.items(), key=lambda item: -float(item[1].get("base_score", 0.0)))
@@ -339,9 +308,8 @@ class RallyRotationAlgorithm(BaseAlgorithm):
     ) -> None:
         """Why a qualifying candidate did not get a slot: the book was full of better names.
 
-        The last gate, and the only competitive one. Everything above it is a statement about the
-        name itself; this one is a statement about the field it was in, which is why it has to be
-        recorded here rather than inferred from the row.
+        The last gate, and the only competitive one -- a statement about the field, not the
+        name, so it has to be recorded here rather than inferred from the row.
         """
         for row in candidates:
             symbol = str(row["symbol"])
@@ -368,12 +336,9 @@ class RallyRotationAlgorithm(BaseAlgorithm):
         """Filter out trades too small to be worth their costs, and return the book to aim at.
 
         The symbol set is the union of what pass one proposed, what is currently held, and what
-        pass two decided to hold. It used to be the proposal alone, which silently discarded
-        every decision pass two had just made about a name pass one did not re-propose: an
-        incumbent that was *kept* vanished from the returned weights, and ``MODE_TARGET`` reads
-        an absent symbol as a target of zero, so the position was sold. Over a 12-month replay
-        that force-sold a still-qualifying holding on 73% of decisions and was the single largest
-        source of turnover.
+        pass two decided to hold -- not the proposal alone, which would silently discard a
+        pass-two decision about a name pass one didn't re-propose (``MODE_TARGET`` reads an
+        absent symbol as a target of zero, selling a still-qualifying holding).
         """
         symbols = set(proposed) | set(current) | set(weights)
         target = {symbol: float(weights.get(symbol, 0.0)) for symbol in symbols}

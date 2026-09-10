@@ -12,7 +12,7 @@ from datetime import date
 import pandas as pd
 import pytest
 
-from src.algorithms.options_flip.config import OptionsFlipConfig
+from src.algorithms.options_flip.config import ENTRY_MAX_REPRICE_PCT, OptionsFlipConfig
 from src.algorithms.options_flip.contracts import affordable_contracts, select_contract
 from src.algorithms.options_flip.indicators import (
     average_true_range,
@@ -301,6 +301,29 @@ class TestLifecycle:
         """
         late = self.bidding(entry_target=99.9, session=session(fraction_remaining=0.02))
         assert late.orders[0].request.limit_price <= contract().midpoint
+
+    def test_a_thin_contracts_jumpy_quote_does_not_move_the_bid_in_one_step(self) -> None:
+        """ENTRY_MAX_REPRICE_PCT caps how far one run can move the resting bid, independent of
+        entry_patience -- verified live on USO, where the ratchet's own given_up moved by 0.01
+        between two runs while the resting bid jumped $2.20, which given_up cannot explain; the
+        contract's own thinly-traded quote had jumped instead."""
+        # Late in the session, given_up is close to 1 -- without a cap this would walk almost
+        # all the way to the $2.05 mid in one step from the $1.00 previous bid.
+        late = self.bidding(
+            memory={"bid": 1.00}, entry_target=99.9, session=session(fraction_remaining=0.02),
+        )
+        max_step = 1.00 * ENTRY_MAX_REPRICE_PCT
+        assert float(late.orders[0].request.limit_price) <= 1.00 + max_step + 1e-9
+
+    def test_the_reprice_cap_never_overrides_the_never_above_mid_rule(self) -> None:
+        """The step cap could in principle push the price up to its ceiling even when the mid
+        sits below that -- re-asserting the mid cap after the clamp is what this guards."""
+        cheap_contract = contract(bid=1.00, ask=1.02, mark=1.01)
+        outcome = self.bidding(
+            memory={"bid": 0.90}, contract=cheap_contract, entry_target=99.9,
+            session=session(fraction_remaining=0.02),
+        )
+        assert float(outcome.orders[0].request.limit_price) <= cheap_contract.midpoint
 
     def test_never_bids_through_the_offer(self) -> None:
         # Target at the market, so the translated price is the mark -- still under the offer.
@@ -1125,11 +1148,45 @@ class TestSellBand:
         assert outcome.state == HELD
         assert 2.40 < self._target(outcome) <= 3.00
 
-    def test_the_bull_gate_closed_and_the_position_reads_at_the_mark(self) -> None:
-        # `sell_ok=False` means "sell at the mark" -- the bracket asks the market's own price
-        # rather than a target the closed gate no longer endorses.
+    def test_a_single_closed_read_does_not_collapse_the_target(self) -> None:
+        """A gate reading closed for one run only takes one concession step -- the streak-driven
+        decay (see ``SELL_GATE_CONCESSION_RATE``) only reaches the mark after several consecutive
+        closed reads, so a brief flicker never prices the exit as if the gate had been closed all
+        along."""
         outcome = self.held(memory={"target": 3.00}, sell_ok=False)
-        assert self._target(outcome) == pytest.approx(2.40, abs=0.02)
+        assert 2.40 < self._target(outcome) < 3.00
+        assert outcome.memory["gate_failed_streak"] == 1
+
+    def test_the_bull_gate_closed_converges_gradually_once_confirmed(self) -> None:
+        """Converges toward the mark as the closed-read streak grows -- the same "converge
+        across what's left of the clock" mechanism the deadline uses, driven by consecutive
+        closed reads instead of the session's fraction remaining."""
+        memory = {"target": 3.00}
+        outcome = self.held(memory=memory, sell_ok=False)
+        # One run in: a step taken, nowhere near the mark yet.
+        assert 2.40 < self._target(outcome) < 3.00
+        memory = dict(outcome.memory)
+        # Each step closes a fixed *fraction* of the remaining gap (an exponential approach,
+        # not a linear one), so it only ever gets arbitrarily close, never exactly there --
+        # 40 more runs is comfortably enough to call that "converged" for this assertion.
+        for _ in range(40):
+            outcome = self.held(memory=memory, sell_ok=False)
+            memory = dict(outcome.memory)
+        assert self._target(outcome) == pytest.approx(2.40, abs=0.05)
+        assert outcome.memory["gate_failed_streak"] == 41
+
+    def test_a_reopened_gate_resumes_the_normal_ratchet_immediately(self) -> None:
+        """Once sell_ok is true again the streak (and the concession) resets to zero and the
+        ratchet resumes right away -- asking for more is never the risky direction, only giving
+        ground is, so there is nothing to debounce on the way back up."""
+        memory = {"target": 3.00}
+        outcome = self.held(memory=memory, sell_ok=False)
+        memory = dict(outcome.memory)
+        conceded = self._target(outcome)
+        assert 2.40 < conceded < 3.00
+        outcome = self.held(memory=memory, target_premium=3.00, sell_ok=True)
+        assert self._target(outcome) > 2.40
+        assert outcome.memory["gate_failed_streak"] == 0
 
     def test_a_target_at_or_below_the_mark_also_reads_at_the_mark(self) -> None:
         outcome = self.held(memory={"target": 3.00}, target_premium=2.20)
@@ -1140,3 +1197,71 @@ class TestSellBand:
         outcome = self.held(memory={"target": 2.50}, target_premium=None, sell_ok=True)
         target = self._target(outcome)
         assert target > 2.40  # a sane translation still reaches for a profit
+
+
+def test_a_held_position_prices_against_what_it_actually_cost() -> None:
+    """A limit buy fills at or below its price, so the order we placed is an upper bound on the
+    cost and never the cost itself.
+
+    The anchor used to be the bid, and ``fill_price`` was set to whatever the mark happened to
+    be on the first poll after the fill -- so the deck reported an unrealised P&L against a
+    price the account never paid, and the stop was struck off it too.
+    """
+    from src.algorithms.options_flip.algorithm import _refresh_held
+    from src.algorithms.options_flip.config import OptionsFlipConfig
+
+    osi = "GLD   260918C00400000"
+    bidding_memory = {
+        "state": "bidding", "contract": osi, "direction": "call",
+        "contracts": 1, "bid": 15.00, "stop": 10.0, "market_day": "2026-09-10",
+    }
+
+    class Context:
+        latest_prices = {osi: 15.40}   # the mark has moved since the fill
+        cost_basis = {osi: 14.80}      # what the broker says we actually paid
+
+    memory = _refresh_held(
+        dict(bidding_memory), osi, Context(), {"market_day": "2026-09-10"}, OptionsFlipConfig()
+    )
+
+    assert memory["fill_price"] == 14.80
+
+
+def test_a_held_position_falls_back_when_the_broker_reports_no_cost() -> None:
+    """A brokerage that cannot report a cost basis must still be tradable -- the position is
+    anchored to the mark, and that is worth a warning rather than silence."""
+    from src.algorithms.options_flip.algorithm import _refresh_held
+    from src.algorithms.options_flip.config import OptionsFlipConfig
+
+    osi = "GLD   260918C00400000"
+
+    class Context:
+        latest_prices = {osi: 15.40}
+        cost_basis: dict[str, float] = {}
+
+    memory = _refresh_held(
+        {"contract": osi, "bid": 15.00}, osi, Context(),
+        {"market_day": "2026-09-10"}, OptionsFlipConfig(),
+    )
+
+    assert memory["fill_price"] == 15.40
+
+
+def test_the_cost_basis_is_refreshed_rather_than_frozen() -> None:
+    """A partial fill or a second lot moves the average, so it is re-read every run instead of
+    being recorded once and kept."""
+    from src.algorithms.options_flip.algorithm import _refresh_held
+    from src.algorithms.options_flip.config import OptionsFlipConfig
+
+    osi = "GLD   260918C00400000"
+
+    class Context:
+        latest_prices = {osi: 15.40}
+        cost_basis = {osi: 15.10}      # averaged up by a second lot
+
+    memory = _refresh_held(
+        {"contract": osi, "fill_price": 14.80}, osi, Context(),
+        {"market_day": "2026-09-10"}, OptionsFlipConfig(),
+    )
+
+    assert memory["fill_price"] == 15.10

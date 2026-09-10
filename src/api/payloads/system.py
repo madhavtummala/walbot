@@ -1,14 +1,10 @@
 """Process, config-file and data-freshness status.
 
-Split out of the single ``api_payloads`` module, which had grown to 1253 lines covering nine
-unrelated domains. The public names are unchanged and still importable from ``api_payloads``.
+Split out of the single ``api_payloads`` module. Public names are unchanged and still
+importable from ``api_payloads``.
 """
 
-
 from __future__ import annotations
-
-from src.api.controls import load_controls
-from ...data.universe import resolve_project_path
 
 import logging
 import re
@@ -18,15 +14,12 @@ from typing import Any
 
 import pandas as pd
 
-
 from ...core.bot_runtime import bot_runtime
-from ...core.config import (
-    DEFAULT_STRATEGY_ID,
-    get_config,
-)
+from ...core.config import DEFAULT_STRATEGY_ID, get_config
+from ...data.universe import resolve_project_path
+from ..controls import load_controls
 
 logger = logging.getLogger(__name__)
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -116,8 +109,6 @@ def status_payload() -> dict[str, Any]:
         "risk": {
             "max_weight_per_symbol": config.max_weight_per_symbol,
             "max_portfolio_exposure": config.max_portfolio_exposure,
-            "max_longs": config.max_longs,
-            "target_annual_vol": config.target_annual_vol,
             "cash_buffer": config.cash_buffer,
         },
     }

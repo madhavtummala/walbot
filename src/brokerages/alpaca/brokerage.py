@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from typing import Dict, Any, List
 from ..base import BaseBrokerage
 from ...core.interfaces import OrderRequest
@@ -18,24 +17,29 @@ from src.brokerages.alpaca.client import (
     validate_short_sale_feasibility as _alpaca_short_check,
 )
 
-logger = logging.getLogger(__name__)
-
 
 class AlpacaBrokerage(BaseBrokerage):
     supports_fractional_shares = True
     supports_options = True
 
-    #: Verified against the live API, not assumed: Alpaca answers "complex orders not supported
-    #: for options trading" to any OCO or bracket on a contract. Single-leg limit, stop and
-    #: stop-limit orders are all accepted, so a bracket is still expressible -- as two
-    #: independent orders whose mutual exclusivity the *caller* must maintain. See
-    #: ``broker_supports_oco``, which is how the algorithm learns to split it.
+    #: Alpaca rejects OCO/bracket orders on options; a bracket must be split into two
+    #: independent orders. See ``broker_supports_oco``.
     supports_oco = False
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.client = create_trading_client(config)
         self._config = config
+
+    @property
+    def is_paper(self) -> bool:
+        """Alpaca separates paper from live by endpoint, so the base URL is the whole answer.
+
+        Read from the config this brokerage actually authenticated with, rather than from a
+        config some other layer happens to hold -- which is the distinction that makes this
+        trustworthy where the old string sniff was not.
+        """
+        return "paper-api.alpaca.markets" in str(getattr(self._config, "alpaca_base_url", "") or "")
 
     def get_dividend_activity(self, start=None, end=None) -> List[Dict[str, Any]]:
         from datetime import datetime, time, timezone
@@ -54,8 +58,7 @@ class AlpacaBrokerage(BaseBrokerage):
                     "description": str(item.get("description") or item.get("activity_type") or ""),
                 }
             )
-        rows.sort(key=lambda row: row["date"], reverse=True)
-        return rows
+        return self._sorted_by_date_desc(rows)
 
     def get_account_state(self) -> Dict[str, Any]:
         account = self.client.get_account()
@@ -80,12 +83,12 @@ class AlpacaBrokerage(BaseBrokerage):
                 "symbol": str(getattr(position, "symbol", "")),
                 "qty": float(getattr(position, "qty", 0.0) or 0.0),
                 "avg_entry_price": float(getattr(position, "avg_entry_price", 0.0) or 0.0),
+                "current_price": float(getattr(position, "current_price", 0.0) or 0.0),
                 "market_value": float(getattr(position, "market_value", 0.0) or 0.0),
                 "unrealized_pl": float(getattr(position, "unrealized_pl", 0.0) or 0.0),
                 "unrealized_plpc": float(getattr(position, "unrealized_plpc", 0.0) or 0.0),
             })
-        rows.sort(key=lambda row: abs(row["market_value"]), reverse=True)
-        return rows
+        return self._sorted_by_market_value(rows)
 
     def submit_order(self, request: OrderRequest) -> Dict[str, Any]:
         order = self.client.submit_order(order_data=build_order_request(request))
@@ -94,22 +97,13 @@ class AlpacaBrokerage(BaseBrokerage):
     def get_orders(self, status: str = "WORKING") -> List[Dict[str, Any]]:
         """Open orders, in the shape :meth:`Brokerage.get_orders` promises.
 
-        Alpaca calls the resting set ``open``; Schwab calls it ``WORKING``. The caller speaks
-        Schwab's word because that is what the interface settled on, so it is translated here.
+        Alpaca calls the resting set ``open``; the interface speaks Schwab's word ``WORKING``.
         """
         wanted = "open" if str(status).upper() in ("WORKING", "OPEN", "") else str(status).lower()
         return [_order_row(order) for order in get_open_orders(self.client, wanted)]
 
     def cancel_order(self, order_id: str) -> None:
-        """Cancel one order. Already-gone is success, not failure.
-
-        A reconciler works from a snapshot seconds old, so racing a fill is routine; raising
-        would abort the rest of its pass over something that is already true.
-        """
-        try:
-            self.client.cancel_order_by_id(order_id)
-        except Exception as exc:
-            logger.info("Alpaca order %s was not cancellable (already filled or gone): %s", order_id, exc)
+        self._cancel_ignoring_gone(order_id, lambda: self.client.cancel_order_by_id(order_id))
 
     def replace_order(self, order_id: str, request: OrderRequest) -> Dict[str, Any]:
         """Re-price in place, so the order is never absent from the book in between."""
@@ -129,29 +123,23 @@ class AlpacaBrokerage(BaseBrokerage):
 
 def _order_result(order: Any) -> Dict[str, Any]:
     """A submitted or replaced order, in the shape ``submit_order`` promises."""
-    return {
-        "order_id": str(order.id),
-        "client_order_id": str(order.client_order_id),
-        "status": str(getattr(order, "status", "")),
-        "symbol": str(order.symbol),
-        "qty": int(float(order.qty or 0)),
-    }
+    return BaseBrokerage._order_receipt(
+        order.id, order.client_order_id, getattr(order, "status", ""), order.symbol,
+        int(float(order.qty or 0)),
+    )
 
 
 def _order_row(order: Any) -> Dict[str, Any]:
     """One resting order, in the shape ``get_orders`` promises.
 
-    The symbol is re-spelled to the padded OSI form the rest of the codebase uses, so a
-    reconciler comparing a working order against a desired one is comparing like with like --
-    otherwise every Alpaca option order looks different from the contract that asked for it and
-    is replaced on every single run.
+    The symbol is re-spelled to the padded OSI form the rest of the codebase uses, so an
+    option order compares equal to the contract that requested it.
     """
     symbol = str(getattr(order, "symbol", "")).upper()
     option = is_osi_symbol(symbol)
     return {
         "order_id": str(order.id),
-        # Always empty: Alpaca refuses complex orders on options, so nothing this codebase
-        # submits there has a parent. The key is present because the interface promises it.
+        # Always empty: Alpaca refuses complex orders on options, so nothing here has a parent.
         "parent_order_id": "",
         "symbol": to_osi_form(symbol, padded=True) if option else symbol,
         "asset_type": "option" if option else "equity",

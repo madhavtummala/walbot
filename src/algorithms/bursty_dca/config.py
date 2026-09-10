@@ -13,27 +13,15 @@ from typing import Any
 
 from ...common.config_utils import as_float
 
-#: Where a plan lives inside this algorithm's ordinary config section.
-#:
-#: Bursty DCA is a normal algorithm that happens to declare a custom editor, and nothing more.
-#: Its plan is therefore ordinary algorithm tuning -- ``algorithms.<id>.plan``, read and written
-#: through ``/api/algorithm-config`` like every other algorithm's knobs.
-#:
-#: It used to live in a ``dca_bot`` section of its own, keyed by account (``dca_plans``) with a
-#: shared template (``dca_plan``) behind it. That bought a per-account dimension no other
-#: algorithm has, at the cost of the editor and the views disagreeing about which account's plan
-#: they were looking at. Keying by algorithm fixes that, and the price -- two accounts running it
-#: share a plan -- is the same price every other algorithm already pays.
+#: Where a plan lives inside this algorithm's ordinary config section -- ``algorithms.<id>.plan``,
+#: read and written through ``/api/algorithm-config`` like every other algorithm's knobs.
 PLAN_KEY = "plan"
 
-#: Hard ceiling on a per-symbol budget. Every plan amount means **dollars per month, per
-#: symbol**.
+#: Hard ceiling on a per-symbol budget, in dollars per month per symbol.
 MAX_ITEM_AMOUNT = 5_000.0
 
-#: The plan carries **what to buy and how much**, and nothing else. Cadence lives on the
-#: algorithm class as a ``Schedule``, and whether it runs at all is the binding's own switch. A
-#: separate ``enabled`` here used to let it run on its own loop alongside another algorithm,
-#: which meant two loops could drive the same accrual state at different cadences.
+#: The plan carries what to buy and how much, and nothing else -- cadence and enablement live
+#: on the binding, not here.
 BUCKETS = ("buy", "sell")
 
 
@@ -50,12 +38,8 @@ class BurstyConfig:
     """
 
     #: Extra multiples of the monthly budget per standard deviation of favourable dislocation
-    #: from the moving average: ``conviction = 1 + scaling_factor x z``.
-    #:
-    #: Measured in sigma rather than in percent so one setting means the same thing for a bond
-    #: ETF that moves 3% a year and a single name that moves 30%. Under the old percent-of-peak
-    #: drawdown this knob had to be ~10 to do anything to a broad ETF, and that same 10 was
-    #: violent on a volatile name.
+    #: from the moving average: ``conviction = 1 + scaling_factor x z``. Measured in sigma
+    #: rather than percent, so one setting means the same thing across symbols of different vol.
     scaling_factor: float = 0.5
     #: Window for the moving average *and* for the standard deviation that normalizes distance
     #: from it. One window, because a z-score whose mean and deviation come from different
@@ -64,12 +48,8 @@ class BurstyConfig:
     #: Cap on cumulative deployment per symbol per month, in multiples of the monthly budget.
     #: A backstop against a runaway signal, not the primary control -- ``relax_months`` is.
     max_monthly_multiple: float = 3.0
-    #: Width of the backlog resistance curve, in months of budget. At a backlog of this many
-    #: months the curve has taken up roughly 3/4 of its swing.
-    #:
-    #: The successor to the old ``backlog_relax_months`` threshold. A threshold made the
-    #: algorithm behave identically at 1.9 and 0.1 months behind and then change character in
-    #: one step; a width makes falling behind matter continuously.
+    #: Width of the backlog resistance curve, in months of budget -- a continuous width rather
+    #: than a threshold, so falling behind matters gradually rather than in one step.
     relax_months: float = 2.0
     #: How far ``willingness`` swings either side of 1.0 as the backlog saturates. At the
     #: default, a symbol months ahead of plan deploys 0.3x and one months behind deploys 1.7x.
@@ -87,16 +67,10 @@ class BurstyConfig:
 
 
 def raw_plan(config: Any, algorithm_id: str) -> dict[str, Any]:
-    """The plan as written in ``algorithms.<algorithm_id>.plan``, unsanitized.
-
-    Unsanitized because two callers need different things from it: :func:`sanitize_plan` for
-    what can actually be traded, and :func:`unknown_plan_symbols` for what was asked for and
-    silently dropped. Sanitizing first would make the second question unanswerable.
-
-    No plan configured means an empty plan -- buy nothing. The dashboard renders whatever is in
-    the config section, so a built-in fallback basket here would have the algorithm quietly
-    trading names the board showed as empty.
-    """
+    """The plan as written in ``algorithms.<algorithm_id>.plan``, unsanitized -- two callers need
+    different things from it (:func:`sanitize_plan`, :func:`unknown_plan_symbols`), so sanitizing
+    here first would make the second question unanswerable. No plan configured means buy nothing,
+    never a built-in fallback basket."""
     section = (getattr(config, "algorithm_configs", {}) or {}).get(algorithm_id) or {}
     plan = section.get(PLAN_KEY)
     return plan if isinstance(plan, dict) else {}
@@ -105,9 +79,8 @@ def raw_plan(config: Any, algorithm_id: str) -> dict[str, Any]:
 def sanitize_plan(plan: dict[str, Any] | None, universe: set[str]) -> dict[str, Any]:
     """Normalize a plan and keep only symbols present in the configured universe.
 
-    An absent or empty plan sanitizes to empty buckets. This used to start from a built-in
-    default basket, which meant clearing every bubble off the board silently restored it the
-    next time the plan was read -- the board showed nothing and the algorithm would have bought.
+    An absent or empty plan sanitizes to empty buckets -- never a built-in default basket, which
+    would let clearing the board silently leave the algorithm still buying.
     """
     sanitized: dict[str, Any] = {}
 

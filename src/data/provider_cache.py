@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 
-from .duckdb_store import _connect
+from .duckdb_store import _connect, count_and_delete, where_clause
 
 logger = logging.getLogger(__name__)
 
@@ -44,14 +44,8 @@ def load_cached_payload(
     if not row:
         logger.debug("Cache miss: %s/%s [%s]", category, provider, cache_key)
         return None
-    # ``expires_at`` was written on every row and read on none, so every TTL in the config was
-    # decorative and a cached quote was served for ever. Found live: a run on 2026-08-25 priced
-    # IBIT at 36.15 and GLD at 405.77 from rows fetched on 2026-08-17 and expired thirty minutes
-    # later, while the venue was quoting 45.04 and 426.65 -- an eight-day-old price, delivered
-    # with ``current: True``, to an algorithm that sizes real orders from it.
-    #
-    # Enforced here rather than at each caller because the TTL is the cache's own promise; a
-    # caller that has to remember to check it is a caller that will eventually forget.
+    # Enforced here rather than at each caller: a stale row served past its TTL is a silent
+    # bad price, and a caller that has to remember to check expiry will eventually forget.
     expires_at = _timestamp(row[1])
     if expires_at is not None and expires_at <= _now():
         logger.debug("Cache expired: %s/%s [%s] at %s", category, provider, cache_key, expires_at)
@@ -112,11 +106,8 @@ def clear_cached_payloads(
     if prefixes:
         clauses.append("(" + " OR ".join(["cache_key LIKE ?"] * len(prefixes)) + ")")
         params.extend([f"{prefix}%" for prefix in prefixes])
-    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     with _connect(db_path) as connection:
-        deleted = int(connection.execute(f"SELECT COUNT(*) FROM api_cache {where}", params).fetchone()[0] or 0)
-        connection.execute(f"DELETE FROM api_cache {where}", params)
-        return deleted
+        return count_and_delete(connection, "api_cache", where_clause(clauses), params)
 
 
 def provider_is_limited(provider: str, *, db_path: str | None = None) -> bool:

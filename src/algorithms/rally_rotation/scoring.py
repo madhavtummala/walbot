@@ -1,11 +1,8 @@
-"""Per-symbol features and the cross-sectional score built from them.
-"""
+"""Per-symbol features and the cross-sectional score built from them."""
 
 from __future__ import annotations
 
 from .config import EPSILON, TRADING_DAYS, RallyRotationConfig
-
-
 
 import logging
 import math
@@ -41,16 +38,8 @@ def compute_features(
     daily_bars: Any,
     config: RallyRotationConfig,
 ) -> dict[str, Any]:
-    """Everything about one symbol that the layers below need, computed once.
-
-    Daily bars, and only daily bars. The selection horizons used to be measured against a
-    separate intraday window; they are now measured against these, at session granularity.
-    That window was never reliably intraday anyway -- ``read_history`` blends resolutions, so
-    the same backtest scored its early months from ~18 daily closes and its later ones from
-    ~1,300 five-minute bars, with the score's EMA silently collapsing to a single sample
-    wherever the cache was daily. One source removes both inconsistencies, and lets a replay
-    reach back as far as the daily store does rather than as far as the intraday cache does.
-    """
+    """Everything about one symbol that the layers below need, computed once, from daily bars
+    only -- one source, at session granularity, rather than a blend of resolutions."""
     closes = _closes(daily_bars)
     daily_closes = closes
     step = market_minutes_per_bar(daily_bars, TRADING_MINUTES_PER_DAY)
@@ -73,9 +62,8 @@ def compute_features(
     }
 
     ma_window = max(config.etf_ma_days, 1)
-    # A short history would silently turn "the 100-day average" into the average of whatever
-    # happened to be cached, and a name below that shorter average looks like a market fact
-    # rather than a data gap. Anything under the window is reported as unknown instead.
+    # A short history would silently shrink "the 100-day average" to whatever's cached; report
+    # anything under the window as unknown rather than a market fact.
     enough_history = len(daily_closes) >= ma_window
     moving_average = float(daily_closes.tail(ma_window).mean()) if enough_history else 0.0
     last_daily = float(daily_closes.iloc[-1]) if not daily_closes.empty else 0.0
@@ -96,9 +84,7 @@ def compute_features(
         "ma_distance": (last_daily / moving_average - 1.0) if moving_average > 0 else 0.0,
         "daily_bars": int(len(daily_closes)),
         "enough_history": bool(enough_history),
-        # The crash stop's input. Its own feature rather than the fastest selection horizon,
-        # which it used to borrow: a stop that moves whenever someone retunes the score's
-        # ladder is a stop nobody can reason about.
+        # The crash stop's own feature, not borrowed from a selection horizon that could retune.
         "session_return": _return_over(daily_closes, 1),
         "abs_return": _return_over(daily_closes, config.etf_abs_return_days),
         "fast_return": _return_over(daily_closes, config.etf_fast_return_days),
@@ -110,13 +96,8 @@ def compute_features(
 
 
 def zscores(values: dict[str, float], robust: bool) -> dict[str, float]:
-    """Cross-sectional z-scores, robust (median/MAD) by default.
-
-    A thematic ETF can post an event-driven move that drags the mean and inflates the standard
-    deviation enough to flatten everyone else's score. Median and MAD do not move, so one
-    outlier stops rewriting the whole cross-section. Falls back to the standard deviation when
-    the MAD is zero, which happens when most of the universe posts the identical return.
-    """
+    """Cross-sectional z-scores, robust (median/MAD) by default so one event-driven outlier
+    can't rewrite the whole cross-section. Falls back to standard deviation when MAD is zero."""
     if not values:
         return {}
     data = list(values.values())
@@ -157,17 +138,12 @@ def base_scores(
 ) -> dict[str, dict[str, Any]]:
     """Slow-weighted composite score, smoothed over ``score_ema_days``.
 
-    The smoothing is done here rather than across runs so that ``analyze`` stays pure: the
-    score at bar t-1 is recomputed from the bars, not remembered from the previous run, which
-    is what lets a backtest reproduce it exactly.
-
-    ``risk_adjusted_score`` decides *what* is being ranked. Raw returns rank a 58%-volatility
-    thematic ETF above a 14%-volatility index fund whenever both are up, because its returns
-    are simply four times larger -- the ranking becomes a volatility ranking wearing a
-    momentum costume. Dividing by each symbol's own volatility first asks the different
-    question: whose trend is strongest *per unit of risk taken*. Sizing already divides by
-    volatility, but sizing only applies to names that were selected, so it cannot undo a
-    selection bias.
+    Smoothed here rather than across runs, so ``analyze`` stays pure and a backtest can
+    reproduce it exactly. ``risk_adjusted_score`` decides *what* is ranked: raw returns rank a
+    volatile name above a calm one whenever both are up merely because its returns are bigger,
+    so dividing by each symbol's own volatility first asks "strongest per unit of risk" instead
+    -- a question sizing's own volatility division cannot retroactively ask for names it never
+    selected.
     """
     if not features_by_symbol:
         return {}

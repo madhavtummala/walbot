@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
 from ..base import BaseBrokerage
 from ...core.interfaces import OrderRequest
-from ...data.state_store import load_state, save_state
+from ...data.state_store import load_state, save_state, state_lock
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,9 @@ class PaperBrokerage(BaseBrokerage):
     #: than quietly filled.
     supports_fractional_shares = False
 
+    #: Nothing here reaches a venue -- the book is a local ledger in ``app_state``.
+    is_paper = True
+
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         starting_cash = float(getattr(config, "paper_starting_cash", DEFAULT_STARTING_CASH) or DEFAULT_STARTING_CASH)
@@ -53,8 +57,27 @@ class PaperBrokerage(BaseBrokerage):
             # Fall back to the single unnamespaced book written before accounts were a thing.
             self.state = load_state(STATE_KEY, {"cash": starting_cash, "positions": {}, "prices": {}})
 
-    def _save(self) -> None:
-        save_state(self.state_key, self.state)
+    @contextmanager
+    def _transaction(self):
+        """Run a mutation against freshly-read state, with this book held for the whole of it.
+
+        The book is loaded once in ``__init__`` and lives on the instance, which is fine for
+        reading and wrong for writing: the scheduler runs a thread per binding and several
+        bindings may be deployed on one account, so two instances of this class can hold the
+        same book at once. Each would fill its orders against the balance it read at
+        construction and write the whole blob back, and the second write would discard the
+        first's cash and positions -- fills silently vanishing from a book that is supposed to
+        rehearse a live one.
+
+        Re-reading inside the lock is the half that matters most: taking the lock around a
+        balance read minutes ago protects nothing.
+        """
+        with state_lock(self.state_key):
+            stored = load_state(self.state_key, None)
+            if stored is not None:
+                self.state = stored
+            yield
+            save_state(self.state_key, self.state)
 
     def _market_value(self) -> float:
         prices = self.state.get("prices", {})
@@ -71,13 +94,17 @@ class PaperBrokerage(BaseBrokerage):
         Idempotent by watermark: each payment is credited once, and re-running on the same day
         is a no-op rather than a second payday.
         """
+        as_of = as_of or datetime.now(timezone.utc).date()
+        with self._transaction():
+            return self._credit_dividends(as_of)
+
+    def _credit_dividends(self, as_of: date) -> Dict[str, Any]:
+        """The body of :meth:`credit_dividends`, run with the book locked and freshly read."""
         from src.data.dividends import read_dividends
 
-        as_of = as_of or datetime.now(timezone.utc).date()
         positions = {s: v for s, v in self.state.get("positions", {}).items() if v}
         if not positions:
             self.state["dividends_credited_through"] = as_of.isoformat()
-            self._save()
             return {"credited": 0.0, "events": 0}
 
         watermark = self.state.get("dividends_credited_through")
@@ -117,7 +144,6 @@ class PaperBrokerage(BaseBrokerage):
         # Bounded so a long-lived paper book does not grow an unbounded blob in app_state.
         self.state["dividend_activity"] = paid[-200:]
         self.state["dividends_credited_through"] = as_of.isoformat()
-        self._save()
         return {"credited": credited, "events": events}
 
     def get_dividend_activity(self, start=None, end=None) -> list:
@@ -175,7 +201,13 @@ class PaperBrokerage(BaseBrokerage):
             raise ValueError(
                 f"Paper brokerage fills whole shares only (got {quantity} for {request.symbol})"
             )
+        # Validation above reads nothing from the book, so it stays outside the lock. Everything
+        # from the price lookup down is a read-modify-write of cash and positions.
+        with self._transaction():
+            return self._fill(request)
 
+    def _fill(self, request: OrderRequest) -> Dict[str, Any]:
+        """The body of :meth:`submit_order`, run with the book locked and freshly read."""
         price = float((request.extra or {}).get("latest_price") or self.state.get("prices", {}).get(request.symbol, 0.0))
         if price <= 0:
             raise ValueError(f"Paper brokerage needs a price for {request.symbol} to fill an order")
@@ -198,7 +230,22 @@ class PaperBrokerage(BaseBrokerage):
             )
         positions = dict(self.state.get("positions", {}))
         held = positions.get(request.symbol, 0.0)
-        positions[request.symbol] = held + signed
+        after = held + signed
+        # Asked here rather than only in ``submit_planned_orders``, which is one caller of
+        # several: the reconciler and the MCP tools reach ``submit_order`` directly, and a check
+        # that only some callers perform is not a check. Without it a sell with nothing held was
+        # booked as a short that *credited* cash, with no margin requirement and no size limit,
+        # so the book could short indefinitely and manufacture its own buying power -- a paper
+        # account that permits what the live one refuses flatters a backtest in exactly the
+        # direction that hurts.
+        if signed < 0 and after < -1e-9:
+            feasibility = self.validate_short_sale_feasibility(
+                request.symbol, quantity=abs(signed), target_shares=after, latest_price=price
+            )
+            if not feasibility.get("shortable"):
+                raise ValueError(f"Short sale refused for {request.symbol}: {feasibility.get('reason', '')}")
+
+        positions[request.symbol] = after
         if abs(positions[request.symbol]) < 1e-9:
             positions.pop(request.symbol, None)
 
@@ -208,7 +255,6 @@ class PaperBrokerage(BaseBrokerage):
         # The *mark* is the clean price, not what this order paid: marking the book at its own
         # fill price would let a round trip look flat while the spread was being paid twice.
         self.state.setdefault("prices", {})[request.symbol] = price
-        self._save()
 
         logger.info("Paper fill: %s %s qty=%s @ %.4f", request.action, request.symbol, request.quantity, fill_price)
         return {
@@ -250,6 +296,7 @@ class PaperBrokerage(BaseBrokerage):
                     "symbol": symbol,
                     "qty": float(shares),
                     "avg_entry_price": entry,
+                    "current_price": price,
                     "market_value": float(shares) * price,
                     "unrealized_pl": (price - entry) * float(shares) if entry and price else 0.0,
                     "unrealized_plpc": (price / entry - 1.0) if entry and price else 0.0,
@@ -271,8 +318,10 @@ class PaperBrokerage(BaseBrokerage):
 
     def mark_prices(self, latest_prices: Dict[str, float]) -> None:
         """Update marks so equity reflects current prices rather than last fill prices."""
-        self.state.setdefault("prices", {}).update({s: float(p) for s, p in latest_prices.items() if p > 0})
-        self._save()
+        with self._transaction():
+            self.state.setdefault("prices", {}).update(
+                {s: float(p) for s, p in latest_prices.items() if p > 0}
+            )
 
     def validate_short_sale_feasibility(
         self, symbol: str, quantity: float, target_shares: float, latest_price: float

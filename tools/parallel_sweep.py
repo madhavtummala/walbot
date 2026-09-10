@@ -220,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  PARALLEL SWEEP COMPLETE  |  {len(all_runs)} runs  |  {workers} workers")
         print(f"{'='*100}")
         ranked = sorted(all_runs, key=lambda r: r.get("net_return_5bps", 0), reverse=True)
-        print(f"\n  Top 10 by net return (5bps cost):")
+        print("\n  Top 10 by net return (5bps cost):")
         print(f"  {'Label':30s} {'Return':>8s} {'Net5':>8s} {'DD':>8s} {'Sharpe':>7s} {'Turn':>6s}")
         print(f"  {'-'*30} {'-'*8} {'-'*8} {'-'*8} {'-'*7} {'-'*6}")
         for run in ranked[:10]:

@@ -1754,10 +1754,19 @@ h2 {
 
 .accountLayout > .card .tableWrap.is-scroll {
   flex: 1;
-  /* More specific than ".accountLayout .tableWrap.is-scroll" below, so it wins: the cap
-     that rule sets exists to keep the left *stack* of two panels within one screen, and does
-     not apply here -- this card is already bounded by the stack's own height. */
-  max-height: none;
+  /* Load-bearing, not decorative: a flex item's default min-height is "auto", meaning "at
+     least as tall as my content" -- so without this, a long order list (a local-paper book
+     with no cap on how many rows accrue) could not shrink to fit the space stretch gives it.
+     It grew to its full content height instead and dragged the whole grid row -- and the left
+     stack right along with it, via align-items: stretch -- to match. That is the "weird"
+     layout this fixes, the opposite case from the one align-items: stretch was added for (a
+     short list leaving the card too small). */
+  min-height: 0;
+  /* More specific than ".accountLayout .tableWrap.is-scroll" below, so it wins: that rule's
+     cap exists to keep the left *stack* of two panels within one screen. This is a single
+     panel opposite that stack, so it gets its own budget -- roughly what the two-panel stack
+     is allowed, so a long list scrolls internally instead of outgrowing its sibling. */
+  max-height: min(60vh, 640px);
 }
 
 .accountLayout > .card .emptyState {

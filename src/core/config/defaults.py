@@ -1,8 +1,4 @@
-"""Default values and file locations.
-
-Every tunable the application ships with, in one place, so a default can be found without
-reading the loader that consumes it.
-"""
+"""Default values and file locations."""
 
 from __future__ import annotations
 
@@ -27,25 +23,22 @@ SYMBOLS: list[str] = [
     "TLT",
 ]
 MOMENTUM_LOOKBACK_DAYS = 63
-SHORT_MOMENTUM_LOOKBACK_DAYS = 21
-LONG_MA_DAYS = 200
-VOLUME_LOOKBACK_DAYS = 20
-SOCIAL_LOOKBACK_DAYS = 30
 MAX_WEIGHT_PER_SYMBOL = 0.25
 MAX_PORTFOLIO_EXPOSURE = 0.95
-MAX_LONGS = 5
-MIN_COMPOSITE_SCORE = 0.05
-PRICE_MOMENTUM_WEIGHT = 0.55
-SOCIAL_MOMENTUM_WEIGHT = 0.30
-VOLUME_MOMENTUM_WEIGHT = 0.15
-TARGET_ANNUAL_VOL = 0.18
-#: Cash held back from the buying power an order batch is allowed to spend. An account-level
-#: floor rather than a haircut on target weights: how much of the book a strategy wants
-#: deployed is the strategy's decision, expressed through its own gross-exposure cap.
+#: Cash held back from the buying power an order batch is allowed to spend.
 CASH_BUFFER = 0.02
-#: Holdings that are cash in all but name. A rebalance short of buying power may sell these to
-#: fund its buys, so parking idle cash in T-bills no longer blocks the next batch.
-CASH_EQUIVALENTS = ["SGOV", "BIL"]
+#: Holdings treated as cash; may be sold to fund a batch short of buying power.
+#:
+#: **Order is liquidation preference** -- ``get_cash_equivalents`` walks this list front to back
+#: and stops once the shortfall is covered, so the first entry is sold first.
+#:
+#: GUMI sits last deliberately. The other two are T-bill funds, which is what makes selling them
+#: to raise cash a non-decision: they barely move, so the price you get is the price you saw.
+#: GUMI is filed as ``Other / Equity`` in ``data/tradable_etfs.csv`` rather than
+#: ``Fixed Income / Treasury``, so listing it here makes a security that can actually move
+#: something the funding ladder may sell at market to pay for an unrelated buy. Last in the
+#: list means that only happens once the real bills are exhausted.
+CASH_EQUIVALENTS = ["SGOV", "BIL", "GUMI"]
 MIN_TRADE_DOLLARS = 50.0
 REBALANCE_THRESHOLD = 0.02
 TRANSACTION_COST_BPS = 1.0
@@ -62,9 +55,8 @@ ALPHA_VANTAGE_NEWS_LOOKBACK_DAYS = 30
 ALPHA_VANTAGE_NEWS_LIMIT = 50
 ALPHA_VANTAGE_MAX_SYMBOLS = 20
 ALPHA_VANTAGE_REQUEST_DELAY_SECONDS = 0.0
-#: One file holds every section. The per-section constants below are the pre-unification
-#: paths, kept because their env overrides still work and because an existing deployment is
-#: migrated from them on first start.
+#: One file holds every section; the per-section constants below are the pre-unification
+#: paths, kept because their env overrides still work and existing deployments migrate off them.
 CONFIG_FILE = "config/walbot.yaml"
 ACCOUNTS_FILE = "config/accounts.yaml"
 CONNECTORS_FILE = "config/connectors.yaml"
@@ -76,17 +68,12 @@ MARKET_DATA_PROVIDER_ORDER: list[str] = []
 INTRADAY_MARKET_DATA_PROVIDER_ORDER: list[str] = ["yfinance"]
 EOD_MARKET_DATA_PROVIDER_ORDER: list[str] = []
 NEWS_SENTIMENT_PROVIDER_ORDER: list[str] = []
-#: Alpaca first because it carries ``payable_date`` and flags special distributions; yfinance
-#: is the credential-free fallback. Both were measured to report identical events.
 DIVIDEND_PROVIDER_ORDER: list[str] = ["alpaca", "yfinance"]
 MARKET_DATA_CACHE_TTL_SECONDS = 1800
 INTRADAY_MARKET_DATA_CACHE_TTL_SECONDS = 900
 EOD_MARKET_DATA_CACHE_TTL_SECONDS = 1800
-#: Preferred resolution for fine-grained bars, in minutes. Five rather than the old fifteen
-#: because the grid used to be dictated by yfinance's floor, and Schwab -- now the primary
-#: feed -- serves 1/5/10/15/30 in real time. Algorithm horizons are stated in minutes, so
-#: this only sets fidelity: a finer grid resolves them more precisely, a coarser one still
-#: answers them. Providers that cannot serve it fall back to their nearest coarser grid.
+#: Preferred resolution for fine-grained bars, in minutes. Providers that cannot serve it
+#: fall back to their nearest coarser grid.
 MARKET_DATA_BAR_MINUTES = 5
 NEWS_SENTIMENT_CACHE_TTL_SECONDS = 1800
 ALGORITHM_IDS = {
@@ -99,7 +86,6 @@ ALGORITHM_IDS = {
 DEFAULT_STRATEGY_ID = "rally_rotation"
 
 
-#: Stands for "no account was named" -- the value ``Config.account_id`` carries before any
-#: accounts config is read, and the id used when none is configured. Distinct from a real
-#: account id, so asking for it is not the same as asking for an account that does not exist.
+#: Stands for "no account was named" -- distinct from a real account id, so asking for it is
+#: not the same as asking for an account that does not exist.
 UNNAMED_ACCOUNT_ID = "default"

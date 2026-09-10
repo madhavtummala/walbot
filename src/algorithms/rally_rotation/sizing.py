@@ -1,9 +1,7 @@
 """How much of each name, and how much of that is worth trading today.
 
-Everything here maps a set of chosen symbols onto weights, and then damps the move from the
-current book to those weights. The two halves were split across separate modules -- one called
-"layers", one called "stateful" -- although neither reads any state and both are pure functions
-of a weight vector. They are one subject: sizing.
+Maps a set of chosen symbols onto weights, then damps the move from the current book to those
+weights -- both pure functions of a weight vector.
 """
 
 from __future__ import annotations
@@ -14,17 +12,10 @@ from .config import EPSILON, RallyRotationConfig
 
 
 def score_to_weights(rows: list[dict[str, Any]], config: RallyRotationConfig) -> dict[str, float]:
-    """Split ``risk_on_gross_max`` between the selected names, in proportion to score.
-
-    The score enters as its positive part, so a name barely above the universe median gets a
-    small position rather than an equal one, tilted by ``volatility_tilt``.
-
-    No per-name cap. A cap on top of a two-name split does not diversify anything -- it forces
-    the pair toward equal weight and throws away the ranking the whole algorithm exists to
-    produce. It also came with a water-filling routine to re-spread the overflow, because the
-    first version dropped it and left the book quietly under-invested: one selected name produced
-    a 50% position and 50% idle cash rather than the gross the configuration asked for. Both are
-    gone; a proportional split cannot leave a residual.
+    """Split ``risk_on_gross_max`` between the selected names, in proportion to score (positive
+    part only, tilted by ``volatility_tilt``). No per-name cap -- one on top of a two-name split
+    forces equal weight and throws away the ranking the algorithm exists to produce; a
+    proportional split cannot leave a residual, so no water-filling is needed either.
     """
     raw: dict[str, float] = {}
     for row in rows:
@@ -63,14 +54,8 @@ def park_residual(
     defensive_book: dict[str, float],
     config: RallyRotationConfig,
 ) -> dict[str, float]:
-    """Put whatever the risk sleeve could not deploy into the defensive sleeve, not into cash.
-
-    A real funded account never holds idle cash: the balance sits in T-bills until something
-    needs it, which is the same reason the backtester opens the book in a cash equivalent rather
-    than in cash. Without this the book was a three-way split -- risk assets, T-bills, and a raw
-    cash slice earning nothing -- when the intent is binary. Over 2023 that slice averaged 10.3%
-    of equity and reached 15% in some months.
-    """
+    """Put whatever the risk sleeve could not deploy into the defensive sleeve, not into cash --
+    a real funded account never holds idle cash; the balance sits in T-bills."""
     gross = max(config.risk_on_gross_max, 0.0)
     residual = gross - sum(value for value in weights.values() if value > 0)
     total = sum(defensive_book.values())
@@ -98,11 +83,9 @@ def apply_turnover_filters(
 ) -> dict[str, float]:
     """Drop trades too small to be worth their costs, keeping the current weight instead.
 
-    A full exit is never "too small". The thresholds here exist to suppress small *adjustments*
-    to a position the algorithm still wants; applied to a close they instead trap it, because a
-    holding below ``rebalance_weight_threshold`` can never move far enough to clear the bar and
-    is therefore held forever. That is how an 8-position book came to carry a mean of 12 names,
-    5 of them frozen below the threshold and holding a fifth of the equity.
+    A full exit is never "too small": these thresholds suppress small *adjustments* to a
+    position still wanted, but applied to a close they'd trap a position below the threshold
+    forever, since it can never move far enough on its own to clear the bar.
     """
     minimum_notional = _minimum_notional(equity, config)
     filtered: dict[str, float] = {}
@@ -128,26 +111,14 @@ def _fit_to_budget(
 ) -> dict[str, float]:
     """Give back whatever holding a name at its current weight borrowed from the budget.
 
-    The band suppresses moves in both directions, but only the *trims* were funding anything.
-    Holding two incumbents above target because their trims were too small to trade, while
-    letting a new entry through at full size because its move was large enough, produces a target
-    vector that no longer sums to the gross the algorithm budgeted for.
-
-    Measured on 2026-01-08: the plan proposed exactly 100.0%; the band held IEMG at 12.2% against
-    a 6.6% target and XSD at 36.0% against 29.1%, passed XBI's 12.1% entry untouched, and handed
-    planning a 106.9% book. That is unfundable by construction on an account already 98%
-    invested, so ``fund_planned_orders`` pro-rata shrank the buys and warned -- 16 of 24 sessions
-    that January, and on one of them the entry was dropped outright.
-
-    The repair shrinks the *increases* rather than forcing the trims through: a suppressed trim
-    stays suppressed, and the entry simply arrives smaller, filling in over later runs as the
-    incumbents drift far enough to trade.
-
-    Only the notional floor is re-applied to a shrunken leg, not ``rebalance_weight_threshold``.
-    The band exists to suppress *drift* -- small adjustments to a position already held -- and an
-    opening is not drift. Re-applying it here killed the entry outright whenever the freed budget
-    came to less than the band, which on the 2026-01-08 book meant a 12.1% entry shrinking to
-    5.2% and then being dropped: the opposite of the intent.
+    The band suppresses moves both directions, but only the *trims* were funding anything: a
+    suppressed trim plus a full-size new entry sums to more than the gross budgeted. This
+    shrinks the *increases* instead of forcing trims through -- a suppressed trim stays
+    suppressed, and the entry arrives smaller, filling in as incumbents later drift far enough
+    to trade on their own. Only the notional floor is re-applied to a shrunken leg, not
+    ``rebalance_weight_threshold``: that band suppresses drift on a position already held, and
+    an opening is not drift -- re-applying it here could shrink an entry below the band and
+    drop it outright, the opposite of the intent.
     """
     budget = sum(weight for weight in target.values() if weight > 0)
     excess = sum(weight for weight in filtered.values() if weight > 0) - budget

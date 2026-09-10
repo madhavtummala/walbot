@@ -1,23 +1,10 @@
 """Is today eligible for a bullish pullback trade on this symbol?
 
-The first of three gates, and the only one entitled to assert a direction. It is a *conjunction*:
-every condition must hold, because each one rules out a different way the thesis can already be
-wrong, and passing four out of five means the fifth is telling you something.
-
-**The trend readings come from Rally Rotation's features, not from its score.** ``base_scores``
-ranks names against each other and needs a universe to rank within; with two symbols the top one
-scores positive by construction. What ports is the per-symbol, absolute material -- a return
-over a horizon, a position against a moving average, an annualised volatility to divide by --
-and that is what this module reads.
-
-**Stated in sigma and in ATR, never in raw percent.** Measured on Rally Rotation's own universe:
-VEA held the book on a 20-day move of +3.0% against 17% annualised volatility, which is 0.6
-sigma and is noise, while XBI was locked out by -8.4% that was -1.7 sigma for a 31%-volatility
-ETF. A gap threshold in percent has the identical defect, so gaps are measured against ATR.
-
-**Earnings are not checked.** Every symbol this strategy trades is an ETF or a trust, which do
-not report. A calendar gate would be a permanently-true check, and a permanently-true check on
-a deck teaches a reader to stop reading the column.
+The first of three gates, and the only one entitled to assert a direction -- a conjunction, since
+each condition rules out a different way the thesis can already be wrong. Readings are absolute
+and per-symbol (borrowed from Rally Rotation's features, not its cross-sectional score), and
+stated in sigma/ATR rather than raw percent so one threshold works across symbols of different
+volatility.
 """
 
 from __future__ import annotations
@@ -43,11 +30,22 @@ def bull_regime(
     *,
     price: float,
     config: Any,
+    for_exit: bool = False,
 ) -> tuple[bool, dict[str, Any], list[Check]]:
     """``(eligible, readings, checks)`` -- whether the bull thesis holds for this symbol today.
 
-    **Two gates were removed here and the reason is the same for both: they cost opportunity and
-    bought nothing measurable.**
+    **Three gates were removed here and the reason is the same for all three: they cost
+    opportunity and bought nothing measurable.**
+
+    *The same-day checks* (``Holding VWAP``, ``Open not a gap down``) are demoted to readings
+    when ``for_exit`` is set -- re-checked on a held position (see ``_sell_ok``), not on a new
+    entry. Measured on the full August walk-forward: of four large exits this pair forced, three
+    were an intact uptrend's one ordinary red day, sold at the day's low the session before it
+    resumed (GLD 380C Aug 13, GLD 390C Aug 18, IBIT 41C Aug 28 -- each recovered or kept climbing
+    within 1-2 sessions). A same-day measure answers "should I buy into today's weakness", which
+    is the right question on entry; it does not answer "has the multi-day thesis this position
+    was opened on broken", which is what a held position needs asked. Kept as blocking on entry,
+    where intraday caution is still correct.
 
     *The moving-average slope* is a lagging confirmation that was being used as leading
     permission. A 20-day mean turns only after a move has largely happened: over 2026-08-17 to
@@ -125,7 +123,7 @@ def bull_regime(
         ok=calm_open,
         value=f"{gap_atr:+.2f} ATR ({(session_open / prior_close - 1.0) if prior_close else 0:+.2%})",
         limit=f"gap ≥ -{float(config.max_gap_down_atr):.2f} ATR (up-gaps are allowed)",
-        blocking=not calm_open,
+        blocking=not calm_open and not for_exit,
     ))
 
     # ── VWAP: is today's average buyer under water or in front? ────────────────────────
@@ -148,7 +146,7 @@ def bull_regime(
             if vwap > 0 else "no intraday volume yet"
         ),
         limit="above VWAP, or recovering toward it",
-        blocking=not vwap_ok,
+        blocking=not vwap_ok and not for_exit,
     ))
 
 

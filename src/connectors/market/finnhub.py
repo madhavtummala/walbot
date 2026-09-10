@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any
 
 import pandas as pd
 
-from ...data.bars import calendar_days_for
-from ...data.duckdb_store import DAILY_INTERVAL_MINUTES
 from ..base import MarketDataProvider
 from ..frames import _empty_bars, _normalize_quote
+from ..grid import history_window
 from ..http import _request_json
 from ..sources import (
     EOD_MARKET_CATEGORY,
@@ -80,14 +79,13 @@ class Finnhub(MarketDataProvider):
         **extra: Any,
     ) -> dict[str, pd.DataFrame]:
         key = self._key()
-        daily = interval_minutes >= DAILY_INTERVAL_MINUTES
-        end = end_date or datetime.now(timezone.utc)
-        span_days = lookback_bars if daily else calendar_days_for(lookback_bars * interval_minutes)
-        start = start_date or end - timedelta(days=max(span_days, 1))
-        # "D" for daily, the minute count itself for anything finer. The category follows the
-        # resolution too: it is the rate-limit namespace and the config section, so a daily
-        # fetch must not be accounted against the intraday budget.
+        start, end, daily = history_window(
+            interval_minutes, lookback_bars, start_date=start_date, end_date=end_date
+        )
+        # "D" for daily, the minute count itself for anything finer.
         resolution = "D" if daily else str(interval_minutes)
+        # The rate-limit/config category follows the resolution: a daily fetch must not be
+        # accounted against the intraday budget.
         category = EOD_MARKET_CATEGORY if daily else INTRADAY_MARKET_CATEGORY
 
         frames: dict[str, pd.DataFrame] = {}

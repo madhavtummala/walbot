@@ -1,33 +1,24 @@
 """The tradable universe and recommendations for changing it.
 
-Split out of the single ``api_payloads`` module, which had grown to 1253 lines covering nine
-unrelated domains. The public names are unchanged and still importable from ``api_payloads``.
+Split out of the single ``api_payloads`` module. Public names are unchanged and still
+importable from ``api_payloads``.
 """
 
-
 from __future__ import annotations
-
-from ...brokerages.alpaca.client import create_data_client
-from ...data.universe import load_tradable_names
 
 import logging
 from typing import Any
 
 import pandas as pd
 
-
+from ...brokerages.alpaca.client import create_data_client
+from ...core.config import get_config, save_universe_symbols
 from ...data import fetch_daily_bars
-from ...core.config import (
-    get_config,
-    save_universe_symbols,
-)
+from ...data.universe import load_tradable_names
 from ...data.universe_selector import candidate_specs_by_symbol, preferred_symbols, recommend_universe_rows
-
-logger = logging.getLogger(__name__)
 from .system import _display_path
 
-
-
+logger = logging.getLogger(__name__)
 
 
 def universe_payload() -> dict[str, Any]:
@@ -95,39 +86,26 @@ def apply_universe_payload(body: dict[str, Any]) -> dict[str, Any]:
     if isinstance(raw_symbols, str):
         raw_symbols = [symbol.strip().upper() for symbol in raw_symbols.split(",") if symbol.strip()]
 
+    # Rows carry a name/bucket override; a bare symbol list falls back to the spec for both.
+    sources = (
+        [(str(row.get("symbol", row.get("Ticker", ""))).strip().upper(), row) for row in raw_rows]
+        if raw_rows else
+        [(str(item).strip().upper(), {}) for item in raw_symbols]
+    )
     proposed_rows: list[dict[str, str]] = []
     seen: set[str] = set()
-    if raw_rows:
-        for row in raw_rows:
-            symbol = str(row.get("symbol", row.get("Ticker", ""))).strip().upper()
-            if not symbol or symbol in seen:
-                continue
-            if validate_against_master and symbol not in tradable_names:
-                raise ValueError(f"{symbol} is not present in the tradables CSV.")
-            spec = specs.get(symbol)
-            proposed_rows.append(
-                {
-                    "symbol": symbol,
-                    "name": tradable_names.get(symbol) or str(row.get("name") or symbol),
-                    "bucket": str(row.get("bucket") or (spec.bucket if spec else "")).strip(),
-                }
-            )
-            seen.add(symbol)
-    else:
-        for symbol in [str(item).strip().upper() for item in raw_symbols]:
-            if not symbol or symbol in seen:
-                continue
-            if validate_against_master and symbol not in tradable_names:
-                raise ValueError(f"{symbol} is not present in the tradables CSV.")
-            spec = specs.get(symbol)
-            proposed_rows.append(
-                {
-                    "symbol": symbol,
-                    "name": tradable_names.get(symbol) or symbol,
-                    "bucket": spec.bucket if spec else "",
-                }
-            )
-            seen.add(symbol)
+    for symbol, row in sources:
+        if not symbol or symbol in seen:
+            continue
+        if validate_against_master and symbol not in tradable_names:
+            raise ValueError(f"{symbol} is not present in the tradables CSV.")
+        spec = specs.get(symbol)
+        proposed_rows.append({
+            "symbol": symbol,
+            "name": tradable_names.get(symbol) or str(row.get("name") or symbol),
+            "bucket": str(row.get("bucket") or (spec.bucket if spec else "")).strip(),
+        })
+        seen.add(symbol)
 
     if len(proposed_rows) < 3:
         raise ValueError("Universe must include at least 3 tradable symbols.")

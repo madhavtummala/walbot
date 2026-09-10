@@ -174,6 +174,8 @@ class SchwabBrokerage(BaseBrokerage):
     #: Schwab holds the OCO pair itself, via ``orderStrategyType``, so a bracket is one order and
     #: the venue owns the "never both" invariant.
     supports_oco = True
+    #: The Trader API has no paper endpoint: an account reached through it is a real one.
+    is_paper = False
 
     def __init__(self, config: Dict[str, Any], session: SchwabSession | None = None):
         super().__init__(config)
@@ -250,10 +252,19 @@ class SchwabBrokerage(BaseBrokerage):
             avg_entry = float(pos.get("averagePrice", 0.0) or 0.0)
             unrealized_pl = float(pos.get("currentDayProfitLoss", 0.0) or 0.0)
             unrealized_plpc = (market_value / (avg_entry * abs(qty)) - 1.0) if avg_entry and qty else 0.0
+            # Not sent directly -- derived from the same two fields "Value" already uses.
+            # ``marketValue`` is the position's full notional, which for an option already
+            # carries the 100x contract multiplier (verified live: 1 contract, marketValue
+            # 861.00, average price 8.61 -- dividing by quantity alone would answer $861 for
+            # a contract actually quoted at $8.61).
+            is_option = str((pos.get("instrument") or {}).get("assetType") or "") == "OPTION"
+            multiplier = 100.0 if is_option else 1.0
+            current_price = (market_value / (qty * multiplier)) if qty else 0.0
             rows.append({
                 "symbol": symbol,
                 "qty": qty,
                 "avg_entry_price": avg_entry,
+                "current_price": current_price,
                 "market_value": market_value,
                 "unrealized_pl": unrealized_pl,
                 "unrealized_plpc": unrealized_plpc,
@@ -500,6 +511,26 @@ def _schwab_time(moment: Any) -> str:
     return moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
 
 
+def _average_fill_price(order: Dict[str, Any]) -> float:
+    """Quantity-weighted average across every ``EXECUTION`` activity's legs.
+
+    ``0.0`` for an order with no fills yet, indistinguishable from a genuine zero-price fill --
+    but there is no such thing as a real trade at $0.00, so the caller can read it as "unfilled"
+    safely.
+    """
+    total_quantity = 0.0
+    total_notional = 0.0
+    for activity in order.get("orderActivityCollection") or []:
+        if str(activity.get("activityType") or "").upper() != "EXECUTION":
+            continue
+        for leg in activity.get("executionLegs") or []:
+            quantity = float(leg.get("quantity") or 0.0)
+            price = float(leg.get("price") or 0.0)
+            total_quantity += quantity
+            total_notional += quantity * price
+    return (total_notional / total_quantity) if total_quantity > 0 else 0.0
+
+
 def _flatten_order(order: Dict[str, Any], *, parent_order_id: str) -> List[Dict[str, Any]]:
     """One Schwab order tree as flat rows, in the shape :meth:`Brokerage.get_orders` promises.
 
@@ -527,6 +558,13 @@ def _flatten_order(order: Dict[str, Any], *, parent_order_id: str) -> List[Dict[
             "limit_price": float(order.get("price") or 0.0),
             "stop_price": float(order.get("stopPrice") or 0.0),
             "status": str(order.get("status") or "").upper(),
+            # Schwab's own ISO stamp, not derived: the reconciler that owns this method never
+            # needed a time, so nothing here read it before the account activity view did.
+            "entered_time": str(order.get("enteredTime") or ""),
+            # The order's own ``price`` is the limit it was placed at, not what it filled at --
+            # verified live, a sell limit at 0.59 filled at 0.61 on price improvement. The real
+            # number is buried in the execution legs, quantity-weighted in case of partial fills.
+            "filled_avg_price": _average_fill_price(order),
         })
     for child in order.get("childOrderStrategies") or []:
         rows.extend(_flatten_order(child, parent_order_id=order_id or parent_order_id))

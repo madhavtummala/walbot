@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from collections import defaultdict
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import timezone
@@ -11,6 +13,19 @@ import pandas as pd
 from .duckdb_store import DUCKDB_STATE_PATH, _connect
 
 STATE_DUCKDB_PATH = DUCKDB_STATE_PATH
+
+#: One lock per key, so a read-modify-write on one binding's state cannot interleave with
+#: another's. Process-wide is the right scope: the dashboard, the MCP server and every scheduler
+#: loop run in a single process (see ``src/container_entrypoint.py``), and the DuckDB handle is
+#: shared within it. ``defaultdict`` under its own lock, since two threads can arrive at a key
+#: neither has locked yet.
+_KEY_LOCKS: dict[str, threading.Lock] = defaultdict(threading.Lock)
+_KEY_LOCKS_GUARD = threading.Lock()
+
+
+def _key_lock(key: str) -> threading.Lock:
+    with _KEY_LOCKS_GUARD:
+        return _KEY_LOCKS[key]
 
 #: When set, reads and writes go to this dict instead of DuckDB. A backtest replays algorithms
 #: that carry state between runs -- DCA's accrued budget, Rally Rotation's eligibility history --
@@ -76,5 +91,28 @@ def save_state(key: str, value: Any, db_path: str | None = None) -> Any:
 
 
 def delete_state(key: str, db_path: str | None = None) -> None:
+    # Honours the ephemeral store for the same reason the other two do: a delete inside a
+    # backtest that reached past the sandbox would destroy the live account's state, which is
+    # precisely what ``ephemeral_state`` exists to prevent.
+    store = _EPHEMERAL_STATE.get()
+    if store is not None:
+        store.pop(key, None)
+        return
     with _connect(db_path) as connection:
         connection.execute("DELETE FROM app_state WHERE key = ?", [key])
+
+
+@contextmanager
+def state_lock(key: str) -> Iterator[None]:
+    """Hold ``key`` for the duration of a read-modify-write.
+
+    State derived from its own previous value -- a cash balance, a position book, an accrued
+    budget -- cannot be updated with a bare ``load_state`` then ``save_state``. The scheduler
+    runs one thread per binding and several bindings may share an account, so two runs read the
+    same balance, both fill their orders, and the second write discards the first's.
+
+    Callers must re-read inside the block: taking the lock around a value read before it
+    protects nothing.
+    """
+    with _key_lock(key):
+        yield

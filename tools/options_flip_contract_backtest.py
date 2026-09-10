@@ -58,7 +58,7 @@ from src.data.bars import read_history
 logger = logging.getLogger("optflip_contract")
 
 CACHE = os.path.join(os.path.dirname(__file__), "_optcache")
-SYMBOLS = ["IBIT", "GLD", "SMH"]
+SYMBOLS = ["IBIT", "GLD", "USO"]
 EXPIRY = date(2026, 9, 18)
 REGULAR_MINUTES = 390
 DECISION_MINUTE = 10 * 60  # 10:00, first fire
@@ -590,7 +590,7 @@ def analyze(cfg) -> pd.DataFrame:
 def report(rows: pd.DataFrame) -> None:
     print(f"\nContract-gate backtest (Sep-18 2026, {rows['symbol'].nunique()} symbols, "
           f"{len(rows)} sessions / Aug 1-27)")
-    print(f"contract-gate gate outcomes vs realized option outcome:")
+    print("contract-gate gate outcomes vs realized option outcome:")
     header = (f"{'contract gate':26s} {'rej':>5s} {'kept':>5s} {'kept WIN':>9s} "
               f"{'rej WIN':>8s} {'kept LOSS':>10s} {'kept NOFILL':>12s}  verdict")
     print(header)
@@ -635,7 +635,7 @@ def report(rows: pd.DataFrame) -> None:
             print(f"  {r['symbol']:6s} {r['day']:11s} {fill_str:17s} {r['entry_opt']:>8.2f}  "
                   f"{exit_str:17s} {r['exit_opt']:>7.2f}  {r['opt_ret']:>+6.1%}  {r['outcome']}")
 
-        print(f"\nOption-band entry prediction: at order placement (10:00) vs. at the moment it filled:")
+        print("\nOption-band entry prediction: at order placement (10:00) vs. at the moment it filled:")
         header2 = (f"  {'symbol':6s} {'day':11s} {'placed $':>9s} {'src':>4s}  {'filled $':>9s} "
                    f"{'src':>4s}  {'actual fill $':>13s}  {'placed->fill Δ':>14s}")
         print(header2)

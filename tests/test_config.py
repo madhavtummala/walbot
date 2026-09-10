@@ -24,7 +24,7 @@ social:
 algorithms:
   rally_rotation:
     momentum_lookback_days: 42
-    max_longs: 3
+    rebalance_threshold: 0.05
 """,
         encoding="utf-8",
     )
@@ -93,7 +93,7 @@ data_sources:
     assert config.alpaca_api_secret == "paper-secret"
     assert config.symbols == ["AAA", "BBB"]
     assert config.momentum_lookback_days == 42
-    assert config.max_longs == 3
+    assert config.rebalance_threshold == 0.05
     # The kill switch is env-only now: a deployment brake, not a dashboard control, so a
     # runtime: block in the config document no longer turns it on.
     assert config.kill_switch is False
@@ -309,7 +309,7 @@ algorithm_bot:
 algorithms:
   rally_rotation:
     momentum_lookback_days: 126
-    max_longs: 4
+    rebalance_threshold: 0.07
 """,
         encoding="utf-8",
     )
@@ -339,7 +339,7 @@ tradable_universe:
 
     assert config.symbols == ["SPY", "QQQ", "GLD"]
     assert config.momentum_lookback_days == 126
-    assert config.max_longs == 4
+    assert config.rebalance_threshold == 0.07
 
 
 def test_the_kill_switch_is_an_environment_brake_not_a_config_key(tmp_path, monkeypatch) -> None:

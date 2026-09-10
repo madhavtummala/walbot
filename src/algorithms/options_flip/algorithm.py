@@ -121,6 +121,9 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
             needs_state=True,
             needs_option_chains=True,
             needs_premarket=True,
+            # The exit prices against what the position actually cost, and a limit buy fills at
+            # or below its price -- so the bid is an upper bound on the cost, never the cost.
+            needs_cost_basis=True,
         )
 
     def plan(self, context: AlgorithmContext) -> AlgorithmPlan:
@@ -188,7 +191,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
                 held_contract, context, cfg, session, under_now=underlying_now,
                 delta=delta, mark=mark, under_translation=under_translation,
             )
-            return plan_symbol(
+            outcome = plan_symbol(
                 symbol, memory=memory, held_contract=held_contract,
                 direction=str(memory.get("direction") or ""), contract=None,
                 contracts=int(memory.get("contracts", 1) or 1),
@@ -199,6 +202,11 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
                 target_premium=float(band.get("target", 0.0)) or None,
                 sell_ok=sell_ok,
             )
+            # The band re-predicts every run regardless of state, so a held position should not go
+            # dark once it fills -- same estimate shape as the flat/bidding case, below.
+            return replace(outcome, estimate=_held_estimate_row(
+                memory, band, mark, exit_level, sell_ok,
+            ))
 
         history, today = _split_sessions(intraday, session["market_day"])
         # ── gate 1: is the bull thesis intact today? ──────────────────────────────────
@@ -422,13 +430,33 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
         run which correctly did nothing, and which a cron would otherwise lose on every quiet
         fire. (Rally Rotation has the opposite bug for the same reason: its eligibility window is
         empty because dashboard previews never reach ``execute``.)
+
+        Order ids are written *as the reconciler places them*, not once it returns. A broker
+        error partway through leaves the orders it already placed live at the broker, and ids
+        that only landed on a clean return would be lost with the exception -- so the next run
+        would read empty state and submit the whole book again.
         """
         state = dict(plan.state or {})
-        outcome = reconcile_orders(
-            plan.desired_orders, brokerage, dict(state.get(ORDER_IDS_KEY) or {})
-        )
+        state_key = algorithm_state_key(self.algorithm_id, getattr(config, "account_id", ""))
+
+        def persist(order_ids: dict[str, str]) -> None:
+            state[ORDER_IDS_KEY] = order_ids
+            save_state(state_key, state)
+
+        try:
+            outcome = reconcile_orders(
+                plan.desired_orders,
+                brokerage,
+                dict(state.get(ORDER_IDS_KEY) or {}),
+                persist=persist,
+            )
+        except Exception:
+            # Whatever ``persist`` last wrote stands: it names every order that reached the
+            # broker before the failure, which is exactly what the next run needs to pick up.
+            logger.exception("Order reconciliation failed; recorded order ids are up to date")
+            raise
         state[ORDER_IDS_KEY] = outcome["order_ids"]
-        save_state(algorithm_state_key(self.algorithm_id, getattr(config, "account_id", "")), state)
+        save_state(state_key, state)
         return {
             "strategy": plan.strategy,
             "mode": "lifecycle",
@@ -708,6 +736,29 @@ def _estimate_row(contract, levels, outcomes, profit, ceiling, contracts, regime
     }
 
 
+def _held_estimate_row(memory, band, mark: float, exit_level: float, sell_ok: bool) -> dict[str, Any]:
+    """What the deck needs to judge a held position, refreshed every run like the flat estimate.
+
+    Unlike :func:`_estimate_row`, there is no contract to price scenarios from -- the entry
+    already happened -- so this reports the exit side only: the re-predicted band, and where the
+    position sits against its own fill.
+    """
+    fill_price = float(memory.get("fill_price", 0.0) or 0.0)
+    return {
+        "contract": str(memory.get("contract", "")),
+        "fill_price": fill_price,
+        "mark": mark,
+        "unrealised_pct": (mark / fill_price - 1.0) if fill_price > 0 and mark > 0 else 0.0,
+        "target_underlying": exit_level,
+        "target_premium": float(band.get("target", 0.0)),
+        "band_source": str(band.get("source") or "none"),
+        "band_sample": int(band.get("sample", 0)),
+        "sell_ok": sell_ok,
+        "sessions_held": int(memory.get("sessions_held", 0) or 0),
+        "gate_failed_streak": int(memory.get("gate_failed_streak", 0) or 0),
+    }
+
+
 def _split_sessions(intraday, market_day: str):
     """``(history, today)`` -- past sessions and this one, in the shape :mod:`.band` wants.
 
@@ -799,8 +850,12 @@ def _sell_ok(daily, today, price: float, cfg) -> bool:
     ``_plan_one`` short-circuits before the entry gates for a held position, so the regime has to
     be checked here rather than assumed -- a position's bracket must not keep asking a premium
     target the market is no longer expected to pay.
+
+    ``for_exit=True`` -- only the multi-day trend (``Above the trend``) can close this gate here;
+    same-day noise (``Holding VWAP``, ``Open not a gap down``) is reported but not acted on. See
+    ``bull_regime``'s docstring for the measured reason.
     """
-    eligible, _, _ = bull_regime(daily, today, price=price, config=cfg)
+    eligible, _, _ = bull_regime(daily, today, price=price, config=cfg, for_exit=True)
     return bool(eligible)
 
 
@@ -817,14 +872,23 @@ def _refresh_held(memory, held_contract, context, session, cfg) -> dict[str, Any
     mark = float(context.latest_prices.get(held_contract, 0.0) or 0.0)
     if mark > 0:
         memory["mark"] = mark
-    if not memory.get("fill_price"):
-        # Opened outside this algorithm, or state was lost. The mark is the only anchor left, and
-        # anchoring the stop to it is conservative: it sets the floor from here rather than
-        # pretending to know a cost basis we do not have.
+    # The broker's own average entry price, which is the only account of what this position
+    # actually cost. Recorded on every run rather than only when missing, so a partial fill or a
+    # second lot -- both of which move the average -- are picked up rather than frozen at
+    # whatever the first run saw.
+    broker_cost = float((context.cost_basis or {}).get(held_contract, 0.0) or 0.0)
+    if broker_cost > 0:
+        memory["fill_price"] = broker_cost
+    elif not memory.get("fill_price"):
+        # No cost basis and nothing remembered: opened outside this algorithm, state was lost, or
+        # the brokerage cannot report one. The mark is the only anchor left, and anchoring the
+        # stop to it is conservative only while the mark sits below the true cost -- so this is a
+        # fallback worth seeing in the log rather than a normal path.
         memory["fill_price"] = mark
         memory.setdefault("filled_day", session["market_day"])
         logger.warning(
-            "Options Flip found %s held with no recorded fill; anchoring the stop to the mark",
+            "Options Flip found %s held with no cost basis from the broker and no recorded "
+            "fill; anchoring the stop to the mark instead",
             held_contract,
         )
     filled_day = str(memory.get("filled_day") or session["market_day"])

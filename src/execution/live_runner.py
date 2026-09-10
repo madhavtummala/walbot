@@ -37,9 +37,11 @@ def run_once(account_id: str | None = None, strategy: str | None = None) -> None
     # No global enable check. Whether this algorithm trades is the binding's own switch, and
     # the scheduler already refused to call run_once if it were off -- a second, dashboard-wide
     # flag could only disagree with the thing the user actually toggled.
-    if config.kill_switch:
-        logger.warning("KILL_SWITCH is set in the environment. Exiting without sending orders.")
-        return
+    #
+    # The kill switch and the paper-only restriction are not tested here any more: they are
+    # asserted in ``execute_algorithm``, which is the one point every order path crosses.
+    # Enforcing them in this function only ever protected this function, and the dashboard and
+    # the MCP tools do not come through it.
     logger.info("Active strategy: %s", STRATEGY_LABELS.get(strategy, strategy))
 
     try:
@@ -56,20 +58,16 @@ def run_once(account_id: str | None = None, strategy: str | None = None) -> None
     # dashboard make, and like them it places nothing and remembers nothing.
     plan = run_algorithm(strategy, config, brokerage=brokerage)
 
-    if plan.metadata["requirements"].paper_only and "paper-api.alpaca.markets" not in str(config.alpaca_base_url):
-        logger.warning(
-            "%s is restricted to Alpaca paper trading by default. Configured endpoint %s is not paper; exiting without orders.",
-            STRATEGY_LABELS.get(strategy, strategy),
-            config.alpaca_base_url,
-        )
-        return
-
     logger.info("%s metadata: %s", STRATEGY_LABELS.get(strategy, strategy), plan.metadata)
     log_signals(plan.signals, plan.latest_prices)
 
     # Place it. The scheduled flow goes straight here; the MCP flow pauses in between so an
     # agent can validate -- and edit -- the plan first.
-    outcome = execute_algorithm(plan, config, brokerage)
+    try:
+        outcome = execute_algorithm(plan, config, brokerage)
+    except pipeline.TradingRefused as refusal:
+        logger.warning("%s: %s", STRATEGY_LABELS.get(strategy, strategy), refusal.reason)
+        return
     log_portfolio(outcome["final_weights"], outcome["equity"])
     log_orders(outcome["order_results"])
     log_position_changes(outcome["order_results"])

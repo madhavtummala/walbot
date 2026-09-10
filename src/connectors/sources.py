@@ -1,8 +1,7 @@
 """Which providers to try, in what order, and whether one is usable at all.
 
-A *category* names a provider-configuration section and a rate-limit namespace -- not a cache
-category. Bars all land in one store keyed by resolution, because intraday and EOD were never
-two kinds of data, only two grids. See ``src/data/duckdb_store.py``.
+A *category* names a provider-configuration section and a rate-limit namespace, not a cache
+category -- bars all land in one store keyed by resolution. See ``src/data/duckdb_store.py``.
 """
 
 from __future__ import annotations
@@ -116,13 +115,9 @@ def _access_token(config: Config, category: str, provider: str) -> str:
 def _schwab_token(config: Config, category: str) -> str:
     """Schwab bearer token, refreshed via OAuth when app credentials are configured.
 
-    Schwab access tokens last ~30 minutes, so a statically configured token goes stale almost
-    immediately; it is kept only as a fallback for manual testing.
-
-    Gated on the app credentials alone, not on a configured refresh token: consent completed
-    through the dashboard stores its refresh token in the state store, which is where
-    ``SchwabSession`` looks when the config has none. Requiring SCHWAB_REFRESH_TOKEN here made
-    the connector unusable for exactly the flow the dashboard exists to drive.
+    Gated on the app credentials alone, not on a configured refresh token: dashboard-driven
+    consent stores its refresh token in the state store, which is where ``SchwabSession`` looks
+    when the config has none.
     """
     if getattr(config, "schwab_app_key", "") and getattr(config, "schwab_app_secret", ""):
         from src.brokerages.schwab.client import SchwabAuthError, SchwabSession
@@ -130,8 +125,6 @@ def _schwab_token(config: Config, category: str) -> str:
         try:
             return SchwabSession(config).access_token()
         except SchwabAuthError as error:
-            # No consent yet, or the refresh token expired: fall through to the ladder rather
-            # than taking down the whole fetch.
             logger.info("Schwab OAuth session unavailable, falling back: %s", error)
             return ""
     return _access_token(config, category, "schwab")

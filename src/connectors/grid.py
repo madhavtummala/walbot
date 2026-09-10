@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import logging
 import math
+from datetime import datetime, timedelta, timezone
 
 from ..core.config import Config
-from ..data.bars import TRADING_MINUTES_PER_DAY
+from ..data.bars import TRADING_MINUTES_PER_DAY, calendar_days_for
 from ..data.duckdb_store import DAILY_INTERVAL_MINUTES
 
 logger = logging.getLogger(__name__)
@@ -36,12 +37,11 @@ def default_bar_minutes(config: Config) -> int:
 def resolve_bar_minutes(provider: str, wanted: int) -> int:
     """The finest grid ``provider`` can serve at or below ``wanted``.
 
-    Coarser rather than an error: horizons are stated in minutes now, so a provider that
-    cannot hit the requested grid still answers the question, just with less resolution.
+    Coarser rather than an error: a provider that cannot hit the requested grid still answers
+    the question, just with less resolution.
     """
-    # A daily request is not on the intraday grid. ``PROVIDER_BAR_MINUTES`` lists the minute
-    # frequencies a vendor serves, so resolving 1440 against Alpaca's ``(1, 5, 15, 30, 60)``
-    # picked 60 and quietly turned every daily fetch into an hourly one.
+    # A daily request (>= DAILY_INTERVAL_MINUTES) is not on the intraday grid at all -- it must
+    # not be resolved against PROVIDER_BAR_MINUTES, which lists only intraday frequencies.
     if int(wanted) >= DAILY_INTERVAL_MINUTES:
         return DAILY_INTERVAL_MINUTES
     supported = PROVIDER_BAR_MINUTES.get(provider.lower())
@@ -54,9 +54,8 @@ def resolve_bar_minutes(provider: str, wanted: int) -> int:
 def bars_for_minutes(lookback_minutes: int, bar_minutes: int) -> int:
     """How many bars of ``bar_minutes`` a window of ``lookback_minutes`` of market time spans.
 
-    Lookbacks count minutes the market was open, so a 4800-minute window is about twelve
-    sessions -- and asking a provider for 4800/5 = 960 five-minute bars would fetch nearly
-    four times what it needs. One session is 390 minutes however finely it is sliced.
+    Lookbacks count minutes the market was open, so this scales by session length
+    (``TRADING_MINUTES_PER_DAY``), not by wall-clock time.
     """
     if lookback_minutes <= 0 or bar_minutes <= 0:
         return 0
@@ -64,3 +63,17 @@ def bars_for_minutes(lookback_minutes: int, bar_minutes: int) -> int:
     per_session = max(TRADING_MINUTES_PER_DAY // bar_minutes, 1)
     return max(int(math.ceil(sessions * per_session)) + 1, 1)
 
+
+def history_window(
+    interval_minutes: int,
+    lookback_bars: int,
+    *,
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+) -> tuple[datetime, datetime, bool]:
+    """``(start, end, is_daily)`` for a bars request, defaulting the range from the lookback."""
+    daily = interval_minutes >= DAILY_INTERVAL_MINUTES
+    end = end_date or datetime.now(timezone.utc)
+    span_days = lookback_bars if daily else calendar_days_for(lookback_bars * interval_minutes)
+    start = start_date or end - timedelta(days=max(span_days, 1))
+    return start, end, daily

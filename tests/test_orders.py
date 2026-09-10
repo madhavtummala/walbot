@@ -1,8 +1,12 @@
 from __future__ import annotations
 from typing import Any
 
-from src.core import orders as orders
-from src.core.interfaces import OrderRequest
+import pytest
+
+from src.core import orders as orders, pipeline
+from src.core.config import Config
+from src.core.interfaces import AlgorithmRequirements, OrderRequest
+from src.data.state_store import ephemeral_state
 
 
 class FakeBrokerage:
@@ -183,6 +187,32 @@ def test_sync_positions_closes_fractional_holding_exactly() -> None:
     )
 
     assert brokerage.submitted == [("SPY", "sell", 2.5)]
+
+
+def test_a_position_worth_less_than_the_minimum_can_still_be_closed() -> None:
+    """The trade floors suppress noise, and closing a position is never noise.
+
+    A $30 holding can never move far enough to clear a $50 floor, so applying the floor to an
+    exit stranded it permanently -- ``MODE_TARGET`` says the intent list *is* the portfolio, and
+    the book would never reach it. Partial fills and splits produce these holdings routinely.
+    """
+    planned = orders.plan_share_orders(
+        {"AAPL": 10.0}, {"AAPL": 3.0}, {"AAPL": 0.0}, 100_000.0,
+        min_trade_dollars=50.0, rebalance_threshold=0.02,
+    )
+
+    assert [(o["symbol"], o["action"], o["quantity"]) for o in planned] == [("AAPL", "sell", 3.0)]
+
+
+def test_a_small_trim_is_still_suppressed() -> None:
+    """The other side of it: the floors still do their job on an adjustment that leaves the
+    position open, which is the case they were written for."""
+    planned = orders.plan_share_orders(
+        {"AAPL": 10.0}, {"AAPL": 100.0}, {"AAPL": 98.0}, 100_000.0,
+        min_trade_dollars=50.0, rebalance_threshold=0.02,
+    )
+
+    assert planned == []
 
 
 class RejectingBrokerage(FakeBrokerage):
@@ -415,3 +445,61 @@ def test_funding_drops_a_leg_it_cannot_clear_the_minimum_for() -> None:
 
 def test_funding_an_empty_batch_is_a_no_op() -> None:
     assert orders.fund_planned_orders([], buying_power=1_000.0) == ([], [], {})
+
+
+def test_a_paper_only_algorithm_is_refused_on_a_live_non_alpaca_account() -> None:
+    """The gate this replaced sniffed for ``paper-api.alpaca.markets`` in ``alpaca_base_url``.
+
+    That field is meaningless for a Schwab account -- and worse than meaningless, because it
+    defaults to the Alpaca *paper* URL, so the check passed for every non-Alpaca account and a
+    paper-only strategy could trade real money. The brokerage answers for itself now.
+    """
+    from src.brokerages.schwab.brokerage import SchwabBrokerage
+
+    config = Config(account_id="schwab_live")
+    # Untouched by a Schwab account, so it still holds the paper default the old check read.
+    assert "paper-api.alpaca.markets" in config.alpaca_base_url
+
+    with pytest.raises(pipeline.TradingRefused, match="restricted to paper trading"):
+        pipeline.assert_tradable(
+            AlgorithmRequirements(paper_only=True),
+            config,
+            SchwabBrokerage.__new__(SchwabBrokerage),
+        )
+
+
+def test_a_paper_only_algorithm_runs_on_the_paper_book() -> None:
+    from src.brokerages.paper.brokerage import PaperBrokerage
+
+    with ephemeral_state():
+        pipeline.assert_tradable(
+            AlgorithmRequirements(paper_only=True),
+            Config(account_id="local_paper"),
+            PaperBrokerage(Config(account_id="local_paper")),
+        )
+
+
+def test_the_kill_switch_refuses_every_order_path() -> None:
+    """Asserted in ``execute_algorithm`` rather than in one driver, so the dashboard and the MCP
+    tools cannot reach the broker without crossing it."""
+    from src.brokerages.paper.brokerage import PaperBrokerage
+
+    with ephemeral_state():
+        with pytest.raises(pipeline.TradingRefused, match="KILL_SWITCH"):
+            pipeline.assert_tradable(
+                AlgorithmRequirements(),
+                Config(account_id="local_paper", kill_switch=True),
+                PaperBrokerage(Config(account_id="local_paper")),
+            )
+
+
+def test_a_brokerage_that_does_not_answer_is_treated_as_live() -> None:
+    """The conservative direction: the cost of guessing wrong is a paper-only strategy trading
+    real money, so silence means live."""
+    class Undeclared(pipeline.Brokerage):
+        def get_account_state(self): return {}
+        def get_positions(self): return {}
+        def submit_order(self, request): return {}
+        def cancel_all_orders(self): return None
+
+    assert Undeclared().is_paper is False

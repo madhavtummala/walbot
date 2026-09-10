@@ -1,20 +1,12 @@
 """What this algorithm remembers between runs, and the decisions that need it.
 
-Everything here reads or writes ``AlgorithmContext.state``. Nothing else in the package does --
-which is the point of gathering it: the pure market maths and the path-dependent decisions were
-previously interleaved under a module named "stateful" that was mostly stateless.
+Everything here reads or writes ``AlgorithmContext.state``; nothing else in the package does.
+Mutated in place and handed back on the plan -- persisted by ``execute``, only if orders went
+out.
 
-The memory is small and deliberately so: one clock per kind of decision, and a short window of
-per-symbol history. All of it is mutated in place and handed back on the plan; none of it is
-persisted here. That happens in ``execute``, and only if orders actually went out.
-
-**Everything here is measured in market days, never in runs.** That is the one invariant this
-module exists to hold. Counting runs made every interval below a function of the binding's cron:
-under ``15 10-14 * * 1-5`` -- five fires a session -- "ranked in the top 3 for 3 runs" was
-satisfied by 36 minutes of one morning, and "re-rank every 5 days" re-ranked daily. Worse, the
-count only advances when the algorithm actually runs, so pausing a binding froze every clock
-mid-stride and editing a cron silently redefined all of them at once. Bursty DCA had already
-settled this for accrual: the schedule controls the *opportunity* to act, never the rate.
+**Everything here is measured in market days, never in runs.** Counting runs makes every
+interval a function of the binding's cron cadence rather than the config: the schedule controls
+the *opportunity* to act, never the rate.
 """
 
 from __future__ import annotations
@@ -30,15 +22,9 @@ logger = logging.getLogger(__name__)
 
 
 def market_day(as_of: datetime) -> str:
-    """The trading day a run belongs to, as an ISO date in market-local time.
-
-    Market-local rather than UTC, and the same :data:`MARKET_TZ` the cron scheduler fires
-    against, so a run and the day it is filed under can never disagree. Under UTC a 16:00 ET
-    fire in summer lands on the next calendar day and would open a second bucket for a session
-    that had already been recorded.
-
-    A naive timestamp is read as market time rather than as UTC. Replays hand this method bar
-    stamps, which are market-local by construction.
+    """The trading day a run belongs to, as an ISO date in market-local time -- not UTC, so a
+    late-session fire can't land on the next calendar day. A naive timestamp is read as market
+    time; replays hand this bar stamps, which are market-local by construction.
     """
     moment = as_of.astimezone(MARKET_TZ) if as_of.tzinfo else as_of.replace(tzinfo=MARKET_TZ)
     return moment.date().isoformat()
@@ -60,17 +46,10 @@ def _weekdays_inclusive(first: date, last: date) -> int:
 def sessions_since(last_day: str, as_of: datetime) -> int:
     """Sessions elapsed since ``last_day``, not counting the day itself.
 
-    Weekdays stand in for sessions. Elapsed time is what a throttle should measure -- a binding
-    that was paused for a fortnight has to re-rank the moment it comes back, and a count of runs
-    says it is not due yet -- but *calendar* days are the wrong unit for it: a 3-day interval set
-    on a Friday would be satisfied by Monday, throttling Tuesday-to-Thursday decisions while
-    waving every Friday-to-Monday one straight through.
-
-    Weekdays rather than a real exchange calendar, so the arithmetic stays a pure function of two
-    dates and a replay throttles identically to the live path. The cost is that a holiday inside
-    the window counts as a session, so an interval can come due one day early a handful of times
-    a year. That is a rounding error against a knob measured in weeks, and it is bounded: it can
-    only ever make the throttle *shorter*, never let it run past its interval.
+    Weekdays stand in for sessions rather than a real exchange calendar, so the arithmetic stays
+    a pure function of two dates and a replay throttles identically to the live path. A holiday
+    inside the window counts as a session, so an interval can come due up to a day early -- a
+    rounding error against a knob measured in weeks, and bounded to only ever shorten a wait.
     """
     start = date.fromisoformat(last_day)
     end = date.fromisoformat(market_day(as_of))
@@ -80,16 +59,10 @@ def sessions_since(last_day: str, as_of: datetime) -> int:
 def action_due(state: dict[str, Any], action: str, interval_days: int, as_of: datetime) -> bool:
     """Whether ``action`` may be taken now, given its own interval in trading days.
 
-    One clock per *kind* of decision rather than one for the whole algorithm. The run cadence and
-    the decision cadence had collapsed into each other: the algorithm re-ranked, re-sized and
-    rotated on every fire, against a score whose slowest horizon is twelve sessions.
-
-    A cold clock -- no record, or the ``last_<action>_run`` counter written by the run-indexed
-    predecessor -- reads as due. Re-ranking once on the first run after an upgrade is the safe
-    direction: the alternative is inventing a start date for a clock nobody started.
-
-    ``state`` is mutated by :func:`record_action`, not here, so a caller that asks and then
-    decides not to act does not restart the clock.
+    One clock per *kind* of decision, not one for the whole algorithm. A cold clock (no record)
+    reads as due -- acting once on the first run after an upgrade is the safe direction, rather
+    than inventing a start date for a clock nobody started. Mutated by :func:`record_action`,
+    not here, so asking and then deciding not to act doesn't restart the clock.
     """
     interval = max(interval_days, 0)
     if interval <= 0:
@@ -151,23 +124,11 @@ def _track(
 ) -> dict[str, dict[str, int]]:
     """Fold this run into a per-symbol window of the last ``eligibility_window`` market days.
 
-    Keyed by day rather than appended per run, which is the whole point: under a cron that fires
-    five times a session the old list counted one morning as five days of evidence, so the
-    settling period a name had to serve was set by the schedule rather than by the config.
-
-    Within a day the **last** run wins. A day is one observation of a daily-bar test, and the
-    latest look is the best-informed one -- rather than the first, which would freeze the day at
-    the open, or "eligible at any point today", which would let a name that led for one bar and
-    faded bank a full day of credit.
-
-    Only days this algorithm actually ran are recorded. Absent days are not filled in as failures
-    because they are not evidence of anything: a paused binding should make a name take longer to
-    qualify, never disqualify it retroactively.
-
-    A window written by the run-indexed predecessor is a plain list with no days attached, so it
-    is dropped rather than guessed at. Both gates read an empty window as "not watched long
-    enough", which holds the book still and makes new entries wait out the settling period -- the
-    safe direction on both sides, and it refills itself within ``eligibility_window`` sessions.
+    Keyed by day, not appended per run, so a cron that fires several times a session doesn't
+    count one morning as several days of evidence. Within a day the **last** run wins, as the
+    best-informed look. Only days this algorithm actually ran are recorded -- an absent day is
+    not evidence of failure, so a paused binding makes a name take longer to qualify rather than
+    disqualifying it retroactively.
     """
     window = max(config.eligibility_window, 1)
     today = market_day(as_of)
@@ -191,16 +152,10 @@ def resolve_positions(
 ) -> set[str]:
     """Which ETFs the book holds: keep what still ranks, fill free slots, then displace.
 
-    Two kinds of hesitance, doing different jobs.
-
-    *Rank* is the cheap one. A name enters only from inside ``entry_rank_max`` but is kept while
-    it stays inside ``exit_rank_max``, so an incumbent that slips a place or two is not sold for
-    it. Ejecting on the entry rank instead meant a holding that drifted to 7th of 14 on scores
-    separated by 0.15 was sold and the freed slot refilled from the top with no margin at all.
-
-    *Score* is the one that costs something to cross. Displacing an incumbent -- as opposed to
-    filling an empty slot -- needs ``min_score_delta_to_replace`` of daylight, so a challenger
-    that is ahead by a rounding error waits.
+    Two kinds of hesitance. *Rank*: a name enters only from inside ``entry_rank_max`` but is
+    kept while it stays inside the wider ``exit_rank_max``, so slipping a place or two doesn't
+    sell it. *Score*: displacing an incumbent (not filling an empty slot) needs
+    ``min_score_delta_to_replace`` of daylight, so a challenger ahead by a rounding error waits.
     """
     slots = max(config.max_positions, 0)
     delta = max(config.min_score_delta_to_replace, 0.0)

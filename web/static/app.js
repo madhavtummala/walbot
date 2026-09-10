@@ -2535,7 +2535,7 @@ function accountPositionsTable(positions) {
     <div class="tableWrap is-scroll">
       <table class="dataTable">
         <thead>
-          <tr><th>Symbol</th><th class="num">Qty</th><th class="num">Avg</th><th class="num">Value</th><th class="num">P/L</th></tr>
+          <tr><th>Symbol</th><th class="num">Qty</th><th class="num">Avg</th><th class="num">Current</th><th class="num">Value</th><th class="num">P/L</th></tr>
         </thead>
         <tbody>
           ${positions.rows.map((row) => `
@@ -2543,6 +2543,7 @@ function accountPositionsTable(positions) {
               <td><strong>${escapeHtml(row.symbol)}</strong></td>
               <td class="num">${escapeHtml(num(row.qty, row.qty % 1 ? 3 : 0))}</td>
               <td class="num">${escapeHtml(money(row.avg_entry_price, 2))}</td>
+              <td class="num">${row.current_price ? escapeHtml(money(row.current_price, 2)) : "--"}</td>
               <td class="num">${escapeHtml(money(row.market_value, 2))}</td>
               <td class="num ${row.unrealized_pl >= 0 ? "gain" : "loss"}">${escapeHtml(money(row.unrealized_pl, 2))}
                 <span class="tableNote">${escapeHtml(percent(row.unrealized_plpc))}</span></td>
@@ -2815,6 +2816,7 @@ function renderOverviewTab(body, strategy, deployment) {
           <h2>Orders this algorithm placed</h2>
           <div class="cardHeadActions">
             ${deployment ? `<span class="cardHint">on <a class="factLink" href="#/account/${escapeHtml(deployment.account_id)}">${escapeHtml(accountLabel(deployment.account_id))}</a></span>` : ""}
+            <button class="ctl" type="button" id="clearAlgoOrdersButton">Clear</button>
             <button class="ctl" type="button" id="refreshAlgoOrdersButton">Refresh</button>
           </div>
         </div>
@@ -2962,6 +2964,28 @@ async function ensureAlgorithmActivity(strategyKey) {
     state.algorithmActivityLoading[strategyKey] = false;
     render();
   }
+}
+
+//: ensureAlgorithmActivity is cache-first (see above), so a "Refresh" click has to drop the
+//: cached copy before asking again -- calling it directly would just see the cache and do
+//: nothing, which is why the button used to appear to do nothing at all.
+function refreshAlgorithmActivity(strategyKey) {
+  delete state.algorithmActivity[strategyKey];
+  ensureAlgorithmActivity(strategyKey);
+}
+
+//: Clears this algorithm's own journal server-side -- not the broker's order history, which
+//: the account page's "Recent orders" reads directly from the broker and this never touches.
+async function clearAlgorithmActivity(strategyKey) {
+  try {
+    state.algorithmActivity[strategyKey] = await api(
+      `/api/algorithm-activity/clear?strategy=${encodeURIComponent(strategyKey)}`,
+      { method: "POST", timeoutMs: 8000 });
+  } catch (error) {
+    showToast(`Could not clear: ${error.message}`);
+    return;
+  }
+  render();
 }
 
 async function ensurePositions(accountId) {
@@ -3171,10 +3195,8 @@ function wireEvents() {
       else state.expandedSignals.add(symbol);
       return render();
     }
-    if (event.target.closest("#refreshAlgoOrdersButton")) {
-      delete state.algorithmActivity[route.id];
-      return ensureAlgorithmActivity(route.id);
-    }
+    if (event.target.closest("#refreshAlgoOrdersButton")) return refreshAlgorithmActivity(route.id);
+    if (event.target.closest("#clearAlgoOrdersButton")) return clearAlgorithmActivity(route.id);
     if (event.target.closest("#refreshUniverseButton")) return recommendUniverse();
     if (event.target.closest("[data-apply-universe]")) return applyUniverseProposal();
     if (event.target.closest('[data-role="power"]')) {

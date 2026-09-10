@@ -174,14 +174,19 @@ def plan_share_orders(
             diff = round(diff, FRACTIONAL_SHARE_PRECISION)
         trade_dollars = abs(diff) * price
 
-        # Closing a position is not a rebalance, so ``rebalance_threshold`` does not gate it:
-        # a holding smaller than the threshold can never move far enough to clear it, and
-        # would be held forever by a rule meant to suppress small adjustments. The absolute
-        # ``min_trade_dollars`` floor still applies, so this cannot spray sub-minimum orders.
+        # Closing a position is not a rebalance, and neither floor gates it. Both exist to
+        # suppress *noise trades* -- adjustments too small to be worth their spread -- and
+        # closing a position is never noise: it is the difference between holding a name and
+        # not holding it. A holding worth less than the floor can never move far enough to
+        # clear it, so applying either rule here stranded the position permanently. In
+        # ``MODE_TARGET`` that quietly broke the contract that the intent list *is* the
+        # portfolio: the book never reached the target, and the deck reported ``exit`` on a
+        # symbol that would still be held next month. Every partial fill and every split
+        # manufactures one of these.
         closing = abs(symbol_target_shares) <= SHARE_EPSILON and abs(current_shares) > SHARE_EPSILON
-        floor = min_trade_dollars if closing else min_rebalance_dollars
+        floor_dollars = 0.0 if closing else min_rebalance_dollars
 
-        if abs(diff) <= SHARE_EPSILON or trade_dollars < floor:
+        if abs(diff) <= SHARE_EPSILON or trade_dollars < floor_dollars:
             logger.info(
                 "No trade required for %s: target_shares=%s current_shares=%s drift_dollars=%.2f",
                 symbol,

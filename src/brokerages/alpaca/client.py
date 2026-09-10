@@ -12,9 +12,8 @@ except ImportError:  # type: ignore
     pd = None
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import ContractType, OrderSide, OrderType, PositionIntent, TimeInForce
+from alpaca.trading.enums import OrderSide, OrderType, PositionIntent, TimeInForce
 from alpaca.trading.requests import (
-    GetOptionContractsRequest,
     GetOrdersRequest,
     LimitOrderRequest,
     MarketOrderRequest,
@@ -23,8 +22,8 @@ from alpaca.trading.requests import (
     StopOrderRequest,
 )
 from alpaca.data.enums import DataFeed
-from alpaca.data.historical import OptionHistoricalDataClient, StockHistoricalDataClient
-from alpaca.data.requests import OptionLatestQuoteRequest, StockBarsRequest
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from src.core.config import Config
@@ -47,18 +46,6 @@ def create_data_client(config: Config) -> StockHistoricalDataClient:
         api_key=config.alpaca_data_api_key or config.alpaca_api_key,
         secret_key=config.alpaca_data_api_secret or config.alpaca_api_secret,
     )
-
-
-def create_option_data_client(config: Config) -> OptionHistoricalDataClient:
-    return OptionHistoricalDataClient(
-        api_key=config.alpaca_data_api_key or config.alpaca_api_key,
-        secret_key=config.alpaca_data_api_secret or config.alpaca_api_secret,
-    )
-
-
-def get_account_equity(trading_client: TradingClient) -> float:
-    account = trading_client.get_account()
-    return float(account.equity)
 
 
 def get_positions(trading_client: TradingClient) -> dict[str, float]:
@@ -331,56 +318,6 @@ def get_historical_intraday_bars(
         logger.debug("Fetched %s intraday bars for %s", len(df), symbol)
 
     return bars_by_symbol
-
-
-def submit_market_order(trading_client: TradingClient, symbol: str, side: str, qty: float):
-    side = side.lower()
-    if side not in {"buy", "sell"}:
-        raise ValueError("side must be 'buy' or 'sell'")
-    if qty <= 0:
-        raise ValueError("qty must be a positive quantity")
-    order = MarketOrderRequest(
-        symbol=symbol,
-        qty=qty,
-        side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
-        time_in_force=TimeInForce.DAY,
-    )
-    return trading_client.submit_order(order_data=order)
-
-
-def get_option_contracts(
-    trading_client: TradingClient,
-    underlying_symbol: str,
-    contract_type: str,
-    expiration_date_gte,
-    expiration_date_lte,
-    strike_price_gte: float | None = None,
-    strike_price_lte: float | None = None,
-    limit: int = 100,
-):
-    request = GetOptionContractsRequest(
-        underlying_symbols=[underlying_symbol],
-        type=ContractType.CALL if contract_type.lower() == "call" else ContractType.PUT,
-        expiration_date_gte=expiration_date_gte,
-        expiration_date_lte=expiration_date_lte,
-        strike_price_gte=str(strike_price_gte) if strike_price_gte is not None else None,
-        strike_price_lte=str(strike_price_lte) if strike_price_lte is not None else None,
-        limit=limit,
-    )
-    response = trading_client.get_option_contracts(request)
-    if hasattr(response, "option_contracts"):
-        return response.option_contracts
-    if hasattr(response, "data"):
-        return response.data
-    return response
-
-
-def get_option_latest_quotes(option_data_client: OptionHistoricalDataClient, symbols: list[str]):
-    if not symbols:
-        return {}
-    request = OptionLatestQuoteRequest(symbol_or_symbols=symbols)
-    response = option_data_client.get_option_latest_quote(request)
-    return response.data if hasattr(response, "data") else response
 
 
 def submit_option_limit_order(

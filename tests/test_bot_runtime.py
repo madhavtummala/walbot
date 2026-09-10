@@ -263,3 +263,92 @@ def test_describe_cron_reads_the_common_shapes_back_in_words() -> None:
 def test_describe_cron_falls_back_to_the_expression_it_cannot_summarise() -> None:
     """Better than prose that quietly drops a field it did not know how to say."""
     assert describe_cron(parse_cron("0 0 1 * *")) == "0 0 1 * *"
+
+
+# --------------------------------------------------------------------------------------
+# Retrying a fire time. The scheduler used to mark a key done *before* the run, so a run
+# that then failed was indistinguishable from one that succeeded -- one data-provider
+# timeout silently skipped that day's trading.
+# --------------------------------------------------------------------------------------
+
+
+def _loop(run_fn, run_key="2026-08-12T11:00"):
+    return bot_runtime._RuntimeLoop(
+        "test", lambda controls: True, run_fn, lambda: 300, lambda: run_key,
+        lambda controls: "acct",
+    )
+
+
+def test_a_failed_run_is_retried_within_its_grace_window() -> None:
+    attempts = []
+
+    def failing(account_id, run_key=""):
+        attempts.append(run_key)
+        raise RuntimeError("data provider timed out")
+
+    loop = _loop(failing)
+    for _ in range(5):
+        key = loop._next_run_key()
+        if key is None:
+            break
+        loop._run_guarded("acct", key)
+
+    assert len(attempts) == bot_runtime.MAX_RUN_ATTEMPTS
+    # And then it is given up on rather than retried for the rest of the window.
+    assert loop._next_run_key() is None
+    assert loop.snapshot()["last_missed_key"] == "2026-08-12T11:00"
+
+
+def test_a_successful_run_is_not_repeated() -> None:
+    """The property the original design got right and must keep: one fire, one run."""
+    attempts = []
+    loop = _loop(lambda account_id, run_key="": attempts.append(run_key))
+
+    for _ in range(4):
+        key = loop._next_run_key()
+        if key is None:
+            break
+        loop._run_guarded("acct", key)
+
+    assert attempts == ["2026-08-12T11:00"]
+    assert loop._next_run_key() is None
+    assert loop.snapshot()["last_missed_key"] == ""
+
+
+def test_a_run_that_succeeds_on_retry_settles_the_key() -> None:
+    attempts = []
+
+    def flaky(account_id, run_key=""):
+        attempts.append(run_key)
+        if len(attempts) == 1:
+            raise RuntimeError("broker 503")
+
+    loop = _loop(flaky)
+    for _ in range(4):
+        key = loop._next_run_key()
+        if key is None:
+            break
+        loop._run_guarded("acct", key)
+
+    assert len(attempts) == 2
+    assert loop.snapshot()["last_error"] == ""
+    assert loop.snapshot()["last_missed_key"] == ""
+
+
+def test_a_new_fire_time_starts_its_attempts_over() -> None:
+    attempts = []
+
+    def failing(account_id, run_key=""):
+        attempts.append(run_key)
+        raise RuntimeError("still down")
+
+    loop = _loop(failing)
+    for _ in range(5):
+        key = loop._next_run_key()
+        if key is None:
+            break
+        loop._run_guarded("acct", key)
+    assert loop._next_run_key() is None
+
+    loop._run_key_fn = lambda: "2026-08-12T15:00"
+    assert loop._next_run_key() == "2026-08-12T15:00"

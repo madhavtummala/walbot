@@ -1,7 +1,7 @@
 """Social and news sentiment views.
 
-Split out of the single ``api_payloads`` module, which had grown to 1253 lines covering nine
-unrelated domains. The public names are unchanged and still importable from ``api_payloads``.
+Split out of the single ``api_payloads`` module. Public names are unchanged and still
+importable from ``api_payloads``.
 """
 
 from __future__ import annotations
@@ -12,17 +12,11 @@ from typing import Any
 import pandas as pd
 
 from ...connectors.sentiment.alpha_vantage import collect_alpha_vantage_news, write_social_trends_csv
-from ...core.config import (
-
-    get_config,
-)
+from ...core.config import get_config
 from ...data.social import load_social_trends_csv
-
-logger = logging.getLogger(__name__)
 from .system import _display_path
 
-
-
+logger = logging.getLogger(__name__)
 
 
 def social_payload(limit: int = 250) -> dict[str, Any]:

@@ -1,14 +1,9 @@
 """What a Rally Rotation run decided about each name, and the gates behind it.
 
-The rows are published on the plan, so they are read three times over: by the deck, by an MCP
-agent reviewing a proposal, and by the backtest recording what a historical run believed. That
-is why the gate results travel as data rather than as a sentence -- a string can be shown but
-not audited.
-
-Two things are worth reading carefully here. Entry and exit gates are *different lists*, so a
-held name is explained against the band it actually has to clear rather than against the one it
-would need to be bought today. And the run-level facts are denormalised onto every row, because
-the hold/rotate pass reads these signals and nothing else.
+Rows are published on the plan and read by the deck, an MCP agent, and the backtest alike, so
+gate results travel as data rather than as a sentence -- a string can be shown but not audited.
+Run-level facts are denormalised onto every row, since the hold/rotate pass reads these signals
+and nothing else.
 """
 
 from __future__ import annotations
@@ -82,29 +77,22 @@ def finalize(
 ) -> dict[str, dict[str, Any]]:
     """Attach the decision and the gates that justify it, once the book is settled.
 
-    ``notes`` carries what the selection pass decided -- the settling period, the slot contest,
-    the re-rank throttle. Those cannot be recovered from the market gates: a name can clear every
-    one of them and still be turned away, and re-deriving a reason here produced confident
-    nonsense ("Rank 1, outside the top 5") whenever it did.
+    ``notes`` carries what the selection pass decided (settling period, slot contest, re-rank
+    throttle) -- not recoverable from the market gates alone, since a name can clear every one
+    and still be turned away.
     """
     defensive = {name.upper() for name in config.defensive_universe}
     for symbol, row in signals.items():
         weight = float(weights.get(symbol, 0.0))
         was_held = symbol in held
-        # Written before the headline reads it: ``dict.update`` evaluates all its values first,
-        # so computing the two together showed every row the *previous* run's weight.
         row["target_weight"] = weight
         row["signal"] = 1 if weight > 0 else 0
         is_defensive = symbol in defensive
         row["defensive"] = is_defensive
-        # One list, for held and unheld alike, because that is what actually decides: a name
-        # that fails these is dropped from the ranking and therefore sold. The view used to show
-        # a holding a separate widened band that nothing consulted.
-        #
-        # The defensive sleeve gets no gates at all, because it is not selected by them: it is
-        # held precisely when nothing else qualifies, so a momentum score decides nothing about
-        # it. It was being scored and gated like a candidate anyway -- SGOV sitting at "5/6"
-        # while holding the entire book, as though one more gate would have changed something.
+        # One gate list for held and unheld alike: a name that fails it is dropped from the
+        # ranking and therefore sold, so a held name is explained against the same band. The
+        # defensive sleeve gets no gates -- it's held precisely when nothing else qualifies, so
+        # a momentum score decides nothing about it.
         if is_defensive:
             checks: list[Check] = []
         else:
@@ -144,9 +132,7 @@ def _headline(action: str, row: dict[str, Any], checks: list[Check], defensive: 
     if action == ACTION_ENTER:
         return f"Rank {rank} - opening" if rank else "Opening"
     if action == ACTION_EXIT:
-        # Every gate passed and it is still leaving. Only the throttle can do that: the run was
-        # not due to re-rank, so the position is being closed by the sizing brake rather than by
-        # any judgement about the name.
+        # Every gate passed and it's still leaving -- only the sizing throttle does that.
         return "Closed below the minimum trade size"
     return "Eligible, not selected"
 
@@ -173,16 +159,10 @@ def signal_view(plan: AlgorithmPlan) -> SignalView:
 
 
 def _metrics(values: dict[str, Any], latest_price: Any = None) -> list[dict[str, str]]:
-    """Score, rank and volatility are cross-sectional facts about a *candidate*.
-
-    The defensive sleeve is not one, so all three are dashed out for it. Printed, they invite
-    exactly the comparison that does not apply -- SGOV showed a score of -0.10 beside names
-    ranked against each other, as though it had come last rather than not been entered. Its
-    weight is real and stays: it is the one number about the sleeve that means anything.
-
-    The share price is per-symbol, so unlike the three above it is shown for every row. The
-    plan's ``latest_prices`` -- live quotes while the market is open -- is preferred; the row's
-    last daily close answers when no quote covered the symbol (a holding outside the universe).
+    """Score, rank and volatility are cross-sectional facts about a *candidate* -- the defensive
+    sleeve isn't one, so those three are dashed out for it; its weight is real and stays. Price
+    is shown for every row: the plan's live ``latest_prices`` preferred, falling back to the
+    row's last daily close for a holding outside the universe.
     """
     weight = {"label": "Weight", "value": f"{float(values['target_weight']):.1%}"}
     priced = float(latest_price or 0.0) or float(values.get("close") or 0.0)
@@ -218,8 +198,6 @@ def _summary(plan: AlgorithmPlan, rows: list[SignalRow]) -> list[dict[str, str]]
 
     data = plan.metadata.get("universe_data") or {}
     if not data.get("data_ok", True):
-        # The one condition that overrides everything below it: too thin a cache is not a
-        # bearish reading, and the deck should not let it be mistaken for one.
         summary.append({"label": "Data", "value": str(data.get("detail") or "insufficient")})
     summary.append({"label": "Universe", "value": str(len(rows))})
     return summary

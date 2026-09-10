@@ -1,11 +1,6 @@
 """Alpaca market data.
 
-Bars come back batched -- one call for every missing symbol -- because Alpaca's endpoint takes a
-symbol list. The base hands ``fetch_bars`` exactly the symbols the cache could not answer, so
-that batching survives intact.
-
-Daily bars are dividend-adjusted at the source (``Adjustment.ALL``), which is why SGOV shows its
-yield here rather than a flat sawtooth.
+Daily bars are dividend-adjusted at the source (``Adjustment.ALL``).
 """
 
 from __future__ import annotations

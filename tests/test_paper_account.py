@@ -290,3 +290,71 @@ def test_paper_refuses_a_bracket_it_cannot_hold(tmp_path) -> None:
                 symbol="AAA", action="sell", quantity=1, order_type="limit", limit_price=2.0,
                 strategy="oco", children=(child, child), extra={"latest_price": 2.0},
             ))
+
+
+def test_two_bindings_on_one_paper_account_do_not_lose_each_others_fills() -> None:
+    """The dashboard permits several bindings on one account, and the scheduler runs a thread
+    per binding -- so two instances of this class can hold the same book at once.
+
+    The book used to be read once at construction and written back whole, so both threads
+    started from the same balance and the second write discarded the first's cash and
+    positions. Fills vanished from a book whose whole job is to rehearse a live one.
+    """
+    import threading
+
+    from src.brokerages.paper.brokerage import _state_key
+    from src.data.state_store import delete_state, load_state
+
+    account = "concurrency_probe"
+    key = _state_key(account)
+    config = Config(account_id=account)
+    try:
+        books = [PaperBrokerage(config), PaperBrokerage(config)]
+        # Both read their starting balance before either writes, which is the race exactly.
+        starting_cash = books[0].state["cash"]
+        assert all(book.state["cash"] == starting_cash for book in books)
+
+        start = threading.Barrier(len(books))
+
+        def fill(book: PaperBrokerage, symbol: str) -> None:
+            start.wait()
+            book.submit_order(
+                OrderRequest(symbol, "buy", 10, extra={"latest_price": 100.0})
+            )
+
+        threads = [
+            threading.Thread(target=fill, args=(book, symbol))
+            for book, symbol in zip(books, ("AAA", "BBB"))
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        stored = load_state(key, {})
+        # Both fills are in the book, and both were paid for: one lost write would leave a
+        # single position and $1,000 of phantom cash.
+        assert stored["positions"] == {"AAA": 10.0, "BBB": 10.0}
+        assert stored["cash"] == starting_cash - 2000.0
+    finally:
+        delete_state(key)
+
+
+def test_paper_refuses_a_short_it_was_not_asked_to_approve() -> None:
+    """``submit_planned_orders`` checks short feasibility, but it is one caller of several --
+    the reconciler and the MCP tools reach ``submit_order`` directly.
+
+    A sell with nothing held used to be booked as a short that credited cash, with no margin
+    requirement and no size limit, so the book could short indefinitely and manufacture its own
+    buying power.
+    """
+    class NoShorts(PaperBrokerage):
+        def validate_short_sale_feasibility(self, symbol, quantity, target_shares, latest_price):
+            return {"shortable": False, "reason": "not shortable"}
+
+    with ephemeral_state():
+        brokerage = NoShorts(Config(account_id=LOCAL))
+        with pytest.raises(ValueError, match="Short sale refused"):
+            brokerage.submit_order(
+                OrderRequest("AAA", "sell", 10, extra={"latest_price": 100.0})
+            )

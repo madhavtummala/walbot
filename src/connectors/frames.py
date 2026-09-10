@@ -99,8 +99,6 @@ def _news_record(provider: str, symbol: str, timestamp: Any, title: str, url: st
     }
 
 
-
-
 def normalize_intraday_frame(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "adjusted_close"])

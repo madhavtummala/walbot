@@ -1,10 +1,8 @@
 """What an Options Flip run decided, per symbol.
 
-Every configured symbol gets a row every run, including the ones doing nothing. That is
-deliberate and it is the main thing this view is for: most sessions most symbols will not trade,
-and "no direction" and "direction but pre-market disagreed" and "everything confirmed but the
-chain had nothing tradable" are three very different silences. A view that only showed the
-symbols with orders would render all three identically, as absence.
+Every configured symbol gets a row every run, including the ones doing nothing -- "no direction",
+"direction but gates disagreed" and "confirmed but nothing tradable" are different silences a
+positions-only view would render identically.
 """
 
 from __future__ import annotations
@@ -28,7 +26,7 @@ def signal_view(plan: AlgorithmPlan) -> SignalView:
     """One row per symbol, ordered so the positions and the near-misses come first."""
     rows = [_row(symbol, signal) for symbol, signal in sorted(plan.signals.items())]
     rows.sort(key=lambda row: (_ORDER.get(row.action, 9), row.symbol))
-    return SignalView(rows=rows, summary=_summary(rows, plan))
+    return SignalView(rows=rows, summary=_summary(rows))
 
 
 _ORDER = {ACTION_HOLD: 0, ACTION_ENTER: 1, ACTION_BLOCKED: 2, ACTION_IDLE: 3}
@@ -55,46 +53,20 @@ def _row(symbol: str, signal: dict[str, Any]) -> SignalRow:
 
 
 def _metrics(signal: dict[str, Any]) -> list[dict[str, str]]:
-    """What the row needs to be *judged*, not merely watched.
-
-    Reported even on a run that places nothing, which is the point: on most sessions this
-    algorithm stands down, and "no trade today" tells you nothing about whether the setup was
-    close or hopeless. The contract, its cost, and the band it expects to transact in do.
-
-    Four columns -- contract, price, band, profit -- because every extra one squeezes the reason
-    text the row is built around.
-
-    ``Band`` is the *underlying's* noise band, not the contract's price range. That is the object
-    the algorithm actually decides on: price outside it is a direction and price inside it is no
-    trade, so a reader comparing the band against the price can see how close the symbol came
-    without opening the panel. The premium range it implies is a translation of it and stays in
-    the expanded view.
-    """
+    """What the row needs to be judged, not merely watched: contract, price, band, profit."""
     estimate = signal.get("estimate") or {}
     metrics: list[dict[str, str]] = []
-    # No Direction column: the contract label already reads "$88 call", so a CALL/PUT column
-    # beside it says the same word twice. The only case it carried anything extra was a symbol
-    # with a direction but no contract, and that row now shows the pre-market reading instead.
     if not estimate.get("contract") and (direction := str(signal.get("direction") or "")):
         metrics.append({"label": "Direction", "value": direction.upper()})
-
-    # Guarded on the contract, not on the dict: the direction is merged in even when no contract
-    # was found, so the dict is never empty.
     if not estimate.get("contract"):
         return metrics
 
     mark = float(estimate.get("mark", 0.0) or 0.0)
-    # No "(not tradable)" suffix: the row already carries a BLOCKED badge and the gate list says
-    # exactly which floor it missed and by how much. Repeating it here is a third telling.
     metrics.append({"label": "Contract", "value": str(estimate.get("contract_label") or "")})
-    # The contract's current mid price, per share. Not multiplied out: ×100 is a fixed property
-    # of every listed option and the contract count is a config setting, so the product carried
-    # no information the reader did not already have.
     metrics.append({"label": "Price", "value": f"${mark:.2f}"})
-    # The underlying's band, low and high in one cell. Against the symbol's own price this is the
-    # whole entry decision in one column.
-    # The two levels the trade would transact between, with how often each is reached. Against
-    # the symbol's own price this is the whole entry decision in one column.
+
+    # The underlying's noise band -- where the trade would transact -- not the contract's own
+    # price range.
     entry = float(estimate.get("entry_underlying", 0.0) or 0.0)
     target = float(estimate.get("target_underlying", 0.0) or 0.0)
     metrics.append({
@@ -106,9 +78,7 @@ def _metrics(signal: dict[str, Any]) -> list[dict[str, str]]:
         ),
     })
 
-    # Gross. It assumes *both* ends fill -- entry at the predicted low, exit at the predicted
-    # high -- when neither is guaranteed and the exit may hit the stop instead, so read it as the
-    # band's width in dollars rather than as an expectation.
+    # Gross, and assumes both ends fill -- read as the band's width in dollars, not a promise.
     metrics.append({
         "label": "Est Profit",
         "value": f"${float(estimate.get('expected_profit', 0.0)):,.0f}",
@@ -119,14 +89,8 @@ def _metrics(signal: dict[str, Any]) -> list[dict[str, str]]:
     return metrics
 
 
-def _summary(rows: list[SignalRow], plan: AlgorithmPlan) -> list[dict[str, str]]:
-    """The header strip: label/value chips, matching what every other algorithm returns.
-
-    A list rather than a sentence because that is what :class:`SignalView` declares and what the
-    deck renders -- it maps over these to build the metric row, and a string silently becomes
-    ``payload.summary.map is not a function``, which empties the whole panel rather than just
-    the strip.
-    """
+def _summary(rows: list[SignalRow]) -> list[dict[str, str]]:
+    """The header strip: label/value chips, matching what every other algorithm returns."""
     held = sum(1 for row in rows if row.action == ACTION_HOLD)
     bidding = sum(1 for row in rows if row.action == ACTION_ENTER)
     blocked = sum(1 for row in rows if row.action == ACTION_BLOCKED)
@@ -138,9 +102,6 @@ def _summary(rows: list[SignalRow], plan: AlgorithmPlan) -> list[dict[str, str]]
     ]
     if blocked:
         summary.append({"label": "Blocked", "value": str(blocked)})
-    # Deliberately no aggregate "why flat". The strip is counts across the whole book, and one
-    # symbol's blocking gate is not a fact about the book -- with several symbols it names
-    # whichever happened to sort first. Each row already carries its own reason, measured.
     return summary
 
 

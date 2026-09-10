@@ -75,7 +75,6 @@ def test_live_runner_uses_selected_template_strategy(monkeypatch) -> None:
             kill_switch=False,
             max_weight_per_symbol=0.5,
             max_portfolio_exposure=0.8,
-            max_longs=1,
             cash_buffer=0.0,
         ),
     )

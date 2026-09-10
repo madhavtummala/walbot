@@ -1,26 +1,14 @@
 """Making a broker's resting orders match what a run decided they should be.
 
-Plain functions, not a base class. An algorithm whose output is an order book rather than a
-target portfolio needs a different ``execute`` -- but "different ``execute``" is a method
-override, which :class:`BaseAlgorithm` already permits and which ``bursty_dca`` already does for
-``state_after``. Forking the class hierarchy for one algorithm would buy nothing that overriding
-one hook does not, while adding a second algorithm shape everyone reading the package has to
-learn. If a second order-book algorithm ever appears, it calls :func:`reconcile_orders` too.
+Plain functions, not a base class: an algorithm whose output is an order book rather than a
+target portfolio overrides ``execute`` and calls :func:`reconcile_orders` from there.
 
-Three properties this module exists to hold:
-
-**The broker is the source of truth, not our memory.** Every run reads the working orders back
-before deciding anything. Reconstructing the book from what we remember submitting cannot
-survive a partial fill, a manual cancellation in the broker's own UI, or a run that died between
-placing an order and recording it.
-
-**Reconciliation is idempotent, which is what makes a cron cadence safe.** Running twice in a
-minute is the same as running once; skipping an hour converges on the next fire. The caller is
-never mid-transaction -- it is only ever asserting a desired state.
-
-**Order identity is a role, not a submission.** ``DesiredOrder.key`` names what an order is
-*for* ("this symbol's entry bid"), so an order re-priced five times across a session stays one
-thing. Broker order ids are recorded against the key in algorithm state; the key outlives them.
+The broker is the source of truth, never our own memory -- every run reads the working orders
+back before deciding anything, since a remembered book cannot survive a partial fill or a
+manual cancellation. Reconciliation is idempotent, so a cron cadence can run it as often as it
+likes. And order identity is a role (``DesiredOrder.key``), not a submission, so an order
+re-priced repeatedly across a session stays one thing; broker order ids are recorded against
+the key in algorithm state.
 """
 
 from __future__ import annotations
@@ -33,20 +21,15 @@ from ..core.interfaces import DesiredOrder
 logger = logging.getLogger(__name__)
 
 #: Where an algorithm records the broker order id standing behind each desired order's key.
-#: Nested under one key so it cannot collide with whatever the strategy keeps beside it.
 ORDER_IDS_KEY = "order_ids"
 
 
 def broker_supports_oco(account_id: str) -> bool:
     """Whether this account's broker will hold an OCO pair itself.
 
-    Read off the class without instantiating it, exactly as ``bursty_dca`` reads
-    ``supports_fractional_shares``: this is a property of the venue, not of a live session, and
-    building the brokerage would authenticate it just to answer a question about its capabilities.
-    That matters because the caller is ``plan``, which must stay free of brokerage objects.
-
-    An unknown account falls back to ``False`` -- the conservative reading, since two independent
-    legs work everywhere and an OCO does not.
+    Read off the class without instantiating it (and authenticating), since this is a property
+    of the venue, not of a live session. Unknown accounts fall back to ``False``, the
+    conservative reading.
     """
     from ..brokerages.registry import get_brokerage_class
     from ..core.config import get_account_broker_type
@@ -61,22 +44,32 @@ def reconcile_orders(
     desired: List[DesiredOrder],
     brokerage: Any,
     recorded: Dict[str, str],
+    *,
+    persist: Any = None,
 ) -> Dict[str, Any]:
     """Cancel what is no longer wanted, then place or re-price the rest.
 
-    ``recorded`` maps each desired order's key to the broker order id last known to stand behind
-    it. Returns ``{"results", "order_ids", "working"}`` -- the caller persists ``order_ids`` and
-    reports ``results``.
+    ``recorded`` maps each desired order's key to the broker order id last known to stand
+    behind it. Returns ``{"results", "order_ids", "working"}``; the caller persists
+    ``order_ids`` and reports ``results``.
 
-    Cancels run first so a replacement is never submitted alongside the order it replaces, which
-    for a bracket would leave two stops on one position.
+    Cancels run first so a replacement is never submitted alongside the order it replaces.
+
+    ``persist`` is called with the id map after every change to it. An order that exists at the
+    broker but not in our state is the one condition this system cannot recover from -- so the
+    write cannot be batched behind work that can still fail. Without it, a broker error on the
+    third leg discards the ids of the two already submitted, and the next run, reading empty
+    state, submits the whole book a second time.
+
+    The invariant every branch below keeps: **an id is dropped only once the broker has
+    confirmed the order is gone.** A working-order listing is a snapshot that can be stale or
+    partial, so "absent from the listing" is never on its own taken as "no longer exists".
     """
     try:
         working = brokerage.get_orders("WORKING")
     except NotImplementedError as exc:
-        # A brokerage that cannot list orders cannot be reconciled against. Refusing here is the
-        # safe direction: proceeding would submit the whole desired book on every run, since
-        # nothing would ever look already-present.
+        # Refusing here is the safe direction: proceeding would resubmit the whole desired book
+        # every run, since nothing would ever look already-present.
         raise NotImplementedError(
             f"{type(brokerage).__name__} cannot list working orders, which order reconciliation "
             "requires. An algorithm that rests orders needs a brokerage that holds them, so it "
@@ -86,15 +79,32 @@ def reconcile_orders(
     working_by_id = {str(o.get("order_id")): o for o in working if o.get("order_id")}
     results: List[Dict[str, Any]] = []
     wanted = {order.key: order for order in desired}
-    order_ids: Dict[str, str] = {}
+    # Seeded from what was already recorded rather than built up from scratch, so a key this
+    # pass never resolves is carried forward instead of being forgotten. Forgetting an id
+    # orphans a live order: nothing tracks it, so no later run can ever cancel it.
+    order_ids: Dict[str, str] = {key: order_id for key, order_id in recorded.items() if order_id}
 
-    for key, order_id in recorded.items():
-        if key in wanted or order_id not in working_by_id:
-            # Not ours to cancel, or already gone -- filled, expired, or cancelled by hand. An id
-            # that has left the working set is simply dropped from the record.
+    def commit() -> None:
+        if persist is not None:
+            persist(dict(order_ids))
+
+    for key, order_id in list(recorded.items()):
+        if key in wanted or not order_id:
             continue
-        existing = working_by_id[order_id]
-        brokerage.cancel_order(order_id)
+        existing = working_by_id.get(order_id, {})
+        # Cancelled even when the listing does not show it. ``cancel_order`` is contracted to
+        # treat an already-gone order as a success, so the call is safe either way -- and it is
+        # the only way to be sure a stale id is not still live at the broker.
+        if not _cancel(brokerage, order_id, key):
+            results.append(_result(
+                key, "cancel_failed", order_id,
+                symbol=str(existing.get("symbol", "")),
+                action=str(existing.get("action", "")),
+                status="unreconciled",
+            ))
+            continue
+        order_ids.pop(key, None)
+        commit()
         results.append(_result(
             key, "cancelled", order_id,
             symbol=str(existing.get("symbol", "")),
@@ -104,11 +114,28 @@ def reconcile_orders(
 
     for key, desired_order in wanted.items():
         existing_id = recorded.get(key, "")
-        existing = working_by_id.get(existing_id)
+        existing = working_by_id.get(existing_id) if existing_id else None
         if existing is None:
+            if existing_id:
+                # Recorded but not listed. Most often it filled or was cancelled, but a partial
+                # listing looks identical -- and submitting beside an order that is still live
+                # would leave two working orders for one role. Cancel first: a no-op if it is
+                # genuinely gone, and the thing that prevents a duplicate if it is not.
+                if not _cancel(brokerage, existing_id, key):
+                    results.append(_result(
+                        key, "cancel_failed", existing_id,
+                        symbol=desired_order.request.symbol,
+                        action=desired_order.request.action,
+                        status="unreconciled",
+                    ))
+                    continue
+                order_ids.pop(key, None)
+                commit()
             results.append(_submit(key, desired_order, brokerage, order_ids))
+            commit()
         elif _needs_replacement(desired_order, existing):
             results.append(_replace(key, desired_order, existing_id, brokerage, order_ids))
+            commit()
         else:
             order_ids[key] = existing_id
             results.append(_result(
@@ -118,22 +145,53 @@ def reconcile_orders(
                 quantity=float(desired_order.request.quantity),
             ))
 
+    commit()
     return {"results": results, "order_ids": order_ids, "working": working}
+
+
+def _cancel(brokerage: Any, order_id: str, key: str) -> bool:
+    """Cancel ``order_id``, reporting whether the broker confirmed it is gone.
+
+    ``False`` means the id must stay recorded: the order may still be live, and an id we stop
+    tracking is one no later run can cancel. Not letting the exception escape matters as much --
+    it would abandon the rest of the book mid-pass, which is how orders get orphaned.
+    """
+    try:
+        brokerage.cancel_order(order_id)
+        return True
+    except Exception as exc:  # noqa: BLE001 - one stuck cancel must not end the pass
+        logger.warning("Could not cancel %s (order %s): %s; keeping it recorded", key, order_id, exc)
+        return False
 
 
 def _submit(key: str, desired: DesiredOrder, brokerage: Any, order_ids: Dict[str, str]) -> Dict[str, Any]:
     try:
         result = brokerage.submit_order(desired.request)
     except Exception as exc:
-        # One rejected order must not abandon the rest of the book: a stop that cannot be placed
-        # is exactly when the remaining orders matter most.
+        # One rejected order must not abandon the rest of the book.
         logger.warning("Order %s rejected: %s", key, exc)
         return _result(
             key, "rejected", "", symbol=desired.request.symbol,
             action=desired.request.action, quantity=float(desired.request.quantity),
             status="rejected", reason=str(exc),
         )
-    order_ids[key] = str(result.get("order_id", ""))
+    order_id = str(result.get("order_id", "") or "")
+    if not order_id:
+        # An accepted order we cannot name is worse than a rejected one: only the rejection is
+        # recoverable. Recording "" would make the next run look up an empty id, find nothing,
+        # and submit again -- every run, stacking live orders each time.
+        logger.error(
+            "Broker accepted %s (%s %s %s) without returning an order id; it cannot be tracked "
+            "or cancelled and must be reconciled by hand",
+            key, desired.request.action, desired.request.quantity, desired.request.symbol,
+        )
+        order_ids.pop(key, None)
+        return _result(
+            key, "untracked", "", symbol=desired.request.symbol,
+            action=desired.request.action, quantity=float(desired.request.quantity),
+            status="untracked", reason="broker returned no order id",
+        )
+    order_ids[key] = order_id
     logger.info(
         "Placed %s: %s %s %s @ %s",
         key, desired.request.action, desired.request.quantity,
@@ -150,27 +208,31 @@ def _submit(key: str, desired: DesiredOrder, brokerage: Any, order_ids: Dict[str
 def _replace(
     key: str, desired: DesiredOrder, order_id: str, brokerage: Any, order_ids: Dict[str, str]
 ) -> Dict[str, Any]:
-    """Re-price in place, falling back to cancel-and-resubmit where the venue refuses.
+    """Re-price in place; fall back to cancel-and-resubmit where the venue refuses.
 
-    Replace is tried first because it is atomic: the order is never absent from the book, so
-    nothing can slip through the gap and a crash cannot leave the position unprotected.
-
-    But not every venue will replace every order. Alpaca refuses while an order is still in
-    ``accepted`` -- "cannot replace order in accepted status" -- which for a strategy whose whole
-    mechanism is re-pricing a resting bid every five minutes would mean the bid never moves at
-    all. A brief gap is a far smaller cost than an order frozen at the morning's price, so the
-    fallback cancels and resubmits, and says which route it took.
+    Replace is tried first because it is atomic -- the order is never absent from the book.
+    Not every venue allows it in every order state (e.g. Alpaca while still ``accepted``), so
+    the fallback cancels and resubmits, and records which route it took.
     """
     try:
         result = brokerage.replace_order(order_id, desired.request)
     except Exception as exc:
         logger.info("Order %s could not be re-priced in place (%s); resubmitting", key, exc)
-        brokerage.cancel_order(order_id)
+        # Guarded: a cancel that fails for a reason other than "already gone" (a network error,
+        # a broker outage) must not escape and abandon the rest of the book. The old order may
+        # still be resting, so it keeps its id and this run leaves the price where it was --
+        # a stale price being strictly better than an untracked order plus a duplicate.
+        if not _cancel(brokerage, order_id, key):
+            order_ids[key] = order_id
+            return _result(
+                key, "cancel_failed", order_id, symbol=desired.request.symbol,
+                action=desired.request.action, quantity=float(desired.request.quantity),
+                status="unreconciled", reason="could not re-price or cancel; order left as it was",
+            )
         outcome = _submit(key, desired, brokerage, order_ids)
         if outcome.get("reconciled") == "submitted":
             return {**outcome, "reconciled": "resubmitted", "previous_order_id": order_id}
-        # Both routes failed. The old order was cancelled, so there is nothing left to point at:
-        # recording its id would have the next run believe a dead order is still working.
+        # Both routes failed; the old order is confirmed cancelled, so there is nothing to record.
         order_ids.pop(key, None)
         return outcome
     order_ids[key] = str(result.get("order_id", order_id))
@@ -184,23 +246,19 @@ def _replace(
 
 
 def _result(key: str, reconciled: str, order_id: str, **fields: Any) -> Dict[str, Any]:
-    """One reconciliation outcome, in the shape the journal and the logs already read.
+    """One reconciliation outcome, in the shape the journal and logs already read.
 
-    ``action`` stays the trade side -- buy or sell -- because that is what
-    ``src/data/order_journal.py`` files under ``side`` and what the logs print. What the
-    reconciler *did* is a separate axis and lives in ``reconciled``; collapsing the two put
-    "unchanged" in the journal's side column, which reads as a trade that never happened.
+    ``action`` stays the trade side (buy/sell); what the reconciler *did* is a separate axis
+    and lives in ``reconciled``.
     """
     return {"key": key, "reconciled": reconciled, "order_id": order_id, **fields}
 
 
 def _needs_replacement(desired: DesiredOrder, existing: Dict[str, Any]) -> bool:
-    """Whether the working order differs from what is wanted by enough to be worth re-pricing.
+    """Whether the working order differs from what is wanted by enough to re-price.
 
-    Quantity and side are exact: those are not prices and any difference is a different order.
-    Prices are compared against ``replace_tolerance`` because options spreads are wide and every
-    replace costs a round trip -- rewriting the book because a mark moved a cent would churn all
-    day and buy nothing.
+    Quantity, side and order type are exact; prices are compared against
+    ``replace_tolerance`` since a wide-spread instrument shouldn't churn on a cent of drift.
     """
     request = desired.request
     if str(existing.get("action", "")).lower() != request.action.lower():

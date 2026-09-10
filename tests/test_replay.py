@@ -125,6 +125,15 @@ def test_replay_state_is_isolated_from_the_live_store() -> None:
             save_state("replay_probe", {"live": False})
             assert load_state("replay_probe", None) == {"live": False}
         assert load_state("replay_probe", None) == {"live": True}  # write never leaked
+
+        # Deletes are sandboxed too. ``delete_state`` used to go straight to DuckDB while its
+        # two siblings honoured the ContextVar, so a replay that dropped a key reached past the
+        # sandbox and destroyed the live account's state -- the exact failure this exists to
+        # prevent, one call site away from happening.
+        with ephemeral_state({"replay_probe": {"live": False}}):
+            delete_state("replay_probe")
+            assert load_state("replay_probe", None) is None
+        assert load_state("replay_probe", None) == {"live": True}
     finally:
         delete_state("replay_probe")
 

@@ -3,36 +3,23 @@
   z    = (moving_average - price) / stdev        signed: positive is cheap, negative is dear
   size = budget x conviction(z) x willingness(backlog)
 
-``conviction`` is the valuation half -- how good is this price, in standard deviations of
-dislocation from the moving average, signed against the direction the plan wants to trade.
-``willingness`` is the budget half -- a symbol that has already spent months ahead of its plan
-resists spending more, and one sitting on unspent budget pushes to deploy it.
+``conviction`` is the valuation half -- how good is this price, signed against the direction
+the plan wants to trade. ``willingness`` is the budget half -- a symbol ahead of its plan
+resists spending more, one sitting on unspent budget pushes to deploy it. They multiply rather
+than gate each other, so an exceptional dislocation against heavy resistance still deploys
+most of a month's budget, while a mediocre signal at the same backlog deploys almost nothing.
 
-They multiply rather than gate each other. That is the whole design: a three-sigma dislocation
-against heavy resistance still deploys about nine-tenths of a month's budget, while a mediocre
-signal at the same backlog deploys almost nothing -- and neither case needed a rule of its own.
+``spending_allowance`` bounds both together: a run may deploy at most the balance the symbol has
+actually banked, plus an overdraft ``conviction`` earns. Without it, ``willingness`` (a
+multiplier on a *monthly* budget applied once per *run*, never reaching zero) would let cadence
+rather than the plan set the spend rate.
 
-One bound sits over the top of both. ``spending_allowance`` caps a run at the balance the
-symbol has actually banked, plus an overdraft that ``conviction`` earns. Without it the model
-is not merely loose but wrong in kind: ``willingness`` is a multiplier on a *monthly* budget
-applied once per *run* and it never reaches zero, so an hourly cadence would spend its floor
-value ~141 times a month against a daily one's ~31, and cadence -- not the plan -- would set
-the spend rate. ``max_monthly_multiple`` cannot stand in for it, because a ceiling that resets
-every month holds any cadence to three times the plan rate rather than to the plan rate.
+Every amount in a plan means dollars per month, per symbol, accrued against elapsed wall-clock
+time rather than divided by run count -- so cadence controls only the *opportunity* to act, and
+a missed run self-corrects on the next one's longer interval.
 
-When it runs is the binding's cron expression, and nothing here reads a clock to second-guess
-it: whichever runs fire, both directions trade on all of them.
-
-Every amount in a plan means **dollars per month, per symbol**. The budget is deliberately
-*not* divided by run count: at an hourly cadence that is ~141 runs a month, so a $100 budget
-would yield $0.71 per run -- below every broker minimum -- and the divisor would change whenever
-the schedule was edited. Accruing against elapsed wall-clock time instead leaves cadence
-controlling only the *opportunity* to act, never the spend rate, and lets missed runs
-self-correct because the next run observes a longer interval.
-
-It emits ``notional`` intents in ``incremental`` mode and shares the order path with every other
-algorithm. One thing is still peculiar to it: its memory depends on what actually *filled*,
-which is why it is the only algorithm that overrides ``state_after``.
+Emits ``notional`` intents in ``incremental`` mode. Its memory depends on what actually
+*filled*, which is why it's the only algorithm overriding ``state_after``.
 """
 
 from __future__ import annotations
@@ -130,8 +117,8 @@ def accrual_to_state(accrual: dict[str, SymbolState]) -> dict[str, Any]:
 def accrue(state: SymbolState, monthly_budget: float, now: datetime) -> SymbolState:
     """Advance ``state`` to ``now``, adding the budget earned over the elapsed wall-clock time.
 
-    The first run only seeds the clock: budget is never accrued retroactively for time before
-    the plan was known. A month boundary resets the cumulative deployment cap.
+    The first run only seeds the clock -- budget is never accrued retroactively. A month
+    boundary resets the cumulative deployment cap.
     """
     month = now.strftime("%Y-%m")
     if state.month and state.month != month:
@@ -154,11 +141,8 @@ def accrue(state: SymbolState, monthly_budget: float, now: datetime) -> SymbolSt
 def min_executable(price: float, supports_fractional_shares: bool) -> float:
     """Smallest trade that survives share rounding for this symbol on this brokerage.
 
-    Arithmetic, not policy. There is no configured trade minimum to consult: the only reason a
-    small order cannot be sent is that ``round_shares`` would truncate it to nothing, so the
-    floor is derived from the rounding rule that would do the truncating. On a whole-share
-    brokerage that is one share, which is why a $100/month budget against a $500 ETF still has
-    to accrue for months before it can trade at all.
+    Arithmetic, not policy: derived from the rounding rule that would otherwise truncate a small
+    order to nothing. On a whole-share brokerage that's one share.
     """
     price = max(float(price), 0.0)
     return price / 10**FRACTIONAL_SHARE_PRECISION if supports_fractional_shares else price
@@ -172,19 +156,14 @@ def min_executable(price: float, supports_fractional_shares: bool) -> float:
 def evaluate_valuation(bars: pd.DataFrame | None, settings: BurstyConfig) -> dict[str, Any]:
     """How dislocated the last close is from its moving average, in standard deviations.
 
-    Signed and two-sided on purpose. The predecessor measured drawdown from a running
-    ``cummax``, which could only ever report "cheap" or "neutral": it had no way to say a
-    symbol was expensive, so the model could scale a buy up on a dip but never down on a
-    melt-up, and a sell fired only at an exact high-water mark -- a handful of days a year.
-
-    Dividing by the deviation rather than by the mean is what makes ``scaling_factor`` a single
-    number that transfers across a plan holding both a bond ETF and a single name.
+    Signed and two-sided, so the model can scale a buy up on a dip and down on a melt-up, and a
+    sell isn't limited to firing at an exact high-water mark. Dividing by the deviation rather
+    than the mean is what makes ``scaling_factor`` transfer across symbols of different vol.
     """
     closes = pd.to_numeric(bars["close"], errors="coerce").dropna() if _has_closes(bars) else pd.Series(dtype=float)
     window = max(int(settings.regime_ma_days), 2)
-    # A symbol with less history than the window is measured against everything it has, down to
-    # ``MIN_VALUATION_BARS``. The average is then shorter than configured, which is the honest
-    # answer for a recent listing -- refusing outright would leave it accruing forever.
+    # Less history than the window: measured against everything available, down to
+    # MIN_VALUATION_BARS, rather than refused outright (which would accrue forever).
     minimum = min(window, MIN_VALUATION_BARS)
     if len(closes) < minimum:
         return {"ok": False, "reason": "No price history", "detail": {}}
@@ -195,11 +174,8 @@ def evaluate_valuation(bars: pd.DataFrame | None, settings: BurstyConfig) -> dic
     if not math.isfinite(moving_average) or not math.isfinite(sigma):
         return {"ok": False, "reason": "No price history", "detail": {}}
 
-    # A series with no deviation has nothing to divide by. That is a neutral reading rather
-    # than a refusal: a price that has not moved is not dislocated, so the honest answer is to
-    # size at the plan rate -- which is exactly what straight DCA would have done. Refusing
-    # instead would leave the symbol accruing forever over a data quirk, and a genuinely dead
-    # feed is already caught upstream by quote staleness.
+    # No deviation to divide by is a neutral reading (size at the plan rate), not a refusal --
+    # a price that hasn't moved isn't dislocated.
     z = 0.0 if sigma <= 0 else max(-MAX_SIGMA, min(MAX_SIGMA, (moving_average - close) / sigma))
     return {
         "ok": True,
@@ -209,8 +185,7 @@ def evaluate_valuation(bars: pd.DataFrame | None, settings: BurstyConfig) -> dic
             "moving_average": round(moving_average, 4),
             "sigma": round(sigma, 4),
             "z": round(z, 3),
-            # The percent form too: sigma is the honest unit for sizing, but "8% below its
-            # average" is the one a reader can sanity-check against a chart.
+            # The percent form too, for sanity-checking against a chart.
             "distance": round((moving_average - close) / moving_average, 4) if moving_average else 0.0,
         },
     }
@@ -242,11 +217,9 @@ def conviction(z: float, buying: bool, settings: BurstyConfig) -> float:
 def willingness(backlog_months: float, settings: BurstyConfig) -> float:
     """The backlog factor: how entitled this symbol is to spend right now.
 
-    ``backlog_months`` is accrued budget over monthly budget -- positive when the symbol is
-    sitting on money it has not deployed, negative when previous runs deployed more than had
-    accrued and it is repaying. ``tanh`` gives a curve that is near-linear around zero, where
-    almost all the time is spent, and saturates smoothly rather than at a threshold, so nothing
-    changes character in one step and the factor stays bounded however extreme the backlog.
+    ``backlog_months`` is accrued budget over monthly budget -- positive when sitting on
+    unspent money, negative when repaying an overdraft. ``tanh`` is near-linear around zero and
+    saturates smoothly, so the factor stays bounded however extreme the backlog.
     """
     width = max(float(settings.relax_months), 1e-9)
     return 1.0 + settings.relax_depth * math.tanh(float(backlog_months) / width)
@@ -257,24 +230,14 @@ def spending_allowance(
 ) -> float:
     """The most this symbol may deploy on one run: everything banked, plus an earned overdraft.
 
-    A bound of *some* kind here is not optional. ``willingness`` shapes how eagerly the budget
-    is spent, but it is a multiplier on a monthly budget applied once *per run* and it never
-    reaches zero -- so on its own an hourly cadence spends its floor value ~141 times a month
-    against a daily one's ~31, and the two disagree by more than 4x. Cadence would then control
-    the spend rate, which is the single thing the whole accrual design exists to prevent.
+    Bounding against the accrued balance is what keeps ``willingness`` (a per-run multiplier
+    that never reaches zero) from letting cadence set the spend rate -- over any horizon a
+    symbol cannot spend faster than it earns, since the balance is drawn down by what filled.
 
-    Bounding against the accrued balance closes that: over any long horizon a symbol cannot
-    spend faster than it earns, whatever the cadence, because the balance is drawn down by what
-    actually filled.
-
-    The overdraft is what keeps this a resistance rather than the hard ``accrued >= floor`` gate
-    it replaced, and it is scaled by ``conviction`` rather than fixed. That is the deliberate
-    part: how far a symbol may run ahead of its plan should be bought by the quality of the
-    price, so an exceptional dislocation can borrow several months forward while an ordinary
-    one at the same backlog can borrow nothing. A fixed overdraft cannot express that -- it
-    clamps both to the same number and erases the distinction precisely where it matters most.
-    Long-run conservation survives because ``conviction`` is itself bounded by ``MAX_SIGMA``,
-    so the overdraft is a constant ceiling rather than a growing one.
+    The overdraft is scaled by ``conviction`` rather than fixed, deliberately: how far a symbol
+    may run ahead of plan should be bought by the quality of the price, so an exceptional
+    dislocation can borrow several months forward while an ordinary one at the same backlog
+    borrows nothing. It stays a constant ceiling since ``conviction`` is bounded by ``MAX_SIGMA``.
     """
     budget = abs(float(monthly_budget))
     overdraft = max(settings.relax_months, 0.0) * max(float(conviction_factor), 0.0)
@@ -282,13 +245,7 @@ def spending_allowance(
 
 
 def monthly_cap(monthly_budget: float, settings: BurstyConfig) -> float:
-    """Most this symbol may deploy this month, in dollars.
-
-    A flat multiple of the budget now. It used to scale with drawdown via ``cap_boost``, which
-    was a second, coarser way of saying what ``conviction`` already says per order -- and the
-    two could disagree, since one read drawdown from peak and the other from the same peak but
-    at a different moment in the run.
-    """
+    """Most this symbol may deploy this month, in dollars -- a flat multiple of the budget."""
     return abs(float(monthly_budget)) * settings.max_monthly_multiple
 
 
@@ -307,8 +264,7 @@ def planned_order_size(
 
     ``size = |budget| x conviction x willingness``, lifted to the smallest sendable order when
     the accrued balance covers one, then clamped to the month's remaining cap room. Shared by
-    ``plan`` and the signal rows, so the dashboard previews exactly what a run would order
-    rather than a parallel approximation of it.
+    ``plan`` and the signal rows, so the dashboard preview matches exactly what a run would order.
     """
     budget = abs(float(monthly_budget))
     if budget <= 0:
@@ -319,22 +275,13 @@ def planned_order_size(
     allowance = spending_allowance(budget, backlog_months, conviction_factor, settings)
     sized = min(desired, remaining, allowance)
 
-    # A budget smaller than one share can never *size* its way to a sendable order: $100/month
-    # against a $500 share would need the factors to reach 5x, and ``willingness`` saturates
-    # below 2x by design. Accrual is what closes that gap -- once the balance the symbol has
-    # actually banked covers a share, send exactly one rather than accruing forever while the
-    # deck reports an order about to happen.
-    #
-    # Deliberately applied *after* the monthly cap, and therefore able to exceed it. A cap
-    # stated in multiples of the budget cannot express a position whose smallest tradable unit
-    # is five months of that budget: clamping here would forbid the only order the symbol will
-    # ever be able to place, which is how this reintroduces the accrues-forever bug through a
-    # second door. Letting it through is safe because ``accrued`` is the real governor -- the
-    # balance falls by the whole fill, so the next lift cannot come until it is re-earned at
-    # exactly the plan rate.
-    #
-    # Skipped when ``conviction`` zeroed the order, because a bucket that wants none of its
-    # budget wants none of it at any size, however much has accrued.
+    # A budget smaller than one share can never size its way to a sendable order, since
+    # ``willingness`` saturates below the factor a small budget would need. Once the accrued
+    # balance covers a share, lift to exactly one rather than accruing forever. Applied
+    # *after* the monthly cap deliberately -- a cap in multiples of budget can't express a
+    # position whose smallest tradable unit is several months of it, and letting this exceed
+    # the cap is safe because ``accrued`` is the real governor: it falls by the whole fill.
+    # Skipped when ``conviction`` zeroed the order -- that bucket wants none of its budget.
     if 0.0 < sized < float(floor_dollars) <= float(accrued):
         return float(floor_dollars)
     return sized
@@ -363,27 +310,19 @@ class BurstyDCAAlgorithm(BaseAlgorithm):
     algorithm_id = "bursty_dca"
     tuning_class = BurstyConfig
 
-    #: The budgets are this algorithm's real configuration, and a list of dollar amounts per
-    #: symbol is not a parameter form. Declaring the editor here rather than listing the
-    #: algorithm on the dashboard is what keeps the frontend from carrying its own idea of
-    #: which algorithms are "DCA ones".
+    #: The budgets are this algorithm's real configuration -- a list of dollar amounts per
+    #: symbol is not a parameter form.
     tune_editor = "budgets"
 
-    #: No floors of any kind, and nothing here reads the account's. ``rebalance_threshold`` is
-    #: a target-drift concept: applied here it would suppress a small DCA buy that is exactly
-    #: what the plan asked for. A dollar minimum is no better -- the only reason an order cannot
-    #: be sent is that it rounds away to no shares, which :func:`min_executable` derives from the
-    #: rounding rule itself rather than from a number someone has to pick.
+    #: No floors of any kind. ``rebalance_threshold`` is a target-drift concept that would
+    #: suppress a small DCA buy exactly as planned; a dollar minimum is no better, since the
+    #: only reason an order can't send is share rounding, which :func:`min_executable` derives
+    #: directly rather than from a number someone has to pick.
     min_trade_dollars = 0.0
     rebalance_threshold = 0.0
 
-    #: One run a day at 11:00 market time, which is where spreads are tightest.
-    #:
-    #: Both directions trade on whichever runs the cron fires. This used to split them -- buys
-    #: on an 11:00 bucket, sells on a 15:00 one, decided inside ``plan`` by reading the hour off
-    #: the timestamp. That was a second schedule living underneath the first, and once a binding
-    #: states its own cron the two disagree silently: a cron naming any single time made one
-    #: side of the plan permanently unreachable, with nothing on the deck to say so.
+    #: One run a day at 11:00 market time, where spreads are tightest. Both directions trade on
+    #: whichever runs the cron fires -- no separate buy/sell schedule underneath it.
     cron = "0 11 * * 1-5"
 
     def budget_plan(self, config: Any) -> dict[str, Any]:
@@ -393,11 +332,8 @@ class BurstyDCAAlgorithm(BaseAlgorithm):
         return sanitize_plan(raw_plan(config, self.algorithm_id), tradable_symbols(config))
 
     def config_fingerprint(self, config: Any) -> dict[str, Any]:
-        """The plan is this algorithm's real configuration, so it belongs in the fingerprint.
-
-        Editing a bucket amount changes every future decision, and a cached backtest computed
-        under the old plan describes a strategy that no longer exists.
-        """
+        """The plan is this algorithm's real configuration, so it belongs in the fingerprint --
+        editing a bucket amount changes every future decision."""
         return {**super().config_fingerprint(config), "plan": self.budget_plan(config)}
 
     def requirements(self, config: Any, current_positions: dict[str, int]) -> AlgorithmRequirements:
@@ -406,29 +342,23 @@ class BurstyDCAAlgorithm(BaseAlgorithm):
             price_symbols=sorted(plan_budgets(self.budget_plan(config))),
             daily_lookback_days=settings.required_daily_bars,
             daily_ma_days=settings.regime_ma_days,
-            # The accrued budget per symbol: what makes this algorithm's spend rate a statement
-            # about elapsed wall-clock time rather than about run count.
-            needs_state=True,
+            needs_state=True,  # The accrued budget per symbol.
         )
 
     def plan(self, context: AlgorithmContext) -> AlgorithmPlan:
         """Accrue each symbol's budget and emit an intent for whatever can trade now.
 
         Accrual is a pure function of elapsed time, so running this twice in quick succession
-        accrues the same total as running it once -- and because the result is only written once
-        orders go out, a dashboard preview can neither inflate nor lose budget.
-
-        Sizing rides along in the same pass: size = budget x conviction x willingness, clamped
-        for a sell to what is actually held, so it trims a position and never shorts.
+        accrues the same total as running it once. Sizing rides along in the same pass, clamped
+        for a sell to what is actually held so it trims a position and never shorts.
         """
         config = context.config
         settings = self.tuning(config)
         budgets = plan_budgets(self.budget_plan(config))
         fractional = broker_supports_fractional_shares(getattr(config, "account_id", "") or "")
 
-        # A naive timestamp is read as UTC rather than replaced by the wall clock. Substituting
-        # "now" for a historical bar is how a replay ends up accruing a whole backtest's budget
-        # against the moment it was run.
+        # A naive timestamp is read as UTC, not the wall clock -- else a replay accrues a whole
+        # backtest's budget against the moment it was run.
         now = context.timestamp if context.timestamp.tzinfo else context.timestamp.replace(tzinfo=timezone.utc)
 
         accrual = accrual_from_state(context.state)
@@ -443,15 +373,13 @@ class BurstyDCAAlgorithm(BaseAlgorithm):
             price = float(context.latest_prices.get(symbol, 0.0) or 0.0)
             floor_dollars = min_executable(price, fractional)
             # Months of budget banked, signed: positive is unspent money waiting, negative is
-            # a symbol that deployed ahead of its plan and is repaying. The input to
-            # ``willingness``; the deck reports the dollar balance itself as the backlog.
+            # repaying an overdraft. Input to ``willingness``.
             backlog_months = symbol_state.accrued / abs(monthly_budget) if monthly_budget else 0.0
             valuation = evaluate_valuation(context.daily_bars_by_symbol.get(symbol), settings)
             z = float(valuation.get("detail", {}).get("z") or 0.0)
 
-            # What a run would order for this symbol on its own terms, before the gates. The
-            # dashboard shows it as "upcoming", so it is computed once here rather than
-            # re-derived by the view from a different set of numbers.
+            # What a run would order on its own terms, before the gates -- computed once here
+            # so the dashboard's "upcoming" figure matches exactly.
             size = planned_order_size(
                 monthly_budget,
                 z,
@@ -465,9 +393,8 @@ class BurstyDCAAlgorithm(BaseAlgorithm):
             if not buying:
                 size = min(size, float(context.positions.get(symbol, 0.0)) * price)
 
-            # Everything left here is a hard fact rather than a preference: whether there is
-            # data to size against and whether the order clears share rounding. The preferences
-            # all live in ``size``, and *when* to run is the binding's cron, not this method's.
+            # Hard facts only: is there data to size against, does the order clear rounding.
+            # The preferences all live in ``size``.
             deploys = bool(valuation["ok"]) and price > 0 and size >= floor_dollars
             if deploys:
                 intents.append(Intent(symbol=symbol, kind="notional", value=size if buying else -size))
@@ -475,9 +402,6 @@ class BurstyDCAAlgorithm(BaseAlgorithm):
             rows.append({
                 "symbol": symbol,
                 "buying": buying,
-                # Shares actually held, so the deck can say *why* a sell row cannot act: a
-                # sell budget trims a position and never opens a short, which makes this the
-                # one condition that decides a sell row on its own.
                 "held": float(context.positions.get(symbol, 0.0)),
                 "price": price,
                 "monthly_budget": monthly_budget,
@@ -503,8 +427,6 @@ class BurstyDCAAlgorithm(BaseAlgorithm):
                 "scaling_factor": settings.scaling_factor,
                 "max_monthly_multiple": settings.max_monthly_multiple,
                 "relax_months": settings.relax_months,
-                # So the deck can label the average by the window it was taken over rather
-                # than calling every one of them "Average".
                 "regime_ma_days": settings.regime_ma_days,
             },
             state=accrual_to_state(accrual),
@@ -523,12 +445,9 @@ class BurstyDCAAlgorithm(BaseAlgorithm):
     def state_after(self, plan: AlgorithmPlan, outcome: dict[str, Any]) -> dict[str, Any]:
         """Draw down the accrued budget by what actually reached the market.
 
-        The one thing this algorithm cannot decide until after the fact. Deducting the *filled*
-        notional rather than the intent keeps the remainder -- the part that rounded away below
-        one share -- accrued for the next run instead of silently vanishing, which is what makes
-        a whole-share brokerage eventually trade. A run that proposes but never submits -- a
-        rejected order, a batch no funding could cover -- therefore keeps its budget rather than
-        spending it on nothing.
+        Deducting the *filled* notional rather than the intent keeps the remainder (the part
+        that rounded away below one share) accrued for the next run rather than vanishing. A
+        run that proposes but never submits therefore keeps its budget.
         """
         accrual = accrual_from_state(plan.state)
         for order in outcome.get("order_results") or []:

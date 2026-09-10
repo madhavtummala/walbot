@@ -42,6 +42,49 @@ class UnknownBrokerageError(Exception):
         super().__init__(f"Unknown brokerage: {broker_type}")
 
 
+class TradingRefused(Exception):
+    """A pre-trade gate refused this execution. ``reason`` is meant for a person to read."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
+def assert_account_tradable(config: Any) -> None:
+    """The half of the pre-trade gate that needs only configuration.
+
+    Split out so a caller can refuse before authenticating with a broker: connecting to a venue
+    we have already decided not to trade wastes a round trip and can fail for its own unrelated
+    reasons. It is one implementation called from two points, not two copies of a rule.
+    """
+    if getattr(config, "kill_switch", False):
+        raise TradingRefused("KILL_SWITCH is set in the environment; no orders will be sent.")
+
+
+def assert_tradable(requirements: Any, config: Any, brokerage: Brokerage) -> None:
+    """The safety gates every order path must clear, in the one place all of them pass through.
+
+    These used to live in ``live_runner.run_once``, which is only one of three callers -- the
+    dashboard and the MCP tools reach ``execute_algorithm`` directly, so an agent-driven
+    execution inherited none of them. A check that only some callers perform is not a check,
+    which is why this is asserted where the orders are actually placed rather than where one
+    particular driver happens to start.
+
+    Deliberately *not* including the market-open test. That one is a scheduling policy -- the
+    cron runner declines to fire out of hours -- rather than a safety invariant, and a resting
+    limit order queued before the open is a legitimate thing for an agent to place.
+    """
+    assert_account_tradable(config)
+
+    # Asked of the brokerage, which is the only party that knows which endpoint it reached.
+    if getattr(requirements, "paper_only", False) and not brokerage.is_paper:
+        raise TradingRefused(
+            f"This algorithm is restricted to paper trading, and "
+            f"{getattr(config, 'account_id', '')!r} is a live "
+            f"{type(brokerage).__name__.replace('Brokerage', '').lower()} account."
+        )
+
+
 def sizing_equity(config, account_equity: float) -> float:
     cap = max(float(getattr(config, "algorithm_equity_cap", 0.0) or 0), 0.0)
     return min(account_equity, cap) if cap > 0 else account_equity
@@ -164,6 +207,9 @@ def place_orders(
         planned_orders,
         buying_power=snapshot.buying_power,
         reserve=snapshot.equity * max(0.0, min(1.0, float(getattr(config, "cash_buffer", 0.0) or 0.0))),
+        # ``getattr`` rather than a direct call: ``Brokerage`` defines this, but this function
+        # accepts anything with the order-placing surface, and a duck-typed book that only
+        # implements what it uses should degrade to "no cash sleeve" rather than fail the batch.
         cash_equivalents=getattr(brokerage, "get_cash_equivalents", dict)(),
         min_trade_dollars=min_trade_dollars,
         supports_fractional_shares=fractional,

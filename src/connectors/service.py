@@ -16,18 +16,13 @@ from ..data.provider_cache import (
 
 logger = logging.getLogger(__name__)
 
-# Providers are declared in ``registry`` and imported on first use. Market data resolves to a
-# ``MarketDataProvider`` class that brings its own read-through cache; news is still a plain
-# fetcher dict, because a headline fetch has no bar store to read through to.
+# Providers are declared in ``registry`` and imported on first use.
 from .registry import (  # noqa: E402
     MARKET_DATA,
     NEWS_FETCHER_REGISTRY as NEWS_FETCHERS,
     market_provider,
 )
 
-# The shared plumbing, from the module that owns each piece. ``service`` used to re-export all
-# forty of these names so that callers could reach them through the dispatcher; twenty-eight of
-# those were unused here, which made the wall a second, drifting description of the toolkit.
 from .cache import (  # noqa: E402
     _news_cache_key,
     _read_duckdb_sentiment,
@@ -62,11 +57,9 @@ def _run_provider_fallback(
 ) -> dict[str, pd.DataFrame]:
     """Walk the provider order, keeping the best result *per symbol*.
 
-    Per symbol rather than per batch: a provider that answered for twelve of fourteen symbols
-    used to win the whole request, and the two it had nothing for were simply returned empty
-    -- no fallback, no error, and downstream they read as a symbol with no history rather
-    than one nobody asked properly. Later providers now fill only what is still missing, and
-    the walk stops as soon as every symbol is covered.
+    Per symbol rather than per batch, so a provider that answers for only some symbols doesn't
+    win the whole request and leave the rest empty; later providers fill only what is still
+    missing, and the walk stops once every symbol is covered.
     """
     resolved: dict[str, pd.DataFrame] = {}
     wanted = [symbol.upper() for symbol in symbols]
@@ -81,7 +74,7 @@ def _run_provider_fallback(
         next_provider = next((item for item in providers[index + 1 :] if item in fetchers), "")
         try:
             bars = fetchers[provider_name]()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - one provider must not end the walk
             log = logger.info if next_provider else logger.warning
             log("%s market data provider %s failed%s: %s", label, provider_name, _fallback_suffix(next_provider), exc)
             continue
@@ -115,11 +108,8 @@ def _run_provider_fallback(
 def _bound(providers: list[str], config: Config, call: str, **kwargs):
     """``{provider: thunk}`` for each named provider, bound to one method call.
 
-    This used to inspect every fetcher's signature and hand it only the keyword arguments it
-    declared, because providers were loose functions with different parameters -- only Alpaca
-    wanted a ``data_client``, and a new provider would want neither that nor anything else this
-    module knew about. One method signature on ``MarketDataProvider`` makes that unnecessary:
-    ``**extra`` absorbs whatever a particular vendor needs.
+    Every provider shares one method signature (``**extra`` absorbs whatever a vendor needs),
+    so this needs no per-provider argument inspection.
     """
     def bind(name: str):
         def run():
