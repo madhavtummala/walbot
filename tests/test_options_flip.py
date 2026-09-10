@@ -1445,3 +1445,24 @@ def test_the_stop_is_struck_off_what_the_position_cost() -> None:
 
     stops = [o.request.stop_price for o in plan.orders if o.request.order_type == "stop"]
     assert stops == [4.00], "50% below the $8.00 fill, not the $10.00 bid"
+
+
+def test_every_gate_that_can_refuse_a_trade_is_in_the_formula() -> None:
+    """The deck shows fourteen checks that can block, and the Tune formula should account for
+    all of them.
+
+    It described the signal half -- trend, regime, levels, the greeks -- and omitted contract
+    selection entirely, so six gates could refuse a trade with nothing in the explanation
+    saying they existed. "Affordable" is one of them, and it was the blocking check on a live
+    row.
+    """
+    from src.algorithms.explainers import EXPLAINERS
+
+    formula = " ".join(EXPLAINERS["options_flip"]["formula"])
+    for knob in (
+        "min_trend_strength", "regime_fast_ma_days", "VWAP", "max_gap_down_atr",
+        "entry_reach", "exit_reach", "entry_cutoff_fraction", "min_profit_per_contract",
+        "max_annual_volatility", "min_dte", "target_delta", "min_open_interest",
+        "max_quote_age_seconds",
+    ):
+        assert knob in formula, f"{knob} gates a trade but the formula never mentions it"
