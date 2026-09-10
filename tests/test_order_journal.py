@@ -83,3 +83,32 @@ def test_a_backtest_cannot_pollute_the_live_journal() -> None:
 
     with ephemeral_state():
         assert load_order_journal() == []
+
+
+def test_the_journal_records_the_price_the_order_names() -> None:
+    """``latest_price`` is the mark a *market* order was sized from -- an estimate, not a price
+    the order carries. A resting limit or stop names one exactly, and the reconciler reports it.
+
+    Recording only the former left every option order in the journal at $0.00, since none of
+    them is a market order, so the panel could show a size and a direction and nothing else.
+    """
+    from src.data.order_journal import _entry
+
+    resting = _entry("options_flip", "alpaca1", {
+        "symbol": "USO   260916C00142000", "action": "sell", "quantity": 1.0,
+        "status": "submitted", "order_type": "limit", "limit_price": 17.30,
+    }, "now")
+    assert resting["limit_price"] == 17.30 and resting["order_type"] == "limit"
+
+    stop = _entry("options_flip", "alpaca1", {
+        "symbol": "USO   260916C00142000", "action": "sell", "quantity": 1.0,
+        "status": "submitted", "order_type": "stop", "stop_price": 4.42,
+    }, "now")
+    assert stop["stop_price"] == 4.42
+
+    # A market order still records what it was sized from, kept separate from a named price.
+    market = _entry("bursty_dca", "schwab2", {
+        "symbol": "SPYM", "action": "buy", "quantity": 2.0,
+        "status": "submitted", "latest_price": 89.735,
+    }, "now")
+    assert market["price"] == 89.735 and market["limit_price"] == 0.0

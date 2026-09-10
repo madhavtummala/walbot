@@ -278,6 +278,9 @@ def _paper_activity(config: Any, limit: int) -> dict[str, Any]:
                 "qty": entry.get("quantity"),
                 "filled_qty": entry.get("quantity") if entry.get("status") == "submitted" else 0.0,
                 "filled_avg_price": entry.get("price") or None,
+                "order_type": entry.get("order_type", ""),
+                "limit_price": entry.get("limit_price") or None,
+                "stop_price": entry.get("stop_price") or None,
                 "submitted_at": entry.get("submitted_at", ""),
             }
         )
@@ -320,6 +323,13 @@ def account_activity_payload(account_id: str = "", limit: int = 40) -> dict[str,
                     "qty": json_number(getattr(order, "qty", None)),
                     "filled_qty": json_number(getattr(order, "filled_qty", None)),
                     "filled_avg_price": json_number(getattr(order, "filled_avg_price", None)),
+                    # What the order is *asking*, which is the only price a resting order has:
+                    # it has no fill yet, so ``filled_avg_price`` is null and the row could say
+                    # nothing about price at all. A market order genuinely has none -- it takes
+                    # whatever the book offers -- and says so rather than inventing one.
+                    "order_type": _enum_value(getattr(order, "order_type", "")) or _enum_value(getattr(order, "type", "")),
+                    "limit_price": json_number(getattr(order, "limit_price", None)),
+                    "stop_price": json_number(getattr(order, "stop_price", None)),
                     "submitted_at": submitted.isoformat() if hasattr(submitted, "isoformat") else str(submitted or ""),
                 }
             )

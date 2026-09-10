@@ -34,7 +34,14 @@ def _entry(strategy: str, account_id: str, order: dict[str, Any], recorded_at: s
         "side": action,
         "quantity": float(quantity) if isinstance(quantity, (int, float)) else 0.0,
         "notional": float(order.get("notional") or 0.0),
+        # The price the order actually carries. ``latest_price`` is the mark a *market* order
+        # was sized from -- an estimate, not a price the order names -- while a resting limit or
+        # stop names one exactly, and the reconciler reports it. Recording only the former left
+        # every option order in the journal at 0.00, since none of them is a market order.
         "price": float(order.get("latest_price") or 0.0),
+        "order_type": str(order.get("order_type") or ""),
+        "limit_price": float(order.get("limit_price") or 0.0),
+        "stop_price": float(order.get("stop_price") or 0.0),
         "status": status,
         "order_id": str(order.get("order_id") or ""),
         "reason": str(order.get("reason") or ""),

@@ -2948,7 +2948,7 @@ function algorithmOrdersTable(journal) {
     <div class="tableWrap is-scroll">
       <table class="dataTable">
         <thead>
-          <tr><th>Time</th><th>Symbol</th><th>Side</th><th class="num">Qty</th><th>Status</th></tr>
+          <tr><th>Time</th><th>Symbol</th><th>Side</th><th>Detail</th><th>Status</th></tr>
         </thead>
         <tbody>
           ${journal.rows.map((row) => `
@@ -2956,7 +2956,15 @@ function algorithmOrdersTable(journal) {
               <td class="nowrap">${escapeHtml(formatActivityTime(row.submitted_at))}</td>
               <td><strong>${escapeHtml(row.symbol)}</strong></td>
               <td><span class="side is-${escapeHtml(orderSideClass(row.side))}">${escapeHtml(row.side)}</span></td>
-              <td class="num">${escapeHtml(row.quantity ? num(row.quantity, row.quantity % 1 ? 3 : 0) : "--")}</td>
+              <td class="nowrap">${escapeHtml(formatActivityDetail({
+                qty: row.quantity,
+                filled_qty: row.status === "submitted" ? row.quantity : 0,
+                filled_avg_price: null,
+                limit_price: row.limit_price,
+                stop_price: row.stop_price,
+                order_type: row.order_type,
+                est_price: row.price,
+              }))}</td>
               <td class="tableNote" title="${escapeHtml(row.reason || "")}">${escapeHtml(row.status)}</td>
             </tr>`).join("")}
         </tbody>
@@ -2991,13 +2999,32 @@ async function ensureAlgorithmConfig(strategyKey) {
   }
 }
 
+//: Size and price, in that order, saying which price it is.
+//:
+//: A filled order has one true price and that is what it paid. An order still resting has none
+//: -- ``filled_avg_price`` is null -- but it is *asking* one, and that limit or stop is the
+//: whole substance of the order: "sell 1" says nothing, "sell 1 @ $17.30 limit" says what will
+//: happen and when. A market order really has no price to name and says so, rather than
+//: borrowing the mark it was sized from and presenting an estimate as a fact.
 function formatActivityDetail(row) {
+  const qty = Number(row.filled_qty || 0) || Number(row.qty || 0);
+  const size = qty ? num(qty, qty % 1 ? 3 : 0) : "";
+
   const filled = Number(row.filled_qty || 0);
-  if (filled > 0 && row.filled_avg_price) {
-    return `${num(filled, filled % 1 ? 3 : 0)} @ ${money(row.filled_avg_price, 2)}`;
-  }
-  const qty = Number(row.qty || 0);
-  return qty ? `${num(qty, qty % 1 ? 3 : 0)} requested` : "--";
+  if (filled > 0 && row.filled_avg_price) return `${size} @ ${money(row.filled_avg_price, 2)} filled`;
+
+  const limit = Number(row.limit_price || 0);
+  const stop = Number(row.stop_price || 0);
+  if (limit > 0) return `${size} @ ${money(limit, 2)} limit`;
+  if (stop > 0) return `${size} @ ${money(stop, 2)} stop`;
+
+  // A market order names no price, but it was *sized* from one. Marked with a tilde so the
+  // estimate is never mistaken for what the order paid.
+  const sized = Number(row.est_price || 0);
+  if (size && sized > 0) return `${size} @ ~${money(sized, 2)}`;
+  const type = String(row.order_type || "").toLowerCase();
+  if (size && type.includes("market")) return `${size} at market`;
+  return size ? `${size} requested` : "--";
 }
 
 function formatActivityTime(value) {

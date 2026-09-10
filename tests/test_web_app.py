@@ -598,3 +598,18 @@ def test_the_budget_board_is_one_component_for_every_algorithm() -> None:
         if "function renderDcaSummary" in app_js else app_js[app_js.index("function itemRadius"):app_js.index("function planStrategyKey")]
     for hardcoded in ('=== "buy"', '=== "sell"', '=== "call"', '=== "put"'):
         assert hardcoded not in board, f"the board still branches on {hardcoded}"
+
+
+def test_an_order_row_says_which_price_it_is_showing() -> None:
+    """A filled order has one true price; a resting one is only *asking* its limit or stop; a
+    market order names none at all and shows the mark it was sized from, tilde-marked.
+
+    "sell 1" says nothing. "sell 1 @ $17.30 limit" says what will happen and when.
+    """
+    app_js, _, _ = _assets()
+
+    detail = app_js[app_js.index("function formatActivityDetail"):app_js.index("function formatActivityTime")]
+    assert "filled`" in detail and "limit`" in detail and "stop`" in detail
+    assert "~${money(sized, 2)}" in detail, "a market order's price is an estimate, not a fact"
+    # Both tables go through it, so the journal and the broker view cannot disagree.
+    assert app_js.count("formatActivityDetail(") >= 2
