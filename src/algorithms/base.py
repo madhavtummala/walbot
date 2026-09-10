@@ -147,6 +147,13 @@ class BaseAlgorithm:
     tune_buckets: tuple[str, ...] = ("buy", "sell")
     #: One line under the board saying what a bubble's number is, in the algorithm's own terms.
     tune_budget_hint: str = "Dollars per month, per symbol"
+    #: How a bubble's number should be read and edited: ``currency`` formats it as dollars,
+    #: ``count`` as a plain integer. The board is one component, so the unit is a declaration
+    #: rather than two implementations of the same board.
+    tune_unit: str = "currency"
+    #: Largest amount one bubble may hold, and the increment a scroll moves it by.
+    tune_max_amount: float = 2000.0
+    tune_step: float = 25.0
 
     #: Order-sizing floors. ``None`` takes the account's own setting (right for a portfolio
     #: algorithm); ``0.0`` switches the floor off (right for one that states increments, e.g.

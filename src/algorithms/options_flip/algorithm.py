@@ -48,7 +48,7 @@ from ...data.state_store import algorithm_state_key, save_state
 from ..base import BaseAlgorithm
 from ..rally_rotation.memory import market_day, sessions_since
 from ..reconcile import ORDER_IDS_KEY, reconcile_orders
-from .config import BUCKETS, OptionsFlipConfig, raw_plan, sanitize_plan, symbol_budget
+from .config import BUCKETS, MAX_ITEM_AMOUNT, OptionsFlipConfig, raw_plan, sanitize_plan, symbol_contracts
 from .contracts import affordable_contracts, fill_missing_deltas, select_contract
 from .candidates import scoring_parameters, trend_strength
 from .indicators import average_true_range, quote_age_seconds
@@ -77,7 +77,11 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
     #: -- call and put rather than buy and sell -- and the editor keys off ``BUCKETS``.
     tune_editor = "budgets"
     tune_buckets = BUCKETS
-    tune_budget_hint = "Dollars per position, per symbol — the most this side may risk at once"
+    tune_budget_hint = "Contracts per position, per symbol"
+    tune_unit = "count"
+    tune_max_amount = float(MAX_ITEM_AMOUNT)
+    #: One contract, because that is the unit the venue actually trades.
+    tune_step = 1.0
 
     #: Contracts are sized by a per-symbol dollar budget, trimmed by a notional cap, so neither
     #: portfolio floor applies.
@@ -102,10 +106,31 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
     cron = "*/5 9-15 * * 1-5"
 
     def budget_plan(self, config: Any) -> dict[str, Any]:
-        """The per-symbol dollar budgets, filtered to what is actually tradable."""
+        """The per-symbol contract sizes, filtered to what is actually tradable.
+
+        An unset board seeds from this algorithm's own symbols at the global
+        ``contracts_per_trade``, which is exactly what those symbols would trade today -- so the
+        board opens showing the current behaviour rather than an empty canvas that reads as "this
+        algorithm trades nothing". Seeding only when the board is *entirely* empty is what keeps
+        it honest afterwards: once anything is saved, a symbol left off it is a symbol the reader
+        chose not to fund, and it stays at zero.
+        """
         from ...data.universe import tradable_symbols
 
-        return sanitize_plan(raw_plan(config, self.algorithm_id), tradable_symbols(config))
+        tradable = tradable_symbols(config)
+        board = sanitize_plan(raw_plan(config, self.algorithm_id), tradable)
+        if any(bucket.get("items") for bucket in board.values()):
+            return board
+
+        cfg = self.tuning(config)
+        unit = max(int(getattr(cfg, "contracts_per_trade", 1) or 1), 1)
+        seeded = [
+            {"symbol": symbol, "amount": unit}
+            for symbol in self._symbols(cfg, config)
+            if symbol in tradable
+        ]
+        board[CALL] = {"amount": sum(item["amount"] for item in seeded), "items": seeded}
+        return board
 
     def config_fingerprint(self, config: Any) -> dict[str, Any]:
         """The board sizes every position, so editing an amount changes what this algorithm
@@ -316,8 +341,11 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
                 spot=underlying_now, config=cfg,
             )
             ceiling = max_debit(priced, outcomes, config=cfg)
-            budget = symbol_budget(plan_board, symbol, CALL)
-            contracts = affordable_contracts(priced, cfg, budget=budget) if contract else 0
+            board_contracts = symbol_contracts(plan_board, symbol, CALL)
+            contracts = (
+                affordable_contracts(priced, cfg, wanted_contracts=board_contracts)
+                if contract else 0
+            )
             profit = expected_profit(outcomes, contracts or 1, config=cfg)
             worth_it = profit["per_contract"] >= float(cfg.min_profit_per_contract)
             estimate = _estimate_row(
@@ -326,13 +354,13 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
             notional_cap = float(getattr(cfg, "max_notional_per_trade", 0.0) or 0.0)
             # What set the size, named so the deck says which control the reader should reach
             # for: the symbol's own budget when the board funds it, the global unit otherwise.
-            if budget > 0:
-                wanted_contracts = int(budget // ((contract.ask or contract.midpoint) * 100.0)) if contract else 0
-                sized_by = f"${budget:,.0f} budget for {symbol}"
+            if board_contracts > 0:
+                wanted_contracts = board_contracts
+                sized_by = f"{symbol}'s board size"
             else:
                 wanted_contracts = max(int(getattr(cfg, "contracts_per_trade", 1) or 1), 1)
-                sized_by = f"{wanted_contracts} contract unit (no budget set for {symbol})"
-            if contract is not None and (notional_cap > 0 or budget > 0):
+                sized_by = f"the global unit ({symbol} is not on the board)"
+            if contract is not None and (notional_cap > 0 or board_contracts > 0):
                 contract_cost = (contract.ask or contract.midpoint) * 100.0
                 capped = notional_cap > 0 and contracts < wanted_contracts
                 checks = checks + [Check(
@@ -340,7 +368,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
                     ok=contracts > 0,
                     value=(
                         f"${contract_cost:,.0f}/contract — {contracts} of {wanted_contracts} "
-                        f"from the {sized_by}"
+                        f"from {sized_by}"
                         + (f", trimmed by the ${notional_cap:,.0f} cap" if capped else "")
                     ),
                     limit=(

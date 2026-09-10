@@ -1279,52 +1279,57 @@ class _Quote:
         self.midpoint = ask
 
 
-def test_a_budget_sizes_the_position_in_dollars_not_contracts() -> None:
-    """The budget is the loss cap: a long call cannot lose more than its premium, so the same
-    dollar figure means the same risk on any symbol."""
+def test_the_board_sets_the_position_size_per_symbol() -> None:
+    """One global unit meant one size for every symbol. The board states it per name."""
     from src.algorithms.options_flip.config import OptionsFlipConfig
     from src.algorithms.options_flip.contracts import affordable_contracts
 
-    config = OptionsFlipConfig()
+    config = OptionsFlipConfig(max_notional_per_trade=0.0)
 
-    assert affordable_contracts(_Quote(17.50), config, budget=3_500.0) == 2   # $3,500
-    assert affordable_contracts(_Quote(2.50), config, budget=3_500.0) == 14   # $3,500
+    assert affordable_contracts(_Quote(17.50), config, wanted_contracts=2) == 2
+    assert affordable_contracts(_Quote(2.50), config, wanted_contracts=8) == 8
 
 
-def test_no_budget_falls_back_to_the_global_contract_unit() -> None:
+def test_a_symbol_off_the_board_falls_back_to_the_global_unit() -> None:
     """An account that never opens the board behaves exactly as it did before."""
     from src.algorithms.options_flip.config import OptionsFlipConfig
     from src.algorithms.options_flip.contracts import affordable_contracts
 
-    config = OptionsFlipConfig(contracts_per_trade=2)
+    config = OptionsFlipConfig(contracts_per_trade=2, max_notional_per_trade=0.0)
 
-    assert affordable_contracts(_Quote(2.50), config, budget=0.0) == 2
+    assert affordable_contracts(_Quote(2.50), config, wanted_contracts=0) == 2
 
 
-def test_the_notional_cap_still_trims_a_budget() -> None:
-    """The two say different things: the budget sizes the position, the cap is money the
+def test_the_notional_cap_still_trims_the_board_size() -> None:
+    """The two say different things: the board is the size you intend, the cap is money the
     account refuses to exceed whatever the board asks for."""
     from src.algorithms.options_flip.config import OptionsFlipConfig
     from src.algorithms.options_flip.contracts import affordable_contracts
 
     config = OptionsFlipConfig(max_notional_per_trade=1_000.0)
 
-    # The budget wants 14; the cap allows 4.
-    assert affordable_contracts(_Quote(2.50), config, budget=3_500.0) == 4
+    # The board wants 8 at $250 each; the cap allows 4.
+    assert affordable_contracts(_Quote(2.50), config, wanted_contracts=8) == 4
 
 
-def test_a_symbol_absent_from_the_board_is_not_traded() -> None:
-    """Zero is a decision, not a missing value: the board is the whole statement of what this
-    algorithm may open."""
-    from src.algorithms.options_flip.config import OptionsFlipConfig, sanitize_plan, symbol_budget
-    from src.algorithms.options_flip.contracts import affordable_contracts
+def test_a_symbol_absent_from_the_board_reads_as_zero() -> None:
+    """Zero is a decision, not a missing value."""
+    from src.algorithms.options_flip.config import sanitize_plan, symbol_contracts
 
-    plan = sanitize_plan({"call": {"items": [{"symbol": "GLD", "amount": 3_500}]}}, {"GLD", "USO"})
+    plan = sanitize_plan({"call": {"items": [{"symbol": "GLD", "amount": 3}]}}, {"GLD", "USO"})
 
-    assert symbol_budget(plan, "USO", "call") == 0.0
-    # ...and with no budget it falls back to the unit, so "not on the board" has to be enforced
-    # by the board being the source of the symbol list, which `_symbols` already is.
-    assert affordable_contracts(_Quote(8.00), OptionsFlipConfig(), budget=0.0) == 1
+    assert symbol_contracts(plan, "GLD", "call") == 3
+    assert symbol_contracts(plan, "USO", "call") == 0
+
+
+def test_the_board_holds_whole_contracts_only() -> None:
+    """No venue sells a fraction of one, so a board offering 1.5 would offer an unsubmittable
+    size."""
+    from src.algorithms.options_flip.config import sanitize_plan, symbol_contracts
+
+    plan = sanitize_plan({"call": {"items": [{"symbol": "GLD", "amount": 2.7}]}}, {"GLD"})
+
+    assert symbol_contracts(plan, "GLD", "call") == 2
 
 
 def test_the_board_declares_call_and_put_buckets() -> None:

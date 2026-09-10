@@ -150,23 +150,18 @@ def select_contract(
 
 
 def affordable_contracts(
-    contract: OptionContract, config: Any, *, budget: float = 0.0
+    contract: OptionContract, config: Any, *, wanted_contracts: int = 0
 ) -> int:
     """How many contracts to open, at this contract's ask.
 
-    Priced at the ask rather than the mid because this is a statement about money that could
-    actually leave the account, and a marketable order pays the offer.
+    **The per-symbol board sets the size; ``max_notional_per_trade`` only trims it.** The two say
+    different things rather than the same thing twice: the board is the position you intend to
+    take, the cap is money the account refuses to exceed whatever the board asks for. Priced at
+    the ask rather than the mid because the cap is a statement about money that could actually
+    leave the account, and a marketable order pays the offer.
 
-    **A per-symbol budget sizes the position; the global knobs only trim it.** The budget is
-    stated in dollars because dollars are what a long call actually risks -- it cannot lose more
-    than its premium, so the budget *is* the loss cap, and it means the same thing on GLD's $17
-    premium as on IBIT's $2.50. A contract count does not: the same unit on those two symbols is
-    a six-fold difference in money at risk, and it drifts again as premium moves. Measured over
-    August, one global ``contracts_per_trade: 1`` put ~$1,750 per GLD position against ~$250 per
-    IBIT one, which is a position-sizing decision nobody made on purpose.
-
-    Falls back to ``contracts_per_trade`` when a symbol has no budget on the board, so an
-    account that never opens the board behaves exactly as it did before.
+    Falls back to the global ``contracts_per_trade`` when a symbol is not on the board, so an
+    account that never opens it behaves exactly as it did before.
 
     Whole contracts because no venue sells a fraction of one.
     """
@@ -179,11 +174,9 @@ def affordable_contracts(
     if cost <= 0:
         return 0
 
-    budget = max(float(budget or 0.0), 0.0)
-    if budget > 0:
-        wanted = int(budget // cost)
-    else:
-        wanted = max(int(getattr(config, "contracts_per_trade", 1) or 1), 1)
+    wanted = int(max(wanted_contracts or 0, 0)) or max(
+        int(getattr(config, "contracts_per_trade", 1) or 1), 1
+    )
 
     cap = float(getattr(config, "max_notional_per_trade", 0.0) or 0.0)
     # A cap of zero means "no cap" -- deliberately, because on an expensive underlying the cap

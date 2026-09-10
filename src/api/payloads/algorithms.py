@@ -104,6 +104,25 @@ def _tune_attr(strategy: str, name: str, default: Any) -> Any:
         return default
 
 
+def _with_seeded_board(strategy: str, values: dict[str, Any]) -> dict[str, Any]:
+    """Fill in the board an algorithm would open with, when nothing is saved yet.
+
+    The editor draws bubbles from ``config.plan``, so an algorithm that has never been tuned
+    renders an empty canvas -- which reads as "this trades nothing" when in fact it trades on
+    its global defaults. Asking the algorithm for its own opening board is the honest answer,
+    and it is read-only: nothing is written until the reader saves.
+    """
+    if _tune_editor(strategy) != "budgets" or isinstance(values.get("plan"), dict) and values["plan"]:
+        return values
+    try:
+        algorithm = get_algorithm_class(strategy).from_config(config_for_strategy_view(strategy, ""))
+        board = algorithm.budget_plan(config_for_strategy_view(strategy, ""))
+    except Exception as exc:  # noqa: BLE001 - a board that cannot be seeded is still editable
+        logger.warning("Could not seed the %s board: %s", strategy, exc)
+        return values
+    return {**values, "plan": board}
+
+
 def algorithm_config_payload(strategy: str) -> dict[str, Any]:
     """The saved tuning for one algorithm, read from the key it actually lives under."""
     strategy = canonical_algorithm_id(strategy)[:80]
@@ -114,6 +133,7 @@ def algorithm_config_payload(strategy: str) -> dict[str, Any]:
         (legacy for legacy in LEGACY_ALGORITHM_IDS.get(strategy, []) if legacy in sections), strategy
     )
     values = sections.get(key) if isinstance(sections.get(key), dict) else {}
+    values = _with_seeded_board(strategy, values)
     return {
         "strategy": strategy,
         # Surfaced so the dashboard can say which key on disk a value came from: several
@@ -127,6 +147,10 @@ def algorithm_config_payload(strategy: str) -> dict[str, Any]:
         # to algorithms whose buckets happened to be named buy and sell.
         "tune_buckets": [str(b) for b in _tune_attr(strategy, "tune_buckets", ("buy", "sell"))],
         "tune_budget_hint": str(_tune_attr(strategy, "tune_budget_hint", "") or ""),
+        # How the board reads and edits a bubble's number. One component, two units.
+        "tune_unit": str(_tune_attr(strategy, "tune_unit", "currency")),
+        "tune_max_amount": float(_tune_attr(strategy, "tune_max_amount", 2000.0)),
+        "tune_step": float(_tune_attr(strategy, "tune_step", 25.0)),
         "explainer": explainer_for(strategy),
     }
 

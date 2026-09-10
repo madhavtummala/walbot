@@ -279,8 +279,8 @@ class OptionsFlipConfig:
 #: own reader, and the Tune screen renders it through a purpose-built editor.
 PLAN_KEY = "plan"
 
-#: Hard ceiling on one symbol's budget, in dollars per position.
-MAX_ITEM_AMOUNT = 25_000.0
+#: Hard ceiling on one symbol's position size, in contracts.
+MAX_ITEM_AMOUNT = 20
 
 #: The directions a budget can be set for. ``put`` is declared but not yet tradable -- the
 #: level model measures a dip-then-rebound and the regime gate is one-sided, so nothing can act
@@ -303,7 +303,7 @@ def raw_plan(config: Any, algorithm_id: str) -> dict[str, Any]:
 
 
 def sanitize_plan(plan: dict[str, Any] | None, universe: set[str]) -> dict[str, Any]:
-    """Normalize a budget board and keep only symbols present in the configured universe.
+    """Normalize a contracts board and keep only symbols present in the configured universe.
 
     An absent or empty plan sanitizes to empty buckets -- never a built-in default, which would
     let clearing the board leave the algorithm still trading. A symbol with no budget is a
@@ -323,22 +323,24 @@ def sanitize_plan(plan: dict[str, Any] | None, universe: set[str]) -> dict[str, 
             seen.add(symbol)
             items.append({
                 "symbol": symbol,
-                "amount": min(max(as_float(item.get("amount"), default=0.0), 0.0), MAX_ITEM_AMOUNT),
+                # Whole contracts: no venue sells a fraction of one, so a board that let you
+                # type 1.5 would be offering a size that cannot be submitted.
+                "amount": int(min(max(as_float(item.get("amount"), default=0.0), 0.0), MAX_ITEM_AMOUNT)),
             })
         sanitized[bucket] = {"amount": sum(item["amount"] for item in items), "items": items}
 
     return sanitized
 
 
-def symbol_budget(plan: dict[str, Any] | None, symbol: str, direction: str) -> float:
-    """This symbol's budget for one direction, in dollars. 0.0 when the board does not fund it.
+def symbol_contracts(plan: dict[str, Any] | None, symbol: str, direction: str) -> int:
+    """How many contracts this symbol may open in one direction. 0 when the board omits it.
 
     Zero is meaningful rather than a missing value: a symbol absent from the board is one this
-    algorithm may not open a position in, and :func:`contracts_for_budget` sizes it to nothing.
+    algorithm may not open a position in.
     """
     bucket = (plan or {}).get(str(direction).strip().lower()) or {}
     wanted = str(symbol).strip().upper()
     for item in bucket.get("items") or []:
         if str(item.get("symbol", "")).strip().upper() == wanted:
-            return max(as_float(item.get("amount"), default=0.0), 0.0)
-    return 0.0
+            return int(max(as_float(item.get("amount"), default=0.0), 0.0))
+    return 0

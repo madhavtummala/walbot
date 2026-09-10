@@ -251,9 +251,9 @@ def test_tune_tab_renders_the_right_editor_per_algorithm() -> None:
     # config: its regime gate, scaling factor and cap knobs live in the config section like
     # every other algorithm's. It used to get the board *instead of* the parameter form, which
     # left those with no editor at all. It now gets both; everything else gets the form.
-    assert "function renderDcaTuner" in app_js
+    assert "function renderBudgetBoard" in app_js
     assert "function renderConfigForm" in app_js
-    assert 'if (hasBudgets) renderDcaTuner($("#dcaBoard"), strategy);' in app_js
+    assert 'if (hasBudgets) renderBudgetBoard($("#dcaBoard"), strategy);' in app_js
     assert 'renderConfigForm($("#tuneBody"), strategy);' in app_js
     # The save button is no longer suppressed, because there is now a form to save.
     assert 'hasBudgets ? "" : `<div class="cardActions">' not in app_js
@@ -307,7 +307,7 @@ def test_one_algorithms_bubbles_are_never_written_into_anothers_plan() -> None:
     sync = app_js[app_js.index("function syncNodesToPlan"):app_js.index("function renderBoard")]
     assert "if (state.nodesStrategy !== planStrategyKey()) return;" in sync
     # And the board starts clean rather than animating the previous algorithm's bubbles.
-    tuner = app_js[app_js.index("function renderDcaTuner"):app_js.index("function renderConfigForm")]
+    tuner = app_js[app_js.index("function renderBudgetBoard"):app_js.index("function renderConfigForm")]
     assert "state.nodes = [];" in tuner
 
 
