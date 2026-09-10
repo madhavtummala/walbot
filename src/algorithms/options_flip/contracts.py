@@ -122,8 +122,8 @@ def select_contract(
                     f"delta {best.delta:+.2f}, {best.dte(as_of)}d, "
                     f"vol {best.volume}, OI {best.open_interest}, "
                     f"{best.bid:.2f}/{best.ask:.2f} ({best.spread_pct:.1%} wide)"
+                    f" — nearest delta {target:+.2f}, then volume"
                 ),
-                limit=f"nearest delta {target:+.2f}, then volume",
             ))
             return best, candidate, checks
 

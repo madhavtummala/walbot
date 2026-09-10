@@ -399,8 +399,10 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
             ), Check(
                 label="Max debit",
                 ok=ceiling > 0,
-                value=f"${ceiling:.2f} — the entry limit is never raised past this",
-                limit="derived from the base case, not chosen",
+                value=(
+                    f"${ceiling:.2f} — the entry limit is never raised past this, "
+                    f"derived from the base case rather than chosen"
+                ),
             )]
             if not worth_it:
                 contracts = 0
@@ -454,8 +456,8 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
                     f"${float(band.get('target', 0.0)):.2f} from "
                     + ("the premium's own history" if band_source == "option" else "the underlying")
                     + f" ({int(band.get('sample', 0))} sessions)"
+                    + " — this contract's own low and run, in premium; absurds fall back"
                 ),
-                limit="this contract's own low and run, in premium; absurds fall back",
             )]
             if estimate:
                 # What the resting bid is actually priced from -- the band's own entry, which is
@@ -671,7 +673,7 @@ def _pick_contract(context, symbol, direction, session, cfg, spot=0.0, annual_vo
             label="Option chain available",
             ok=False,
             value="no chain provider bound",
-            limit="required to choose a contract",
+            limit="a chain to choose a contract from",
             blocking=True,
         )]
     try:
@@ -680,7 +682,7 @@ def _pick_contract(context, symbol, direction, session, cfg, spot=0.0, annual_vo
         logger.warning("Options Flip could not read the chain for %s: %s", symbol, exc)
         return None, None, [Check(
             label="Option chain available",
-            ok=False, value=str(exc)[:80], limit="chain request succeeded", blocking=True,
+            ok=False, value=str(exc)[:80], limit="a chain the provider could return", blocking=True,
         )]
     as_of = datetime.fromisoformat(session["market_day"]).date()
     chain, estimated = fill_missing_deltas(
@@ -692,8 +694,10 @@ def _pick_contract(context, symbol, direction, session, cfg, spot=0.0, annual_vo
         checks = [Check(
             label="Greeks estimated",
             ok=True,
-            value="the chain returned none; delta computed from realised volatility",
-            limit="provider greeks preferred",
+            value=(
+                "the chain returned none; delta computed from realised volatility "
+                "(a provider greek is preferred when one is quoted)"
+            ),
         )] + checks
     return best, candidate, checks
 

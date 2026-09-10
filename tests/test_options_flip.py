@@ -779,7 +779,7 @@ class TestStopDisabled:
         outcome = self._held(stop_loss_pct=0.0)
         stop_check = next(c for c in outcome.checks if c.label == "Protective stop")
         assert "loss cap" in stop_check.value
-        assert "deadline" in (stop_check.limit or "")
+        assert "deadline" in stop_check.value
 
 
 class TestExitTargetIsALevel:
@@ -1466,3 +1466,40 @@ def test_every_gate_that_can_refuse_a_trade_is_in_the_formula() -> None:
         "max_quote_age_seconds",
     ):
         assert knob in formula, f"{knob} gates a trade but the formula never mentions it"
+
+
+def test_only_a_real_requirement_goes_in_a_checks_limit() -> None:
+    """``Check.limit`` is "what it had to be", and the deck renders it as "needs {limit}".
+
+    Readings put explanatory prose there, so a check that refuses nothing rendered as
+    "needs reported, not gated" -- a requirement stated for something that requires nothing.
+    A note belongs in the value; only a gate carries a limit.
+    """
+    import ast
+    import pathlib
+
+    offenders = []
+    for path in pathlib.Path("src/algorithms/options_flip").glob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not (isinstance(node, ast.Call) and getattr(node.func, "id", "") == "Check"):
+                continue
+            kw = {k.arg: k.value for k in node.keywords}
+            limit = kw.get("limit")
+            if limit is None:
+                continue
+            if not isinstance(limit, (ast.Constant, ast.JoinedStr, ast.BinOp)):
+                continue  # a pass-through, not a literal this file controls
+            text = ast.unparse(limit)
+            # A requirement compares something. Prose does not -- and prose is what reads as
+            # nonsense once the deck prefixes it with "needs". A gate that passed may still
+            # restate the bar it cleared, which is worth showing.
+            if not any(token in text for token in (
+                "≥", "≤", ">", "<", "=", "within", "at least", "only", "never",
+                "placed at", "or recovering", "allowed",
+                # A noun phrase reads correctly after "needs": "needs a quote to size the
+                # bracket from", "needs daily bars to measure the trend against".
+                "a ", "an ", "the ",
+            )):
+                offenders.append(f"{path.name}: {text[:60]}")
+
+    assert not offenders, "a check's limit must read as a requirement: " + "; ".join(offenders)

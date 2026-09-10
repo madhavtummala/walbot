@@ -190,9 +190,9 @@ def _flat_or_bidding(
             + (f" — ratcheted {given_up:.0%} toward the mark" if given_up > 0.01 else "")
             if entry_target > 0 else
             f"${limit:.2f} for {contract.osi_symbol}, at the mid (no level)"
-        ),
-        limit=f"pullback limit, patience {float(getattr(config, 'entry_patience', 1.0)):.1f}; "
-              f"never above the mark, abandoned unfilled at the close",
+        )
+        + f" — pullback limit, patience {float(getattr(config, 'entry_patience', 1.0)):.1f}; "
+          f"never above the mark, abandoned unfilled at the close",
     )]
     memory = {
         "state": BIDDING,
@@ -378,14 +378,15 @@ def _held(
         Check(
             label="Profit target",
             ok=True,
+            # A reading: it reports the order that is resting, and refuses nothing. So the
+            # schedule behind it belongs in the value -- ``limit`` means "what it had to be",
+            # and the deck prefixes that with "needs", which turns a note into a false rule.
             value=(
-                f"${target:.2f} ({(target / fill_price - 1.0):+.0%} on the fill)"
-                if fill_price > 0 else f"${target:.2f}"
-            ),
-            limit=(
-                f"asking {asked:.0%} of the modelled gain, session {held_days + 1} of "
-                f"{int(config.max_hold_sessions)} (patience "
-                f"{float(getattr(config, 'exit_patience', 1.0)):.1f})"
+                (f"${target:.2f} ({(target / fill_price - 1.0):+.0%} on the fill)"
+                 if fill_price > 0 else f"${target:.2f}")
+                + f" — asking {asked:.0%} of the modelled gain, session {held_days + 1} of "
+                + f"{int(config.max_hold_sessions)} (patience "
+                + f"{float(getattr(config, 'exit_patience', 1.0)):.1f})"
                 + ("" if not band_exhausted else " — band target at/below the mark, sold outright")
                 + ("" if gate_streak <= 0 else f" — bull gate closed {gate_streak} run(s), "
                    f"{1.0 - gate_decay:.0%} converged to the mark")
@@ -396,20 +397,18 @@ def _held(
             label="Protective stop",
             ok=True,
             value=(
-                f"${stop:.2f} at the exchange, as a separate order"
+                f"${stop:.2f} at the exchange, as a separate order — "
+                f"{float(config.stop_loss_pct):.0%} below the ${anchor:.2f} fill"
                 if stop > 0 else
-                f"none — the {quantity}-contract premium is the loss cap"
-            ),
-            limit=(
-                f"{float(config.stop_loss_pct):.0%} below the ${anchor:.2f} entry" if stop > 0
-                else "disabled; the deadline is the exit that forces the issue"
+                f"none — the {quantity}-contract premium is the loss cap, and the deadline is "
+                f"the exit that forces the issue"
             ),
         ),
         Check(
             label="Hold deadline",
             ok=not deadline,
             value=f"session {int(memory.get('sessions_held', 0) or 0) + 1} of {config.max_hold_sessions}",
-            limit=f"flatten after {config.max_hold_sessions}",
+            limit=f"≤ {config.max_hold_sessions} sessions held",
             blocking=deadline,
         ),
     ]

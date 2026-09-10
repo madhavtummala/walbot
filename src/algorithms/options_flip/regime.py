@@ -66,7 +66,7 @@ def bull_regime(
     if daily_bars is None or daily_bars.empty:
         return False, readings, [Check(
             label="Bull regime", ok=False, value="no daily history",
-            limit="daily bars required", blocking=True,
+            limit="daily bars to measure the trend against", blocking=True,
         )]
 
     closes = daily_bars["close"].astype(float)
@@ -88,12 +88,12 @@ def bull_regime(
         value=(
             f"${price:,.2f} / {int(config.regime_fast_ma_days)}d ${fast:,.2f} / "
             f"{int(config.regime_slow_ma_days)}d ${slow:,.2f}"
+            f" — {int(config.regime_fast_ma_days)}d slope {slope:+.2%} over 5 sessions"
             if fast > 0 and slow > 0 else "not enough history for both averages"
         ),
-        limit=(
-            f"reported, not gated — {int(config.regime_fast_ma_days)}d slope {slope:+.2%} over "
-            f"5 sessions; the fast average carries the test"
-        ),
+        # Deliberately no ``limit``: this is a reading, and ``limit`` means "what it had to be".
+        # The deck prefixes that field with "needs", so prose there rendered as
+        # "needs reported, not gated" -- a requirement stated for a check that requires nothing.
     ))
 
     above_fast = bool(price > fast > 0)
@@ -163,10 +163,11 @@ def bull_regime(
         value=(
             f"{volume_split['imbalance']:+.0%} imbalance "
             f"(buy {volume_split['buy_volume']:,.0f} / sell {volume_split['sell_volume']:,.0f})"
+            f" — buy/sell split by each bar's own open-to-close"
             if (volume_split["buy_volume"] + volume_split["sell_volume"]) > 0
             else "no directional volume yet"
         ),
-        limit="reported, not gated -- buy/sell split by each bar's own open-to-close",
+        # A reading, so no ``limit`` -- see the trend check above.
     ))
 
     eligible = all(not check.blocking for check in checks)
