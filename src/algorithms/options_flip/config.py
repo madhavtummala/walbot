@@ -18,7 +18,7 @@ position at the deadline is sold at whatever is offered.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from ...common.config_utils import as_float
