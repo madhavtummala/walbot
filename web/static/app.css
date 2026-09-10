@@ -591,8 +591,12 @@ select.ctl {
    the row scrolls sideways instead of the reason becoming unreadable. */
 .signalWhy .whyText {
   display: block;
+  /* The floor stays small on purpose. ``width: 100%`` on the cell already sends every spare
+     pixel here, so this column grows whenever the table has room; raising the floor instead
+     forces the table past its container and the whole row scrolls sideways, which costs more
+     than a narrow reason does. Small when the row is full, wide when it is not. */
   min-width: 14ch;
-  max-width: 52ch;
+  max-width: 76ch;
 }
 
 .actionBadge {
@@ -2465,16 +2469,3 @@ h2 {
     white-space: normal;
   }
 }
-
-/* A reading has no verdict to render, so its row is quieter than a gate's and its verdict
-   column stays empty rather than claiming a PASS it never earned. */
-.gateHeading {
-  margin: 4px 0 6px;
-  font-size: 11px;
-  letter-spacing: .06em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-.gateHeading.is-readings { margin-top: 14px; }
-.gateItem.is-reading { opacity: .72; }
-.gateItem.is-reading .gateLabel { font-weight: 400; }

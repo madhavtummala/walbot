@@ -724,9 +724,8 @@ def _estimate(
     low, high = round(entry, 2), round(exit_price, 2)
     return {
         "contract": contract.osi_symbol,
-        "contract_label": (
-            f"${contract.strike:g} {contract.option_type} · {contract.expiry:%d %b}"
-            f" · {contract.dte(as_of)}d · delta {contract.delta:.2f}"
+        "contract_label": _contract_label(
+            contract.strike, contract.option_type, contract.expiry, contract.delta
         ),
         "strike": contract.strike,
         "expiry": contract.expiry.isoformat(),
@@ -802,14 +801,12 @@ def _estimate_row(
     """
     return {
         "contract": contract.osi_symbol,
-        # Carries what the retired "Contract chosen" check reported: the top-level column
-        # already named the strike, expiry and delta, so the check repeated three of its five
-        # fields. What it alone had -- days left, and whether the contract is tradable -- is
-        # here instead of on a second line saying the same thing twice.
-        "contract_label": (
-            f"${contract.strike:g} {contract.option_type} · {contract.expiry:%d %b} · "
-            f"{contract.dte(as_of)}d · delta {contract.delta:+.2f} · "
-            f"OI {contract.open_interest:,} · {contract.spread_pct:.1%} wide"
+        # Built by the shared helper so a candidate and a held position read identically.
+        # Open interest and the quoted spread are deliberately absent: they are the *gates*
+        # "Liquid enough to trade" measures, and the panel already reports both against their
+        # thresholds. Repeating them on the row said the same thing without the threshold.
+        "contract_label": _contract_label(
+            contract.strike, contract.option_type, contract.expiry, contract.delta
         ),
         "mark": contract.midpoint,
         "spread_pct": contract.spread_pct,
@@ -879,10 +876,6 @@ def _held_estimate_row(memory, band, mark: float, exit_level: float, sell_ok: bo
         # for the contracts it would open. Reported rather than omitted: "what do I make if
         # this target fills" is the question a held row exists to answer.
         "expected_profit": max(asking - fill_price, 0.0) * 100.0 * contracts,
-        # Promoted to a column of its own. It used to appear only as a reading, and the deck no
-        # longer renders those -- which would have hidden the one price on a held row that
-        # nothing else reports: what the position is protected at.
-        "stop_price": float(memory.get("stop", 0.0) or 0.0),
         "band_source": str(band.get("source") or "none"),
         "band_sample": int(band.get("sample", 0)),
         "sell_ok": sell_ok,

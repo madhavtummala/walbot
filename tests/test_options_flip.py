@@ -1556,17 +1556,20 @@ def test_the_deck_shows_gates_and_nothing_else() -> None:
     assert "Measured, not gated" not in app_js
 
 
-def test_a_held_row_still_reports_the_price_it_is_protected_at() -> None:
-    """The stop appeared only as a reading, and the deck no longer renders those. It is the one
-    price on a held row nothing else carries, so it became a column."""
-    from src.algorithms.options_flip.algorithm import _held_estimate_row
-    from src.algorithms.options_flip.signals import _metrics
+def test_the_contract_reads_the_same_whether_held_or_a_candidate() -> None:
+    """One builder for both, so a held position and a candidate cannot drift apart.
 
-    estimate = _held_estimate_row(
-        {"contract": "USO   260916C00142000", "fill_price": 8.85, "target": 17.83,
-         "contracts": 1, "delta": 0.97, "stop": 4.42},
-        band={"source": "option", "sample": 10}, mark=13.0, exit_level=162.87, sell_ok=True,
-    )
-    labels = {m["label"]: m["value"] for m in _metrics({"estimate": estimate})}
+    The candidate row briefly carried open interest and the quoted spread as well. Those are
+    what the "Liquid enough to trade" gate measures, and the panel already reports both against
+    their thresholds -- on the row they repeated the measurement without the bar it had to clear.
+    """
+    from datetime import date
 
-    assert labels["Stop"] == "$4.42"
+    from src.algorithms.options_flip.algorithm import _contract_label, _held_contract_label
+
+    candidate = _contract_label(385.0, "call", date(2026, 9, 25), 0.77)
+    held = _held_contract_label({"contract": "GLD   260925C00385000", "delta": 0.77})
+
+    assert candidate == held == "$385 call · 25 Sep · delta +0.77"
+    for absent in ("OI", "wide", "15d"):
+        assert absent not in candidate

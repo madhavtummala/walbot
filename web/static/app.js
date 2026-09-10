@@ -1535,14 +1535,9 @@ function gateDetail(row) {
   // rather than dropped: on a held position the resting target and stop are readings, and they
   // are the two most useful lines there.
 
-  const blocked = gates.filter((check) => !check.ok).length;
-  return `
-    <p class="gateHeading">${escapeHtml(
-      blocked
-        ? `${blocked} of ${gates.length} ${gates.length === 1 ? "gate" : "gates"} refused this row`
-        : `${gates.length === 1 ? "the one gate" : `all ${gates.length} gates`} cleared`
-    )}</p>
-    <ul class="gateList">${gates.map(item).join("")}</ul>`;
+  // No summary line: the pip strip on the row already counts them, and which ones refused is
+  // the list immediately below, marked on each entry.
+  return `<ul class="gateList">${gates.map(item).join("")}</ul>`;
 }
 
 function renderSignalTable(rows) {
