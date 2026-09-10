@@ -875,3 +875,50 @@ def test_an_expired_cache_row_is_a_miss_not_a_hit(tmp_path) -> None:
     # Same row, written with a TTL that has already elapsed.
     save_cached_payload("market_data", "schwab", "IBIT", {"price": 36.15}, -1, db_path=db)
     assert load_cached_payload("market_data", "schwab", "IBIT", db_path=db) is None
+
+
+# --------------------------------------------------------------------------------------
+# Out-of-hours bar freshness. The session is 6.5 of 24 hours, so most runs are out of it.
+# --------------------------------------------------------------------------------------
+
+
+def _bars_ending(moment: str) -> pd.DataFrame:
+    from src.core.interfaces import MARKET_TZ
+
+    end = pd.Timestamp(moment, tz=MARKET_TZ).tz_convert("UTC")
+    return pd.DataFrame(
+        {"timestamp": [end - pd.Timedelta(minutes=5), end], "close": [1.0, 1.0]}
+    )
+
+
+def _is_fresh(now: str, latest: str) -> bool:
+    from src.connectors.cache import _fresh_cached_bars
+    from src.core.interfaces import MARKET_TZ
+
+    now_ts = pd.Timestamp(now, tz=MARKET_TZ).tz_convert("UTC")
+    return not _fresh_cached_bars(_bars_ending(latest), 5, now=now_ts).empty
+
+
+def test_a_complete_out_of_hours_cache_is_not_refetched() -> None:
+    """No intraday bar can print between the close and the next open, so a cache holding
+    everything up to the last close is complete rather than stale.
+
+    The age rule alone expired yesterday's 16:00 bar fifteen minutes after it printed, so every
+    out-of-hours run re-downloaded the whole window -- 15,000 bars a symbol, forty seconds --
+    and returned exactly what was already stored. That is what made a signals refresh time out.
+    """
+    assert _is_fresh("2026-09-10 08:18", "2026-09-09 16:00")   # pre-market
+    assert _is_fresh("2026-09-10 18:00", "2026-09-10 16:00")   # after the close
+    assert _is_fresh("2026-09-12 10:00", "2026-09-11 16:00")   # Saturday
+    assert _is_fresh("2026-09-14 08:00", "2026-09-11 16:00")   # Monday before the open
+
+
+def test_the_session_still_refetches_on_the_ordinary_clock() -> None:
+    """The completeness rule must not reach into the session, where a new bar prints every few
+    minutes and a stale cache is genuinely stale."""
+    # In session with nothing from today: the previous close is not the whole story any more.
+    assert not _is_fresh("2026-09-10 09:35", "2026-09-09 16:00")
+    # Out of session, but missing the session that has since completed.
+    assert not _is_fresh("2026-09-10 18:00", "2026-09-09 16:00")
+    # In session with a recent bar: served from cache, as before.
+    assert _is_fresh("2026-09-10 11:00", "2026-09-10 10:55")

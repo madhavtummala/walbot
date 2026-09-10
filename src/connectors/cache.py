@@ -13,6 +13,7 @@ from typing import Any
 
 import pandas as pd
 
+from ..core.interfaces import MARKET_TZ
 from ..data.duckdb_store import DAILY_INTERVAL_MINUTES, bar_end_timestamps
 from .frames import _empty_bars, filter_bar_range
 
@@ -21,6 +22,30 @@ logger = logging.getLogger(__name__)
 INTRADAY_CACHE_TTL_SECONDS = 900
 EOD_CACHE_TTL_SECONDS = 1800
 EOD_BAR_FRESH_FOR_DAYS = 3
+
+#: Regular US equity session, market-local. Intraday bars only appear between these.
+_SESSION_OPEN = (9, 30)
+_SESSION_CLOSE = (16, 0)
+
+
+def _in_session(local: pd.Timestamp) -> bool:
+    """Whether the regular session is running at ``local`` (market-local, weekdays only).
+
+    Holidays read as in-session, which is the safe direction: it only costs a fetch that comes
+    back with nothing new.
+    """
+    if local.weekday() >= 5:
+        return False
+    return (local.hour, local.minute) >= _SESSION_OPEN and (local.hour, local.minute) <= _SESSION_CLOSE
+
+
+def _last_session_close(local: pd.Timestamp) -> pd.Timestamp:
+    """The most recent regular close at or before ``local``, market-local."""
+    close_today = local.normalize() + pd.Timedelta(hours=_SESSION_CLOSE[0], minutes=_SESSION_CLOSE[1])
+    candidate = close_today if local >= close_today else close_today - pd.Timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate -= pd.Timedelta(days=1)
+    return candidate
 
 def _quote_cache_key(symbol: str) -> str:
     return symbol.upper()
@@ -77,6 +102,15 @@ def _fresh_cached_bars(
     if int(interval_minutes) >= DAILY_INTERVAL_MINUTES:
         return bars if now_ts - latest <= pd.Timedelta(days=EOD_BAR_FRESH_FOR_DAYS) else pd.DataFrame()
     if latest.date() == now_ts.date():
+        return bars
+    # Out of session, a cache holding everything up to the last close is *complete*, not stale:
+    # no further intraday bar can print until the market opens again, so re-fetching can only
+    # return what is already stored. The age-based rule alone treated yesterday's 16:00 bar as
+    # expired the moment its 15-minute TTL passed, so every out-of-hours run re-downloaded the
+    # whole window -- 15,000 bars per symbol, forty seconds, for nothing. That is most runs: the
+    # session is 6.5 of 24 hours, and it is exactly when someone is reviewing a strategy.
+    local = now_ts.tz_convert(MARKET_TZ)
+    if not _in_session(local) and latest.tz_convert(MARKET_TZ) >= _last_session_close(local):
         return bars
     max_age = pd.Timedelta(seconds=max(INTRADAY_CACHE_TTL_SECONDS, int(interval_minutes or 15) * 60 * 3))
     return bars if now_ts - latest <= max_age else pd.DataFrame()
