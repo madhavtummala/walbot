@@ -80,40 +80,52 @@ def _provider_bars(
     return work.reset_index(drop=True)
 
 
-def _fresh_cached_bars(
-    bars: pd.DataFrame,
-    interval_minutes: int,
-    *,
-    now: datetime | None = None,
-) -> pd.DataFrame:
-    """Cached bars if they are recent enough for their own resolution, else nothing.
+def last_complete_bar_end(interval_minutes: int, now: datetime | None = None) -> pd.Timestamp:
+    """End stamp of the newest bar that can possibly be complete right now, in UTC.
 
-    A bar is stale once several of its own intervals have passed; daily bars instead get a
-    session-boundary allowance since the next one doesn't exist until the market closes again.
+    This is what replaces a TTL for bar data. A completed bar is immutable -- Wednesday's
+    14:35 five-minute bar will never differ from what the exchange printed -- so asking how
+    *old* a cached bar is answers the wrong question. The only thing that decides whether the
+    cache is behind is whether a newer bar could exist yet, and outside the session the answer
+    is simply no.
     """
-    if bars.empty or "timestamp" not in bars:
-        return pd.DataFrame()
-    timestamps = pd.to_datetime(bars["timestamp"], utc=True, errors="coerce").dropna()
-    if timestamps.empty:
-        return pd.DataFrame()
     now_ts = pd.Timestamp(now or datetime.now(timezone.utc))
     now_ts = now_ts.tz_localize("UTC") if now_ts.tzinfo is None else now_ts.tz_convert("UTC")
-    latest = timestamps.max()
-    if int(interval_minutes) >= DAILY_INTERVAL_MINUTES:
-        return bars if now_ts - latest <= pd.Timedelta(days=EOD_BAR_FRESH_FOR_DAYS) else pd.DataFrame()
-    if latest.date() == now_ts.date():
-        return bars
-    # Out of session, a cache holding everything up to the last close is *complete*, not stale:
-    # no further intraday bar can print until the market opens again, so re-fetching can only
-    # return what is already stored. The age-based rule alone treated yesterday's 16:00 bar as
-    # expired the moment its 15-minute TTL passed, so every out-of-hours run re-downloaded the
-    # whole window -- 15,000 bars per symbol, forty seconds, for nothing. That is most runs: the
-    # session is 6.5 of 24 hours, and it is exactly when someone is reviewing a strategy.
     local = now_ts.tz_convert(MARKET_TZ)
-    if not _in_session(local) and latest.tz_convert(MARKET_TZ) >= _last_session_close(local):
-        return bars
-    max_age = pd.Timedelta(seconds=max(INTRADAY_CACHE_TTL_SECONDS, int(interval_minutes or 15) * 60 * 3))
-    return bars if now_ts - latest <= max_age else pd.DataFrame()
+
+    # A daily bar is only complete once its session has closed.
+    if int(interval_minutes) >= DAILY_INTERVAL_MINUTES or not _in_session(local):
+        return _last_session_close(local).tz_convert("UTC")
+
+    grid = max(int(interval_minutes or 1), 1)
+    open_minute = _SESSION_OPEN[0] * 60 + _SESSION_OPEN[1]
+    elapsed = (local.hour * 60 + local.minute) - open_minute
+    completed = max((elapsed // grid) * grid, 0)
+    frontier = local.normalize() + pd.Timedelta(minutes=open_minute + completed)
+    return frontier.tz_convert("UTC")
+
+
+def cached_bars_frontier(bars: pd.DataFrame) -> pd.Timestamp | None:
+    """The newest bar stamp held, or ``None`` when there is nothing cached."""
+    if bars is None or bars.empty or "timestamp" not in bars:
+        return None
+    timestamps = pd.to_datetime(bars["timestamp"], utc=True, errors="coerce").dropna()
+    return timestamps.max() if not timestamps.empty else None
+
+
+def cache_is_current(
+    bars: pd.DataFrame, interval_minutes: int, *, now: datetime | None = None
+) -> bool:
+    """Whether the cache already holds every bar that could have printed.
+
+    ``True`` means no request can return anything new, so the fetch is skipped entirely.
+    ``False`` means only the *gap* needs fetching -- see ``BaseConnector.bars`` -- not the whole
+    window, because everything before the frontier is immutable and already stored.
+    """
+    latest = cached_bars_frontier(bars)
+    if latest is None:
+        return False
+    return latest >= last_complete_bar_end(interval_minutes, now)
 
 
 def _news_cache_key(symbols: list[str]) -> str:

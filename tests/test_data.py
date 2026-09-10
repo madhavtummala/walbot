@@ -315,7 +315,10 @@ def test_prune_keeps_only_the_feed_grids_and_symbols_still_in_use(tmp_path, monk
 
     dry = cache_prune.prune(db_path=db_path, apply=False)
     assert dry["applied"] is False
-    assert dry["rows"] == {"kept": 2, "other_intervals": 1, "other_providers": 1, "outside_universe": 1}
+    assert dry["rows"] == {
+        "kept": 2, "other_intervals": 1, "other_providers": 1,
+        "outside_universe": 1, "expired_contracts": 0,
+    }
     # A dry run must not have touched anything.
     assert len(duckdb_store.market_bars_summary(db_path=db_path)) == 5
 

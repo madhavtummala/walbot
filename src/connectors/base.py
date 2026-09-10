@@ -26,7 +26,8 @@ from ..data.provider_cache import load_cached_payload, save_cached_payload
 from .cache import (
     EOD_CACHE_TTL_SECONDS,
     INTRADAY_CACHE_TTL_SECONDS,
-    _fresh_cached_bars,
+    cache_is_current,
+    cached_bars_frontier,
     _provider_bars,
     _quote_cache_key,
     _read_duckdb_bars,
@@ -119,35 +120,55 @@ class MarketDataProvider(ABC):
             lookback_bars = bars_for_minutes(int(lookback_minutes or 0), grid)
         ttl_seconds = self._ttl_seconds(grid)
         wanted = [str(symbol).upper() for symbol in symbols]
+        explicit_range = start_date is not None or end_date is not None
         resolved: dict[str, pd.DataFrame] = {}
+        stored: dict[str, pd.DataFrame] = {}
         missing: list[str] = []
 
         for symbol in wanted:
-            cached = (
-                _empty_bars()
-                if force_refresh
-                else _fresh_cached_bars(
-                    _read_duckdb_bars(self.name, symbol, grid, limit=lookback_bars), grid
-                )
-            )
-            if cached.empty:
+            if force_refresh:
                 missing.append(symbol)
+                continue
+            held = _read_duckdb_bars(self.name, symbol, grid, limit=lookback_bars)
+            # An explicit range is a cache-warming request for a specific window, so it is
+            # always served from the provider rather than from what happens to be stored.
+            if not explicit_range and cache_is_current(held, grid):
+                resolved[symbol] = held.tail(lookback_bars).reset_index(drop=True)
             else:
-                resolved[symbol] = cached.tail(lookback_bars).reset_index(drop=True)
+                stored[symbol] = held
+                missing.append(symbol)
 
         if missing:
+            # Fetch the *gap*, not the window. Every bar before the cached frontier is complete
+            # and immutable -- a printed bar never changes -- so re-requesting the whole
+            # lookback re-downloads thousands of rows to arrive back at what is already stored.
+            # The batch starts at the earliest frontier among the symbols that need one, which
+            # over-fetches slightly for the more current of them and still bounds the request by
+            # the gap rather than by the horizon.
+            gap_start = start_date
+            if gap_start is None and not force_refresh:
+                frontiers = [
+                    frontier for frontier in
+                    (cached_bars_frontier(stored.get(symbol, _empty_bars())) for symbol in missing)
+                    if frontier is not None
+                ]
+                # Only when every symbol has history; one cold symbol needs the full window.
+                if frontiers and len(frontiers) == len(missing):
+                    gap_start = min(frontiers).to_pydatetime()
+
             fresh = self.fetch_bars(
                 missing,
                 interval_minutes=grid,
                 lookback_bars=lookback_bars,
-                start_date=start_date,
+                start_date=gap_start,
                 end_date=end_date,
                 **extra,
             )
-            for symbol, raw in (fresh or {}).items():
+            for symbol in missing:
                 key = str(symbol).upper()
+                raw = (fresh or {}).get(symbol, (fresh or {}).get(key))
                 frame = _provider_bars(
-                    normalize_intraday_frame(raw),
+                    normalize_intraday_frame(raw) if raw is not None else _empty_bars(),
                     grid,
                     start_date=start_date,
                     end_date=end_date,
@@ -155,6 +176,16 @@ class MarketDataProvider(ABC):
                 )
                 if not frame.empty:
                     _write_duckdb_bars(self.name, key, grid, frame, ttl_seconds=ttl_seconds)
+                # Merged with what was already held, since the fetch covered only the gap.
+                previous = stored.get(key, _empty_bars())
+                if not previous.empty and not explicit_range:
+                    frame = (
+                        pd.concat([previous, frame], ignore_index=True)
+                        .drop_duplicates(subset="timestamp", keep="last")
+                        .sort_values("timestamp")
+                        .tail(lookback_bars)
+                        .reset_index(drop=True)
+                    )
                 resolved[key] = frame
 
         return {symbol: resolved.get(symbol, _empty_bars()) for symbol in wanted}

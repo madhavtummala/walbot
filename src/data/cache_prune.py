@@ -18,9 +18,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from datetime import date, datetime, timezone
 from typing import Any
 
 from src.core.config import get_config
+from src.core.options import is_osi_symbol, parse_osi
 from src.data.duckdb_store import (
     DAILY_INTERVAL_MINUTES,
     DUCKDB_STATE_PATH,
@@ -39,22 +41,64 @@ def _universe() -> set[str]:
     return {symbol.upper() for symbol in get_config().symbols}
 
 
-def plan(db_path: str | None = None) -> dict[str, Any]:
+def _contract_is_live(symbol: str, as_of: date) -> bool:
+    """Whether an OSI symbol names a contract that has not expired yet.
+
+    Option-contract bars are kept while the contract trades: Options Flip predicts its exit
+    band from the contract's *own* price history, so deleting it would silently drop that
+    algorithm back to the underlying-delta translation. Once the contract expires the rows can
+    never be relevant again -- nobody can trade it, and no future run will ask for it -- so
+    they are dead weight that only grows, one contract at a time, every expiry.
+
+    An unparseable symbol is treated as live: refusing to delete what we cannot identify is the
+    recoverable direction.
+    """
+    try:
+        return parse_osi(symbol)["expiry"] >= as_of
+    except Exception:  # noqa: BLE001 - an unreadable symbol is not a licence to delete it
+        return True
+
+
+def _keep_symbols(db_path: str | None = None, as_of: date | None = None) -> set[str]:
+    """Every symbol worth keeping: the tradable universe, plus unexpired option contracts."""
+    as_of = as_of or datetime.now(timezone.utc).date()
+    keep = _universe()
+    for row in market_bars_summary(db_path=db_path):
+        symbol = str(row["symbol"]).upper()
+        if is_osi_symbol(symbol) and _contract_is_live(symbol, as_of):
+            keep.add(symbol)
+    return keep
+
+
+def plan(db_path: str | None = None, as_of: date | None = None) -> dict[str, Any]:
     """What would be deleted, and what would remain, without touching anything."""
+    as_of = as_of or datetime.now(timezone.utc).date()
     wanted = _universe()
+    keep = _keep_symbols(db_path=db_path, as_of=as_of)
     rows = market_bars_summary(db_path=db_path)
     buckets: dict[str, int] = {
         "other_providers": 0,
         "other_intervals": 0,
+        "expired_contracts": 0,
         "outside_universe": 0,
         "kept": 0,
     }
+    expired: set[str] = set()
     for row in rows:
+        symbol = str(row["symbol"]).upper()
         if row["provider"] != KEEP_PROVIDER:
             buckets["other_providers"] += row["rows"]
         elif row["interval_minutes"] not in KEEP_INTERVALS:
             buckets["other_intervals"] += row["rows"]
-        elif row["symbol"] not in wanted:
+        elif is_osi_symbol(symbol):
+            # Split out from "outside the universe" because it is a different fact: a contract
+            # is not a symbol someone stopped trading, it is one that stopped existing.
+            if symbol in keep:
+                buckets["kept"] += row["rows"]
+            else:
+                buckets["expired_contracts"] += row["rows"]
+                expired.add(symbol)
+        elif symbol not in wanted:
             buckets["outside_universe"] += row["rows"]
         else:
             buckets["kept"] += row["rows"]
@@ -62,6 +106,8 @@ def plan(db_path: str | None = None) -> dict[str, Any]:
         "universe": sorted(wanted),
         "keep_provider": KEEP_PROVIDER,
         "keep_intervals": list(KEEP_INTERVALS),
+        "live_contracts": sorted(symbol for symbol in keep if is_osi_symbol(symbol)),
+        "expired_contracts": sorted(expired),
         "rows": buckets,
     }
 
@@ -73,7 +119,8 @@ def prune(*, db_path: str | None = None, apply: bool = False) -> dict[str, Any]:
         outcome["applied"] = False
         return outcome
 
-    wanted = sorted(_universe())
+    # Live option contracts are kept alongside the universe -- see ``_contract_is_live``.
+    wanted = sorted(_keep_symbols(db_path=db_path))
     placeholders = ",".join(["?"] * len(wanted))
     intervals = ",".join(str(int(value)) for value in KEEP_INTERVALS)
     with _connect(db_path) as connection:

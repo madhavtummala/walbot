@@ -11,7 +11,7 @@ from src.connectors.market import alpaca as market_alpaca
 from src.connectors.market import finnhub as market_finnhub
 from src.connectors.market import schwab as market_schwab
 from src.connectors.news import stocktwits as news_stocktwits
-from src.connectors.cache import INTRADAY_CACHE_TTL_SECONDS, _fresh_cached_bars
+from src.connectors.cache import INTRADAY_CACHE_TTL_SECONDS, cache_is_current
 from src.connectors.frames import normalize_intraday_frame
 from src.connectors.grid import bars_for_minutes, resolve_bar_minutes
 from src.core.config import Config
@@ -266,7 +266,7 @@ def test_normalize_intraday_frame_preserves_adjusted_close() -> None:
     assert bars["adjusted_close"].tolist() == [99.75, 101.5]
 
 
-def test_fresh_cached_bars_rejects_stale_eod_rows() -> None:
+def test_a_daily_cache_missing_completed_sessions_is_not_current() -> None:
     bars = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2026-06-04T23:00:00-05:00"]),
@@ -278,13 +278,12 @@ def test_fresh_cached_bars_rejects_stale_eod_rows() -> None:
         }
     )
 
-    fresh = _fresh_cached_bars(
+    # Eight days later, several sessions have closed and are not in the cache.
+    assert not cache_is_current(
         bars,
         connectors.DAILY_INTERVAL_MINUTES,
         now=pd.Timestamp("2026-06-12T12:00:00-05:00"),
     )
-
-    assert fresh.empty
 
 
 def test_fetch_alpaca_eod_bars_fetches_when_duckdb_rows_are_stale(monkeypatch) -> None:
@@ -892,11 +891,10 @@ def _bars_ending(moment: str) -> pd.DataFrame:
 
 
 def _is_fresh(now: str, latest: str) -> bool:
-    from src.connectors.cache import _fresh_cached_bars
     from src.core.interfaces import MARKET_TZ
 
     now_ts = pd.Timestamp(now, tz=MARKET_TZ).tz_convert("UTC")
-    return not _fresh_cached_bars(_bars_ending(latest), 5, now=now_ts).empty
+    return cache_is_current(_bars_ending(latest), 5, now=now_ts)
 
 
 def test_a_complete_out_of_hours_cache_is_not_refetched() -> None:
@@ -913,12 +911,56 @@ def test_a_complete_out_of_hours_cache_is_not_refetched() -> None:
     assert _is_fresh("2026-09-14 08:00", "2026-09-11 16:00")   # Monday before the open
 
 
-def test_the_session_still_refetches_on_the_ordinary_clock() -> None:
-    """The completeness rule must not reach into the session, where a new bar prints every few
-    minutes and a stale cache is genuinely stale."""
+def test_in_session_the_cache_is_current_only_up_to_the_last_completed_bar() -> None:
+    """Inside the session the frontier advances one grid step at a time, and the cache is
+    behind the moment a bar completes without it.
+
+    Stricter than the TTL it replaced -- which served a five-minute-old bar as fresh for a
+    further ten minutes -- and cheaper, because being behind now costs the missing bars rather
+    than the whole window.
+    """
+    # Sitting exactly on the frontier: the 11:00 bar is held, nothing newer can exist.
+    assert _is_fresh("2026-09-10 11:00", "2026-09-10 11:00")
+    # One bar behind: the 11:00 bar completed and is not held, so it is fetched.
+    assert not _is_fresh("2026-09-10 11:00", "2026-09-10 10:55")
+    # Mid-bar, holding the last completed one: current until 11:05 completes.
+    assert _is_fresh("2026-09-10 11:03", "2026-09-10 11:00")
     # In session with nothing from today: the previous close is not the whole story any more.
     assert not _is_fresh("2026-09-10 09:35", "2026-09-09 16:00")
     # Out of session, but missing the session that has since completed.
     assert not _is_fresh("2026-09-10 18:00", "2026-09-09 16:00")
-    # In session with a recent bar: served from cache, as before.
-    assert _is_fresh("2026-09-10 11:00", "2026-09-10 10:55")
+
+
+def test_a_live_option_contract_survives_a_prune() -> None:
+    """Options Flip predicts its exit band from the contract's *own* price history, so pruning
+    a live contract silently drops it back to the underlying-delta translation.
+
+    No OSI symbol is in the tradable universe, so the universe filter alone deleted every
+    option contract -- live ones included.
+    """
+    from datetime import date
+
+    from src.data.cache_prune import _contract_is_live
+
+    assert _contract_is_live("USO260916C00142000", date(2026, 9, 10))
+    assert _contract_is_live("USO260916C00142000", date(2026, 9, 16))   # expiry day still trades
+
+
+def test_an_expired_contract_is_dead_weight_and_can_go() -> None:
+    """Once a contract expires nobody can trade it and no run will ask for it again, so its
+    rows only accumulate -- one contract at a time, every expiry."""
+    from datetime import date
+
+    from src.data.cache_prune import _contract_is_live
+
+    assert not _contract_is_live("USO260916C00142000", date(2026, 9, 17))
+
+
+def test_a_symbol_we_cannot_parse_is_never_deleted() -> None:
+    """Refusing to delete what cannot be identified is the recoverable direction: bars older
+    than the API will re-serve cannot be fetched back."""
+    from datetime import date
+
+    from src.data.cache_prune import _contract_is_live
+
+    assert _contract_is_live("NOT_AN_OSI_SYMBOL", date(2026, 9, 17))
