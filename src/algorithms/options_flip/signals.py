@@ -92,16 +92,13 @@ def _metrics(signal: dict[str, Any]) -> list[dict[str, str]]:
         })
 
     # Gross, and assumes both ends fill -- read as the band's width in dollars, not a promise.
-    # Omitted for a held position: it prices an entry that has already happened, so it was only
-    # ever reported as $0 there, which reads as "no profit expected" rather than "not asked".
-    if "expected_profit" in estimate:
-        metrics.append({
-            "label": "Est Profit",
-            "value": f"${float(estimate.get('expected_profit', 0.0)):,.0f}",
-        })
+    # On a held row it prices the resting ask against what the position cost, which is the
+    # question that row exists to answer.
+    metrics.append({
+        "label": "Est Profit",
+        "value": f"${float(estimate.get('expected_profit', 0.0)):,.0f}",
+    })
 
-    if (fill := float(signal.get("fill_price", 0.0) or 0.0)) > 0:
-        metrics.append({"label": "Fill", "value": f"${fill:.2f}"})
     return metrics
 
 

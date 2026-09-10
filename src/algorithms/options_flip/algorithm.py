@@ -835,6 +835,18 @@ def _estimate_row(contract, levels, outcomes, profit, ceiling, contracts, regime
     }
 
 
+def _contract_label(strike: float, option_type: str, expiry, delta: float) -> str:
+    """One contract's name, in the terms a reader judges it by rather than as an OSI string.
+
+    Shared so a held position and a candidate read identically. A held row used to print the
+    raw ``USO   260916C00142000`` because its contract object is gone once the chain stops
+    being fetched -- but every field in the label is recoverable from the symbol itself, and
+    the delta is re-derived each run anyway.
+    """
+    label = f"${strike:g} {option_type} · {expiry:%d %b}"
+    return f"{label} · delta {delta:+.2f}" if delta else label
+
+
 def _held_estimate_row(memory, band, mark: float, exit_level: float, sell_ok: bool) -> dict[str, Any]:
     """What the deck needs to judge a held position, refreshed every run like the flat estimate.
 
@@ -853,9 +865,10 @@ def _held_estimate_row(memory, band, mark: float, exit_level: float, sell_ok: bo
     # The resting sell order's price, as this run resolved it -- not the modelled ceiling. That
     # is what the position is asking, so it is what the band's far end should say.
     asking = float(memory.get("target", 0.0) or 0.0)
+    contracts = max(int(memory.get("contracts", 1) or 1), 1)
     return {
         "contract": str(memory.get("contract", "")),
-        "contract_label": str(memory.get("contract", "")),
+        "contract_label": _held_contract_label(memory),
         "fill_price": fill_price,
         "mark": mark,
         "unrealised_pct": (mark / fill_price - 1.0) if fill_price > 0 and mark > 0 else 0.0,
@@ -866,6 +879,11 @@ def _held_estimate_row(memory, band, mark: float, exit_level: float, sell_ok: bo
         # rather than zero: for a held position the interesting span is from here to the target.
         "entry_underlying": float(memory.get("underlying_now", 0.0) or 0.0),
         "target_underlying": exit_level,
+        # What the resting sell order is worth against what the position cost, gross, for the
+        # whole position -- the same reading as the flat row's, which prices the modelled move
+        # for the contracts it would open. Reported rather than omitted: "what do I make if
+        # this target fills" is the question a held row exists to answer.
+        "expected_profit": max(asking - fill_price, 0.0) * 100.0 * contracts,
         "band_source": str(band.get("source") or "none"),
         "band_sample": int(band.get("sample", 0)),
         "sell_ok": sell_ok,
@@ -1041,6 +1059,19 @@ def _refresh_held(memory, held_contract, context, session, cfg) -> dict[str, Any
     memory["underlying_now"] = _underlying_price(held_contract, context)
     memory["state"] = HELD
     return memory
+
+
+def _held_contract_label(memory: dict[str, Any]) -> str:
+    """The held contract's label, rebuilt from its OSI symbol when the chain is long gone."""
+    osi = str(memory.get("contract", ""))
+    try:
+        parsed = parse_osi(osi)
+    except Exception:  # noqa: BLE001 - an unreadable symbol is its own best label
+        return osi
+    return _contract_label(
+        float(parsed["strike"]), str(parsed["option_type"]), parsed["expiry"],
+        float(memory.get("delta", 0.0) or 0.0),
+    )
 
 
 def _underlying_price(osi: str, context) -> float:
