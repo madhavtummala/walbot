@@ -233,54 +233,60 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
         return {"status": "ok", **context, **_plan_payload(run_algorithm(algorithm, config))}
 
     @mcp.tool()
-    def get_accounts(account_id: str = "") -> dict[str, Any]:
-        """Holdings, cash and P/L for every configured account, or one named account.
+    def list_accounts() -> dict[str, Any]:
+        """Name every configured account. Start here, then ask the other two tools per account.
 
-        The account is the unit here, not the algorithm: a broker reports one blended position
-        per symbol, so two algorithms trading the same account cannot be told apart and asking
-        "what does this algorithm hold" has no answer. Ask what an *account* holds.
-
-        Each row carries ``equity``, ``cash``, ``day_pl`` (and its percent), ``total_pl``,
-        ``dividend_pl``, the holdings in ``rows``, and ``deployments`` -- the algorithms bound
-        to that account. ``day_pl: null`` means the broker did not report where the session
-        started, which is "unknown" and not "flat".
-
-        An account that cannot be reached reports its own ``error`` and does not remove the
-        others, so a single unreachable broker never blanks the whole answer.
+        Cheap and money-free: ids, labels, broker, and ``deployments`` (the algorithms bound to
+        each). Reading a portfolio is this list plus one get_account call per row -- fanned out
+        this way rather than as one all-accounts call so a slow or unreachable broker costs you
+        that account and not the answer.
         """
-        from src.api.payloads.accounts import accounts_payload, positions_payload
+        from src.api.payloads.accounts import accounts_payload
 
-        configured = accounts_payload()
-        wanted = [row for row in configured["rows"] if not account_id or row["id"] == account_id]
-        if account_id and not wanted:
-            return {"status": "error", "reason": f"No account with id {account_id!r}"}
+        payload = accounts_payload()
         return {
             "status": "ok",
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            "default_account": configured["default"],
+            "default_account": payload["default"],
             "accounts": [
-                {**positions_payload(row["id"]), "broker": row["broker"], "deployments": row["deployments"]}
-                for row in wanted
+                {k: row[k] for k in ("id", "label", "broker", "deployments", "credentials_ready")}
+                for row in payload["rows"]
             ],
         }
 
     @mcp.tool()
+    def get_account(account_id: str = "") -> dict[str, Any]:
+        """Holdings, cash and P/L for one account. Defaults to the default account.
+
+        The account is the unit, not the algorithm: a broker reports one blended position per
+        symbol, so two algorithms trading the same account cannot be told apart here.
+
+        Carries ``equity``, ``cash``, ``day_pl`` (and percent), ``total_pl``, ``dividend_pl``
+        and the holdings in ``rows``. ``day_pl: null`` means the broker did not report where the
+        session started -- "unknown", not "flat". An unreachable broker fills ``error`` and
+        leaves the figures null rather than reporting zeros.
+
+        This is the same function the dashboard's account page calls, through the brokerage
+        interface, so every broker answers it the same way.
+        """
+        from src.api.payloads.accounts import positions_payload
+
+        return {"status": "ok", "updated_at": datetime.now(timezone.utc).isoformat(), **positions_payload(account_id)}
+
+    @mcp.tool()
     def get_account_orders(account_id: str = "", limit: int = 40) -> dict[str, Any]:
-        """The account's most recent orders, as the broker itself reports them.
+        """One account's recent orders, in every state, most recent first.
 
-        One list covering every state -- filled, partially filled, replaced, cancelled,
-        rejected, and still resting. There is no separate "working orders" call: an order that
-        is still live simply appears here with a resting status and an unfilled quantity, so
-        this is the only order question worth asking.
+        Filled, partially filled, replaced, cancelled, rejected and still-resting arrive in one
+        list -- a live order simply appears with a resting status and an unfilled quantity, so
+        there is no separate working-orders question to ask.
 
-        Ordered most recent first and capped at ``limit`` rather than windowed by time, which
-        matters for good-till-cancelled orders -- a stop that has rested for two days is recent
-        *activity* but was submitted long ago, and any 24-hour window would drop it.
+        Capped at ``limit`` rather than windowed by time, which matters for good-till-cancelled
+        orders: a stop that has rested for two days is current exposure but was submitted long
+        ago, and any 24-hour window would drop it.
 
-        This is the broker's record, not the bot's, so anything traded manually in the same
-        account shows up here too. The exception is the local paper book, which fills instantly
-        and keeps no order log; there this falls back to the bot's own journal, which is the
-        complete record because nothing else can trade a local book.
+        Same function the dashboard's account page calls. It reads the broker's own record where
+        the broker keeps one, so manual trades show up too; where it does not, it falls back to
+        the bot's order journal, and a row's ``status`` says which vocabulary you are reading.
         """
         from src.api.payloads.accounts import account_activity_payload
 

@@ -46,7 +46,8 @@ def test_create_mcp_server_exposes_expected_tools(monkeypatch) -> None:
     assert [tool.__name__ for tool in fake_server.tools] == [
         "list_bindings",
         "get_algorithm_plan",
-        "get_accounts",
+        "list_accounts",
+        "get_account",
         "get_account_orders",
         "place_orders",
     ]
