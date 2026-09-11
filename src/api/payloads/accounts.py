@@ -220,37 +220,19 @@ def delete_account_payload(account_id: str) -> dict[str, Any]:
     return accounts_payload()
 
 
-def _paper_positions(config: Any) -> dict[str, Any]:
-    """Holdings and P/L from the local paper book.
+def _account_rows(brokerage: Any, *, label: str, account_id: str) -> dict[str, Any]:
+    """Holdings, cash and both P/L figures, from any brokerage through the shared interface.
 
-    ``day_pl`` stays None: the book has no notion of yesterday's close, and inventing one
-    would put a number on the dashboard that nothing backs.
+    One implementation for every broker. There were two near-identical copies -- one for the
+    local paper book and one for everything else -- and adding the day's move to the second
+    silently left the first showing a blank, which is precisely the failure a second copy
+    exists to cause.
     """
     try:
-        brokerage = PaperBrokerage(config)
-        state = brokerage.get_account_state()
-        rows = brokerage.get_position_details()
-    except Exception as error:  # noqa: BLE001 - a corrupt book must not blank the page
-        logger.warning("Could not read the paper book for %s: %s", config.account_id, error)
-        return {"error": str(error)}
-    return {
-        "equity": float(state.get("equity") or 0.0),
-        "cash": float(state.get("cash") or 0.0),
-        "total_pl": sum(float(row["unrealized_pl"]) for row in rows) if rows else 0.0,
-        "rows": rows,
-    }
-
-
-def _brokerage_positions(config: Any, broker: str) -> dict[str, Any]:
-    """Holdings and cash for any non-Alpaca brokerage, through the shared interface."""
-    from ...core.pipeline import resolve_brokerage
-
-    try:
-        brokerage = resolve_brokerage(config)
         state = brokerage.get_account_state()
         rows = brokerage.get_position_details()
     except Exception as error:  # noqa: BLE001 - an unreachable broker must not blank the page
-        logger.warning("Could not read %s positions for %s: %s", broker, config.account_id, error)
+        logger.warning("Could not read %s positions for %s: %s", label, account_id, error)
         return {"error": str(error)}
 
     equity = float(state.get("equity") or 0.0)
@@ -268,6 +250,28 @@ def _brokerage_positions(config: Any, broker: str) -> dict[str, Any]:
         "total_pl": sum(float(row["unrealized_pl"]) for row in rows) if rows else None,
         "rows": rows,
     }
+
+
+def _paper_positions(config: Any) -> dict[str, Any]:
+    """Holdings and P/L from the local paper book."""
+    try:
+        brokerage = PaperBrokerage(config)
+    except Exception as error:  # noqa: BLE001 - a corrupt book must not blank the page
+        logger.warning("Could not read the paper book for %s: %s", config.account_id, error)
+        return {"error": str(error)}
+    return _account_rows(brokerage, label="paper", account_id=config.account_id)
+
+
+def _brokerage_positions(config: Any, broker: str) -> dict[str, Any]:
+    """Holdings and cash for any non-Alpaca brokerage, through the shared interface."""
+    from ...core.pipeline import resolve_brokerage
+
+    try:
+        brokerage = resolve_brokerage(config)
+    except Exception as error:  # noqa: BLE001 - an unknown broker must not blank the page
+        logger.warning("Could not resolve %s for %s: %s", broker, config.account_id, error)
+        return {"error": str(error)}
+    return _account_rows(brokerage, label=broker, account_id=config.account_id)
 
 
 def _paper_activity(config: Any, limit: int) -> dict[str, Any]:

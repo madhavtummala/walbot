@@ -156,9 +156,9 @@ def test_positions_payload_reads_the_book_instead_of_calling_a_broker() -> None:
         assert payload["error"] == ""
         assert payload["equity"] == 100_000.0
         assert [row["symbol"] for row in payload["rows"]] == ["SPY"]
-        # No broker means no notion of yesterday's close, so the day figure stays absent
-        # rather than being invented.
-        assert payload["day_pl"] is None
+        # The book stamps its own opening value on the session's first read, so the day's move
+        # is zero until something in it moves -- not unknown, which is what None meant.
+        assert payload["day_pl"] == 0.0
 
 
 def test_activity_for_a_local_book_comes_from_the_bot_journal() -> None:

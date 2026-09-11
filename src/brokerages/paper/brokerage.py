@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 from uuid import uuid4
 
 from ..base import BaseBrokerage
-from ...core.interfaces import OrderRequest
+from ...core.interfaces import MARKET_TZ, OrderRequest
 from ...data.state_store import load_state, save_state, state_lock
 
 logger = logging.getLogger(__name__)
@@ -174,9 +174,37 @@ class PaperBrokerage(BaseBrokerage):
             "cash": cash,
             "buying_power": max(cash, 0.0),
             "is_market_open": True,
+            "last_equity": self._opening_equity(equity),
             # Surfaced separately so income is legible rather than buried in equity.
             "dividend_income": float(self.state.get("dividend_income", 0.0)),
         }
+
+    def _opening_equity(self, equity: float) -> float:
+        """What this book was worth when today's session began.
+
+        A real broker reports this and the paper book could not, so it was the one account on
+        the page showing no day's move. There is nothing to derive it from after the fact --
+        the book stores a position and a cash balance, not a history -- so the session's first
+        read of a new market day stamps it.
+
+        A write from a read, which is worth being explicit about: the alternative is a
+        scheduled job whose only purpose is to touch this value, and a book nobody looked at
+        would still need one. The stamp is idempotent within a day and self-correcting across
+        one, so the cost of the impurity is a single write per account per session.
+
+        The first read of a brand-new day reports equity equal to itself, so the day's move
+        starts at zero rather than at whatever the book last happened to be worth.
+        """
+        today = datetime.now(MARKET_TZ).date().isoformat()
+        if str(self.state.get("opening_day") or "") == today:
+            return float(self.state.get("opening_equity", equity) or equity)
+        with self._transaction():
+            # Re-checked inside the lock: two bindings reading this book at once must not each
+            # decide they are the first of the day and stamp a different number.
+            if str(self.state.get("opening_day") or "") != today:
+                self.state["opening_day"] = today
+                self.state["opening_equity"] = equity
+        return float(self.state.get("opening_equity", equity) or equity)
 
     def get_positions(self) -> Dict[str, float]:
         return {symbol: shares for symbol, shares in self.state.get("positions", {}).items() if shares}

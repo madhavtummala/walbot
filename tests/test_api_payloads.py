@@ -676,16 +676,19 @@ def test_every_broker_that_knows_its_opening_value_reports_a_day_pl() -> None:
 
     import src.core.pipeline as pipeline
 
+    class Cfg:
+        account_id = "schwab2"
+
     knows = Broker({"equity": 9812.01, "cash": 0.0, "last_equity": 9866.91})
     original = pipeline.resolve_brokerage
     try:
         pipeline.resolve_brokerage = lambda config: knows
-        out = _brokerage_positions(object(), "schwab")
+        out = _brokerage_positions(Cfg(), "schwab")
         assert out["day_pl"] == pytest.approx(-54.90, abs=0.01)
         assert out["day_pl_percent"] == pytest.approx(-54.90 / 9866.91, rel=1e-6)
 
         # A broker that cannot answer stays blank rather than claiming a 100% gain.
         pipeline.resolve_brokerage = lambda config: Broker({"equity": 101_676.46, "cash": 0.0})
-        assert _brokerage_positions(object(), "paper")["day_pl"] is None
+        assert _brokerage_positions(Cfg(), "paper")["day_pl"] is None
     finally:
         pipeline.resolve_brokerage = original
