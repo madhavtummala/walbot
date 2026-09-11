@@ -613,3 +613,22 @@ def test_an_order_row_says_which_price_it_is_showing() -> None:
     assert "~${money(sized, 2)}" in detail, "a market order's price is an estimate, not a fact"
     # Both tables go through it, so the journal and the broker view cannot disagree.
     assert app_js.count("formatActivityDetail(") >= 2
+
+
+def test_the_gate_panel_reads_at_the_table_it_expands_from() -> None:
+    """The panel explains the row above it, so it is part of that table, not a footnote.
+
+    It sat at 10px against the row's 12px, with 2px of vertical padding against the row's 5px,
+    so opening a row dropped into what looked like a different document. Measured in a browser:
+    row cells 12px / 5px, gate items were 10px / 2px.
+    """
+    _, app_css, _ = _assets()
+
+    panel = app_css[app_css.index(".gateItem {"):app_css.index(".gateItem:last-child")]
+    assert "font-size: 12px;" in panel, "the panel must read at the table's scale"
+    assert "padding: 5px 0;" in panel, "and share the row's vertical rhythm"
+    assert "line-height: 1.45;" in panel, "set explicitly rather than left to 'normal'"
+
+    # The verdict is a label on that row, so it sits one step under it rather than beside it.
+    verdict = app_css[app_css.index(".gateVerdict {"):app_css.index(".gateItem.is-pass")]
+    assert "font-size: 10px;" in verdict

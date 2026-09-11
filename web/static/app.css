@@ -672,9 +672,10 @@ select.ctl {
 
 .gateList {
   display: grid;
-  gap: 2px;
+  gap: 0;
   margin: 0;
-  padding: 6px 0 0;
+  /* Indented and inset to sit under the row it belongs to, at the row's own rhythm. */
+  padding: 4px 0 6px;
   list-style: none;
 }
 
@@ -701,8 +702,12 @@ select.ctl {
   gap: 8px;
   justify-content: start;
   align-items: baseline;
-  font-size: 10px;
-  padding: 2px 0;
+  /* The panel reads at the table's own scale. It sat at 10px against the row's 12px, with 2px
+     of vertical padding against the row's 5px, so expanding a row dropped into what looked like
+     a different document -- and the panel is an explanation *of* that row, not a footnote. */
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 5px 0;
   border-bottom: 1px solid var(--line);
 }
 
@@ -712,7 +717,9 @@ select.ctl {
 
 .gateVerdict {
   font-weight: 800;
-  font-size: 9px;
+  /* One step under the row it labels, which is what makes it read as a label rather than as
+     another column of the same rank. */
+  font-size: 10px;
   letter-spacing: 0.04em;
   color: var(--muted);
 }
