@@ -55,7 +55,9 @@ reduce the strategy to "trades only what is in the headlines".
 ## 4. Submit, or decline
 
 - No contradictions → `place_orders(plan, binding_id)` with the payload **passed back whole**.
-  It carries the prices the sizing used and the state that gets committed.
+  It carries the prices the sizing used and the state that gets committed. Read that tool's own
+  description before the first call of a session — for Options Flip in particular, a key
+  dropped from `desired_orders` cancels that order at the broker rather than leaving it alone.
 - Contradictions → you may still submit. Ask whether the fact is one the strategy already
   prices in. A momentum strategy buying a name that has run hard is not a contradiction; that
   *is* the strategy. A momentum strategy buying a name that ran hard on a rumour that has since

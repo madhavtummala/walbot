@@ -14,7 +14,6 @@ from src.api.controls import (
     ORIGIN_MCP,
     binding_driver,
     binding_refusal,
-    find_binding,
     load_controls,
     resolve_binding_for_origin,
 )
@@ -24,7 +23,6 @@ from src.core.pipeline import (
     TradingRefused,
     UnknownBrokerageError,
     assert_account_tradable,
-    read_snapshot,
     resolve_brokerage,
 )
 from src.core.runner import execute_algorithm, run_algorithm
@@ -235,35 +233,58 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
         return {"status": "ok", **context, **_plan_payload(run_algorithm(algorithm, config))}
 
     @mcp.tool()
-    def get_current_positions(binding_id: str = "") -> dict[str, Any]:
-        """Return the live holdings reported by the brokerage, with equity and cash.
+    def get_accounts(account_id: str = "") -> dict[str, Any]:
+        """Holdings, cash and P/L for every configured account, or one named account.
 
-        Reports the default account unless ``binding_id`` names one, which matters as soon as
-        more than one account is configured -- see list_bindings.
+        The account is the unit here, not the algorithm: a broker reports one blended position
+        per symbol, so two algorithms trading the same account cannot be told apart and asking
+        "what does this algorithm hold" has no answer. Ask what an *account* holds.
+
+        Each row carries ``equity``, ``cash``, ``day_pl`` (and its percent), ``total_pl``,
+        ``dividend_pl``, the holdings in ``rows``, and ``deployments`` -- the algorithms bound
+        to that account. ``day_pl: null`` means the broker did not report where the session
+        started, which is "unknown" and not "flat".
+
+        An account that cannot be reached reports its own ``error`` and does not remove the
+        others, so a single unreachable broker never blanks the whole answer.
         """
-        binding = find_binding(load_controls(), binding_id) if binding_id else None
-        if binding_id and binding is None:
-            return {"status": "error", "reason": f"No binding with id {binding_id!r}"}
-        config = get_config(account_id=(binding or {}).get("account_id") or None)
-        try:
-            brokerage = resolve_brokerage(config)
-        except UnknownBrokerageError as exc:
-            return {"status": "error", "reason": str(exc)}
+        from src.api.payloads.accounts import accounts_payload, positions_payload
 
-        account_state = brokerage.get_account_state()
-        snapshot = read_snapshot(config, brokerage)
+        configured = accounts_payload()
+        wanted = [row for row in configured["rows"] if not account_id or row["id"] == account_id]
+        if account_id and not wanted:
+            return {"status": "error", "reason": f"No account with id {account_id!r}"}
         return {
             "status": "ok",
-            "account_id": config.account_id,
             "updated_at": datetime.now(timezone.utc).isoformat(),
-            "equity": snapshot.equity,
-            "cash": float(account_state.get("cash", 0.0)),
-            "buying_power": float(account_state.get("buying_power", 0.0)),
-            "positions": [
-                {"symbol": symbol, "shares": shares}
-                for symbol, shares in sorted(snapshot.positions.items())
+            "default_account": configured["default"],
+            "accounts": [
+                {**positions_payload(row["id"]), "broker": row["broker"], "deployments": row["deployments"]}
+                for row in wanted
             ],
         }
+
+    @mcp.tool()
+    def get_account_orders(account_id: str = "", limit: int = 40) -> dict[str, Any]:
+        """The account's most recent orders, as the broker itself reports them.
+
+        One list covering every state -- filled, partially filled, replaced, cancelled,
+        rejected, and still resting. There is no separate "working orders" call: an order that
+        is still live simply appears here with a resting status and an unfilled quantity, so
+        this is the only order question worth asking.
+
+        Ordered most recent first and capped at ``limit`` rather than windowed by time, which
+        matters for good-till-cancelled orders -- a stop that has rested for two days is recent
+        *activity* but was submitted long ago, and any 24-hour window would drop it.
+
+        This is the broker's record, not the bot's, so anything traded manually in the same
+        account shows up here too. The exception is the local paper book, which fills instantly
+        and keeps no order log; there this falls back to the bot's own journal, which is the
+        complete record because nothing else can trade a local book.
+        """
+        from src.api.payloads.accounts import account_activity_payload
+
+        return {"status": "ok", **account_activity_payload(account_id, limit=limit)}
 
     @mcp.tool()
     def place_orders(algorithm_plan: dict[str, Any], binding_id: str = "") -> dict[str, Any]:
