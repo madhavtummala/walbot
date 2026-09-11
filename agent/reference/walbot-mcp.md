@@ -1,7 +1,6 @@
----
-name: walbot-mcp-agent
-description: Use this skill when an external agent needs to operate Walbot through its MCP tools — review the plan an algorithm proposes, validate it against outside research, and submit the reviewed plan.
----
+# Walbot MCP tools
+
+Reference only — the workflows live in `skills/`. Read this before your first tool call.
 
 ## What this is
 
@@ -50,8 +49,9 @@ and the state that gets committed; `place_orders` fetches no market data of its 
 
 ### `list_bindings()`
 Which algorithm is bound to which account, and what drives each one. Only bindings with
-`can_place_orders: true` — switched on, `frequency: "mcp"` — will accept orders; the rest are
-off or are the scheduler's to run. Name a `binding_id` when one algorithm is bound to more than
+`can_place_orders: true` will accept orders from you: switched on, and with an **empty
+schedule**. An empty cron means no clock drives the binding, so an agent does; a binding
+carrying a cron expression belongs to Walbot's own scheduler and will refuse your orders. Name a `binding_id` when one algorithm is bound to more than
 one account.
 
 ### `get_current_positions(binding_id="")`
@@ -181,3 +181,32 @@ to Bursty DCA and Rally Rotation; Options Flip trades whole option contracts alw
   whole-share brokerages and high-priced symbols.
 - Short targets are always sized in whole shares, since fractional quantities cannot be
   shorted.
+
+---
+
+## Summary tools
+
+Read-only, and account-wide rather than per binding. Used by `skills/daily-summary`.
+
+### `get_portfolio_summary()`
+Every configured account in one call: `label`, `broker`, `equity`, `cash`, `day_pl`,
+`day_pl_percent`, `total_pl`, `dividend_pl`, and `positions[]` with `symbol`, `qty`,
+`avg_entry_price`, `market_value`, `unrealized_pl`.
+
+`day_pl` is `null` where the broker cannot say what the session opened at. Null means
+*unknown*, never zero — do not report it as flat.
+
+### `get_recent_orders(since_hours=24, account_id="", strategy="")`
+What was submitted, filled, replaced or rejected, merged from two sources that answer different
+questions: the bot's own journal, which knows **which algorithm** placed an order, and the
+broker's history, which knows what actually **happened** to it. Rows carry `symbol`, `side`,
+`quantity`, `order_type`, `limit_price`/`stop_price`, `filled_avg_price`, `status`, `reason`,
+`strategy`, `submitted_at`.
+
+A `rejected` row always carries the broker's own `reason`. Quote it verbatim — it is the
+difference between "the strategy did nothing" and "the strategy tried and was refused".
+
+### `get_working_orders(account_id="")`
+Orders resting at the broker right now, which is tomorrow's exposure: `symbol`, `side`,
+`quantity`, `order_type`, `limit_price`/`stop_price`, `status`, `account_id`. An option order's
+`symbol` is the contract's OSI string, not the underlying.
