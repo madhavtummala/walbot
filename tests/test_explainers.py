@@ -128,3 +128,34 @@ def test_the_prose_does_not_describe_knobs_that_no_longer_exist(algorithm_id: st
     assert not stale, (
         f"{algorithm_id} prose names knobs the algorithm does not read: {sorted(stale)}"
     )
+
+
+def test_every_knob_says_which_way_to_turn_it() -> None:
+    """A reader on the Tune page is deciding whether to raise or lower a number, so that is
+    what the guidance has to answer.
+
+    Twenty-two knobs described what the setting *was* without saying what moving it does --
+    "Half the selection weight sits here", "Stops trivial orders" -- which is true and
+    unactionable. Eight more spent their space on why the current default was chosen, which
+    belongs in the source beside the value, not on a page someone opens to change it.
+    """
+    from src.algorithms.explainers import EXPLAINERS
+
+    directional = (
+        "higher", "lower", "longer", "shorter", "raise", "more", "less", "tighter", "wider",
+        "above", "below", "0 ", "zero", "at 1", "on,", "off", "deeper", "easier", "harder",
+        "one is", "whichever", "set it",
+    )
+    history = ("replaced", "earlier default", "used to", "previously", "the old ")
+
+    for algorithm, entry in EXPLAINERS.items():
+        for knob, doc in entry["parameters"].items():
+            effect = doc["effect"].lower()
+            assert any(word in effect for word in directional), (
+                f"{algorithm}.{knob} does not say which way to turn it"
+            )
+            assert not any(word in effect for word in history), (
+                f"{algorithm}.{knob} explains its own history rather than its effect"
+            )
+            assert len(doc["effect"].split()) <= 50, f"{algorithm}.{knob} runs long"
+            assert len(doc["what"].split()) <= 30, f"{algorithm}.{knob}'s 'what' runs long"
