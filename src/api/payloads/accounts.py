@@ -253,9 +253,18 @@ def _brokerage_positions(config: Any, broker: str) -> dict[str, Any]:
         logger.warning("Could not read %s positions for %s: %s", broker, config.account_id, error)
         return {"error": str(error)}
 
+    equity = float(state.get("equity") or 0.0)
+    # Only when the broker reports where the session started. Absent stays absent: a missing
+    # opening value is "unknown", and defaulting it to zero would render the whole balance as
+    # today's gain.
+    opening = state.get("last_equity")
+    day_pl = (equity - float(opening)) if opening else None
+
     return {
-        "equity": float(state.get("equity") or 0.0),
+        "equity": equity,
         "cash": float(state.get("cash") or 0.0),
+        "day_pl": day_pl,
+        "day_pl_percent": (day_pl / float(opening)) if day_pl is not None and float(opening) else None,
         "total_pl": sum(float(row["unrealized_pl"]) for row in rows) if rows else None,
         "rows": rows,
     }

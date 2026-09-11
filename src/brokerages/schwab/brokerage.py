@@ -200,6 +200,11 @@ class SchwabBrokerage(BaseBrokerage):
     def get_account_state(self) -> Dict[str, Any]:
         account = self._account_payload()
         balances = account.get("currentBalances", {}) or {}
+        # Schwab's start-of-session snapshot, which is what makes a day's P/L expressible. It
+        # was in the payload all along and simply never read, so every Schwab account showed a
+        # blank where Alpaca showed a number.
+        opening = account.get("initialBalances", {}) or {}
+        last_equity = opening.get("liquidationValue", opening.get("accountValue"))
         # Schwab reports total account value as liquidationValue; equity is margin-only.
         equity = balances.get("liquidationValue", balances.get("equity", 0.0))
         cash = balances.get("cashBalance", balances.get("cashAvailableForTrading", 0.0))
@@ -209,6 +214,7 @@ class SchwabBrokerage(BaseBrokerage):
             "cash": float(cash or 0.0),
             "buying_power": float(buying_power or 0.0),
             "is_market_open": self.is_market_open(),
+            **({"last_equity": float(last_equity)} if last_equity is not None else {}),
         }
 
     def get_positions(self) -> Dict[str, float]:

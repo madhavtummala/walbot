@@ -657,3 +657,35 @@ def test_a_replayable_algorithm_is_unaffected(monkeypatch) -> None:
     # Falls through to the ordinary "no cached run" answer rather than the refusal.
     assert payload.get("supported") is not False
     assert "No cached" in payload["error"]
+
+
+def test_every_broker_that_knows_its_opening_value_reports_a_day_pl() -> None:
+    """Only Alpaca showed a day's move; the sidebar read "--" for everyone else.
+
+    The figure was computed inside the Alpaca branch alone, so a broker that could answer the
+    question was never asked it. Schwab carries the session's opening value in
+    ``initialBalances.liquidationValue`` -- it was in the payload all along and simply never
+    read.
+    """
+    from src.api.payloads.accounts import _brokerage_positions
+
+    class Broker:
+        def __init__(self, state): self._state = state
+        def get_account_state(self): return self._state
+        def get_position_details(self): return []
+
+    import src.core.pipeline as pipeline
+
+    knows = Broker({"equity": 9812.01, "cash": 0.0, "last_equity": 9866.91})
+    original = pipeline.resolve_brokerage
+    try:
+        pipeline.resolve_brokerage = lambda config: knows
+        out = _brokerage_positions(object(), "schwab")
+        assert out["day_pl"] == pytest.approx(-54.90, abs=0.01)
+        assert out["day_pl_percent"] == pytest.approx(-54.90 / 9866.91, rel=1e-6)
+
+        # A broker that cannot answer stays blank rather than claiming a 100% gain.
+        pipeline.resolve_brokerage = lambda config: Broker({"equity": 101_676.46, "cash": 0.0})
+        assert _brokerage_positions(object(), "paper")["day_pl"] is None
+    finally:
+        pipeline.resolve_brokerage = original

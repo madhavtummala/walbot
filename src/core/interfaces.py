@@ -459,7 +459,13 @@ class Brokerage(ABC):
 
     @abstractmethod
     def get_account_state(self) -> Dict[str, Any]:
-        """Return equity, cash, and buying power."""
+        """Return equity, cash, and buying power.
+
+        May also carry ``last_equity``: what the account was worth at the start of the session,
+        which is the only way to say what it made today. A broker that cannot answer omits the
+        key rather than reporting zero -- absent means "unknown", and zero would read as a
+        hundred-percent loss.
+        """
         pass
 
     @abstractmethod
