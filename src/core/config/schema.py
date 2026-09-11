@@ -227,6 +227,10 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
         schwab_refresh_token=read_account_config("schwab_refresh_token", ""),
         schwab_account_number=read_account_config("schwab_account_number", ""),
         schwab_callback_url=read_account_config("schwab_callback_url", ""),
+        # Account-level: two paper books on one install are usually two different sizes.
+        # Only consulted when a book is first created; resizing an existing one is a
+        # state-store edit, not a config change.
+        paper_starting_cash=float(read_account_config("paper_starting_cash", 100_000.0)),
         history_extra_buffer_days=read_algorithm("history_extra_buffer_days", HISTORY_EXTRA_BUFFER_DAYS),
         social_trends_csv=social_trends_csv,
         tradables_csv=tradables_csv,

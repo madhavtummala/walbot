@@ -22,6 +22,10 @@ def _order(symbol: str, action: str, quantity: float, price: float) -> OrderRequ
     return OrderRequest(symbol=symbol, action=action, quantity=quantity, extra={"latest_price": price})
 
 
+def _starting_cash() -> float:
+    return float(get_config(account_id=LOCAL).paper_starting_cash)
+
+
 
 def _patch_payloads(monkeypatch, name, value):
     """Patch ``name`` on every payload module that resolves it.
@@ -109,8 +113,10 @@ def test_closing_a_position_forgets_its_basis() -> None:
         brokerage.submit_order(_order("GLD", "sell", 5, 250.0))
 
         assert brokerage.book()["rows"] == []
-        # Cash keeps the realised gain: paid 1000, received 1250.
-        assert brokerage.get_account_state()["cash"] == 100_250.0
+        # Cash keeps the realised gain: paid 1000, received 1250. Stated against the
+        # account's own starting cash so resizing the book in config does not read as
+        # a regression here.
+        assert brokerage.get_account_state()["cash"] == _starting_cash() + 250.0
 
 
 def test_two_local_accounts_do_not_share_one_book() -> None:
@@ -154,7 +160,8 @@ def test_positions_payload_reads_the_book_instead_of_calling_a_broker() -> None:
         payload = positions_payload(LOCAL)
 
         assert payload["error"] == ""
-        assert payload["equity"] == 100_000.0
+        # A buy moves cash into stock, so equity is unchanged from the opening balance.
+        assert payload["equity"] == _starting_cash()
         assert [row["symbol"] for row in payload["rows"]] == ["SPY"]
         # The book stamps its own opening value on the session's first read, so the day's move
         # is zero until something in it moves -- not unknown, which is what None meant.
