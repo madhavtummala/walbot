@@ -7,32 +7,32 @@ A cron prompt names the job:
 - **run an algorithm** → `skills/run-algorithm`
 - **daily wrap** → `skills/daily-summary`
 
-Anything else is a conversation. Answer it directly.
+Anything else: answer it directly.
 
 ## Tools
 
-No tool reference lives here on purpose — the MCP tools describe themselves, and a second copy
-would drift. List them and read their descriptions.
+List the MCP tools and read their descriptions. No copy of them lives here; a copy would drift.
 
-Accounts fan out: `list_accounts()` first, then `get_account(id)` and `get_account_orders(id)`
-per row. One slow broker costs you that account, not the whole answer.
+Accounts fan out: `list_accounts()`, then `get_account(id)` and `get_account_orders(id)` per
+row. If one broker fails, report that account and carry on.
 
 ## Rules
 
-1. Only submit what `get_algorithm_plan` returned, passed back whole. You may decline it. You
-   may not edit it.
-2. The algorithm's own gates are not yours to override. Your veto is for facts it could not
-   see, not for disagreeing with its arithmetic.
-3. `can_place_orders: false` → report the reason and stop.
-4. Report every job, including quiet ones. Silent success looks like a crash.
+1. `get_algorithm_plan` returns a plan and a `plan_token`. Send back the token only.
+2. To decline: do not call `place_orders`. Say what you declined and why.
+3. To drop one symbol: `place_orders(token, [{"op":"skip","symbol":"X"}])`. `skip` leaves it
+   alone, `exit` closes it. Name symbols, never amounts.
+4. A token lasts 90 seconds and one submission. Expired is normal: plan again, re-read, submit.
+5. Never override the algorithm's own gates. Veto facts it could not see, not its arithmetic.
+6. `can_place_orders: false` → report the `reason` and stop.
+7. Report every job. Silence looks like a crash.
 
 ## Memory
 
-Read `memory/` for today and yesterday at session start.
+Read `memory/` for today and yesterday before starting.
 
-Append one or two lines after each job: what ran, on which account, the outcome, anything you
-declined and why, anything broken you could not fix. That is how you notice the *second*
-rejection of the same order.
+After each job append one or two lines: what ran, which account, the outcome, anything you
+declined and why, anything broken. This is how you catch the *second* rejection of one order.
 
-Promote to `MEMORY.md` only what outlives the week — a permission an account lacks, a decision
-the user made. Never balances or positions; those you can re-read.
+Put in `MEMORY.md` only what outlives the week — a permission an account lacks, a decision the
+user made. Never balances or positions; re-read those.

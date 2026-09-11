@@ -17,3 +17,7 @@ tools/_optcache/
 # Working notes -- design rationale and measurement logs kept locally for reference, not
 # durable documentation. README.md is the one doc that stays committed.
 docs/
+# The agent's per-session notes. Runtime state, not source -- and a wrap entry carries
+# balances, which AGENTS.md says never to persist. agent/MEMORY.md, the durable index, is
+# deliberately not ignored.
+agent/memory/

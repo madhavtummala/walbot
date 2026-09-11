@@ -8,7 +8,7 @@ Data sources are grouped by the shape of data they return:
 - `eod_market_data`: daily OHLCV bars.
 - `sentiment_data`: news, social, and sentiment records.
 
-Provider waterfall order is the order of keys under each category's `providers:` mapping in `config/connectors.yaml`. There is no separate `provider_order` key in the desired connector contract.
+Provider waterfall order is the order of keys under each category's `providers:` mapping in `config/walbot.yaml`'s `data_sources`. There is no separate `provider_order` key in the desired connector contract.
 
 A provider is one module of fetcher functions -- `market/<name>.py`, `news/<name>.py` -- registered by path in `src/connectors/registry.py` and imported on first use. There is deliberately no provider base class: `connectors/base.py` held three ABCs that nothing implemented and nothing referenced, the second attempt at an abstraction over these fetchers, and it went the way of the first.
 
@@ -70,24 +70,19 @@ A package with three modules, so that knowing one is knowing all of them:
 
 A verdict is `all(check.ok for check in checks)` — the test and the message about the test are one object, so they cannot drift apart. Gates a *selection* imposes (a settling period, a slot contest, a re-rank throttle) are recorded by the pass that imposes them and appended to the same list; re-deriving them from the market gates produced confident nonsense like "Rank 1, outside the top 5".
 
-Two module-level functions in `src/core/runner.py` drive it: `run_algorithm(strategy, config)` builds the context and returns the plan; `execute_algorithm(plan, config, brokerage)` acts on it. The scheduler chains them; the MCP flow pauses in between so an agent can edit the plan first — its `intents` for an allocation strategy, or its `desired_orders` for an order-book one (see below).
+Two module-level functions in `src/core/runner.py` drive it: `run_algorithm(strategy, config)` builds the context and returns the plan; `execute_algorithm(plan, config, brokerage)` acts on it. The scheduler chains them; the MCP flow pauses in between so an agent can review the plan first (see *Agent/MCP Direction*).
 
 `src/core/pipeline.py` is the order-placing layer underneath allocation strategies, and knows nothing about algorithms — it takes intents, prices and two sizing knobs, and reports what the broker did. That ignorance is load-bearing: it is why `BaseAlgorithm` can import it outright without closing an import cycle back through the registry. A lifecycle algorithm whose output is a book of resting orders rather than a target portfolio -- Options Flip is the one deployed example -- bypasses this layer entirely: its `plan()` fills `AlgorithmPlan.desired_orders` instead of `intents`, and its own `execute()` override goes straight to `src/algorithms/reconcile.py`'s `reconcile_orders`, which diffs the wanted set against the broker's actual working orders (cancel what dropped out, submit or re-price the rest) rather than sizing a portfolio at all.
 
 Algorithms are registered in `src/algorithms/registry.py`. The live runner resolves the selected strategy through that registry instead of branching on individual strategy ids.
 
-Three modules hold what more than one algorithm needs, so a rule cannot be fixed in one place and left broken in another:
+What more than one algorithm needs lives outside them, so a rule cannot be fixed in one place and left broken in another:
 
-- `src/algorithms/allocation.py`: ranking a scored universe, spreading an exposure budget by score under a per-name cap, and holding a weight set inside a gross limit.
-- `src/algorithms/risk.py`: the session drawdown breaker, keyed on the timestamp the algorithm saw rather than on the wall clock so a replay does not latch it for the whole backtest.
 - `src/common/config_utils.py`: `load_tuning(cls, section)` builds a tuning dataclass from saved config, coercing each field by its declared type. A new knob is a dataclass field and nothing else -- there is no parser to update alongside it.
+- `src/algorithms/reconcile.py`: `reconcile_orders`, for algorithms whose output is a book of resting orders.
+- `src/algorithms/risk.py`: the session drawdown breaker. **Currently wired to nothing**, and deliberately so -- it measures the drop from the equity it first saw *this session*, so at a daily cadence every run rebases the reference and the drawdown it reports is identically zero. `test_a_session_breaker_cannot_fire_at_this_algorithms_cadence` is the record of why the knob was removed rather than switched off, and the module is kept for an intraday algorithm that could use it honestly.
 
-DCA and options strategies live in the same hierarchy as equity algorithms:
-
-- `src/algorithms/bursty_dca/`
-- `src/algorithms/options/swing.py`
-
-They can still be rendered on separate frontend pages, but backend-wise they are algorithms that produce normalized signal/order-intent dictionaries from an `AlgorithmContext`.
+DCA and options strategies live in the same hierarchy as equity algorithms -- `src/algorithms/bursty_dca/` and `src/algorithms/options_flip/`. They can be rendered on separate frontend pages, but backend-wise they are algorithms producing an `AlgorithmPlan` from an `AlgorithmContext` like any other.
 
 ## Brokerages
 
@@ -106,21 +101,32 @@ One package per venue, each with the same two roles — the same rule the algori
 
 ## Agent/MCP Direction
 
-The clean MCP boundary is around deterministic components, not around the whole bot loop:
+The clean MCP boundary is around deterministic components, not around the whole bot loop.
+`src/mcp_server.py` exposes six tools: `list_bindings`, `get_algorithm_plan`, `list_accounts`,
+`get_account`, `get_account_orders`, `place_orders`. The account is the unit for reading —
+`list_accounts` then one call per row, so a slow broker costs that account and not the answer.
 
-- data tools: fetch bars, quotes, provider status, sentiment snapshots.
-- algorithm tools: describe requirements, generate decision, explain signals.
-- execution tools: preview orders, submit approved orders, cancel pending orders.
-- state tools: read/write algorithm state and run snapshots.
+Proposing and submitting are two calls with a gap for judgement in between:
 
-An agent runtime such as OpenClaw can then run the scheduled workflow externally:
+1. `get_algorithm_plan` runs the algorithm and returns the proposal plus a `plan_token`.
+2. The agent checks the named symbols against news the algorithm could not see.
+3. `place_orders(plan_token)` submits it. Declining needs no call at all.
 
-1. call a market/sentiment data tool.
-2. call an algorithm decision tool.
-3. call an order preview tool.
-4. summarize the proposed position changes.
-5. edit the plan's intents if research rejects a name.
-6. call `place_orders` with the reviewed plan.
+**The plan never travels back.** It is held in `src/core/plan_cache.py` — in-process,
+single-use, ~90s TTL — so what executes is what was reviewed, rather than a plan rebuilt from
+whatever the agent returned. An agent cannot forge a proposal, revise `latest_prices`, or edit
+the opaque `state` an algorithm commits, because it is never asked for any of them. The TTL is
+what keeps the reviewed plan and the live market close enough to be the same thing: a plan
+commits the prices it was built with, so age is staleness, and expiry is a normal outcome.
+
+Within that, `place_orders` takes `edits` — `{"op": "skip"|"exit", "symbol": ...}`, applied
+server-side by `src/core/plan_edits.py`. An edit names an action, never an amount: the agent
+judges whether a plan survives contact with today's news, and sizing stays the algorithm's.
+`skip` is spelled per mode because absence means opposite things in the two — under
+`MODE_TARGET` the intent list *is* the portfolio, so a row dropped as a "veto" would sell the
+position, and skip therefore pins to the shares currently held. Order-book plans (Options Flip)
+refuse edits outright: reconciliation cancels whatever is not in `desired_orders`, so removing
+a leg cancels a resting stop rather than declining an action.
 
 This keeps strategy math and brokerage execution deterministic inside this repo, while the agent handles orchestration, external search/sentiment tools, natural-language summaries -- and the review itself, which is the only approval step there is.
 
@@ -133,13 +139,12 @@ process per database file and locks every other opener out entirely; a separate 
 contended with the dashboard for `data/walbot.duckdb` and one of the two would fail with
 "Conflicting lock is held". There is no `--bot` / `--mcp` process-wide mode: whether an algorithm is
 driven by the clock or by an external agent is a property of its *binding*, not of the
-process. Each binding declares a `frequency` for the scheduler -- `15m`, `30m`, `1hr`, `2hr`,
-`1d` -- or `mcp` to park it, switched on but waiting for an agent-driven request. A process
-mode could only contradict the binding's own frequency, so the dashboard reports per-binding
-scheduler state instead.
-
-`algorithm_bot.yaml` can narrow the scheduler window with `trading_start_time` and
-`trading_end_time`.
+process. Each binding carries a **cron expression** in market time -- `0 11 * * 1-5` -- or an
+empty one, which parks it: switched on, waiting for an agent. A process mode could only
+contradict the binding's own schedule, so the dashboard reports per-binding scheduler state
+instead. `src/core/cron.py` holds the evaluator and the two deliberate departures from
+crontab(5): day-of-month and day-of-week are ANDed rather than ORed, and there is no implicit
+catch-up for missed slots.
 
 There is no out-of-band trade approval. It existed as a Telegram approve/deny round trip and
 went when Telegram did: an approval gate whose only transport is removed does not fail safe, it

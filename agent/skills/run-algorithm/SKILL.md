@@ -5,52 +5,48 @@ description: Run one Walbot algorithm over MCP, check its plan against outside i
 
 # Run an algorithm
 
-The prompt names the algorithm. The steps are the same whichever it is.
+The prompt names the algorithm. Same steps for all of them.
 
 ## 1. Check it is yours
 
 `list_bindings()`. Find this algorithm's binding.
 
-- `can_place_orders: false` → report the `reason` and stop.
-- Two bindings and no `binding_id` in the prompt → report the ambiguity and stop. Do not guess
-  which account to trade.
-
-A binding is yours only when its `cron` is empty. A cron means the scheduler owns it.
+- `can_place_orders: false` → report the `reason`, stop.
+- Two bindings, no `binding_id` in the prompt → report the ambiguity, stop. Never guess the
+  account.
 
 ## 2. Get the plan
 
-`get_algorithm_plan(algorithm, binding_id)` — read-only, places nothing, commits nothing.
+`get_algorithm_plan(algorithm, binding_id)`. Places nothing. Returns the proposal and a
+`plan_token`.
 
-Read its description for which field holds the proposal; it differs by algorithm and reading
-the wrong one looks like an empty plan rather than an error.
+Read the tool's description for which field holds the proposal. It differs per algorithm, and
+reading the wrong one looks like an empty plan.
 
-Nothing proposed → say so and stop. That is a normal outcome, and `signals[].checks` names the
-gate that refused, which is what makes the message worth sending.
+Nothing proposed → say so and stop. Quote the blocking gate from `signals[].checks`.
 
-## 3. Check against what the bot cannot see
+## 3. Check what the bot cannot see
 
-Only for the symbols the plan touches. Search each for:
+Search only the symbols in the plan:
 
-- news in the last 48h — earnings, guidance, an SEC action, a halt, an index change
+- news in the last 48h — earnings, guidance, SEC action, halt, index change
 - a scheduled event inside the holding horizon
-- **whether today's move has a cause** — the bot sees a price series and cannot tell a trend
-  from a one-day reaction
+- whether today's move has a cause
 
-Then per symbol: **confirms**, **silent**, or **contradicts**.
+Mark each symbol **confirms**, **silent**, or **contradicts**.
 
-**Silence is not a veto.** Most trades have no news, and refusing those reduces the strategy to
-"trades only what is in the headlines".
+Silence is not a veto. Most trades have no news.
 
 ## 4. Submit or decline
 
-- No contradictions → `place_orders(plan, binding_id)`, payload **passed back whole**. Read
-  that tool's description first: for order-book algorithms a dropped key cancels a resting
-  order rather than leaving it alone.
-- Contradictions → you may still submit. Ask whether the strategy already prices the fact in. A
-  momentum strategy buying a name that ran hard is the strategy working; buying one that ran on
-  a rumour since denied is not.
-- Declining is all-or-nothing — `place_orders` takes the plan whole. Submit and flag the leg,
-  or decline the lot and name the leg that cost it. Say which you chose.
+- Nothing contradicts → `place_orders(plan_token)`.
+- One symbol contradicts → `place_orders(plan_token, [{"op":"skip","symbol":"IWM"}])`.
+- Decline everything → call nothing. Report what you declined.
+
+Options Flip refuses `edits`. Submit it whole or decline it whole.
+
+A contradiction does not force a decline. Ask whether the strategy already prices it in: a
+momentum strategy buying a name that ran hard is working as designed.
 
 ## 5. Report
 
@@ -71,11 +67,9 @@ WHERE IT DOESN'T
   → submitted anyway — rank is the strategy's call, not a fact it missed
 ```
 
-- First line: 🟢 submitted · 🟡 nothing to do · 🔴 declined or error, then algorithm, account,
-  time. Second line: the outcome with the money involved.
-- **`WHERE IT DOESN'T` is never omitted.** Nothing found → `• Nothing found against it`. An
-  absent section reads as "not checked".
-- Quantities in shares or contracts *and* dollars.
-- For a resting order, describe the order, not a position: `bid $16.84 for the GLD 385C` — it
-  may never fill.
-- Under ~15 lines.
+- Line 1: 🟢 submitted · 🟡 nothing to do · 🔴 declined or error. Then algorithm, account, time.
+- Line 2: outcome and the money.
+- Never drop `WHERE IT DOESN'T`. Nothing found → `• Nothing found against it`.
+- Quantities in shares or contracts **and** dollars.
+- A resting order is an order, not a position: `bid $16.84 for the GLD 385C`.
+- Under 15 lines.

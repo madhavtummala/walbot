@@ -30,7 +30,9 @@ pip install -r requirements.txt
 
 ### Configuration
 
-Edit files under `config/` to set provider order, runtime behavior, universes, and account wiring. Keep secrets in environment variables referenced by `*_env` fields, not directly in YAML.
+Everything non-secret lives in `config/walbot.yaml`, one file with a section per concern:
+`accounts`, `data_sources`, `tradable_universe`, `algorithms`, and the bot runtime. Keep secrets
+in environment variables referenced by `*_env` fields, never in the YAML.
 
 ### Running the Dashboard
 
@@ -71,50 +73,28 @@ pip install -r requirements-dev.txt
 Create `.env` in the project root. For local non-Docker development, paths may stay relative:
 
 ```bash
-TRADING_ACCOUNTS_FILE=config/accounts.yaml
-TRADING_CONNECTORS_FILE=config/connectors.yaml
-TRADING_ALGORITHM_BOT_FILE=config/algorithm_bot.yaml
-TRADING_ALGORITHMS_FILE=config/algorithms.yaml
-TRADING_OPTIONS_BOT_FILE=config/options_bot.yaml
-TRADING_DCA_BOT_FILE=config/dca_bot.yaml
-TRADING_UNIVERSE_FILE=config/universe.yaml
+TRADING_CONFIG_FILE=config/walbot.yaml
 STATE_DUCKDB_PATH=data/walbot.duckdb
 ALPHA_VANTAGE_NEWS_CSV=data/social_trends.csv
 ```
 
+The config used to be seven files, and the per-section `TRADING_*_FILE` variables that
+addressed them still work — `src/core/config/paths.py` falls back to each only when it is set
+explicitly. Leave them unset and every section is read from the one file.
+
 After setup, run the dashboard with the command in [Running the Dashboard](#running-the-dashboard).
 
 There are no `--bot` / `--mcp` process-wide modes. The dashboard, the bot scheduler, and the
-MCP tool server all start together; whether an algorithm is driven by the clock or by an
-agent is a property of its *binding* in the dashboard. Each binding declares a `frequency`
-for the scheduler -- `15m`, `30m`, `1hr`, `2hr`, `1d` -- or `mcp` to park it, switched on but
-waiting for an external agent to drive it. A `--mcp` process mode could only contradict the
-binding's own frequency, and it did: the dashboard reported "MCP mode" with every algorithm
-switched off.
-
-Built-in bot scheduling is configured in `algorithm_bot.yaml`:
-
-```yaml
-algorithm_bot:
-  backtest_period: 4m
-  trading_start_time: "08:30"
-  trading_end_time: "15:00"
-```
+MCP tool server all start together; whether an algorithm is driven by the clock or by an agent
+is a property of its *binding*. Each binding carries a **cron expression** evaluated in market
+time — `0 11 * * 1-5` — or an empty one, which parks it: switched on, waiting for an agent. A
+process mode could only contradict the binding's own schedule.
 
 There is no out-of-band trade approval. Review happens through the MCP flow instead:
-`get_algorithm_plan` runs the algorithm and places nothing, and an external agent such as
-OpenClaw -- driving a binding parked on `mcp` through the tool server on port `8001` -- edits
-the plan's intents and calls `place_orders` only when it is satisfied.
-
-Current config files:
-
-- `config/accounts.yaml` - brokerage account wiring; use `api_key_env` and `api_secret_env`.
-- `config/connectors.yaml` - market and sentiment providers, and provider order.
-- `config/algorithm_bot.yaml` - built-in equity bot runtime, trading window, and kill switch.
-- `config/algorithms.yaml` - per-algorithm strategy knobs and universes.
-- `config/options_bot.yaml` - options bot runtime and options strategy knobs.
-- `config/dca_bot.yaml` - DCA scheduler and DCA plan.
-- `config/universe.yaml` - dashboard/tradable universe and master ETF list path.
+`get_algorithm_plan` runs the algorithm, places nothing, and returns the plan with a
+`plan_token`. An external agent reviews it against outside information and calls
+`place_orders(plan_token)` only when satisfied. The plan itself never travels back — it is held
+server-side, so what executes is what was reviewed.
 
 ## Schwab Authorization
 
@@ -156,10 +136,10 @@ python -m src.data.cache_warmup
 
 By default this refreshes the configured algorithm universe with enough daily EOD bars for the configured backtest period and recent 15-minute intraday bars. Existing cached rows are preserved unless `--clear` is supplied.
 
-Warm only the `fast_momentum` symbols for one America/Chicago market date:
+Warm only one algorithm's symbols for a single America/Chicago market date:
 
 ```bash
-python -m src.data.cache_warmup --algorithm fast_momentum --start-date 2026-06-03 --end-date 2026-06-03
+python -m src.data.cache_warmup --algorithm rally_rotation --start-date 2026-06-03 --end-date 2026-06-03
 ```
 
 Use `--eod` or `--intraday` to warm only that bar category. Use `--symbols SPY QQQM` instead of `--algorithm` to warm an explicit symbol list.

@@ -9,27 +9,26 @@ After the close. **The unit is the account, not the algorithm.**
 
 ## 1. Gather
 
-`list_accounts()`, then per account: `get_account(id)` and `get_account_orders(id)`.
-`list_bindings()` once, for what is armed.
+`list_accounts()`, then `get_account(id)` and `get_account_orders(id)` per account.
+`list_bindings()` once.
 
-Orders come back in every state — filled, replaced, rejected, still resting — in one list.
+Orders come back in every state — filled, replaced, rejected, resting — in one list.
 
-If one account errors, name it and carry on. A partial wrap beats a silent evening.
+If an account errors, name it and carry on.
 
 ## 2. Read it
 
-- **P/L against orders.** Down $400 with no orders is market drift. Say so.
-- **A rejection is the most important line.** Lead with it, quote the broker's reason verbatim,
-  say what it means for tomorrow.
-- **Resting orders are tomorrow's exposure.** A stop is protection, an entry is an intention.
-  Say which, and what it would cost or make.
-- **Bindings only when they change the outlook** — nothing armed, or armed on an empty account.
-  An armed binding that traded nothing is a normal day.
+- P/L with no orders behind it is market drift. Say so.
+- A rejection is the most important line. Quote the broker's reason verbatim and say what it
+  means for tomorrow.
+- Resting orders are tomorrow's exposure. A stop protects, an entry intends. Say which.
+- Mention bindings only when they change the outlook: nothing armed, or armed on an empty
+  account. An armed binding that traded nothing is a normal day.
 
 ## 3. Outside information
 
-One or two searches, only for symbols held or resting: anything scheduled tomorrow (earnings,
-CPI, FOMC, expiry), or a cause for today's move. Skip entirely on a quiet day.
+One or two searches, only for symbols held or resting: what is scheduled tomorrow (earnings,
+CPI, FOMC, expiry), or the cause of a big move. Skip on a quiet day.
 
 ## 4. Report
 
@@ -59,10 +58,10 @@ TOMORROW
 • All three bindings are switched off — nothing will trade.
 ```
 
-- `MONEY` first: portfolio total, then the per-account split.
+- `MONEY` first: total, then the per-account split.
 - Group by account. Use labels, not ids.
-- Empty sections get one line (`• Nothing.`), never dropped.
+- Empty sections get `• Nothing.` Never drop one.
 - `⚠️ REJECTED` only when something was, and above `RESTING`.
 - **If nothing is armed, say so in `TOMORROW`.** A wrap that reads normally while the bot is
   switched off is the worst message you can send.
-- Under ~20 lines.
+- Under 20 lines.
