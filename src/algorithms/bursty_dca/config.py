@@ -15,7 +15,6 @@ from ...common.config_utils import as_float
 
 #: Where a plan lives inside this algorithm's ordinary config section -- ``algorithms.<id>.plan``,
 #: read and written through ``/api/algorithm-config`` like every other algorithm's knobs.
-PLAN_KEY = "plan"
 
 #: Hard ceiling on a per-symbol budget, in dollars per month per symbol.
 MAX_ITEM_AMOUNT = 5_000.0
@@ -64,16 +63,6 @@ class BurstyConfig:
 # --------------------------------------------------------------------------------------
 # The plan: per-symbol monthly budgets.
 # --------------------------------------------------------------------------------------
-
-
-def raw_plan(config: Any, algorithm_id: str) -> dict[str, Any]:
-    """The plan as written in ``algorithms.<algorithm_id>.plan``, unsanitized -- two callers need
-    different things from it (:func:`sanitize_plan`, :func:`unknown_plan_symbols`), so sanitizing
-    here first would make the second question unanswerable. No plan configured means buy nothing,
-    never a built-in fallback basket."""
-    section = (getattr(config, "algorithm_configs", {}) or {}).get(algorithm_id) or {}
-    plan = section.get(PLAN_KEY)
-    return plan if isinstance(plan, dict) else {}
 
 
 def sanitize_plan(plan: dict[str, Any] | None, universe: set[str]) -> dict[str, Any]:

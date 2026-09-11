@@ -163,17 +163,26 @@ def tuning_section(config: Any, *algorithm_ids: str) -> dict[str, Any]:
     return {}
 
 
-def account_sizing_fallbacks(config: Any) -> dict[str, Any]:
-    """Tuning defaults that come from the account rather than from the algorithm.
+#: The config key holding an algorithm's nested plan. Not a tuning knob -- it is a structure,
+#: not a scalar, so it is excluded from the knob explainers the dashboard renders.
+PLAN_KEY = "plan"
 
-    An algorithm that does not name its own per-trade minimum or drift threshold inherits the
-    account's, so switching accounts changes it -- which is why these two cannot simply be
-    dataclass defaults.
+
+def raw_plan(config: Any, algorithm_id: str, key: str = PLAN_KEY) -> dict[str, Any]:
+    """An algorithm's plan section as written in ``algorithms.<algorithm_id>.<key>``, unsanitized.
+
+    Read off the config object rather than carried on a tuning dataclass, which is a flat set of
+    scalars coerced by declared type -- a nested structure does not survive that path. Both
+    algorithms that configure a nested plan (Bursty DCA's monthly budgets, Options Flip's board)
+    need it for the same reason, which is why it lives here rather than twice in their configs.
+
+    Unsanitized because two callers want different things from it: sanitizing for the universe
+    here would make "which configured symbols are *not* tradable?" unanswerable. No plan
+    configured means buy nothing, never a built-in fallback basket.
     """
-    return {
-        "per_trade_value_min": getattr(config, "min_trade_dollars", None),
-        "rebalance_threshold": getattr(config, "rebalance_threshold", None),
-    }
+    section = (getattr(config, "algorithm_configs", {}) or {}).get(algorithm_id) or {}
+    plan = section.get(key)
+    return plan if isinstance(plan, dict) else {}
 
 
 def as_symbol_map(value: Any, default: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -215,12 +224,7 @@ def _coercer_for(field: dataclasses.Field) -> Any:
     return as_text
 
 
-def load_tuning(
-    cls: type[T],
-    raw: Mapping[str, Any] | None,
-    *,
-    fallbacks: Mapping[str, Any] | None = None,
-) -> T:
+def load_tuning(cls: type[T], raw: Mapping[str, Any] | None) -> T:
     """Build a frozen tuning dataclass from a saved config section.
 
     Every field is read by name and coerced by its declared type; a field the section does not
@@ -229,21 +233,15 @@ def load_tuning(
     ignored -- the field may declare a non-standard legacy name with
     ``metadata={"legacy_key": ...}``.
 
-    ``fallbacks`` supplies a different default for named fields, for the handful whose default
-    comes from the account config rather than from the dataclass (``per_trade_value_min`` falls
-    back to ``min_trade_dollars``, for instance).
     """
     section = raw if isinstance(raw, dict) else {}
-    fallbacks = fallbacks or {}
     defaults = cls()
     values: dict[str, Any] = {}
 
     for field in dataclasses.fields(cls):
         if not field.init:
             continue
-        default = fallbacks.get(field.name)
-        if default is None:
-            default = getattr(defaults, field.name)
+        default = getattr(defaults, field.name)
         coerce = _coercer_for(field)
         if coerce is as_int and field.name.endswith("_minutes"):
             values[field.name] = minutes_knob(

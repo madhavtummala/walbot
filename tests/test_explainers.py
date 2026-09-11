@@ -23,7 +23,7 @@ def _config_fields(algorithm_id: str) -> set[str]:
     """
     from dataclasses import fields
 
-    from src.algorithms.bursty_dca.config import PLAN_KEY
+    from src.common.config_utils import PLAN_KEY
     from src.algorithms.bursty_dca.config import BurstyConfig
     from src.algorithms.rally_rotation.config import RallyRotationConfig
     from src.algorithms.registry import get_algorithm_class

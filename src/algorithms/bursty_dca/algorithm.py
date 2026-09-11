@@ -44,7 +44,8 @@ from ...core.interfaces import (
     SignalView,
 )
 from ..base import BaseAlgorithm
-from .config import BurstyConfig, plan_budgets, raw_plan, sanitize_plan
+from ...common.config_utils import raw_plan
+from .config import BurstyConfig, plan_budgets, sanitize_plan
 from .signals import signal_rows, signal_view
 
 logger = logging.getLogger(__name__)

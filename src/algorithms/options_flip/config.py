@@ -258,7 +258,6 @@ class OptionsFlipConfig:
 #: ``algorithms.options_flip.plan``, read and written through ``/api/algorithm-config`` like
 #: every other knob. Same key Bursty DCA uses for the same reason: a nested structure needs its
 #: own reader, and the Tune screen renders it through a purpose-built editor.
-PLAN_KEY = "plan"
 
 #: Ceiling on one symbol's budget, in dollars per position -- and the amount a full-size
 #: bubble on the Tune board represents, since a bubble's radius goes as
@@ -275,18 +274,6 @@ MAX_ITEM_AMOUNT = 5_000.0
 #: adding them config rather than a rewrite: every consumer already keys on direction, so the
 #: put side arrives as a populated bucket instead of a new code path.
 BUCKETS = ("call", "put")
-
-
-def raw_plan(config: Any, algorithm_id: str) -> dict[str, Any]:
-    """The board as written in ``algorithms.<algorithm_id>.plan``, unsanitized.
-
-    Read off the config object rather than carried on :class:`OptionsFlipConfig`, which is a
-    flat dataclass of scalars coerced by declared type -- a nested structure does not survive
-    that path, which is exactly why Bursty DCA reads its plan the same way.
-    """
-    section = (getattr(config, "algorithm_configs", {}) or {}).get(algorithm_id) or {}
-    plan = section.get(PLAN_KEY)
-    return plan if isinstance(plan, dict) else {}
 
 
 def sanitize_plan(plan: dict[str, Any] | None, universe: set[str]) -> dict[str, Any]:

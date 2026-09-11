@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from src.algorithms.bursty_dca.config import raw_plan, sanitize_plan, unknown_plan_symbols
+from src.algorithms.bursty_dca.config import sanitize_plan, unknown_plan_symbols
+from src.common.config_utils import raw_plan
 
 
 #: What the account may trade. A plain set now rather than a list of dashboard payload rows:

@@ -33,14 +33,3 @@ def parse_iso_utc(value: Any) -> datetime | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-
-
-def minutes_between(later: datetime | None, earlier: datetime | None) -> float:
-    """Absolute minutes between two moments; infinite when either is unknown.
-
-    Infinity rather than zero, because every caller is asking "has enough time passed?" and an
-    unknown earlier bound must not read as "no time at all".
-    """
-    if later is None or earlier is None:
-        return float("inf")
-    return abs((later - earlier).total_seconds()) / 60.0

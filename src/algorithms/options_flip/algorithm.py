@@ -49,7 +49,8 @@ from ...data.state_store import algorithm_state_key, save_state
 from ..base import BaseAlgorithm
 from ..rally_rotation.memory import market_day, sessions_since
 from ..reconcile import ORDER_IDS_KEY, reconcile_orders
-from .config import BUCKETS, MAX_ITEM_AMOUNT, OptionsFlipConfig, raw_plan, sanitize_plan, symbol_budget
+from ...common.config_utils import raw_plan
+from .config import BUCKETS, MAX_ITEM_AMOUNT, OptionsFlipConfig, sanitize_plan, symbol_budget
 from .contracts import affordable_contracts, fill_missing_deltas, select_contract
 from .candidates import scoring_parameters, trend_strength
 from .indicators import average_true_range, quote_age_seconds

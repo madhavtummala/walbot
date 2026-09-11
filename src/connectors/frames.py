@@ -37,28 +37,6 @@ def _normalize_quote(provider: str, symbol: str, price: Any, raw: Any, timestamp
     }
 
 
-def _bars_to_records(df: pd.DataFrame) -> list[dict[str, Any]]:
-    if df.empty:
-        return []
-    records = []
-    work = df.copy()
-    work["timestamp"] = pd.to_datetime(work["timestamp"], utc=True, errors="coerce")
-    work = work.dropna(subset=["timestamp"])
-    for row in work.to_dict(orient="records"):
-        records.append(
-            {
-                "timestamp": pd.Timestamp(row["timestamp"]).isoformat(),
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "volume": float(row["volume"]),
-                "adjusted_close": float(row.get("adjusted_close", row["close"])),
-            }
-        )
-    return records
-
-
 def _records_to_bars(records: Any) -> pd.DataFrame:
     if not records:
         return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "adjusted_close"])

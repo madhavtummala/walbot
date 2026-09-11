@@ -1,4 +1,16 @@
-"""Risk controls shared by more than one algorithm.
+"""The session drawdown breaker. Currently wired to no algorithm, deliberately.
+
+It measures the fall from the equity it first saw *this session*, so it only means anything to
+an algorithm that runs more than once inside one. At a daily cadence every run opens a new
+session and rebases that reference to current equity -- the drawdown it reports is identically
+zero however far the book fell overnight, and a knob that reads as crash protection while
+providing none is worse than no knob. That is why Rally Rotation's ``intraday_drawdown_limit``
+was removed rather than switched off; ``max_daily_drop``, which reads close-to-close returns,
+is the stop that survived.
+
+Kept rather than deleted because the logic is correct for an intraday algorithm and the trap is
+in the interaction, not in the code. ``test_a_session_breaker_cannot_fire_at_this_algorithms_cadence``
+in ``tests/test_rally_rotation.py`` is the record of it, and the only caller.
 
 Pure functions of their arguments -- nothing reads a clock. ``as_of`` is required rather than
 defaulted to ``date.today()`` so a replay's historical bar is never silently read as "today".
