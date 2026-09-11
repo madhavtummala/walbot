@@ -159,3 +159,26 @@ def test_every_knob_says_which_way_to_turn_it() -> None:
             )
             assert len(doc["effect"].split()) <= 50, f"{algorithm}.{knob} runs long"
             assert len(doc["what"].split()) <= 30, f"{algorithm}.{knob}'s 'what' runs long"
+
+
+def test_a_knob_shared_by_two_algorithms_describes_each_one() -> None:
+    """``plan`` exists in both Bursty DCA and Options Flip and means different things -- a
+    monthly budget in one, a per-position budget in the other.
+
+    A bulk edit keyed on the knob name alone rewrote the first match twice, so DCA's monthly
+    budget was briefly documented as buying option contracts. Guidance for a shared name has to
+    be written per algorithm, and the giveaway is vocabulary from the wrong one.
+    """
+    from src.algorithms.explainers import EXPLAINERS
+
+    vocabulary = {
+        "bursty_dca": ("contract", "premium", "delta", "expiry"),
+        "options_flip": ("monthly", "accrue", "backlog"),
+    }
+    for algorithm, foreign in vocabulary.items():
+        for knob, doc in EXPLAINERS[algorithm]["parameters"].items():
+            text = f"{doc['what']} {doc['effect']}".lower()
+            for word in foreign:
+                assert word not in text, (
+                    f"{algorithm}.{knob} uses {word!r}, which belongs to a different algorithm"
+                )

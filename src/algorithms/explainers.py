@@ -41,47 +41,30 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
         "parameters": {
             "plan": {
                 "what": "The monthly dollar budget for each symbol, set on the bubble board.",
-                "effect": "Raise a symbol's budget to buy more contracts of it; set it to zero and that symbol stops trading. A budget below one contract's premium opens nothing.",
+                "effect": "Higher accrues faster, so a dislocation buys more of that symbol; zero stops it trading. This is the base every multiple is applied to.",
             },
             "regime_ma_days": {
                 "what": "Window for the moving average and for the standard deviation that normalizes distance from it.",
-                "effect": (
-                    "Longer (300) measures dislocation against a slower average, so it reads a "
-                    "multi-month decline as cheap. Shorter (50) reacts to recent moves and will "
-                    "call a symbol fairly priced sooner after it falls."
-                ),
+                "effect": "Longer (300) reads a multi-month decline as cheap. Shorter (50) calls a symbol fairly priced sooner after it falls.",
             },
             "scaling_factor": {
                 "what": "Extra multiples of the monthly budget per standard deviation of favourable dislocation.",
-                "effect": "Higher buys far more into a dislocation: at 0.5, one sigma below the average deploys 1.5x the budget and two sigma deploys 2x. Above 1/3 it stops buying rich names at all.",
+                "effect": "Higher buys harder into a dislocation: at 0.5, one sigma below the average deploys 1.5x budget. Above 1/3 it stops buying rich names.",
             },
             "relax_months": {
                 "what": (
                     "Width of the backlog resistance curve, and the overdraft a neutral price "
                     "may borrow — both in months of budget."
                 ),
-                "effect": (
-                    "Longer (6) makes backlog matter slowly and lets a symbol run months ahead "
-                    "of plan. Shorter (0.5) pulls hard toward the plan rate and makes it behave "
-                    "much more like straight DCA. This is the knob that governs the long-run "
-                    "spend rate; max_monthly_multiple only bounds a single month."
-                ),
+                "effect": "Longer (6) lets a symbol run months ahead of plan; shorter (0.5) pulls it back toward straight DCA. This governs the long-run spend rate.",
             },
             "relax_depth": {
                 "what": "How far the backlog factor swings either side of 1.0 as the backlog saturates.",
-                "effect": (
-                    "At 0.7 a symbol months overspent deploys 0.3× and one months behind "
-                    "deploys 1.7×. Set to 0 to disable backlog resistance and size on valuation "
-                    "alone. Values near 1 let an overspent symbol stop trading almost entirely."
-                ),
+                "effect": "At 0.7 an overspent symbol deploys 0.3x and a behind one 1.7x. 0 disables backlog resistance; near 1 an overspent symbol stops trading.",
             },
             "max_monthly_multiple": {
                 "what": "Ceiling on total deployment per symbol per month, in multiples of the monthly budget.",
-                "effect": (
-                    "A backstop rather than the main control — relax_months governs the pacing. "
-                    "At 3.0 a month of repeated dislocations can spend three months of budget. "
-                    "Set to 1.0 to never exceed the plan rate within a month."
-                ),
+                "effect": "At 3.0 a month of dislocations can spend three months of budget; 1.0 never exceeds the plan rate. A backstop -- relax_months sets the pacing.",
             },
         },
     },
@@ -123,19 +106,14 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "  the defensive universe rather than in cash",
         ],
         "parameters": {
-            "risk_on_universe": {"what": "The ETFs it may hold.", "effect": "A wider list gives the ranking more to choose from; a narrower one concentrates the book. Either way every existing name's z-score moves, since the score is cross-sectional."},
-            "defensive_universe": {"what": "Where the book sits when nothing qualifies, and where undeployed gross is parked.", "effect": "Short-duration choices (BIL) make risk-off flat and cash-like. TLT or GLD make it an active macro bet that can lose while risk-on is closed."},
+            "risk_on_universe": {"what": "The ETFs it may hold.", "effect": "A wider list gives the ranking more to choose from, a narrower one concentrates the book. Either way every name's z-score moves."},
+            "defensive_universe": {"what": "Where the book sits when nothing qualifies, and where undeployed gross is parked.", "effect": "Short-duration (BIL) makes risk-off flat. TLT or GLD make it an active macro bet that can lose while risk-on is closed."},
             "rerank_interval_days": {
                 "what": "Trading days between re-rankings. Counted in runs, so 5 means five sessions.",
-                "effect": (
-                    "Selection, entry, replacement and the considered exits all happen on this clock; "
-                    "the -10% crash stop does not and runs every session regardless. The slowest "
-                    "selection horizon is twelve sessions, so re-ranking daily asks the score a "
-                    "question it cannot answer that fast. 0 re-ranks every run."
-                ),
+                "effect": "Longer holds the book through more chop; 0 re-ranks every run, which asks the twelve-session score a question it cannot answer that fast. The crash stop ignores this clock.",
             },
-            "micro_days": {"what": "Short return horizon, in market days.", "effect": "Longer blends toward the trend horizons and reacts slower; shorter tracks the last few sessions and flips rank on noise. About a week suits daily bars."},
-            "meso_days": {"what": "Medium return horizon, in market days.", "effect": "Longer measures leadership over a slower window and holds through more chop; shorter re-ranks on recent strength. Half the selection weight sits here and in macro."},
+            "micro_days": {"what": "Short return horizon, in market days.", "effect": "Longer reacts slower; shorter flips rank on noise. About a week suits daily bars."},
+            "meso_days": {"what": "Medium return horizon, in market days.", "effect": "Longer holds through more chop; shorter re-ranks on recent strength. Half the selection weight sits here and in macro."},
             "nano_days": {"what": "Fastest return horizon, in market days.", "effect": "1 is the shortest a daily bar can express, and is the setting. Longer overlaps micro and stops being a distinct reading."},
             "macro_days": {"what": "Slowest return horizon, in market days. Carries half the score.", "effect": "Longer favours established trends and cuts turnover sharply, at the cost of reacting late. Past ~40 days it decays rather than improving."},
             "w_nano": {"what": "Score weight on the one-day horizon.", "effect": "Higher leans the score on a single day's move; lower defers to the slower horizons. The horizon's presence matters more than its weight."},
@@ -148,7 +126,7 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "etf_ma_days": {"what": "Each ETF's own absolute-trend window.", "effect": "The core dual-momentum filter: nothing below its own trend can be held at any rank."},
             "etf_abs_return_days": {"what": "Medium-term absolute-momentum lookback per ETF.", "effect": "Longer demands a more established advance before a name is eligible."},
             "etf_min_abs_return": {"what": "Minimum return over that lookback.", "effect": "Zero means 'must have gone up'. Raising it demands a margin over flat."},
-            "etf_fast_return_days": {"what": "Short lookback used to catch deterioration.", "effect": "Longer needs a more sustained decline before a holding is dropped; shorter reacts to a single bad week and raises turnover."},
+            "etf_fast_return_days": {"what": "Short lookback used to catch deterioration.", "effect": "Longer needs a more sustained decline before a holding is dropped; shorter reacts to one bad week and raises turnover."},
             "max_daily_drop": {
                 "what": "A holding falling this much in one session is sold immediately.",
                 "effect": "The only stop this algorithm has, and it works at a daily cadence. Lower stops out on ordinary volatility; 0 turns it off.",
@@ -158,14 +136,14 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "etf_min_fast_return": {"what": "Floor on that short return.", "effect": "Less negative ejects weakening names sooner and increases turnover."},
             "max_positions": {"what": "How many risk-on names it holds at once.", "effect": "Fewer concentrates in the leader; more diversifies but dilutes the signal."},
             "entry_rank_max": {"what": "Worst rank that may be newly entered.", "effect": "Tighter than exit_rank_max on purpose: it is harder to get in than to stay in."},
-            "exit_rank_max": {"what": "Rank at which an incumbent is finally dropped.", "effect": "Wider than entry_rank_max gives a holding room to wobble without being sold. It only protects a name that slipped in rank -- one that fails a gate is unranked, and is sold whatever this says."},
+            "exit_rank_max": {"what": "Rank at which an incumbent is finally dropped.", "effect": "Wider lets a holding wobble without being sold. It only protects rank slippage: a name failing a gate is unranked and sold regardless."},
             "min_score_delta_to_replace": {"what": "Score advantage a challenger needs to displace a holding.", "effect": "The anti-churn knob. At 0 it swaps on any improvement and trades constantly."},
-            "volatility_tilt": {"what": "Exponent on volatility in sizing: weight follows score x sigma ** tilt.", "effect": "-1 is risk parity, so calm names get the big positions. 0 ignores volatility. +1 leans into it, concentrating in the wildest movers -- more return while a trend runs, more damage when it turns."},
+            "volatility_tilt": {"what": "Exponent on volatility in sizing: weight follows score x sigma ** tilt.", "effect": "-1 is risk parity, so calm names get the big positions. 0 ignores volatility. +1 concentrates in the wildest movers -- more return, more damage."},
             "risk_on_gross_max": {"what": "Cap on total invested fraction of equity.", "effect": "Below 1.0 it always holds cash. The simplest single lever on overall risk."},
-            "vol_estimation_days": {"what": "Daily window for the per-name volatility estimate.", "effect": "Longer smooths the per-name volatility that volatility_tilt sizes on; shorter lets one violent week resize the book."},
+            "vol_estimation_days": {"what": "Daily window for the per-name volatility estimate.", "effect": "Longer smooths the volatility volatility_tilt sizes on; shorter lets one violent week resize the book."},
             "vol_ceiling": {"what": "Maximum annualised volatility for eligibility. 0 = off.", "effect": "Lower excludes more volatile names and sells a holding whose volatility rises through it. 0 turns the gate off entirely."},
             "rebalance_weight_threshold": {"what": "Smallest weight change worth trading.", "effect": "Higher tolerates more drift from target in exchange for less churn."},
-            "minimum_trade_notional": {"what": "Floor on the dollar size of any single order.", "effect": "Higher suppresses more small adjustments and lets the book drift further from target; lower corrects sooner and trades more often."},
+            "minimum_trade_notional": {"what": "Floor on the dollar size of any single order.", "effect": "Higher lets the book drift further from target; lower corrects sooner and trades more often."},
             "minimum_trade_nav_fraction": {"what": "The same floor as a fraction of equity.", "effect": "The same floor as a share of equity, so it grows with the account. Whichever of the two is larger applies."},
             "defensive_max_positions": {"what": "How many defensive names to hold in risk-off.", "effect": "One is a pure cash-equivalent stance; two or more splits risk-off across, say, bills and gold."},
         },
@@ -218,28 +196,27 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "plan": {
                 "what": "The dollar budget for each symbol, per position, set on the bubble board.",
                 "effect": (
-                    "Raise a symbol's budget to buy more contracts of it; set it to zero and "
-                    "that symbol stops trading. A budget below one contract's premium opens "
-                    "nothing. The budget is also the loss cap, since a long option cannot lose "
-                    "more than its premium."
+                    "Raise a symbol's budget to buy more contracts; zero stops it trading. "
+                    "Below one contract's premium it opens nothing. The budget is also the "
+                    "loss cap."
                 ),
             },
-            "stop_loss_pct": {"what": "Loss cap as a fraction of the debit. Zero disables the stop entirely.", "effect": "Tighter (0.25) ends a reversal sooner but cuts winners on ordinary theta and IV drift. 0 removes the stop, leaving the hold deadline as the only exit."},
-            "max_hold_sessions": {"what": "Sessions to hold before the deadline exit takes over.", "effect": "Longer gives the target more sessions to arrive, and prices a wider target to match. Shorter forces the deadline exit sooner, on a target priced for less room."},
-            "target_delta": {"what": "The delta the strike is aimed at.", "effect": "Higher earns more per point of underlying move, costs premium that is mostly intrinsic, and buys a contract fewer people trade -- flow concentrates at and out of the money."},
+            "stop_loss_pct": {"what": "Loss cap as a fraction of the debit. Zero disables the stop entirely.", "effect": "Tighter (0.25) ends a reversal sooner but cuts winners on ordinary theta drift. 0 removes the stop, leaving the deadline as the only exit."},
+            "max_hold_sessions": {"what": "Sessions to hold before the deadline exit takes over.", "effect": "Longer gives the target more sessions to arrive and prices a wider target to match. Shorter forces the deadline exit sooner."},
+            "target_delta": {"what": "The delta the strike is aimed at.", "effect": "Higher earns more per point of underlying move but costs premium that is mostly intrinsic, on a contract fewer people trade."},
             "entry_reach": {"what": "Where the entry sits, as the share of comparable sessions that reached it.", "effect": "Lower is a deeper, cheaper entry that fills less often. Pairs with exit_reach; both are probabilities rather than offsets."},
             "exit_reach": {"what": "Where the target sits, as the share of comparable pulled-back sessions that reached it.", "effect": "Lower asks a more ambitious target, reached on fewer of the days that dipped. Higher asks less and is met more often."},
-            "entry_patience": {"what": "How stubbornly the buy holds its price as the session runs out. Higher is more patient.", "effect": "Higher holds the bid at the pullback level: fewer fills, better prices. Lower walks it toward the mark, filling more often and paying more."},
-            "exit_patience": {"what": "How stubbornly the sell holds its ask as the deadline approaches. Higher is more patient.", "effect": "Higher holds out for the modelled target and risks meeting the deadline unsold. Lower concedes toward the mark earlier, taking less but taking it."},
+            "entry_patience": {"what": "How stubbornly the buy holds its price as the session runs out. Higher is more patient.", "effect": "Higher waits at the pullback level -- fewer fills, better prices. Lower walks the bid toward the mark and pays more."},
+            "exit_patience": {"what": "How stubbornly the sell holds its ask as the deadline approaches. Higher is more patient.", "effect": "Higher holds out for the target and risks meeting the deadline unsold. Lower concedes toward the mark, taking less but taking it."},
             "exit_gain_share": {"what": "Share of the modelled gain the sell limit asks for on the day of entry.", "effect": "Asking for part of the move is what makes the exit executable rather than theoretical. It concedes each session, reaching zero at the deadline."},
-            "min_profit_per_contract": {"what": "Smallest predicted move worth opening for, in dollars per contract, gross of commission.", "effect": "Higher trades less often and only on wider predicted moves. Lower admits thinner setups, where spread and commission eat more of the edge."},
-            "level_lookback_days": {"what": "Sessions the dip and run quantiles are learned from.", "effect": "Longer averages more sessions, so one violent stretch cannot set the level. Shorter tracks the current regime and can read a recent tail back out as a forecast."},
+            "min_profit_per_contract": {"what": "Smallest predicted move worth opening for, in dollars per contract, gross of commission.", "effect": "Higher trades less often and only on wider predicted moves. Lower admits thinner setups where spread and commission eat the edge."},
+            "level_lookback_days": {"what": "Sessions the dip and run quantiles are learned from.", "effect": "Longer averages more sessions, so one violent stretch cannot set the level. Shorter tracks the current regime and can read a tail back out as a forecast."},
             "min_trend_strength": {"what": "Smallest trend strength a candidate must carry, in the symbol's own sigma.", "effect": "Higher demands a stronger trend and arms fewer symbols. Lower admits weaker ones; at 0 anything trending at all becomes a candidate."},
-            "min_dte": {"what": "Nearest expiry to trade, in days.", "effect": "Higher buys more time and less decay per day, for more premium. Lower is cheaper and decays faster -- under a week theta outweighs direction."},
-            "min_open_interest": {"what": "Open interest floor on the chosen contract.", "effect": "Higher restricts to contracts with a counterparty waiting, so fewer strikes qualify. Lower admits thin ones a resting order may never trade against."},
-            "max_spread_pct": {"what": "Ceiling on the quoted spread, as a fraction of the mid.", "effect": "Lower refuses wide markets, where the midpoint every estimate is built on is a guess. Higher admits them and pays that width on the way out."},
-            "max_gap_down_atr": {"what": "Largest opening gap DOWN still an ordinary session, in ATR.", "effect": "Downside only. An up-gap is followed by a smaller pullback, so it is directionally favourable and merely harder to fill into -- which the reach probability already prices."},
-            "max_annual_volatility": {"what": "Ceiling on annualised realised volatility.", "effect": "Lower excludes more volatile names, where the premium already prices a bigger move than the model forecasts and a correct call still loses. Higher admits them."},
+            "min_dte": {"what": "Nearest expiry to trade, in days.", "effect": "Higher buys more time and less daily decay, for more premium. Lower is cheaper and decays faster; under a week theta outweighs direction."},
+            "min_open_interest": {"what": "Open interest floor on the chosen contract.", "effect": "Higher restricts to contracts with a counterparty waiting; lower admits thin ones a resting order may never trade against."},
+            "max_spread_pct": {"what": "Ceiling on the quoted spread, as a fraction of the mid.", "effect": "Lower refuses wide markets, where the midpoint every estimate is built on is a guess. Higher admits them and pays that width on exit."},
+            "max_gap_down_atr": {"what": "Largest opening gap DOWN still an ordinary session, in ATR.", "effect": "Lower refuses more opening gaps. Downside only: an up-gap is followed by a smaller pullback, which the reach probability already prices."},
+            "max_annual_volatility": {"what": "Ceiling on annualised realised volatility.", "effect": "Lower excludes volatile names whose premium already prices a bigger move than the model forecasts, so a correct call still loses. Higher admits them."},
         },
     },
 }
