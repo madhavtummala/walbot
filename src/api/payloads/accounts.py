@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from alpaca.trading.enums import QueryOrderStatus
@@ -24,11 +25,17 @@ from ...core.config import (
     config_transaction,
     save_accounts_config,
 )
+from ...common.lazy_field import LazyField
+from ...core.interfaces import MARKET_TZ
 from ...data.order_journal import load_order_journal
 from ..controls import load_controls
 
 logger = logging.getLogger(__name__)
 
+
+#: How far back realized P/L is matched. The same trailing year as income, for the same
+#: reason -- it is one request, and it is inside Schwab's transactions window.
+REALIZED_ACTIVITY_DAYS = 364
 
 #: How far back the account page totals income. Just under a year: comparable to a trailing
 #: yield, small enough to stay one request, and inside Schwab's transactions window, which
@@ -46,6 +53,11 @@ def positions_payload(account_id: str = "") -> dict[str, Any]:
 
     Per account rather than per algorithm: the broker reports a single blended position per
     symbol, so two algorithms trading the same account cannot be told apart here.
+
+    Balances and holdings only -- one read of what the account is right now. Income and realized
+    P/L have to crawl a year of transactions to answer, so they live in
+    :func:`account_analytics_payload` and are computed on request rather than on every page
+    load. Nothing here costs more than the position read itself.
     """
     try:
         config = get_config(account_id=account_id) if account_id else get_config()
@@ -55,7 +67,7 @@ def positions_payload(account_id: str = "") -> dict[str, Any]:
         return {
             "account_id": account_id, "account_label": account_id, "equity": None,
             "cash": None, "day_pl": None, "day_pl_percent": None, "total_pl": None,
-            "dividend_pl": None, "dividend_rows": [], "rows": [], "error": str(error),
+            "rows": [], "error": str(error),
         }
     payload: dict[str, Any] = {
         "account_id": config.account_id,
@@ -67,8 +79,6 @@ def positions_payload(account_id: str = "") -> dict[str, Any]:
         "total_pl": None,
         # Reported beside price P/L, not inside it -- different questions, and a cash sleeve
         # earns almost entirely through the second one.
-        "dividend_pl": None,
-        "dividend_rows": [],
         "rows": [],
         "error": "",
     }
@@ -77,9 +87,9 @@ def positions_payload(account_id: str = "") -> dict[str, Any]:
     # account's name, which is what a Schwab account used to show.
     broker = get_account_broker_type(config.account_id)
     if broker == "paper":
-        return {**payload, **_paper_positions(config), **_dividend_pl(config)}
+        return {**payload, **_paper_positions(config)}
     if broker != "alpaca":
-        return {**payload, **_brokerage_positions(config, broker), **_dividend_pl(config)}
+        return {**payload, **_brokerage_positions(config, broker)}
     try:
         client = create_trading_client(config)
         account = client.get_account()
@@ -97,22 +107,20 @@ def positions_payload(account_id: str = "") -> dict[str, Any]:
     except Exception as error:  # noqa: BLE001 - a broker outage must not blank the dashboard
         logger.warning("Could not load positions for %s: %s", config.account_id, error)
         payload["error"] = str(error)
-    payload.update(_dividend_pl(config))
     return payload
 
 
-def _dividend_pl(config: Any) -> dict[str, Any]:
+def _dividend_pl(brokerage: Any, config: Any) -> dict[str, Any]:
     """Income received, through the brokerage interface rather than per-broker branching.
 
     Kept apart from ``total_pl``: a distribution is cash that arrived, not a change in what
     the holdings are worth.
+
+    Takes an already-resolved brokerage rather than resolving its own. Each resolution builds a
+    fresh session, and a fresh Schwab session means another OAuth exchange and another account
+    lookup -- four helpers resolving independently made one page load authenticate four times.
     """
-    from datetime import datetime, timedelta, timezone
-
-    from ...core.pipeline import resolve_brokerage
-
     try:
-        brokerage = resolve_brokerage(config)
         end = datetime.now(timezone.utc).date()
         rows = brokerage.get_dividend_activity(end - timedelta(days=DIVIDEND_ACTIVITY_DAYS), end)
     except Exception as error:  # noqa: BLE001 - income is a detail, not the whole page
@@ -121,6 +129,98 @@ def _dividend_pl(config: Any) -> dict[str, Any]:
     return {
         "dividend_pl": float(sum(float(row.get("amount") or 0.0) for row in rows)),
         "dividend_rows": rows[:40],
+    }
+
+
+def _realized_pl(brokerage: Any, config: Any) -> dict[str, Any]:
+    """Profit already banked, matched from the broker's own fill record.
+
+    Kept apart from ``total_pl``, which only ever measures positions still held: an account
+    that opened a call, closed it at a profit and went back to cash has a true open P/L of
+    zero, and the whole gain lives here. Reporting only the open figure made such an account
+    look like it had never made a penny.
+    """
+    from ...brokerages.realized import realized_from_fills
+
+    blank = {"realized_pl": None, "realized_closes": 0, "realized_unmatched": 0}
+    try:
+        end = datetime.now(timezone.utc).date()
+        fills = brokerage.get_fills(end - timedelta(days=REALIZED_ACTIVITY_DAYS), end)
+    except Exception as error:  # noqa: BLE001 - one figure is not the whole page
+        logger.warning("Could not read fills for %s: %s", config.account_id, error)
+        return blank
+    # None means the venue cannot report fills at all, which is not the same as an account
+    # that has not closed anything -- the first is unknown, the second is zero.
+    if fills is None:
+        return blank
+    matched = realized_from_fills(fills)
+    return {
+        "realized_pl": matched["realized_pl"],
+        "realized_closes": matched["closes"],
+        # Sells this could find no opening buy for, because the position was opened before the
+        # window. Surfaced so the page can say the total is partial instead of just being wrong.
+        "realized_unmatched": matched["unmatched"],
+    }
+
+
+def _compute_analytics(account_id: str) -> dict[str, Any]:
+    """The slow half of an account page: income and realized P/L, a year of transactions each."""
+    config = get_config(account_id=account_id) if account_id else get_config()
+    from ...core.pipeline import resolve_brokerage
+
+    # Resolved once and handed to both. Each resolution builds a fresh session, and for Schwab
+    # a fresh session is another OAuth exchange and another account lookup -- helpers resolving
+    # independently made one page load authenticate four times.
+    brokerage = resolve_brokerage(config)
+    return {**_dividend_pl(brokerage, config), **_realized_pl(brokerage, config)}
+
+
+#: In memory rather than the state store: it caches something the broker can always be asked
+#: again, so losing it on restart costs one recompute and never correctness.
+ANALYTICS = LazyField("account analytics", _compute_analytics)
+
+
+def account_analytics_payload(account_id: str = "", *, refresh: bool = False) -> dict[str, Any]:
+    """Income and realized P/L for one account -- the figures that cost a year of transactions.
+
+    Split out of the positions payload because the two answer at different speeds. Balances and
+    holdings are one read of what the account is right now; these crawl a trailing year per
+    broker, and paying for that on every page load meant reloading to check a price also re-read
+    a year of history.
+
+    Lazy, not manual. A plain read is instant and answers with whatever was last computed, while
+    starting a recompute in the background if that is missing or stale -- so the value fills
+    itself in without anyone waiting for it, and nothing has to tell the user to go press a
+    button. ``refresh`` is the button: compute now, synchronously, and answer with the result.
+    """
+    try:
+        config = get_config(account_id=account_id) if account_id else get_config()
+    except UnknownAccountError as error:
+        return {**_blank_analytics(account_id), "state": "error", "error": str(error)}
+
+    snapshot = ANALYTICS.get(config.account_id, force=refresh)
+    return {
+        **_blank_analytics(config.account_id),
+        **(snapshot["value"] or {}),
+        "computed_at": snapshot["computed_at"],
+        "state": snapshot["state"],
+        "error": snapshot["error"],
+    }
+
+
+def _blank_analytics(account_id: str) -> dict[str, Any]:
+    """Nulls, not zeros. "Not computed yet" and "this account earned nothing" are different."""
+    return {
+        "account_id": account_id,
+        "computed_at": "",
+        "state": "computing",
+        "dividend_pl": None,
+        "dividend_rows": [],
+        # Banked, as opposed to ``total_pl``, which only measures what is still held.
+        "realized_pl": None,
+        "realized_closes": 0,
+        "realized_unmatched": 0,
+        "error": "",
     }
 
 
@@ -254,6 +354,10 @@ def _account_rows(brokerage: Any, *, label: str, account_id: str) -> dict[str, A
         "cash": float(state.get("cash") or 0.0),
         "day_pl": day_pl,
         "day_pl_percent": (day_pl / float(opening)) if day_pl is not None and float(opening) else None,
+        # Open P/L, summed from what the broker reports per position -- each row's
+        # ``unrealized_pl`` is the broker's own since-opened figure, not a local reconstruction
+        # from cost basis and mark. It used to sum the *day* figure instead, which is why this
+        # tracked Day P/L so closely that the two looked like one number reported twice.
         "total_pl": sum(float(row["unrealized_pl"]) for row in rows) if rows else None,
         "rows": rows,
     }
@@ -281,7 +385,7 @@ def _brokerage_positions(config: Any, broker: str) -> dict[str, Any]:
     return _account_rows(brokerage, label=broker, account_id=config.account_id)
 
 
-def _paper_activity(config: Any, limit: int) -> dict[str, Any]:
+def _paper_activity(config: Any, limit: int, since: datetime | None = None) -> dict[str, Any]:
     """Order history for the local paper book, from the bot's own journal.
 
     The paper brokerage fills immediately and keeps no order log, so the journal written at
@@ -304,15 +408,113 @@ def _paper_activity(config: Any, limit: int) -> dict[str, Any]:
                 "submitted_at": entry.get("submitted_at", ""),
             }
         )
-    return {"rows": rows}
+    return {"rows": _since(rows, since)}
 
 
-def account_activity_payload(account_id: str = "", limit: int = 40) -> dict[str, Any]:
+def market_day_start() -> datetime:
+    """Midnight of the current *trading* day, in the market's own timezone.
+
+    Not UTC midnight: a 4pm ET fill lands on the following UTC day for half the year, so a
+    UTC-midnight cutoff would file this afternoon's trades under tomorrow and answer "nothing
+    traded today" to someone looking at a position opened an hour ago.
+    """
+    return datetime.now(MARKET_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _parse_stamp(value: Any) -> datetime | None:
+    """One order timestamp as an aware datetime, or ``None`` when it cannot be read.
+
+    Every broker spells this differently and none of them are quite ``fromisoformat``: Schwab
+    sends ``+0000`` without the colon, Alpaca a ``Z``, and the bot's own journal a naive local
+    stamp. A stamp that parses to nothing is treated as undateable by the caller rather than
+    as old, so a filter can never silently delete an order over a formatting quirk.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    text = text.replace("Z", "+00:00")
+    # ``+0000`` -> ``+00:00``. ISO 8601 allows the colonless form; fromisoformat did not until
+    # 3.11, and being explicit here keeps the parse independent of the interpreter version.
+    if len(text) >= 5 and text[-5] in "+-" and text[-4:].isdigit():
+        text = f"{text[:-2]}:{text[-2:]}"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    # A naive stamp is the journal's, written in local time by the host that placed the order.
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=datetime.now().astimezone().tzinfo)
+
+
+def _since(rows: list[dict[str, Any]], since: datetime | None) -> list[dict[str, Any]]:
+    """Drop orders entered before ``since``. No cutoff keeps everything.
+
+    An unparseable timestamp is kept. The alternative -- dropping it -- would hide a real order
+    because of a format this code did not anticipate, which is the worse of the two failures.
+    """
+    if since is None:
+        return rows
+    return [row for row in rows if (_parse_stamp(row.get("submitted_at")) or since) >= since]
+
+
+def _brokerage_activity(
+    config: Any, broker: str, limit: int, since: datetime | None = None
+) -> dict[str, Any]:
+    """Recent orders from any non-Alpaca brokerage, in the shape the account page expects.
+
+    Every state, not just the resting ones: ``get_orders("")`` applies no status filter, so a
+    filled, cancelled or rejected order arrives alongside a working one. That is the whole
+    point of this view -- a filled order is the thing you came to look for.
+
+    Bracket legs arrive flattened by the brokerage, so a stop that is still a child of its
+    entry is listed as its own row rather than hidden inside one.
+    """
+    from ...core.pipeline import resolve_brokerage
+
+    try:
+        brokerage = resolve_brokerage(config)
+        orders = brokerage.get_orders("")
+    except Exception as error:  # noqa: BLE001 - a broker outage must not blank the page
+        logger.warning("Could not load %s activity for %s: %s", broker, config.account_id, error)
+        return {"error": str(error)}
+
+    rows = []
+    for order in orders or []:
+        filled_price = json_number(order.get("filled_avg_price"))
+        rows.append(
+            {
+                "symbol": str(order.get("symbol") or ""),
+                "side": str(order.get("action") or ""),
+                "status": str(order.get("status") or ""),
+                "qty": json_number(order.get("quantity")),
+                "filled_qty": json_number(order.get("filled_quantity")),
+                # Zero means "no fill yet" in the brokerage's vocabulary, and the page reads a
+                # null as "--". Passing the zero through would print a $0.00 fill.
+                "filled_avg_price": filled_price or None,
+                "order_type": str(order.get("order_type") or ""),
+                "limit_price": json_number(order.get("limit_price")) or None,
+                "stop_price": json_number(order.get("stop_price")) or None,
+                "submitted_at": str(order.get("entered_time") or ""),
+            }
+        )
+    rows.sort(key=lambda row: row["submitted_at"], reverse=True)
+    # Trimmed by date first, so ``limit`` caps what survives the window rather than deciding
+    # which orders the window gets to consider.
+    return {"rows": _since(rows, since)[:limit]}
+
+
+def account_activity_payload(
+    account_id: str = "", limit: int = 40, since: datetime | None = None
+) -> dict[str, Any]:
     """Recent broker orders for one account.
 
+    ``since`` bounds how far back the view reaches, and is the caller's choice rather than this
+    function's: the dashboard asks for a week, the MCP tool for the trading day. Passing
+    ``None`` returns everything the broker offered, bounded only by ``limit``.
+
     Read straight from the brokerage rather than a local mirror: the broker is the only source
-    that knows about fills, partial fills, and cancels after submission. The local paper book
-    is the exception -- there is no broker, so the bot's own journal is the record.
+    that knows about fills, partial fills, and cancels after submission -- and the only one that
+    knows about a trade placed by hand in the broker's own app, which no journal here can see.
+    The local paper book is the exception: there is no broker, so the bot's journal is the record.
     """
     try:
         config = get_config(account_id=account_id) if account_id else get_config()
@@ -321,11 +523,13 @@ def account_activity_payload(account_id: str = "", limit: int = 40) -> dict[str,
     payload: dict[str, Any] = {"account_id": config.account_id, "rows": [], "error": ""}
     broker = get_account_broker_type(config.account_id)
     if broker == "paper":
-        return {**payload, **_paper_activity(config, limit)}
+        return {**payload, **_paper_activity(config, limit, since)}
     if broker != "alpaca":
-        # Only the bot's own journal is available for a non-Alpaca broker here; its order feed
-        # would need its own client, and reporting Alpaca's would name the wrong account.
-        return {**payload, **_paper_activity(config, limit)}
+        # The broker's own feed, through the shared interface. The bot's journal was standing in
+        # here, which made this view "orders this bot placed" rather than the account's activity:
+        # anything traded by hand in the broker's own app was invisible, and an agent reading the
+        # MCP tool would conclude the account had never bought what it plainly holds.
+        return {**payload, **_brokerage_activity(config, broker, limit, since)}
     try:
         client = create_trading_client(config)
         try:
@@ -354,7 +558,7 @@ def account_activity_payload(account_id: str = "", limit: int = 40) -> dict[str,
                 }
             )
         rows.sort(key=lambda row: row["submitted_at"], reverse=True)
-        payload["rows"] = rows[:limit]
+        payload["rows"] = _since(rows, since)[:limit]
     except Exception as error:  # noqa: BLE001 - a broker outage must not blank the page
         logger.warning("Could not load activity for %s: %s", config.account_id, error)
         payload["error"] = str(error)

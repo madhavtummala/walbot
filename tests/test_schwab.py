@@ -521,3 +521,190 @@ def test_a_replacement_never_carries_the_bracket_it_is_re_pricing() -> None:
     assert payload["price"] == 1.25
     assert "childOrderStrategies" not in payload, "Schwab rejects a replacement carrying children"
     assert payload["orderStrategyType"] == "TRIGGER"
+
+
+def test_a_position_reports_the_day_and_the_life_of_the_trade_separately() -> None:
+    """Two questions, two fields.
+
+    ``currentDayProfitLoss`` was being reported as ``unrealized_pl``, so a position held for
+    months read as though it had been opened this morning, and the account page's "Open P/L"
+    -- a sum of these -- tracked its own Day P/L so closely the two looked like one number
+    printed twice.
+    """
+    session = _session(
+        {
+            "/accounts/accountNumbers": FakeResponse([{"accountNumber": "123", "hashValue": "HASH"}]),
+            "/accounts/HASH": FakeResponse(
+                {
+                    "securitiesAccount": {
+                        "positions": [
+                            {
+                                "instrument": {"symbol": "XSD", "assetType": "EQUITY"},
+                                "longQuantity": 10,
+                                "shortQuantity": 0,
+                                "averagePrice": 100.0,
+                                "marketValue": 1_500.0,
+                                "longOpenProfitLoss": 500.0,
+                                "currentDayProfitLoss": 20.0,
+                            }
+                        ]
+                    }
+                }
+            ),
+        }
+    )
+    brokerage = SchwabBrokerage(_config(), session=session)
+
+    row = brokerage.get_position_details()[0]
+
+    assert row["unrealized_pl"] == 500.0
+    assert round(row["unrealized_plpc"], 4) == 0.5
+    assert row["day_pl"] == 20.0
+    # Against where the position started the session -- 1500 now, 20 of it earned today.
+    assert round(row["day_pl_percent"], 6) == round(20.0 / 1_480.0, 6)
+
+
+def test_an_option_position_is_measured_against_the_contract_multiplier() -> None:
+    """``marketValue`` carries the 100x, ``averagePrice`` does not.
+
+    Comparing them directly answered a 1% move as a 99% loss, which is exactly the shape of
+    wrongness that looks like a real number.
+    """
+    session = _session(
+        {
+            "/accounts/accountNumbers": FakeResponse([{"accountNumber": "123", "hashValue": "HASH"}]),
+            "/accounts/HASH": FakeResponse(
+                {
+                    "securitiesAccount": {
+                        "positions": [
+                            {
+                                "instrument": {"symbol": "AIQ   260116C00045000", "assetType": "OPTION"},
+                                "longQuantity": 2,
+                                "shortQuantity": 0,
+                                "averagePrice": 8.00,
+                                "marketValue": 1_800.0,
+                                "currentDayProfitLoss": 50.0,
+                            }
+                        ]
+                    }
+                }
+            ),
+        }
+    )
+    brokerage = SchwabBrokerage(_config(), session=session)
+
+    row = brokerage.get_position_details()[0]
+
+    assert row["current_price"] == 9.0
+    # Schwab sent no open figure for this one, so it is derived: $1,800 now against $1,600 paid.
+    assert row["unrealized_pl"] == 200.0
+    assert round(row["unrealized_plpc"], 4) == 0.125
+
+
+def test_a_short_position_reads_its_open_pl_from_schwabs_short_field() -> None:
+    """Schwab sends one field or the other, never both, and a missing one is not a flat zero."""
+    session = _session(
+        {
+            "/accounts/accountNumbers": FakeResponse([{"accountNumber": "123", "hashValue": "HASH"}]),
+            "/accounts/HASH": FakeResponse(
+                {
+                    "securitiesAccount": {
+                        "positions": [
+                            {
+                                "instrument": {"symbol": "XBI", "assetType": "EQUITY"},
+                                "longQuantity": 0,
+                                "shortQuantity": 5,
+                                "averagePrice": 90.0,
+                                "marketValue": -400.0,
+                                "shortOpenProfitLoss": 50.0,
+                                "currentDayProfitLoss": -10.0,
+                            }
+                        ]
+                    }
+                }
+            ),
+        }
+    )
+    brokerage = SchwabBrokerage(_config(), session=session)
+
+    row = brokerage.get_position_details()[0]
+
+    assert row["qty"] == -5.0
+    assert row["unrealized_pl"] == 50.0
+    assert row["day_pl"] == -10.0
+
+
+def test_fills_are_read_from_the_transactions_feed() -> None:
+    """A trade's ``amount`` is signed, and that is what says whether the fill opened or closed.
+
+    Not the order's verb: Schwab's own instruction encodes open/close separately, and the
+    transaction record is the one that survives after the order is gone.
+    """
+    session = _session(
+        {
+            "/accounts/accountNumbers": FakeResponse([{"accountNumber": "123", "hashValue": "HASH"}]),
+            "/transactions": FakeResponse(
+                [
+                    {
+                        "type": "TRADE",
+                        "tradeDate": "2026-09-09T16:23:09+0000",
+                        "transferItems": [
+                            {
+                                "instrument": {"symbol": "XSD", "assetType": "EQUITY"},
+                                "amount": 10.0,
+                                "price": 100.0,
+                            },
+                            # A fee leg: no instrument, no price, and not a trade.
+                            {"feeType": "COMMISSION", "amount": -0.65},
+                        ],
+                    },
+                    {
+                        "type": "TRADE",
+                        "tradeDate": "2026-09-10T16:00:39+0000",
+                        "transferItems": [
+                            {
+                                "instrument": {"symbol": "XSD", "assetType": "EQUITY"},
+                                "amount": -10.0,
+                                "price": 110.0,
+                            }
+                        ],
+                    },
+                ]
+            ),
+        }
+    )
+    brokerage = SchwabBrokerage(_config(), session=session)
+
+    fills = brokerage.get_fills()
+
+    assert [(f["symbol"], f["action"], f["quantity"], f["price"]) for f in fills] == [
+        ("XSD", "buy", 10.0, 100.0),
+        ("XSD", "sell", 10.0, 110.0),
+    ]
+    assert all(fill["multiplier"] == 1.0 for fill in fills)
+
+
+def test_an_option_fill_carries_the_hundred_share_multiplier() -> None:
+    session = _session(
+        {
+            "/accounts/accountNumbers": FakeResponse([{"accountNumber": "123", "hashValue": "HASH"}]),
+            "/transactions": FakeResponse(
+                [
+                    {
+                        "type": "TRADE",
+                        "tradeDate": "2026-09-09T16:23:09+0000",
+                        "transferItems": [
+                            {
+                                "instrument": {"symbol": "AIQ   260116C00045000", "assetType": "OPTION"},
+                                "amount": 2.0,
+                                "price": 8.61,
+                            }
+                        ],
+                    }
+                ]
+            ),
+        }
+    )
+    brokerage = SchwabBrokerage(_config(), session=session)
+
+    assert brokerage.get_fills()[0]["multiplier"] == 100.0

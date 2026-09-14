@@ -535,7 +535,12 @@ class Brokerage(ABC):
         return {}
 
     def get_position_details(self) -> List[Dict[str, Any]]:
-        """Full position data per symbol: qty, avg_entry_price, market_value, unrealized_pl, unrealized_plpc.
+        """Full position data per symbol: qty, avg_entry_price, market_value, and both P/Ls.
+
+        Two P/L figures, because they answer different questions and a broker reports both:
+        ``unrealized_pl`` / ``unrealized_plpc`` is the position's whole life since it was
+        opened, and ``day_pl`` / ``day_pl_percent`` is only this session's move. A brokerage
+        that cannot tell them apart reports ``day_pl: None`` -- "unknown", never zero.
 
         The single source for the accounts page.  Defaults to reading ``get_positions`` +
         ``get_marks`` and filling the rest as zeros, which is what the non-Alpaca path did
@@ -553,6 +558,8 @@ class Brokerage(ABC):
                 "market_value": float(shares) * float(marks.get(symbol, 0.0)),
                 "unrealized_pl": 0.0,
                 "unrealized_plpc": 0.0,
+                "day_pl": None,
+                "day_pl_percent": None,
             }
             for symbol, shares in holdings.items()
         ]
@@ -583,6 +590,21 @@ class Brokerage(ABC):
             for symbol, shares in ((s, held[s]) for s in symbols if s in held)
             if float(marks.get(symbol, 0.0) or 0.0) > 0
         }
+
+    def get_fills(
+        self, start: Optional[date] = None, end: Optional[date] = None
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Executed trades over a window, as ``{symbol, action, quantity, price, multiplier, date}``.
+
+        What realized P/L is reconstructed from -- no venue reports that as a field, so the
+        sells have to be matched against the buys that opened them. ``multiplier`` is 100 for an
+        option contract and 1 for shares, because a broker quotes an option per share while
+        selling it a hundred at a time.
+
+        ``None``, not ``[]``, when the venue cannot report fills at all: an empty list is the
+        real answer for an account that has not traded, and the two must not collapse into one.
+        """
+        return None
 
     def get_dividend_activity(
         self, start: Optional[date] = None, end: Optional[date] = None

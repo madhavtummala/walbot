@@ -217,8 +217,9 @@ def signal_view(plan: AlgorithmPlan, *, unknown: list[str]) -> SignalView:
     summary = [
         {"label": "Mode", "value": str(plan.metadata.get("allocation_mode") or "DCA")},
         {"label": "Planned", "value": f"${monthly_total:,.0f}/month"},
-        {"label": "Deploying", "value": str(sum(1 for row in rows if row.action == ACTION_ENTER))},
-        {"label": "Symbols", "value": str(len(rows))},
+        # One tile, not two. The count only means anything against the total it is drawn
+        # from -- "2" answers nothing that "2/5" does not answer better.
+        {"label": "Deploying", "value": f"{sum(1 for row in rows if row.action == ACTION_ENTER)}/{len(rows)}"},
         {"label": "Scaling", "value": f"{plan.metadata.get('scaling_factor')}x/σ"},
         {"label": "Relax", "value": f"{plan.metadata.get('relax_months')} months"},
     ]

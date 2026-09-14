@@ -365,3 +365,452 @@ def test_paper_refuses_a_short_it_was_not_asked_to_approve() -> None:
             brokerage.submit_order(
                 OrderRequest("AAA", "sell", 10, extra={"latest_price": 100.0})
             )
+
+
+def test_a_schwab_accounts_orders_come_from_the_broker_not_the_bot_journal(monkeypatch) -> None:
+    """Including trades placed by hand, which no journal here can ever see.
+
+    The journal records what this bot submitted. Standing it in for the broker's own feed made
+    the account page -- and the MCP tool that shares it -- answer "orders this bot placed" to
+    the question "what happened in this account", so a buy made in the broker's own app was
+    invisible while the position it created sat in the holdings table above it.
+    """
+    from src.api import api_payloads
+
+    class FakeBrokerage:
+        def get_orders(self, status="WORKING"):
+            assert status == "", "every state, not just the resting ones"
+            return [
+                {
+                    "order_id": "1", "symbol": "XSD", "action": "buy", "status": "FILLED",
+                    "quantity": 10.0, "filled_quantity": 10.0, "order_type": "limit",
+                    "limit_price": 100.0, "stop_price": 0.0, "filled_avg_price": 99.5,
+                    "entered_time": "2026-09-14T14:30:00+0000",
+                },
+                {
+                    "order_id": "2", "symbol": "XBI", "action": "buy", "status": "WORKING",
+                    "quantity": 4.0, "filled_quantity": 0.0, "order_type": "limit",
+                    "limit_price": 80.0, "stop_price": 0.0, "filled_avg_price": 0.0,
+                    "entered_time": "2026-09-14T15:00:00+0000",
+                },
+            ]
+
+    _patch_payloads(monkeypatch, "get_account_broker_type", lambda _account: "schwab")
+    monkeypatch.setattr("src.core.pipeline.resolve_brokerage", lambda _config: FakeBrokerage())
+
+    with ephemeral_state():
+        rows = api_payloads.account_activity_payload("schwab2")["rows"]
+
+    # Most recent first, and neither of these was ever written to the bot's journal.
+    assert [row["symbol"] for row in rows] == ["XBI", "XSD"]
+    assert rows[1]["filled_avg_price"] == 99.5
+    # A resting order has no fill, which reads as "--" rather than a $0.00 trade.
+    assert rows[0]["filled_avg_price"] is None
+    assert rows[0]["status"] == "WORKING"
+
+
+def test_an_unreachable_broker_reports_itself_rather_than_an_empty_order_list(monkeypatch) -> None:
+    """An empty list would read as "this account has not traded", which is a different claim."""
+    from src.api import api_payloads
+
+    class FakeBrokerage:
+        def get_orders(self, status="WORKING"):
+            raise RuntimeError("schwab is down")
+
+    _patch_payloads(monkeypatch, "get_account_broker_type", lambda _account: "schwab")
+    monkeypatch.setattr("src.core.pipeline.resolve_brokerage", lambda _config: FakeBrokerage())
+
+    payload = api_payloads.account_activity_payload("schwab2")
+
+    assert payload["rows"] == []
+    assert "schwab is down" in payload["error"]
+
+
+def test_the_accounts_open_pl_sums_the_brokers_open_figure(monkeypatch) -> None:
+    """Not the day figure, which is what made Day P/L and Open P/L agree on every read."""
+    from src.api import api_payloads
+
+    class FakeBrokerage:
+        def get_account_state(self):
+            return {"equity": 10_060.0, "cash": 60.0, "last_equity": 10_000.0}
+
+        def get_position_details(self):
+            return [
+                {"symbol": "XSD", "qty": 10.0, "avg_entry_price": 100.0, "market_value": 1_500.0,
+                 "unrealized_pl": 500.0, "unrealized_plpc": 0.5, "day_pl": 20.0, "day_pl_percent": 0.013},
+                {"symbol": "XBI", "qty": 5.0, "avg_entry_price": 80.0, "market_value": 440.0,
+                 "unrealized_pl": 40.0, "unrealized_plpc": 0.1, "day_pl": 40.0, "day_pl_percent": 0.1},
+            ]
+
+        def get_dividend_activity(self, start=None, end=None):
+            return []
+
+    _patch_payloads(monkeypatch, "get_account_broker_type", lambda _account: "schwab")
+    monkeypatch.setattr("src.core.pipeline.resolve_brokerage", lambda _config: FakeBrokerage())
+
+    payload = api_payloads.positions_payload("schwab2")
+
+    # The day's move comes from the account's own opening value; the open figure from the
+    # positions. The two are free to disagree, and here they do.
+    assert payload["day_pl"] == 60.0
+    assert payload["total_pl"] == 540.0
+    assert payload["rows"][0]["day_pl"] == 20.0
+
+
+def _dated_order(symbol: str, stamp: str) -> dict:
+    return {
+        "order_id": symbol, "symbol": symbol, "action": "buy", "status": "FILLED",
+        "quantity": 1.0, "filled_quantity": 1.0, "order_type": "market",
+        "limit_price": 0.0, "stop_price": 0.0, "filled_avg_price": 10.0,
+        "entered_time": stamp,
+    }
+
+
+def _schwab_stamp(days_ago: float) -> str:
+    """Schwab's own spelling: a colonless ``+0000`` offset, which is not what JS or
+    ``fromisoformat`` consider the standard form."""
+    from datetime import datetime, timedelta, timezone
+
+    moment = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    return moment.strftime("%Y-%m-%dT%H:%M:%S+0000")
+
+
+def _analytics(account_id: str, **kwargs):
+    """Analytics with the cache emptied first, so one test cannot answer another's question."""
+    from src.api.payloads.accounts import ANALYTICS, account_analytics_payload
+
+    ANALYTICS.invalidate(account_id)
+    return account_analytics_payload(account_id, **kwargs)
+
+
+def _week_ago():
+    from datetime import datetime, timedelta, timezone
+
+    return datetime.now(timezone.utc) - timedelta(days=7)
+
+
+def _fake_schwab(monkeypatch, orders: list[dict]) -> None:
+    class FakeBrokerage:
+        def get_orders(self, status="WORKING"):
+            return orders
+
+    _patch_payloads(monkeypatch, "get_account_broker_type", lambda _account: "schwab")
+    monkeypatch.setattr("src.core.pipeline.resolve_brokerage", lambda _config: FakeBrokerage())
+
+
+def test_the_account_page_caps_by_count_and_never_by_date(monkeypatch) -> None:
+    """A date cutoff would drop a good-till-cancelled order still resting from last month.
+
+    That order is current exposure, so the page bounds its list by count alone. Only the MCP
+    tool, which is answering "what happened today", passes a cutoff.
+    """
+    from src.api import api_payloads
+
+    _fake_schwab(monkeypatch, [
+        _dated_order("XSD", _schwab_stamp(0.2)),
+        _dated_order("GTC", _schwab_stamp(35.0)),
+    ])
+
+    rows = api_payloads.account_activity_payload("schwab2")["rows"]
+
+    assert [row["symbol"] for row in rows] == ["XSD", "GTC"]
+
+
+def test_the_mcp_tool_caps_by_count_and_by_the_trading_day(monkeypatch) -> None:
+    """Narrower than the page, because the agent is asking "what happened today"."""
+    from src.api import api_payloads
+
+    _fake_schwab(monkeypatch, [
+        _dated_order("XSD", _schwab_stamp(0.01)),
+        _dated_order("XBI", _schwab_stamp(3.0)),
+    ])
+
+    rows = api_payloads.account_activity_payload(
+        "schwab2", limit=40, since=api_payloads.market_day_start()
+    )["rows"]
+
+    assert [row["symbol"] for row in rows] == ["XSD"]
+
+
+def test_an_order_whose_timestamp_cannot_be_read_is_kept(monkeypatch) -> None:
+    """Dropping it would hide a real order because of a format this code did not anticipate."""
+    from src.api import api_payloads
+
+    _fake_schwab(monkeypatch, [_dated_order("XSD", "not a timestamp")])
+
+    rows = api_payloads.account_activity_payload("schwab2", since=_week_ago())["rows"]
+
+    assert [row["symbol"] for row in rows] == ["XSD"]
+
+
+def test_no_cutoff_returns_everything_the_broker_offered(monkeypatch) -> None:
+    from src.api import api_payloads
+
+    _fake_schwab(monkeypatch, [
+        _dated_order("XSD", _schwab_stamp(0.2)),
+        _dated_order("OLD", _schwab_stamp(40.0)),
+    ])
+
+    rows = api_payloads.account_activity_payload("schwab2")["rows"]
+
+    assert [row["symbol"] for row in rows] == ["XSD", "OLD"]
+
+
+def test_the_date_window_is_applied_before_the_count_cap(monkeypatch) -> None:
+    """``limit`` caps what survives the window, rather than deciding what the window sees.
+
+    Capping first would let a run of old orders crowd out this week's, so a busy account would
+    show "no orders in the last 7 days" while having traded this morning.
+    """
+    from src.api import api_payloads
+
+    orders = [_dated_order(f"OLD{n}", _schwab_stamp(30.0 + n)) for n in range(5)]
+    orders.append(_dated_order("XSD", _schwab_stamp(0.2)))
+    _fake_schwab(monkeypatch, orders)
+
+    rows = api_payloads.account_activity_payload("schwab2", limit=3, since=_week_ago())["rows"]
+
+    assert [row["symbol"] for row in rows] == ["XSD"]
+
+
+def test_a_closed_winning_trade_shows_up_as_realized_not_open(monkeypatch) -> None:
+    """The failure this exists to fix.
+
+    An account opened a call, closed it at a profit and went back to cash. It holds nothing, so
+    open P/L and day P/L are both correctly zero -- and the page showed nothing else, making a
+    profitable account look like it had never traded.
+    """
+    from src.api import api_payloads
+
+    class FakeBrokerage:
+        def get_account_state(self):
+            return {"equity": 10_524.84, "cash": 10_524.84, "last_equity": 10_524.84}
+
+        def get_position_details(self):
+            return []
+
+        def get_dividend_activity(self, start=None, end=None):
+            return []
+
+        def get_fills(self, start=None, end=None):
+            return [
+                {"symbol": "USO260916C00142000", "action": "buy", "quantity": 1.0,
+                 "price": 8.85, "multiplier": 100.0, "date": "2026-09-09T16:23:09Z"},
+                {"symbol": "USO260916C00142000", "action": "sell", "quantity": 1.0,
+                 "price": 14.10, "multiplier": 100.0, "date": "2026-09-10T16:00:39Z"},
+            ]
+
+    _patch_payloads(monkeypatch, "get_account_broker_type", lambda _account: "schwab")
+    monkeypatch.setattr("src.core.pipeline.resolve_brokerage", lambda _config: FakeBrokerage())
+
+    assert api_payloads.positions_payload("schwab2")["total_pl"] is None  # nothing held
+
+    payload = _analytics("schwab2", refresh=True)
+
+    assert payload["realized_pl"] == 525.0
+    assert payload["realized_closes"] == 1
+    assert payload["realized_unmatched"] == 0
+
+
+def test_a_broker_that_cannot_report_fills_says_unknown_rather_than_zero(monkeypatch) -> None:
+    """Zero is a claim -- "this account has banked nothing" -- and a different one."""
+    from src.api import api_payloads
+
+    class FakeBrokerage:
+        def get_account_state(self):
+            return {"equity": 100.0, "cash": 100.0}
+
+        def get_position_details(self):
+            return []
+
+        def get_dividend_activity(self, start=None, end=None):
+            return []
+
+        def get_fills(self, start=None, end=None):
+            return None  # the interface default: this venue has no fill feed
+
+    _patch_payloads(monkeypatch, "get_account_broker_type", lambda _account: "schwab")
+    monkeypatch.setattr("src.core.pipeline.resolve_brokerage", lambda _config: FakeBrokerage())
+
+    assert _analytics("schwab2", refresh=True)["realized_pl"] is None
+
+
+def test_an_unreadable_fill_feed_does_not_blank_the_rest_of_the_page(monkeypatch) -> None:
+    from src.api import api_payloads
+
+    class FakeBrokerage:
+        def get_account_state(self):
+            return {"equity": 4_321.0, "cash": 321.0}
+
+        def get_position_details(self):
+            return []
+
+        def get_dividend_activity(self, start=None, end=None):
+            return []
+
+        def get_fills(self, start=None, end=None):
+            raise RuntimeError("transactions endpoint is down")
+
+    _patch_payloads(monkeypatch, "get_account_broker_type", lambda _account: "schwab")
+    monkeypatch.setattr("src.core.pipeline.resolve_brokerage", lambda _config: FakeBrokerage())
+
+    assert _analytics("schwab2", refresh=True)["realized_pl"] is None
+    # The balances beside it are a separate read and must survive the failure.
+    assert api_payloads.positions_payload("schwab2")["equity"] == 4_321.0
+
+
+def _counting_brokerage(reads: list):
+    class FakeBrokerage:
+        def get_account_state(self):
+            return {"equity": 100.0, "cash": 100.0}
+
+        def get_position_details(self):
+            return []
+
+        def get_dividend_activity(self, start=None, end=None):
+            reads.append("dividends")
+            return []
+
+        def get_fills(self, start=None, end=None):
+            reads.append("fills")
+            return []
+
+    return FakeBrokerage()
+
+
+def _inline_analytics(monkeypatch, reads: list):
+    """The analytics field with its background work run inline.
+
+    The spawn hook exists for exactly this: a test can assert on what the background pass
+    produced instead of sleeping until a thread happens to finish.
+    """
+    from src.common.lazy_field import LazyField
+    from src.api.payloads import accounts
+
+    _patch_payloads(monkeypatch, "get_account_broker_type", lambda _account: "schwab")
+    monkeypatch.setattr("src.core.pipeline.resolve_brokerage", lambda _config: _counting_brokerage(reads))
+    field = LazyField("test analytics", accounts._compute_analytics, spawn=lambda work: work())
+    monkeypatch.setattr(accounts, "ANALYTICS", field)
+    return field
+
+
+def test_a_page_load_answers_instantly_and_fills_itself_in(monkeypatch) -> None:
+    """The whole point of making these lazy rather than manual.
+
+    A page load never waits on a year of transactions, and never has to tell the user to press
+    a button either -- it answers with what it has and works out the rest in the background.
+    """
+    from src.api.payloads.accounts import account_analytics_payload
+
+    reads: list[str] = []
+    _inline_analytics(monkeypatch, reads)
+
+    # The first read has nothing to answer with, and says so rather than reporting a zero.
+    first = account_analytics_payload("schwab2")
+    assert first["state"] == "computing"
+    assert first["realized_pl"] is None
+
+    # It started the work on its own; by the next render the value is simply there.
+    second = account_analytics_payload("schwab2")
+    assert second["state"] == "ready"
+    assert second["computed_at"], "a computed figure must say how old it is"
+    assert reads == ["dividends", "fills"], "computed once, not once per read"
+
+
+def test_a_warm_value_is_served_without_touching_the_broker(monkeypatch) -> None:
+    from src.api.payloads.accounts import account_analytics_payload
+
+    reads: list[str] = []
+    _inline_analytics(monkeypatch, reads)
+
+    account_analytics_payload("schwab2")
+    assert reads == ["dividends", "fills"]
+
+    for _ in range(5):
+        account_analytics_payload("schwab2")
+    assert reads == ["dividends", "fills"], "a fresh value is reused until it goes stale"
+
+
+def test_refresh_recomputes_even_when_a_value_is_already_fresh(monkeypatch) -> None:
+    """Which is the point of having a button: the user decides when to insist."""
+    from src.api.payloads.accounts import account_analytics_payload
+
+    reads: list[str] = []
+    _inline_analytics(monkeypatch, reads)
+
+    account_analytics_payload("schwab2")
+    assert reads == ["dividends", "fills"]
+
+    payload = account_analytics_payload("schwab2", refresh=True)
+
+    assert reads == ["dividends", "fills", "dividends", "fills"]
+    assert payload["state"] == "ready"
+
+
+def test_concurrent_reads_start_one_computation_between_them(monkeypatch) -> None:
+    """Otherwise every panel on a freshly-opened page starts its own year-long crawl."""
+    from src.api.payloads import accounts
+    from src.common.lazy_field import LazyField
+
+    reads: list[str] = []
+    _patch_payloads(monkeypatch, "get_account_broker_type", lambda _account: "schwab")
+    monkeypatch.setattr("src.core.pipeline.resolve_brokerage", lambda _config: _counting_brokerage(reads))
+
+    pending: list = []
+    # Work is queued rather than run, so several reads land while the first is still in flight.
+    field = LazyField("test analytics", accounts._compute_analytics, spawn=pending.append)
+    monkeypatch.setattr(accounts, "ANALYTICS", field)
+
+    for _ in range(4):
+        accounts.account_analytics_payload("schwab2")
+
+    assert len(pending) == 1
+    pending[0]()
+    assert reads == ["dividends", "fills"]
+
+
+def test_a_failed_recompute_keeps_the_value_it_had(monkeypatch) -> None:
+    """A figure from twenty minutes ago is worth more than a blank."""
+    from src.common.lazy_field import LazyField
+
+    attempts = {"n": 0}
+
+    def compute(_key):
+        attempts["n"] += 1
+        if attempts["n"] > 1:
+            raise RuntimeError("schwab is down")
+        return {"realized_pl": 525.0}
+
+    field = LazyField("test", compute, spawn=lambda work: work())
+    field.get("acct")
+
+    failed = field.get("acct", force=True)
+
+    assert failed["value"] == {"realized_pl": 525.0}
+    assert "schwab is down" in failed["error"]
+
+
+def test_both_figures_come_from_one_resolved_brokerage(monkeypatch) -> None:
+    """Each resolution builds a fresh session, and for Schwab that is another OAuth exchange
+    and another account lookup -- helpers resolving independently authenticated four times
+    for one page."""
+    from src.api.payloads import accounts
+    from src.common.lazy_field import LazyField
+
+    resolved: list[int] = []
+    reads: list[str] = []
+
+    def resolve(_config):
+        resolved.append(1)
+        return _counting_brokerage(reads)
+
+    _patch_payloads(monkeypatch, "get_account_broker_type", lambda _account: "schwab")
+    monkeypatch.setattr("src.core.pipeline.resolve_brokerage", resolve)
+    monkeypatch.setattr(
+        accounts, "ANALYTICS",
+        LazyField("test", accounts._compute_analytics, spawn=lambda work: work()),
+    )
+
+    accounts.account_analytics_payload("schwab2", refresh=True)
+
+    assert len(resolved) == 1
