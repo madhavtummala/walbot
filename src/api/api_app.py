@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from src.api.api_payloads import (
     account_activity_payload,
+    account_analytics_payload,
     accounts_payload,
     algorithm_activity_payload,
     algorithm_config_payload,
@@ -190,7 +191,27 @@ def activity(
     account_id: str = Query(default="", max_length=80),
     limit: int = Query(default=40, ge=1, le=200),
 ) -> dict[str, Any]:
+    """The page's order view: capped by count, never by date.
+
+    A count cap rather than a window because of good-till-cancelled orders -- a stop resting
+    since last month is current exposure, and any date cutoff would drop exactly the order most
+    worth seeing. The MCP tool narrows this to the trading day for its own reasons.
+    """
     return account_activity_payload(account_id=account_id, limit=limit)
+
+
+@app.get("/api/account-analytics")
+def account_analytics(
+    account_id: str = Query(default="", max_length=80),
+    refresh: bool = Query(default=False),
+) -> dict[str, Any]:
+    """Income and realized P/L, which cost a year of transactions to answer.
+
+    A plain load answers instantly with whatever was last computed and starts a background
+    recompute if that is stale, so opening the page never waits on a broker crawl.
+    ``refresh=true`` is the Refresh button: compute now and answer with the result.
+    """
+    return account_analytics_payload(account_id=account_id, refresh=refresh)
 
 
 @app.get("/api/algorithm-activity")

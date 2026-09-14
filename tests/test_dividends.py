@@ -258,21 +258,21 @@ def test_a_dividend_that_went_ex_before_the_replay_opened_is_not_paid() -> None:
 
 
 def test_a_schwab_account_number_matches_however_it_is_punctuated() -> None:
-    """Schwab reports "00000000"; statements and the website write "0000-0000".
+    """Schwab reports "12345678"; statements and the website write "1234-5678".
 
     Matching the raw strings 404'd a correctly configured account, and because the dashboard
     falls back to the default account on error, the Schwab tab then showed Alpaca's money.
     """
     from src.brokerages.schwab.client import _digits, account_hash
 
-    assert _digits("0000-0000") == _digits("00000000") == "00000000"
+    assert _digits("1234-5678") == _digits("12345678") == "12345678"
 
     class _Session:
         def get(self, url, **kwargs):
-            return [{"accountNumber": "00000000", "hashValue": "ABC123"}]
+            return [{"accountNumber": "12345678", "hashValue": "ABC123"}]
 
-    assert account_hash(_Session(), "0000-0000") == "ABC123"
-    assert account_hash(_Session(), "00000000") == "ABC123"
+    assert account_hash(_Session(), "1234-5678") == "ABC123"
+    assert account_hash(_Session(), "12345678") == "ABC123"
     assert account_hash(_Session(), "") == "ABC123", "no number configured takes the first account"
 
 
@@ -281,7 +281,7 @@ def test_an_unknown_schwab_account_still_raises() -> None:
 
     class _Session:
         def get(self, url, **kwargs):
-            return [{"accountNumber": "00000000", "hashValue": "ABC123"}]
+            return [{"accountNumber": "12345678", "hashValue": "ABC123"}]
 
     with pytest.raises(SchwabAPIError):
         account_hash(_Session(), "1111-2222")

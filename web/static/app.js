@@ -114,6 +114,8 @@ const state = {
   positionsLoading: {},
   activity: {},
   activityLoading: {},
+  analytics: {},
+  analyticsLoading: {},
   algorithmActivity: {},
   algorithmActivityLoading: {},
 };
@@ -2080,6 +2082,10 @@ function percent(value) {
 //: settles rather than one per tick.
 const PLAN_SAVE_DEBOUNCE_MS = 500;
 
+//: How long to give a background analytics computation before looking again. Comfortably longer
+//: than a year of transactions takes to read, so the second look almost always finds it done.
+const ANALYTICS_SETTLE_MS = 4000;
+
 //: What the board says about its own saving. The board writes on every gesture and has no
 //: save button, so without this an edit that reached the server and one that failed silently
 //: looked exactly the same -- which is how a plan being written to the wrong account went
@@ -2499,9 +2505,12 @@ function renderAccountPage(content, accountId) {
 
   const positions = state.positions[account.id];
   const activity = state.activity[account.id];
+  const analytics = state.analytics[account.id];
   const deployed = deployments().filter((deployment) => deployment.account_id === account.id);
   const status = deploymentStatus(deployed);
-  const busy = Boolean(state.positionsLoading[account.id] || state.activityLoading[account.id]);
+  const busy = Boolean(
+    state.positionsLoading[account.id] || state.activityLoading[account.id]
+      || state.analyticsLoading[account.id]);
   const meta = `<span class="pill is-${status}">${
     status === "live" ? "Trading" : status === "idle" ? "Agent-driven" : deployed.length ? "Deployed, paused" : "No algorithm"}</span>`;
   const actions = `<button class="ctl" type="button" id="refreshAccountButton" data-account="${escapeHtml(account.id)}"
@@ -2526,13 +2535,24 @@ function renderAccountPage(content, accountId) {
             : `${escapeHtml(money(positions.day_pl, 2))} (${escapeHtml(percent(positions.day_pl_percent))})`}</strong></div>
         <div class="metric"><span>Open P/L</span><strong class="${(positions?.total_pl || 0) >= 0 ? "gain" : "loss"}">${
           positions ? escapeHtml(money(positions.total_pl, 2)) : "--"}</strong></div>
-        <div class="metric"><span>Dividends (1y)</span><strong class="${(positions?.dividend_pl || 0) >= 0 ? "gain" : "loss"}">${
+        <div class="metric"><span>Realized P/L ${escapeHtml(activityYear(analytics))}</span><strong class="${(analytics?.realized_pl || 0) >= 0 ? "gain" : "loss"}">${
+          // Banked profit, which Open P/L cannot show: an account that closed a winning trade
+          // and went back to cash has no open position left to carry the gain. Year to date
+          // rather than trailing, so it lines up with what the broker's own statement totals.
+          analytics?.realized_pl === null || analytics?.realized_pl === undefined
+            ? "--"
+            : escapeHtml(money(analytics.realized_pl, 2))}</strong>${realizedNote(analytics)}</div>
+        <div class="metric"><span>Dividends ${escapeHtml(activityYear(analytics))}</span><strong class="${(analytics?.dividend_pl || 0) >= 0 ? "gain" : "loss"}">${
           // Reported beside Open P/L, never inside it. Price appreciation and income are
           // different things, and a T-bill sleeve earns almost entirely through this one.
-          positions?.dividend_pl === null || positions?.dividend_pl === undefined
+          analytics?.dividend_pl === null || analytics?.dividend_pl === undefined
             ? "--"
-            : escapeHtml(money(positions.dividend_pl, 2))}</strong></div>
+            : escapeHtml(money(analytics.dividend_pl, 2))}</strong>${
+          analytics?.dividend_pl_1y === null || analytics?.dividend_pl_1y === undefined
+            ? ""
+            : `<span class="tableNote">${escapeHtml(`${money(analytics.dividend_pl_1y, 2)} over 1y`)}</span>`}</div>
       </div>
+      ${account.credentials_ready ? `<p class="cardHint">${analyticsNote(analytics, busy)}</p>` : ""}
       ${!account.credentials_ready
         ? `<p class="cardHint">Credentials missing: set <code>${escapeHtml(account.missing_env.join("</code> and <code>"))}</code> in <code>.env</code> and restart. It cannot trade until then.</p>`
         : `<p class="cardHint">${account.broker === "paper"
@@ -2556,9 +2576,9 @@ function renderAccountPage(content, accountId) {
         <section class="card">
           <div class="cardHead">
             <h2>Dividends received</h2>
-            <span class="cardHint">${positions?.dividend_rows?.length ? `${positions.dividend_rows.length} shown` : ""}</span>
+            <span class="cardHint">${analytics?.dividend_rows?.length ? `${analytics.dividend_rows.length} shown` : ""}</span>
           </div>
-          ${accountDividendsTable(positions)}
+          ${accountDividendsTable(analytics)}
         </section>
       </div>
       <section class="card">
@@ -2574,7 +2594,42 @@ function renderAccountPage(content, accountId) {
   if (account.credentials_ready) {
     ensurePositions(account.id);
     ensureActivity(account.id);
+    // Cache read only: never computes on load, so opening the page stays as cheap as the
+    // position read. The Refresh button is what recomputes.
+    ensureAnalytics(account.id);
   }
+}
+
+function activityYear(analytics) {
+  // Both figures cover the same calendar year, so they carry one label between them.
+  return analytics?.activity_year ? `(${analytics.activity_year})` : "(YTD)";
+}
+
+function realizedNote(analytics) {
+  // Two things worth saying under the headline figure, and both are caveats rather than
+  // decoration: what the trailing year says, and how much of the window could not be priced.
+  const parts = [];
+  if (analytics?.realized_pl_1y !== null && analytics?.realized_pl_1y !== undefined) {
+    parts.push(`${money(analytics.realized_pl_1y, 2)} over 1y`);
+  }
+  // Sells whose opening buy predates the window: the total is real but partial, and saying so
+  // beats quietly reporting a number that is too small.
+  if (analytics?.realized_unmatched) parts.push(`${analytics.realized_unmatched} unmatched`);
+  return parts.length ? `<span class="tableNote">${escapeHtml(parts.join(" · "))}</span>` : "";
+}
+
+function analyticsNote(analytics, busy) {
+  // The two right-hand metrics are the only ones on this page not read live, so the page says
+  // where they stand rather than letting a computed figure pass for a current one.
+  if (busy) return "Realized P/L and dividends: reading a year of transactions.";
+  if (analytics?.error && !analytics?.computed_at) {
+    return `Realized P/L and dividends unavailable: ${analytics.error}`;
+  }
+  if (!analytics?.computed_at) {
+    return "Realized P/L and dividends read a year of transactions, so they are worked out in the background. They will appear shortly.";
+  }
+  const stale = analytics.error ? " Last attempt to update them failed." : "";
+  return `Realized P/L and dividends as of ${formatActivityTime(analytics.computed_at)}.${stale} Everything else is live. Press Refresh to recompute now.`;
 }
 
 function accountPositionsTable(positions) {
@@ -2585,7 +2640,7 @@ function accountPositionsTable(positions) {
     <div class="tableWrap is-scroll">
       <table class="dataTable">
         <thead>
-          <tr><th>Symbol</th><th class="num">Qty</th><th class="num">Avg</th><th class="num">Current</th><th class="num">Value</th><th class="num">P/L</th></tr>
+          <tr><th>Symbol</th><th class="num">Qty</th><th class="num">Avg</th><th class="num">Current</th><th class="num">Value</th><th class="num">Day P/L</th><th class="num">Open P/L</th></tr>
         </thead>
         <tbody>
           ${positions.rows.map((row) => `
@@ -2595,6 +2650,12 @@ function accountPositionsTable(positions) {
               <td class="num">${escapeHtml(money(row.avg_entry_price, 2))}</td>
               <td class="num">${row.current_price ? escapeHtml(money(row.current_price, 2)) : "--"}</td>
               <td class="num">${escapeHtml(money(row.market_value, 2))}</td>
+              <td class="num ${(row.day_pl || 0) >= 0 ? "gain" : "loss"}">${
+                // Null is "the broker did not say", which the local paper book never can --
+                // distinct from a day that genuinely ended flat.
+                row.day_pl === null || row.day_pl === undefined
+                  ? "--"
+                  : `${escapeHtml(money(row.day_pl, 2))}<span class="tableNote">${escapeHtml(percent(row.day_pl_percent))}</span>`}</td>
               <td class="num ${row.unrealized_pl >= 0 ? "gain" : "loss"}">${escapeHtml(money(row.unrealized_pl, 2))}
                 <span class="tableNote">${escapeHtml(percent(row.unrealized_plpc))}</span></td>
             </tr>`).join("")}
@@ -2603,10 +2664,15 @@ function accountPositionsTable(positions) {
     </div>`;
 }
 
-function accountDividendsTable(positions) {
-  if (positions?.error) return `<p class="emptyState">${escapeHtml(positions.error)}</p>`;
-  if (!positions) return `<p class="emptyState">Loading dividends.</p>`;
-  if (!positions.dividend_rows?.length) {
+function accountDividendsTable(analytics) {
+  if (analytics?.error) return `<p class="emptyState">${escapeHtml(analytics.error)}</p>`;
+  if (!analytics) return `<p class="emptyState">Loading dividends.</p>`;
+  if (!analytics.computed_at) {
+    // Not yet looked, rather than looked and found nothing. Saying "no dividends" here would
+    // be a claim this page has not earned.
+    return `<p class="emptyState">Working out the last year of income.</p>`;
+  }
+  if (!analytics.dividend_rows?.length) {
     // An account that has simply not been paid yet is not an error, and neither is a broker
     // that cannot report income -- say so plainly rather than showing a blank card.
     return `<p class="emptyState">No dividends received in the last year.</p>`;
@@ -2618,7 +2684,7 @@ function accountDividendsTable(positions) {
           <tr><th>Date</th><th>Symbol</th><th class="num">Amount</th></tr>
         </thead>
         <tbody>
-          ${positions.dividend_rows.map((row) => {
+          ${analytics.dividend_rows.map((row) => {
             const security = dividendSecurity(row);
             return `
             <tr>
@@ -2675,8 +2741,12 @@ function accountOrdersTable(activity) {
 function refreshAccount(accountId) {
   delete state.positions[accountId];
   delete state.activity[accountId];
+  delete state.analytics[accountId];
   ensurePositions(accountId);
   ensureActivity(accountId);
+  // The only thing that reaches for a year of transactions. A page load serves whatever this
+  // last computed; pressing Refresh is what says the wait is worth it.
+  ensureAnalytics(accountId, true);
   render();
 }
 
@@ -3019,6 +3089,35 @@ function formatActivityTime(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value).slice(0, 16);
   return date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+async function ensureAnalytics(accountId, recompute = false) {
+  const key = accountId || "";
+  // A plain read never waits on the broker: the server answers with what it has and works out
+  // the rest in the background. With recompute it crawls a year of transactions per broker.
+  if (state.analyticsLoading[key] || (state.analytics[key] && !recompute)) return;
+  state.analyticsLoading[key] = true;
+  try {
+    const payload = await api(
+      `/api/account-analytics?account_id=${encodeURIComponent(key)}${recompute ? "&refresh=true" : ""}`,
+      { timeoutMs: recompute ? 60000 : 8000 },
+    );
+    state.analytics[key] = payload;
+    // "computing" means the server started working it out for us. One look back, rather than
+    // a poll: the crawl takes a second or two, and if it is somehow still going the value
+    // lands on the next visit instead of this page holding a timer open forever.
+    if (payload.state === "computing") {
+      setTimeout(() => {
+        delete state.analytics[key];
+        ensureAnalytics(key);
+      }, ANALYTICS_SETTLE_MS);
+    }
+  } catch (error) {
+    state.analytics[key] = { error: error.message };
+  } finally {
+    state.analyticsLoading[key] = false;
+    render();
+  }
 }
 
 async function ensureActivity(accountId) {

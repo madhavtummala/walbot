@@ -611,3 +611,40 @@ def test_a_sell_with_nothing_held_says_so_instead_of_passing_quietly(monkeypatch
     assert sell.value < 0
     trim = next(check for check in holding.signals["AAA"]["checks"] if check["label"] == "Position to trim")
     assert trim["ok"] is True and trim["blocking"] is False
+
+
+def test_the_summary_states_how_many_of_the_symbols_are_deploying() -> None:
+    """One tile, not two.
+
+    "Deploying 2" and "Symbols 5" were separate figures that only meant anything read together,
+    and a reader had to do that joining themselves. The count only has a size relative to the
+    total it is drawn from.
+    """
+    from src.core.interfaces import ACTION_ENTER, ACTION_IDLE, AlgorithmPlan
+    from src.algorithms.bursty_dca.signals import signal_view
+
+    def values(action: str) -> dict[str, Any]:
+        return {
+            "action": action, "reason": "because", "monthly_budget": 100.0, "checks": [],
+            "next_order": 0.0, "deployed_this_month": 0.0, "accrued": 0.0, "price": 1.0,
+        }
+
+    plan = AlgorithmPlan(
+        strategy="bursty_dca",
+        signals={
+            symbol: values(action)
+            for symbol, action in (
+                ("AAA", ACTION_ENTER), ("BBB", ACTION_ENTER), ("CCC", ACTION_IDLE),
+                ("DDD", ACTION_IDLE), ("EEE", ACTION_IDLE),
+            )
+        },
+        metadata={
+            "monthly_total": 500, "allocation_mode": "DCA", "scaling_factor": 1,
+            "relax_months": 3, "regime_ma_days": 100,
+        },
+    )
+
+    summary = {item["label"]: item["value"] for item in signal_view(plan, unknown=[]).summary}
+
+    assert summary["Deploying"] == "2/5"
+    assert "Symbols" not in summary

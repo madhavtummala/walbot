@@ -146,6 +146,38 @@ class PaperBrokerage(BaseBrokerage):
         self.state["dividends_credited_through"] = as_of.isoformat()
         return {"credited": credited, "events": events}
 
+    def get_fills(self, start=None, end=None) -> list:
+        """Executed trades from the bot's own journal.
+
+        No broker exists here, so the journal written at submission is the whole record -- and
+        it is complete, since nothing but this bot can trade a local book. The paper brokerage
+        fills immediately at the price supplied with the order, so a journalled order is a fill.
+        """
+        from ...core.options import is_osi_symbol
+        from ...data.order_journal import load_order_journal
+
+        rows = []
+        for entry in load_order_journal(account_id=str(getattr(self.config, "account_id", "") or ""), limit=2000):
+            price = float(entry.get("price") or 0.0)
+            quantity = float(entry.get("quantity") or 0.0)
+            stamp = str(entry.get("submitted_at") or "")
+            if price <= 0 or quantity <= 0 or entry.get("status") != "submitted":
+                continue
+            if start and stamp[:10] and stamp[:10] < start.isoformat():
+                continue
+            if end and stamp[:10] and stamp[:10] > end.isoformat():
+                continue
+            symbol = str(entry.get("symbol") or "").upper()
+            rows.append({
+                "symbol": symbol,
+                "action": str(entry.get("side") or entry.get("action") or "").lower(),
+                "quantity": quantity,
+                "price": price,
+                "multiplier": 100.0 if is_osi_symbol(symbol) else 1.0,
+                "date": stamp,
+            })
+        return rows
+
     def get_dividend_activity(self, start=None, end=None) -> list:
         """What ``credit_dividends`` booked. No broker exists here, so this book is the record."""
         rows = []
@@ -328,6 +360,11 @@ class PaperBrokerage(BaseBrokerage):
                     "market_value": float(shares) * price,
                     "unrealized_pl": (price - entry) * float(shares) if entry and price else 0.0,
                     "unrealized_plpc": (price / entry - 1.0) if entry and price else 0.0,
+                    # The book keeps one mark per symbol, not a per-session opening one, so
+                    # today's share of that gain is genuinely unknown here. Null rather than
+                    # zero: a flat day and an unanswerable question are different claims.
+                    "day_pl": None,
+                    "day_pl_percent": None,
                 }
             )
         rows.sort(key=lambda row: abs(row["market_value"]), reverse=True)

@@ -15,13 +15,19 @@ CONFIG_DEFAULTS_DIR = Path(os.getenv("CONFIG_DEFAULTS_DIR", "/app/config-default
 
 CONFIG_FILENAME = "walbot.yaml"
 
+#: What the image actually ships. The live config is gitignored -- it names real accounts -- so
+#: the only file baked into the image is the template, and a fresh volume is seeded from that.
+CONFIG_TEMPLATE_FILENAME = "walbot.yaml.sample"
+
 
 def prepare_config() -> str:
     """Make sure the mounted volume has a config file, and say what was done.
 
     Three cases, in order: an existing unified file is left alone; a volume still holding the
     seven pre-unification files is migrated into one, preserving tuning and DCA accrual; an
-    empty volume is seeded from the image defaults.
+    empty volume is seeded from the image defaults -- which since the live config stopped being
+    committed means the template, leaving a first-run container to be configured rather than
+    started on somebody else's accounts.
     """
     from src.core.config import config_file_path, migrate_legacy_config
 
@@ -33,12 +39,14 @@ def prepare_config() -> str:
     if migrated is not None:
         return f"Merged the previous per-section config files into {migrated}"
 
-    source = CONFIG_DEFAULTS_DIR / CONFIG_FILENAME
-    if not source.is_file():
-        return ""
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source, target)
-    return f"Seeded {target} from the image defaults"
+    # A real config first, for an image built with one present, then the shipped template.
+    for name in (CONFIG_FILENAME, CONFIG_TEMPLATE_FILENAME):
+        source = CONFIG_DEFAULTS_DIR / name
+        if source.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+            return f"Seeded {target} from {source.name}"
+    return ""
 
 
 def main() -> None:

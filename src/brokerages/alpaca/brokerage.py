@@ -9,6 +9,7 @@ from src.brokerages.alpaca.client import (
     build_order_request,
     build_replace_request,
     create_trading_client,
+    FILL_ACTIVITY_TYPES,
     get_account_activities,
     get_open_orders,
     get_position_marks,
@@ -62,12 +63,19 @@ class AlpacaBrokerage(BaseBrokerage):
 
     def get_account_state(self) -> Dict[str, Any]:
         account = self.client.get_account()
-        return {
+        state = {
             "equity": float(account.equity),
             "cash": float(account.cash),
             "buying_power": float(account.buying_power),
             "is_market_open": is_market_open(self.client)
         }
+        # Where the session started, which is what makes a day's P/L expressible. Absent stays
+        # absent: the account page reads a missing opening value as "unknown", and a zero would
+        # render the whole balance as today's gain.
+        last_equity = getattr(account, "last_equity", None)
+        if last_equity is not None:
+            state["last_equity"] = float(last_equity)
+        return state
 
     def get_positions(self) -> Dict[str, float]:
         return get_positions(self.client)
@@ -87,8 +95,41 @@ class AlpacaBrokerage(BaseBrokerage):
                 "market_value": float(getattr(position, "market_value", 0.0) or 0.0),
                 "unrealized_pl": float(getattr(position, "unrealized_pl", 0.0) or 0.0),
                 "unrealized_plpc": float(getattr(position, "unrealized_plpc", 0.0) or 0.0),
+                "day_pl": float(getattr(position, "unrealized_intraday_pl", 0.0) or 0.0),
+                "day_pl_percent": float(getattr(position, "unrealized_intraday_plpc", 0.0) or 0.0),
             })
         return self._sorted_by_market_value(rows)
+
+    def get_fills(self, start=None, end=None) -> List[Dict[str, Any]]:
+        """Executed trades from ``/v2/account/activities``, filed under ``FILL``.
+
+        The activity feed rather than the order history: a partially filled order reports one
+        activity per fill, each at the price it actually traded at, which is the granularity
+        realized P/L needs. The same fetcher the dividend feed uses, asking for a different type.
+        """
+        from datetime import datetime, time, timezone
+
+        after = datetime.combine(start, time.min, tzinfo=timezone.utc) if start else None
+        rows: List[Dict[str, Any]] = []
+        for item in get_account_activities(self._config, FILL_ACTIVITY_TYPES, after=after):
+            stamp = str(item.get("transaction_time") or item.get("date") or "")
+            if end and stamp[:10] and stamp[:10] > end.isoformat():
+                continue
+            quantity = float(item.get("qty") or 0.0)
+            price = float(item.get("price") or 0.0)
+            if quantity <= 0 or price <= 0:
+                continue
+            symbol = str(item.get("symbol") or "").upper()
+            option = is_osi_symbol(symbol)
+            rows.append({
+                "symbol": to_osi_form(symbol, padded=True) if option else symbol,
+                "action": str(item.get("side") or "").lower(),
+                "quantity": quantity,
+                "multiplier": 100.0 if option else 1.0,
+                "price": price,
+                "date": stamp,
+            })
+        return rows
 
     def submit_order(self, request: OrderRequest) -> Dict[str, Any]:
         order = self.client.submit_order(order_data=build_order_request(request))

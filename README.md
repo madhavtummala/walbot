@@ -34,6 +34,17 @@ Everything non-secret lives in `config/walbot.yaml`, one file with a section per
 `accounts`, `data_sources`, `tradable_universe`, `algorithms`, and the bot runtime. Keep secrets
 in environment variables referenced by `*_env` fields, never in the YAML.
 
+That file is gitignored -- it names the accounts you actually trade -- so start from the
+template:
+
+```bash
+cp config/walbot.yaml.sample config/walbot.yaml
+```
+
+The template is deliberately minimal: one account per broker type and one algorithm. Every key
+it omits has a default, and the dashboard writes your tuning back into the real file as you go.
+A container started against an empty volume seeds the same template.
+
 ### Running the Dashboard
 
 ```bash

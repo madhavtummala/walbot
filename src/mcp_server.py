@@ -253,36 +253,86 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
         symbol, so two algorithms trading the same account cannot be told apart here.
 
         Carries ``equity``, ``cash``, ``day_pl`` (and percent), ``total_pl``, ``dividend_pl``
-        and the holdings in ``rows``. ``day_pl: null`` means the broker did not report where the
+        and the holdings in ``rows``. ``dividend_pl`` is year to date like ``realized_pl``, with
+        ``dividend_pl_1y`` beside it for the trailing year. ``day_pl: null`` means the broker did not report where the
         session started -- "unknown", not "flat". An unreachable broker fills ``error`` and
         leaves the figures null rather than reporting zeros.
+
+        Three P/L figures, never interchangeable. ``total_pl`` and a row's ``unrealized_pl`` are
+        *open* P/L: the whole gain since each position was opened. ``day_pl`` and a row's
+        ``day_pl`` are only today's move. A position bought months ago and a position bought
+        this morning differ in the first and can agree in the second.
+
+        ``realized_pl`` is the third and measures what the other two cannot: profit already
+        banked. It is **year to date**, matched from the broker's fills, and read fresh on every
+        call to this tool; ``realized_pl_1y`` is the same figure over the trailing year, and
+        ``activity_year`` names the calendar year both year-to-date figures cover. Year to date leads
+        because it is what a broker's own statement totals, so it is the one figure here a user
+        can check against their account. It carries its own ``computed_at`` regardless, because the
+        dashboard serves the same figure from a background recompute and may show it older. An account that closed a
+        winning trade and went back to cash holds nothing, so its open and day figures are both
+        zero while ``realized_pl`` carries the entire gain -- never read a zero ``total_pl`` as
+        "this account has not made money". ``realized_unmatched`` counts sells whose opening buy
+        predates the window, whose cost is unknowable: when it is above zero the total is real
+        but partial.
 
         This is the same function the dashboard's account page calls, through the brokerage
         interface, so every broker answers it the same way.
         """
-        from src.api.payloads.accounts import positions_payload
+        from src.api.payloads.accounts import account_analytics_payload, positions_payload
 
-        return {"status": "ok", "updated_at": datetime.now(timezone.utc).isoformat(), **positions_payload(account_id)}
+        # Forced, unlike a page load: an agent gets one shot at an answer and cannot come back
+        # a second later to see whether a background recompute landed.
+        positions = positions_payload(account_id)
+        analytics = account_analytics_payload(account_id, refresh=True)
+        # Merged by hand rather than by ``**``, which let the second dict's empty ``error`` erase
+        # the first's real one -- an unreachable broker reported null balances and said nothing
+        # about why. ``state`` and ``computed_at`` are dropped or renamed for the same reason:
+        # beside an account's balances, a bare "state" reads as the account's.
+        carried = {
+            key: value for key, value in analytics.items()
+            if key not in ("error", "state", "computed_at", "account_id")
+        }
+        errors = [text for text in (positions.get("error"), analytics.get("error")) if text]
+        return {
+            "status": "ok",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            **positions,
+            **carried,
+            # Only the realized/dividend half is ever served from a computation; the balances
+            # above are always read live, so one timestamp could not have covered both.
+            "realized_computed_at": analytics.get("computed_at", ""),
+            "error": "; ".join(errors),
+        }
 
     @mcp.tool()
     def get_account_orders(account_id: str = "", limit: int = 40) -> dict[str, Any]:
-        """One account's recent orders, in every state, most recent first.
+        """**Today's** orders for one account, in every state, most recent first.
 
         Filled, partially filled, replaced, cancelled, rejected and still-resting arrive in one
         list -- a live order simply appears with a resting status and an unfilled quantity, so
         there is no separate working-orders question to ask.
 
-        Capped at ``limit`` rather than windowed by time, which matters for good-till-cancelled
-        orders: a stop that has rested for two days is current exposure but was submitted long
-        ago, and any 24-hour window would drop it.
+        Today means the current *trading* day in market time, not the last 24 hours and not the
+        UTC day: an order entered at 4pm ET is still today's.
 
-        Same function the dashboard's account page calls. It reads the broker's own record where
-        the broker keeps one, so manual trades show up too; where it does not, it falls back to
-        the bot's order journal, and a row's ``status`` says which vocabulary you are reading.
+        Note what this excludes. A good-till-cancelled stop placed last week is still live
+        exposure but was entered before the window, so it will not appear here -- read holdings
+        from get_account_positions rather than inferring them from this list, and do not
+        conclude from an empty result that the account is flat.
+
+        The same function the dashboard's account page calls, but narrowed: the page caps by
+        count alone and shows orders from any date. It reads the broker's own record where
+        the broker keeps one, so a trade placed by hand in the broker's own app shows up here
+        exactly like one this bot placed; only the local paper book, which has no broker, falls
+        back to the bot's order journal.
         """
-        from src.api.payloads.accounts import account_activity_payload
+        from src.api.payloads.accounts import account_activity_payload, market_day_start
 
-        return {"status": "ok", **account_activity_payload(account_id, limit=limit)}
+        return {
+            "status": "ok",
+            **account_activity_payload(account_id, limit=limit, since=market_day_start()),
+        }
 
     @mcp.tool()
     def place_orders(plan_token: str, edits: list[dict[str, str]] | None = None) -> dict[str, Any]:

@@ -417,6 +417,10 @@ def build_order_request(request: Any):
 #: moving into or out of the account and belong in an income figure.
 DIVIDEND_ACTIVITY_TYPES = ("DIV", "DIVCGL", "DIVCGS", "DIVNRA", "DIVROC", "DIVTXEX", "DIVWH")
 
+#: Executions. Alpaca files a partial fill under its own type, and realized P/L needs both --
+#: dropping ``PTC`` would discard the earlier half of every order that filled in pieces.
+FILL_ACTIVITY_TYPES = ("FILL", "PTC")
+
 
 def get_account_activities(
     config: Config,

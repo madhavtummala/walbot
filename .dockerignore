@@ -7,6 +7,10 @@ __pycache__
 .env
 .env.*
 !.env.example
+# The live config never belongs in an image. Belt and braces: the Dockerfile names the
+# template explicitly, so this only matters if that line is ever widened back to a directory.
+config/*
+!config/walbot.yaml.sample
 data/*
 !data/tradable_etfs.csv
 *.sqlite

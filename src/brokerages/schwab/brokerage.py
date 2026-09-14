@@ -162,6 +162,31 @@ def _rejection_reason(order: Dict[str, Any]) -> str:
     return "; ".join(reasons)
 
 
+def _first_number(payload: Dict[str, Any], *names: str) -> float | None:
+    """The first of ``names`` the payload actually carries, as a float.
+
+    ``None`` when it carries none of them, which is a different answer from ``0.0``: Schwab
+    sends ``longOpenProfitLoss`` on a long and ``shortOpenProfitLoss`` on a short, never both,
+    and a missing field must not be read as a position that is exactly flat.
+    """
+    for name in names:
+        if payload.get(name) is not None:
+            return float(payload[name] or 0.0)
+    return None
+
+
+def _day_pl_percent(position: Dict[str, Any], market_value: float) -> float:
+    """Today's move as a fraction of where the position started the session.
+
+    Derived rather than read from ``currentDayProfitLossPercentage``, whose units Schwab
+    documents as a percentage while every other figure on this row is a fraction -- deriving it
+    from two numbers already trusted here avoids reporting a 1.2% move as 120%.
+    """
+    day_pl = float(position.get("currentDayProfitLoss", 0.0) or 0.0)
+    opening_value = market_value - day_pl
+    return (day_pl / opening_value) if opening_value else 0.0
+
+
 class SchwabBrokerage(BaseBrokerage):
     """Charles Schwab Trader API.
 
@@ -256,34 +281,74 @@ class SchwabBrokerage(BaseBrokerage):
                 continue
             market_value = float(pos.get("marketValue", 0.0) or 0.0)
             avg_entry = float(pos.get("averagePrice", 0.0) or 0.0)
-            unrealized_pl = float(pos.get("currentDayProfitLoss", 0.0) or 0.0)
-            unrealized_plpc = (market_value / (avg_entry * abs(qty)) - 1.0) if avg_entry and qty else 0.0
-            # Not sent directly -- derived from the same two fields "Value" already uses.
             # ``marketValue`` is the position's full notional, which for an option already
             # carries the 100x contract multiplier (verified live: 1 contract, marketValue
             # 861.00, average price 8.61 -- dividing by quantity alone would answer $861 for
-            # a contract actually quoted at $8.61).
+            # a contract actually quoted at $8.61). ``averagePrice`` is per share or per
+            # share-equivalent, so every comparison of the two has to restore the multiplier.
             is_option = str((pos.get("instrument") or {}).get("assetType") or "") == "OPTION"
             multiplier = 100.0 if is_option else 1.0
             current_price = (market_value / (qty * multiplier)) if qty else 0.0
+            cost_basis = avg_entry * abs(qty) * multiplier
+            # Two different questions, and Schwab answers both. Open P/L is the position's
+            # whole life since it was opened; day P/L is only this session's move. Reporting
+            # the day figure under the open one -- which this did -- makes a position held for
+            # months read as if it were opened this morning.
+            open_pl = _first_number(pos, "longOpenProfitLoss", "shortOpenProfitLoss")
+            if open_pl is None and market_value and cost_basis:
+                # Derived only where Schwab omits its own figure, so the fallback can never
+                # quietly override a broker-reported number.
+                open_pl = (market_value - cost_basis) if qty > 0 else (cost_basis - abs(market_value))
+            open_pl = float(open_pl or 0.0)
             rows.append({
                 "symbol": symbol,
                 "qty": qty,
                 "avg_entry_price": avg_entry,
                 "current_price": current_price,
                 "market_value": market_value,
-                "unrealized_pl": unrealized_pl,
-                "unrealized_plpc": unrealized_plpc,
+                "unrealized_pl": open_pl,
+                "unrealized_plpc": (open_pl / cost_basis) if cost_basis else 0.0,
+                "day_pl": float(pos.get("currentDayProfitLoss", 0.0) or 0.0),
+                "day_pl_percent": _day_pl_percent(pos, market_value),
             })
         rows.sort(key=lambda row: abs(row["market_value"]), reverse=True)
         return rows
 
-    def get_dividend_activity(self, start=None, end=None) -> List[Dict[str, Any]]:
-        """Cash distributions credited to this account, from ``/accounts/{hash}/transactions``.
+    def get_fills(self, start=None, end=None) -> List[Dict[str, Any]]:
+        """Executed trades from ``/accounts/{hash}/transactions``, filed under ``TRADE``.
 
-        Schwab files dividends and cash interest under one ``DIVIDEND_OR_INTEREST`` type, which
-        is the right granularity here: both are income the account received rather than price
-        appreciation, and a T-bill fund's payment is literally interest.
+        The same endpoint and the same ``transferItems`` walk as the dividend feed. A trade
+        carries one item per leg: the instrument leg is the one naming a symbol, and its
+        ``amount`` is signed -- positive bought, negative sold -- which is what says whether a
+        fill opened or closed rather than the order's own verb.
+        """
+        rows: List[Dict[str, Any]] = []
+        for item in self._transactions("TRADE", start, end):
+            trade_date = str(item.get("tradeDate") or item.get("time") or "")
+            for leg in item.get("transferItems", []) or []:
+                instrument = leg.get("instrument") or {}
+                symbol = str(instrument.get("symbol", "")).upper()
+                amount = float(leg.get("amount") or 0.0)
+                price = float(leg.get("price") or 0.0)
+                # A fee leg names no instrument and carries no price; both are skipped rather
+                # than booked as a trade at zero.
+                if not symbol or not amount or price <= 0:
+                    continue
+                rows.append({
+                    "symbol": symbol,
+                    "action": "buy" if amount > 0 else "sell",
+                    "quantity": abs(amount),
+                    "price": price,
+                    "multiplier": 100.0 if str(instrument.get("assetType") or "") == "OPTION" else 1.0,
+                    "date": trade_date,
+                })
+        return rows
+
+    def _transactions(self, types: str, start=None, end=None) -> List[Dict[str, Any]]:
+        """Raw transactions of one ``types`` over a window, defaulting to the trailing year.
+
+        Shared by the dividend and fill feeds, which differ only in the type they ask for and
+        what they read off each row.
         """
         from datetime import datetime, time, timedelta, timezone
 
@@ -300,13 +365,20 @@ class SchwabBrokerage(BaseBrokerage):
             params={
                 "startDate": start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
                 "endDate": end_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-                "types": "DIVIDEND_OR_INTEREST",
+                "types": types,
             },
         )
+        return [item for item in (payload or []) if isinstance(item, dict)]
+
+    def get_dividend_activity(self, start=None, end=None) -> List[Dict[str, Any]]:
+        """Cash distributions credited to this account, from ``/accounts/{hash}/transactions``.
+
+        Schwab files dividends and cash interest under one ``DIVIDEND_OR_INTEREST`` type, which
+        is the right granularity here: both are income the account received rather than price
+        appreciation, and a T-bill fund's payment is literally interest.
+        """
         rows: List[Dict[str, Any]] = []
-        for item in payload or []:
-            if not isinstance(item, dict):
-                continue
+        for item in self._transactions("DIVIDEND_OR_INTEREST", start, end):
             # The symbol lives on the transferItem describing the instrument, when there is
             # one at all -- account-level cash interest has no instrument.
             symbol = ""

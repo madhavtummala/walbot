@@ -158,8 +158,8 @@ def account_hash(session: SchwabSession, account_number: str = "") -> str:
 
     wanted = _digits(account_number)
     for entry in accounts:
-        # Compared on digits alone. Schwab's API reports the number bare -- "00000000" -- while
-        # every human-facing surface, statements and the website included, writes it "0000-0000".
+        # Compared on digits alone. Schwab's API reports the number bare -- "12345678" -- while
+        # every human-facing surface, statements and the website included, writes it "1234-5678".
         # Matching the raw strings made a correctly configured account 404, and because the
         # dashboard falls back to the default account on error, the Schwab tab then showed
         # Alpaca's money under Schwab's name.
