@@ -90,7 +90,8 @@ def plan_symbol(
     (see :mod:`.option_band`), supplied by the caller when the chosen contract has a usable price
     history of its own. When they are ``None`` the caller has not yet collected that history, and
     ``entry_target``/``exit_target`` (underlying levels) are translated through delta as the
-    cold-start fallback. ``sell_ok`` is the bull-run gate, re-read on the sales side: when it has
+    cold-start fallback. ``sell_ok`` is the regime gate for the direction this position was
+    opened on, re-read on the sales side: when it has
     closed, a held position is sold at the mark rather than asked to keep waiting for a target.
     """
     if held_contract:
@@ -303,7 +304,7 @@ def _held(
     # number. It stays as the second choice because an upper bound is still a far better
     # anchor than the current mark, which carries no relationship to cost at all.
     entry_price = fill_price or float(memory.get("bid", 0.0) or 0.0) or mark
-    # The bull-run gate is re-read on the sales side, and the sell band is re-predicted every run.
+    # The regime gate is re-read on the sales side, and the sell band is re-predicted every run.
     # When the freshly predicted target lies at or below the current mark, there is nothing left
     # to ratchet toward and the position is priced at the mark outright -- this is a read of the
     # model, not of the regime, so it is not debounced.
@@ -389,7 +390,7 @@ def _held(
                 + f"{int(config.max_hold_sessions)} (patience "
                 + f"{float(getattr(config, 'exit_patience', 1.0)):.1f})"
                 + ("" if not band_exhausted else " — band target at/below the mark, sold outright")
-                + ("" if gate_streak <= 0 else f" — bull gate closed {gate_streak} run(s), "
+                + ("" if gate_streak <= 0 else f" — regime gate closed {gate_streak} run(s), "
                    f"{1.0 - gate_decay:.0%} converged to the mark")
                 + ("" if not deadline else f" — deadline, {1.0 - day_decay:.0%} converged to the market")
             ),

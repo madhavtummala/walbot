@@ -47,7 +47,7 @@ import pandas as pd
 
 from src.algorithms.options_flip.algorithm import OptionsFlipAlgorithm
 from src.core.interfaces import AlgorithmContext
-from src.core.options import CALL, OptionContract, osi_symbol, parse_osi
+from src.core.options import CALL, PUT, OptionContract, osi_symbol, parse_osi
 
 from .options_flip_contract_backtest import (
     EXPIRY,
@@ -96,6 +96,26 @@ def _prepare_strikes(opt_all: pd.DataFrame) -> dict[float, dict[str, Any]]:
     return prepared
 
 
+def _session_bars(strikes: dict[float, dict[str, Any]], osi: str, day: date) -> int:
+    """How many 5m bars this contract actually printed on ``day``.
+
+    A full regular session is 78. These contracts routinely print under ten, and a fill checked
+    against a bar spanning hours is not really a fill check -- so the count travels with every
+    fill event rather than living in a caveat nobody reads next to the P/L.
+    """
+    try:
+        strike = parse_osi(osi)["strike"]
+    except ValueError:
+        return 0
+    index = strikes.get(strike)
+    if index is None:
+        return 0
+    lo = _tick_key(day, 0)
+    hi = _tick_key(day, 24 * 60)
+    keys = index["keys"]
+    return int(np.searchsorted(keys, hi, side="right") - np.searchsorted(keys, lo, side="left"))
+
+
 def _latest_row(strike_index: dict[str, Any], key: int) -> dict[str, Any] | None:
     """The most recent bar at or before ``key`` for one strike, via binary search."""
     idx = int(np.searchsorted(strike_index["keys"], key, side="right")) - 1
@@ -119,7 +139,7 @@ SYNTHETIC_SPREAD_PCT = 0.02
 
 def _synthetic_chain(
     strikes: dict[float, dict[str, Any]], daily_through: pd.DataFrame, spot: float,
-    day: date, minute: int, symbol: str,
+    day: date, minute: int, symbol: str, option_type: str = CALL,
 ) -> list[OptionContract]:
     """One ``OptionContract`` per cached Sep-18 strike, priced as of this tick.
 
@@ -142,13 +162,13 @@ def _synthetic_chain(
         if mark <= 0:
             continue
         oi = int(row.get("oi", 0) or 0)
-        delta = _bs_delta(spot, strike, day, vol)
-        iv = _bs_price_iv(spot, strike, years, mark) if years > 0 else 0.0
-        greeks = _bs_greeks(spot, strike, years, iv, mark) if iv > 0 else {}
-        osi = osi_symbol(symbol, EXPIRY, CALL, strike, padded=True)
+        delta = _bs_delta(spot, strike, day, vol, option_type)
+        iv = _bs_price_iv(spot, strike, years, mark, option_type) if years > 0 else 0.0
+        greeks = _bs_greeks(spot, strike, years, iv, mark, option_type) if iv > 0 else {}
+        osi = osi_symbol(symbol, EXPIRY, option_type, strike, padded=True)
         half_spread = mark * SYNTHETIC_SPREAD_PCT / 2.0
         contracts.append(OptionContract(
-            osi_symbol=osi, underlying=symbol, option_type=CALL, strike=strike,
+            osi_symbol=osi, underlying=symbol, option_type=option_type, strike=strike,
             expiry=EXPIRY, bid=round(mark - half_spread, 2), ask=round(mark + half_spread, 2), mark=mark,
             delta=float(greeks.get("delta", delta)), gamma=float(greeks.get("gamma", 0.0)),
             theta=float(greeks.get("theta", 0.0)), vega=float(greeks.get("vega", 0.0)),
@@ -227,8 +247,17 @@ def _order_underlying(order: Any) -> str:
         return ""
 
 
-def walk_forward(symbol: str, config: Any) -> tuple[pd.DataFrame, pd.DataFrame, list[dict[str, Any]]]:
+def walk_forward(
+    symbol: str, config: Any, *, option_type: str = CALL, budget: float = 5000.0,
+    start: date | None = None, end: date | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[dict[str, Any]]]:
     """Replay ``OptionsFlipAlgorithm.plan()`` itself, tick by tick, one contract at a time.
+
+    ``option_type`` selects which cached side to replay and which bucket of the budget board to
+    fund. The board is patched rather than read from the live config for the same reason
+    ``_symbols`` is: the account's saved board says what production trades today, and a backtest
+    asking "what would the put side have done" must not be silently answered by a board that
+    funds no puts -- every day would read as "nothing happened" rather than as a gate firing.
 
     Fills are checked against the *following* tick's bar, never the tick that set the price --
     a bar's low is always <= its own close, so checking a limit priced off a bar against that
@@ -243,16 +272,24 @@ def walk_forward(symbol: str, config: Any) -> tuple[pd.DataFrame, pd.DataFrame, 
     # reach ``_plan_one`` at all, and every day would read as "nothing happened" rather than as
     # a gate that actually fired. Pinned to exactly this symbol for the run: the whole point of
     # calling ``plan()`` in a loop is to answer "what would production do for this symbol",
-    # not to replay the live account's other, unrelated bindings.
+    # not to replay the live account's other, unrelated deployments.
     symbols_patch = mock.patch.object(
         # One argument now: ``_symbols`` became an instance method reading the board when the
         # separate ``symbols`` knob was retired. The old two-argument static signature made this
         # harness raise on every run.
         OptionsFlipAlgorithm, "_symbols", lambda self, config: [symbol]
     )
+    board = {
+        side: ({"amount": budget, "items": [{"symbol": symbol, "amount": budget}]}
+               if side == option_type else {"amount": 0.0, "items": []})
+        for side in (CALL, PUT)
+    }
+    board_patch = mock.patch.object(
+        OptionsFlipAlgorithm, "budget_plan", lambda self, config: board
+    )
     daily = _load_daily(symbol)
     intraday = _load_intraday(symbol)
-    opt_all = _load_option_strikes(symbol)
+    opt_all = _load_option_strikes(symbol, option_type)
     if opt_all.empty or intraday.empty:
         return pd.DataFrame(), pd.DataFrame(), []
     # Indexed once, up front -- this is what keeps 70-odd ticks/day x ~20 days x ~17 strikes
@@ -271,21 +308,31 @@ def walk_forward(symbol: str, config: Any) -> tuple[pd.DataFrame, pd.DataFrame, 
         pd.to_datetime(opt_all["timestamp"], utc=True).dt.tz_convert("America/New_York").dt.date.unique()
     )
     sessions = [d for d in sessions if d in opt_days]
+    # Trimmed *after* the option-day intersection so the window means calendar dates, not an
+    # offset into whatever happened to be cached.
+    if start is not None:
+        sessions = [d for d in sessions if d >= start]
+    if end is not None:
+        sessions = [d for d in sessions if d <= end]
     if len(sessions) < 3:
         return pd.DataFrame(), pd.DataFrame(), []
 
     symbols_patch.start()
+    board_patch.start()
     try:
         return _walk_days(
             symbol, algorithm, config, sessions, sf, daily, strikes,
+            option_type=option_type,
         )
     finally:
+        board_patch.stop()
         symbols_patch.stop()
 
 
 def _walk_days(
     symbol: str, algorithm: OptionsFlipAlgorithm, config: Any, sessions: list[date],
     sf: pd.DataFrame, daily: pd.DataFrame, strikes: dict[float, dict[str, Any]],
+    option_type: str = CALL,
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[dict[str, Any]]]:
     state: dict[str, Any] = {}
     positions: dict[str, int] = {}
@@ -331,6 +378,7 @@ def _walk_days(
                         log.append({
                             "symbol": symbol, "day": day.isoformat(), "event": "FILL_ENTRY",
                             "minute": minute, "osi": pending["osi"], "price": pending["limit"],
+                            "session_bars": _session_bars(strikes, pending["osi"], day),
                         })
                         day_row["filled_today"] = True
                         pending = None
@@ -347,6 +395,7 @@ def _walk_days(
                                 "minute": minute, "osi": pending["osi"], "price": fill_px,
                                 "entry_price": ep,
                                 "ret": (fill_px / ep - 1.0) if ep else None,
+                                "session_bars": _session_bars(strikes, pending["osi"], day),
                             })
                             day_row["filled_today"] = True
                             pending = None
@@ -368,8 +417,12 @@ def _walk_days(
                     latest_prices[osi] = opt_bar["close"]
 
             def _chain_reader(sym, option_type="", min_dte=0, max_dte=120, *,
-                               _d=day, _m=minute, _p=price, _dt=daily_through):
-                return _synthetic_chain(strikes, _dt, _p, _d, _m, symbol)
+                               _d=day, _m=minute, _p=price, _dt=daily_through,
+                               _side=option_type):
+                # The cache holds one side per run, so the requested type is what the run was
+                # started for. Honouring the argument instead would hand back call prices
+                # labelled as puts whenever the algorithm asked for the other side.
+                return _synthetic_chain(strikes, _dt, _p, _d, _m, symbol, _side)
 
             def _history_reader(osi, *, _d=day, _m=minute):
                 return _option_bars_upto(strikes, osi, _d, _m)
@@ -380,6 +433,12 @@ def _walk_days(
                 intraday_bars_by_symbol={symbol: intraday_seen},
                 positions=dict(positions),
                 latest_prices=latest_prices,
+                # What the harness actually paid, which is what a broker reports live. Left empty,
+                # ``_refresh_held`` falls through to anchoring the stop on the *mark* and re-anchors
+                # it every run -- a trailing stop, which is a different strategy from the one under
+                # test and the exact behaviour lifecycle.py warns against. Any sweep of
+                # ``stop_loss_pct`` against an empty cost basis measures that fallback, not the knob.
+                cost_basis=dict(entry_prices),
                 state=state,
                 timestamp=ts,
                 extra={"option_chain": _chain_reader, "option_history": _history_reader},
@@ -449,6 +508,26 @@ def _walk_days(
         # to replay what production actually does rather than what its comment claims it does.
         daily_log.append(day_row)
 
+    # A position still open when the data runs out is not a $0 outcome, and counting it as one
+    # biases every variant that holds longer. ``exit_trend_band_atr`` is the sharp case: its whole
+    # effect is to stop the regime gate forcing an exit, so on a short window it converts resolved
+    # trades into open ones -- and a summary that only sums realized fills would score it as
+    # "no trades, no P/L", i.e. indistinguishable from a variant that never entered at all.
+    # Marked to the contract's last real print so the exposure is visible and labelled unrealized.
+    if positions:
+        held_osi = next(iter(positions))
+        last_day = sessions[-2] if len(sessions) >= 2 else sessions[-1]
+        held_strike = parse_osi(held_osi)["strike"]
+        index = strikes.get(held_strike)
+        mark = float(index["rows"][-1]["close"]) if index and index["rows"] else 0.0
+        ep = entry_prices.get(held_osi, 0.0)
+        log.append({
+            "symbol": symbol, "day": last_day.isoformat(), "event": "MARK_OPEN",
+            "minute": 0, "osi": held_osi, "price": mark, "entry_price": ep,
+            "ret": (mark / ep - 1.0) if ep else None,
+            "session_bars": _session_bars(strikes, held_osi, last_day),
+        })
+
     return pd.DataFrame(log), pd.DataFrame(daily_log), ticks
 
 
@@ -458,7 +537,10 @@ def report(symbol: str, log: pd.DataFrame, daily: pd.DataFrame) -> None:
         print(log.to_string(index=False))
         fills = log[log["event"] == "FILL_ENTRY"]
         exits = log[log["event"].isin(["FILL_TARGET", "FILL_STOP"])]
-        print(f"  entries filled: {len(fills)}   exits resolved: {len(exits)}")
+        open_marks = log[log["event"] == "MARK_OPEN"]
+        print(f"  entries filled: {len(fills)}   exits resolved: {len(exits)}"
+              + (f"   still open at the end: {len(open_marks)} "
+                 f"(marked {open_marks['ret'].iloc[0]:+.1%})" if len(open_marks) else ""))
         if len(exits):
             # By realized return, not by which order filled: the exit ratchet concedes the
             # target down toward the mark as the deadline nears (see lifecycle.py), so a
@@ -469,6 +551,12 @@ def report(symbol: str, log: pd.DataFrame, daily: pd.DataFrame) -> None:
             wins = exits[exits["ret"] > 0]
             print(f"  WIN {len(wins)}  LOSS {len(exits) - len(wins)}   "
                   f"mean return {exits['ret'].mean():+.1%}")
+        if "session_bars" in log.columns and len(log):
+            bars = log["session_bars"].dropna()
+            if len(bars):
+                thin = int((bars < 20).sum())
+                print(f"  liquidity behind these fills: median {bars.median():.0f} bars/session "
+                      f"(78 = continuous); {thin} of {len(bars)} resolved on under 20 prints")
 
     print(f"\n{symbol}: day by day")
     if daily.empty:
@@ -493,11 +581,24 @@ def report(symbol: str, log: pd.DataFrame, daily: pd.DataFrame) -> None:
 
 
 def main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Walk Options Flip forward through real history")
+    parser.add_argument("--symbols", nargs="+", default=SYMBOLS)
+    parser.add_argument("--type", dest="option_type", choices=[CALL, PUT], default=CALL)
+    parser.add_argument("--budget", type=float, default=5000.0)
+    parser.add_argument("--start", type=date.fromisoformat, default=None)
+    parser.add_argument("--end", type=date.fromisoformat, default=None)
+    args = parser.parse_args()
+
     logging.basicConfig(level=logging.WARNING)
     from src.core.config import get_config
     config = get_config()
-    for symbol in SYMBOLS:
-        log, daily, _ticks = walk_forward(symbol, config)
+    for symbol in args.symbols:
+        log, daily, _ticks = walk_forward(
+            symbol, config, option_type=args.option_type, budget=args.budget,
+            start=args.start, end=args.end,
+        )
         report(symbol, log, daily)
     return 0
 

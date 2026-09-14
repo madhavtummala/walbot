@@ -233,6 +233,11 @@ def load_tuning(cls: type[T], raw: Mapping[str, Any] | None) -> T:
     ignored -- the field may declare a non-standard legacy name with
     ``metadata={"legacy_key": ...}``.
 
+    ``legacy_key`` is honoured on **every** field, not only the unit-converting ones. Renaming a
+    knob otherwise reads as "the section does not mention it" and silently restores the default,
+    which is the worst shape a config migration can take: a tuned value disappears and the only
+    symptom is different behaviour. The new name always wins when both are present, so a config
+    written since the rename is never overridden by a stale key left beside it.
     """
     section = raw if isinstance(raw, dict) else {}
     defaults = cls()
@@ -256,7 +261,12 @@ def load_tuning(cls: type[T], raw: Mapping[str, Any] | None) -> T:
                 legacy_days_key=field.metadata.get("legacy_days_key"),
             )
             continue
-        values[field.name] = coerce(section.get(field.name), default)
+        raw_value = section.get(field.name)
+        if raw_value is None:
+            legacy_key = field.metadata.get("legacy_key")
+            if legacy_key:
+                raw_value = section.get(str(legacy_key))
+        values[field.name] = coerce(raw_value, default)
 
     return cls(**values)
 

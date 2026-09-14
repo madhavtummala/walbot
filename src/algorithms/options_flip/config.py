@@ -18,7 +18,7 @@ position at the deadline is sold at whatever is offered.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ...common.config_utils import as_float
@@ -159,6 +159,21 @@ class OptionsFlipConfig:
     #: not a rank: it means the same on a quiet symbol as on a violent one.
     min_trend_strength: float = 0.50
 
+    #: The same threshold on the short side, and deliberately not the mirror of it. Direction is
+    #: proposed by this one signed measure and nothing else, so the two thresholds are the whole
+    #: neutral band: a symbol scoring between ``-min_bear_trend_strength`` and
+    #: ``+min_trend_strength`` proposes no direction and arms nothing. Failing the bull test is
+    #: therefore never the same statement as passing the bear one.
+    #:
+    #: Deeper than the long side by default, for three measured reasons. Pooled over 9 ETFs and
+    #: 25,326 sessions, a trend score at or below -0.5σ bought only 0.25--0.69pp of extra
+    #: downside excursion over the same symbol's baseline while the *upside* excursion grew just
+    #: as fast -- the ratio of mean adverse-to-favourable excursion never clears 1.14 anywhere on
+    #: the short side. Equity drift is positive, so a bear reading fights the baseline rather
+    #: than riding it. And put skew makes the contract richer at the same delta, so the same
+    #: predicted move clears ``min_profit_per_contract`` less often. Only past roughly -1.5σ does
+    #: P(adverse move > 4%) separate from the unconditional rate (37--39% against 24%).
+    min_bear_trend_strength: float = 1.50
 
 
     #: Nearest expiry to trade. Under a week the theta curve is steepest.
@@ -172,13 +187,42 @@ class OptionsFlipConfig:
     #: crosses, but the exit has to get out and the stop is denominated in premium.
     max_spread_pct: float = 0.06
 
-    #: Largest opening gap *down* still an ordinary session, in ATR. Downside only: an up-gap is
-    #: followed by a smaller pullback, so it is favourable and merely harder to fill into.
-    max_gap_down_atr: float = 1.0
+    #: Largest opening gap *against the thesis* still an ordinary session, in ATR. One knob for
+    #: both sides: it is read as a floor on gap-down for a call and a ceiling on gap-up for a put,
+    #: because "adverse" is what the gate actually means and which end that is follows from the
+    #: direction. The favourable end stays unguarded either way -- for a call an up-gap predicts a
+    #: *smaller* subsequent pullback (corr -0.156 IBIT, -0.118 GLD), so it is merely harder to fill
+    #: into, which the touch probability already prices.
+    #:
+    #: It briefly had a separate ``max_gap_up_atr`` twin for the put side. Measured across 6,336
+    #: SMH ticks the put-side reading blocked 2% of them and was the *only* blocker on 0 -- every
+    #: session it refused was already refused by the trend gates, which is two names for one
+    #: filter.
+    #:
+    #: Renamed from ``max_gap_down_atr``, which named one end of a gate that has two. Saved
+    #: configs carrying the old key are still read through it -- see ``legacy_key``.
+    gap_atr: float = field(default=1.0, metadata={"legacy_key": "max_gap_down_atr"})
 
     #: Ceiling on annualised realised volatility. Past it the premium already prices a bigger
     #: move than the model forecasts, so a correct call still loses.
     max_annual_volatility: float = 0.80
+
+    #: How far the wrong way price must travel past the fast average before a held position's
+    #: thesis counts as broken, in ATR. Zero is a strict crossing, which is what this gate has
+    #: always been on the way out.
+    #:
+    #: Exit only. An entry-side twin was tried and cut: the crossing would partition the space if
+    #: it were proposing a direction, but it is a veto on a direction ``trend_strength`` has
+    #: already proposed, and the two disagree on about 1% of sessions -- so a band there guarded
+    #: against a case that cannot arise. On the way out it guards a real one. SMH on 2026-08-27
+    #: closed 0.80% (+0.30 ATR) above its 20d average on a single bounce session, closed the gate,
+    #: and forced a put out at -41% that was -18% the next session and -4% three later; the same
+    #: contract was bought back four sessions on, 16% cheaper. A downtrend crossing back over its
+    #: own average is that trend's ordinary behaviour, not evidence against it.
+    #:
+    #: Zero by default because it changes the long side too, and that side has measured thresholds
+    #: this has not earned yet. Swept, not assumed.
+    exit_trend_band_atr: float = 0.0
 
     # ── derived ──────────────────────────────────────────────────────
     # Views of the fields above, exposed as properties so call sites read exactly as they did

@@ -44,7 +44,7 @@ from ...core.interfaces import (
     Check,
     SignalView,
 )
-from ...core.options import CALL, black_scholes_delta, is_osi_symbol, parse_osi
+from ...core.options import CALL, PUT, black_scholes_delta, is_osi_symbol, parse_osi
 from ...data.state_store import algorithm_state_key, save_state
 from ..base import BaseAlgorithm
 from ..rally_rotation.memory import market_day, sessions_since
@@ -57,7 +57,7 @@ from .indicators import average_true_range, quote_age_seconds
 from .levels import conditional_levels
 from .option_band import choose_band, prepare_option_bars
 from .pricing import expected_profit, max_debit, scenarios
-from .regime import bull_regime
+from .regime import regime as regime_gates
 from .excursion import option_price_for, session_fraction_remaining
 from .lifecycle import BIDDING, HELD, plan_symbol
 from .signals import signal_view
@@ -243,9 +243,12 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
             memory = _refresh_held(memory, held_contract, context, session, cfg)
             mark = float(memory.get("mark", 0.0) or 0.0)
             delta = float(memory.get("delta", 0.0) or 0.0)
-            exit_level = _held_exit_target(intraday, session, cfg, underlying_now, daily)
+            held_direction = str(memory.get("direction") or CALL)
+            exit_level = _held_exit_target(
+                intraday, session, cfg, underlying_now, daily, direction=held_direction,
+            )
             _hist, _today = _split_sessions(intraday, session["market_day"])
-            sell_ok = _sell_ok(daily, _today, underlying_now, cfg)
+            sell_ok = _sell_ok(daily, _today, underlying_now, cfg, direction=held_direction)
             under_translation = (
                 {
                     "entry": 0.0,
@@ -282,19 +285,46 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
             ))
 
         history, today = _split_sessions(intraday, session["market_day"])
-        # ── gate 1: is the bull thesis intact today? ──────────────────────────────────
-        eligible, regime, checks = bull_regime(
-            daily, today, price=underlying_now, config=cfg,
-        )
-        # Scored from this symbol's own bars, against a threshold in its own sigma. A held
-        # position is managed out whatever it scores today.
+
+        # ── the direction proposal: one signed measure, two thresholds, and the band between ──
+        # This is the *only* place a direction is asserted. The regime checks below can veto the
+        # proposal but never replace it, which is what keeps "not bullish enough" from silently
+        # becoming "bearish": a symbol scoring between the two thresholds proposes nothing, and a
+        # gate that refuses a call cannot promote the name into a put.
         strength = trend_strength(daily, scoring_parameters())
-        trending = bool(strength >= float(cfg.min_trend_strength)) or bool(held_contract)
+        bull_floor = float(cfg.min_trend_strength)
+        bear_floor = float(getattr(cfg, "min_bear_trend_strength", bull_floor))
+        funded = [side for side in (CALL, PUT) if symbol_budget(plan_board, symbol, side) > 0]
+        if strength >= bull_floor:
+            proposed = CALL
+        elif strength <= -bear_floor:
+            proposed = PUT
+        else:
+            proposed = ""
+        # A proposal the board does not fund is not a trade. Priced anyway, against whichever
+        # side the board *does* fund, so a stand-down row still names a contract and a reader can
+        # see what was being considered rather than an unexplained blank.
+        trending = bool(proposed and proposed in funded) or bool(held_contract)
+        side = proposed if trending and proposed else (funded[0] if len(funded) == 1 else CALL)
+
+        # ── gate 1: is that thesis intact today? ──────────────────────────────────────
+        eligible, regime, checks = regime_gates(
+            daily, today, price=underlying_now, config=cfg, direction=side,
+        )
+        band_text = f"between {-bear_floor:+.2f}σ and {bull_floor:+.2f}σ, nothing is proposed"
         checks = [Check(
             label="Trend strength",
             ok=trending,
-            value=f"{strength:+.2f}σ" + ("" if trending else " — not trending enough today"),
-            limit=f"≥ {float(cfg.min_trend_strength):+.2f}σ, measured on this symbol alone",
+            value=(
+                f"{strength:+.2f}σ"
+                + ("" if trending else (
+                    " — not trending enough today" if not proposed
+                    else f" — proposes a {proposed}, which this board does not fund"))
+            ),
+            limit=(
+                f"≥ {bull_floor:+.2f}σ for a call, ≤ {-bear_floor:+.2f}σ for a put; "
+                f"{band_text}"
+            ),
             blocking=not trending,
         )] + checks
         atr = float(regime.get("atr", 0.0) or 0.0)
@@ -312,7 +342,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
         levels = conditional_levels(
             history, minute=_decision_minute(session, cfg), price=underlying_now,
             session_open=_session_open(intraday, session["market_day"], underlying_now),
-            atr=atr, config=cfg,
+            atr=atr, config=cfg, direction=side,
         )
         in_time = float(session.get("fraction_remaining", 0.0)) >= float(cfg.entry_cutoff_fraction)
         # The entry is placed *at* the ``entry_reach`` quantile, so its own reach is that
@@ -350,7 +380,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
 
         # The contract is priced whatever the gates said, so a stand-down row still names it.
         contract, candidate, contract_checks = _pick_contract(
-            context, symbol, CALL, session,  cfg,
+            context, symbol, side, session,  cfg,
             spot=underlying_now, annual_volatility=annual_vol,
         )
         checks = checks + contract_checks
@@ -365,7 +395,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
                 spot=underlying_now, config=cfg,
             )
             ceiling = max_debit(priced, outcomes, config=cfg)
-            budget = symbol_budget(plan_board, symbol, CALL)
+            budget = symbol_budget(plan_board, symbol, side)
             contracts = affordable_contracts(priced, cfg, budget=budget) if contract else 0
             profit = expected_profit(outcomes, contracts or 1, config=cfg)
             worth_it = profit["per_contract"] >= float(cfg.min_profit_per_contract)
@@ -411,7 +441,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
 
         if not (eligible and vol_ok and levels_ok and trending):
             contracts = 0
-        direction = CALL if (eligible and vol_ok and levels_ok and trending and contracts > 0) else ""
+        direction = side if (eligible and vol_ok and levels_ok and trending and contracts > 0) else ""
 
         # ── option band: the contract's own history, for intra-day prediction ──────────
         # Gates and the entry *level* stay on the underlying -- ``levels["entry"]`` is what
@@ -913,13 +943,18 @@ def _previous_close(history) -> float:
     return float(session.iloc[-1]["close"]) if len(session) else 0.0
 
 
-def _held_exit_target(intraday, session, cfg, underlying_now: float, daily) -> float:
+def _held_exit_target(intraday, session, cfg, underlying_now: float, daily,
+                      *, direction: str = CALL) -> float:
     """The target *level* for a position already open, from the same model that opened it.
 
     Recomputed each run rather than remembered, so a position taken in a quiet session is not
     still asking a quiet session's price two days later. It reuses ``conditional_levels`` for the
     same reason the entry does: one model, one set of quantiles, and no second definition of
     "how far can this travel" that could drift away from the first.
+
+    ``direction`` comes from the position's own memory. Defaulting it would put a held put's
+    target *above* spot -- the level it was bought to profit from falling away from -- and the
+    exit would then ratchet toward a price that means the trade lost.
     """
     history, _today = _split_sessions(intraday, session["market_day"])
     atr = average_true_range(daily, int(cfg.atr_days)) if daily is not None else 0.0
@@ -928,7 +963,7 @@ def _held_exit_target(intraday, session, cfg, underlying_now: float, daily) -> f
     levels = conditional_levels(
         history, minute=_decision_minute(session, cfg), price=underlying_now,
         session_open=_session_open(intraday, session["market_day"], underlying_now),
-        atr=atr, config=cfg,
+        atr=atr, config=cfg, direction=direction,
     )
     return float(levels.get("target", 0.0))
 
@@ -970,18 +1005,24 @@ def _option_band_for(
     )
 
 
-def _sell_ok(daily, today, price: float, cfg) -> bool:
-    """Whether the bull-run gate is still open, re-read on the sales side of a held position.
+def _sell_ok(daily, today, price: float, cfg, *, direction: str = CALL) -> bool:
+    """Whether the run gate is still open, re-read on the sales side of a held position.
 
     ``_plan_one`` short-circuits before the entry gates for a held position, so the regime has to
     be checked here rather than assumed -- a position's bracket must not keep asking a premium
     target the market is no longer expected to pay.
 
-    ``for_exit=True`` -- only the multi-day trend (``Above the trend``) can close this gate here;
-    same-day noise (``Holding VWAP``, ``Open not a gap down``) is reported but not acted on. See
-    ``bull_regime``'s docstring for the measured reason.
+    ``direction`` is the one the position was *opened* on, read from memory rather than
+    re-proposed: a held put whose symbol has since turned bullish has not become a call, it has
+    become wrong, and that is the stop's business rather than the gate's.
+
+    ``for_exit=True`` -- only the multi-day trend (``Above/Below the trend``) can close this gate
+    here; same-day noise (VWAP, the opening gap) is reported but not acted on. See ``regime``'s
+    docstring for the measured reason.
     """
-    eligible, _, _ = bull_regime(daily, today, price=price, config=cfg, for_exit=True)
+    eligible, _, _ = regime_gates(
+        daily, today, price=price, config=cfg, direction=direction, for_exit=True,
+    )
     return bool(eligible)
 
 
