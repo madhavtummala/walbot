@@ -1,0 +1,88 @@
+# Walbot configuration template. Copy to config/walbot.yaml and edit.
+#
+#   cp config/walbot.yaml.sample config/walbot.yaml
+#
+# The real file is gitignored: it names the accounts you actually trade. Secrets never live
+# here at all -- an account references the *name* of an environment variable, and the value
+# stays in .env on the host.
+#
+# Minimal on purpose. Every key not listed has a default in src/core/config/defaults.py, and
+# the dashboard writes the rest back here as you tune it.
+
+# Which account the dashboard opens on, and what any tool defaults to when none is named.
+default: paper1
+
+accounts:
+  items:
+    # A local book. Fills instantly at the last price the algorithm saw, no broker, no
+    # credentials -- the one account that works before anything is wired up.
+    paper1:
+      label: Local Paper
+      broker: paper
+      paper_starting_cash: 10000
+
+    alpaca1:
+      label: Alpaca Paper
+      broker: alpaca
+      # The env var *names*, not the keys. Set the values in .env.
+      api_key_env: ALPACA_API_KEY
+      api_secret_env: ALPACA_API_SECRET
+      base_url: https://paper-api.alpaca.markets
+      data_feed: iex
+
+    schwab1:
+      label: Schwab
+      broker: schwab
+      # Which account under the Schwab login this is. Hyphens optional -- matched on digits.
+      # Schwab's app key, secret and refresh token are shared across accounts and live in .env.
+      schwab_account_number: 0000-0000
+
+# Where prices, dividends and news come from, in preference order: the first provider that
+# answers wins, so a list is a fallback chain rather than a choice.
+data_sources:
+  intraday_market_data:
+    provider_order: [schwab, yfinance]
+    providers:
+      schwab: {}
+      yfinance: {}
+  eod_market_data:
+    provider_order: [schwab, yfinance]
+    providers:
+      schwab: {}
+      yfinance: {}
+  dividends:
+    providers:
+      yfinance: {}
+
+# What any algorithm here is allowed to trade. The dashboard can propose additions to this.
+tradable_universe:
+  master_list: data/tradable_etfs.csv
+  symbols:
+  - QQQM
+  - SGOV
+  - SPYM
+
+algorithm_bot:
+  trading_account_id: paper1
+  backtest_period: 3m
+
+algorithms:
+  # One algorithm, shown with the three keys every algorithm has: where it trades, whether it
+  # is running, and when. Everything below those is its own tuning.
+  bursty_dca:
+    account_id: paper1
+    enabled: false
+    cron: 0 11 * * 1-5
+    regime_ma_days: 150
+    scaling_factor: 0.5
+    plan:
+      buy:
+        amount: 500
+        items:
+        - symbol: QQQM
+          amount: 300
+        - symbol: SPYM
+          amount: 200
+      sell:
+        amount: 0
+        items: []

@@ -1,6 +1,11 @@
 .env
 .env.*
 !.env.example
+# The live config names the accounts actually traded. Ignored as a directory's *contents*
+# rather than the directory itself -- git cannot re-include a file whose parent is excluded,
+# so "config/" alone would hide the template too.
+config/*
+!config/walbot.yaml.sample
 .venv/
 .pytest_cache/
 __pycache__/

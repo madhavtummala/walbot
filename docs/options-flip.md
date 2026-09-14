@@ -179,7 +179,7 @@ first ten minutes of the next session. The live path allows a same-day exit.
 
 ## Live-verified Schwab behaviour
 
-Established by placing and cancelling real orders on account 0000-0000:
+Established by placing and cancelling real orders on account 1234-5678:
 
 - `TRIGGER -> OCO(limit, stop_limit)` on an option rests correctly, and a child leg can be
   replaced by its own order id without disturbing its sibling.
