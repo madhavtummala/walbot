@@ -1,7 +1,14 @@
-"""Is today eligible for a bullish pullback trade on this symbol?
+"""Is today eligible for a pullback trade on this symbol, in the direction already proposed?
 
-The first of three gates, and the only one entitled to assert a direction -- a conjunction, since
-each condition rules out a different way the thesis can already be wrong. Readings are absolute
+The first of three gates, and -- since the bear side arrived -- a pure veto: it is handed a
+direction and answers only whether that thesis is intact today. It no longer asserts one. Exactly
+one measure proposes a direction (``trend_strength``, against ``min_trend_strength`` on the long
+side and ``min_bear_trend_strength`` on the short), and the gap between those two thresholds is
+the neutral band. That split is what makes "failed the bull test" structurally different from
+"passed the bear test": a veto cannot promote a symbol into the opposite direction, so no
+combination of these checks can turn a merely-not-bullish name into a short.
+
+A conjunction, since each condition rules out a different way the thesis can already be wrong. Readings are absolute
 and per-symbol (borrowed from Rally Rotation's features, not its cross-sectional score), and
 stated in sigma/ATR rather than raw percent so one threshold works across symbols of different
 volatility.
@@ -14,6 +21,7 @@ from typing import Any
 import pandas as pd
 
 from ...core.interfaces import Check
+from ...core.options import CALL, PUT
 from .indicators import (
     average_true_range,
     directional_volume,
@@ -24,15 +32,22 @@ from .indicators import (
 )
 
 
-def bull_regime(
+def regime(
     daily_bars: pd.DataFrame,
     intraday_today: pd.DataFrame,
     *,
     price: float,
     config: Any,
+    direction: str = CALL,
     for_exit: bool = False,
 ) -> tuple[bool, dict[str, Any], list[Check]]:
-    """``(eligible, readings, checks)`` -- whether the bull thesis holds for this symbol today.
+    """``(eligible, readings, checks)`` -- whether ``direction``'s thesis holds today.
+
+    Every reading below is sign-free and computed once for both sides; only the three blocking
+    comparisons flip. They are reflected rather than re-derived, which is deliberate: the short
+    side has none of the out-of-sample work behind it that the long side's thresholds carry (see
+    the docstring's three removed gates), so it starts as the honest mirror and earns its own
+    numbers from the walk-forward rather than being guessed at here.
 
     **Three gates were removed here and the reason is the same for all three: they cost
     opportunity and bought nothing measurable.**
@@ -61,11 +76,12 @@ def bull_regime(
     IBIT on 08-25 -- up 23% in a week -- because SPYM sat under its own average. 25.6% rejected,
     0.43% exclusively.
     """
+    bearish = direction == PUT
     readings: dict[str, Any] = {}
     checks: list[Check] = []
     if daily_bars is None or daily_bars.empty:
         return False, readings, [Check(
-            label="Bull regime", ok=False, value="no daily history",
+            label="Bear regime" if bearish else "Bull regime", ok=False, value="no daily history",
             limit="daily bars to measure the trend against", blocking=True,
         )]
 
@@ -97,13 +113,37 @@ def bull_regime(
         gate=False,
     ))
 
-    above_fast = bool(price > fast > 0)
+    # A strict crossing, and the one check here that would partition the space if it were the
+    # measure proposing direction -- every symbol sits on one side of its own average, so
+    # "not above" would read as "below" with no room in between. It is safe as written only
+    # because it is a veto: a symbol has to have *already* cleared the trend-strength threshold
+    # in this direction to get here, and the two disagree on about 1% of sessions.
+    # The deadband makes the crossing hysteretic rather than strict. On entry it is measured on
+    # the side the thesis needs (be decisively there); on exit it is measured on the *opposite*
+    # side (be decisively wrong before the thesis is declared broken), so a position is not closed
+    # by the same cent-wide flicker that would have been too weak to open it.
+    # Exit only -- see ``exit_trend_band_atr``. On the way in the crossing is a veto on a
+    # direction ``trend_strength`` has already proposed, so there is no flicker for a band to
+    # absorb; on the way out it decides whether a thesis is broken, and there is.
+    band_atr = float(getattr(config, "exit_trend_band_atr", 0.0)) if for_exit else 0.0
+    band = band_atr * atr if atr > 0 else 0.0
+    threshold = (fast + band if bearish else fast - band) if for_exit else fast
+    side_ok = bool(fast > 0 and (price < threshold if bearish else price > threshold))
     checks.append(Check(
-        label="Above the trend",
-        ok=above_fast,
-        value=f"${price:,.2f} vs {int(config.regime_fast_ma_days)}d ${fast:,.2f}",
-        limit=f"price > {int(config.regime_fast_ma_days)}d average",
-        blocking=not above_fast,
+        label="Below the trend" if bearish else "Above the trend",
+        ok=side_ok,
+        value=(
+            f"${price:,.2f} vs {int(config.regime_fast_ma_days)}d ${fast:,.2f}"
+            + (f" — {(price - fast) / atr:+.2f} ATR" if atr > 0 else "")
+        ),
+        limit=(
+            f"price {'<' if bearish else '>'} ${threshold:,.2f}"
+            + (f" ({int(config.regime_fast_ma_days)}d average "
+               f"{'+' if threshold > fast else '-'} {abs(band_atr):.2f} ATR"
+               f"{', conceding on the way out' if for_exit else ''})"
+               if band_atr else f" ({int(config.regime_fast_ma_days)}d average)")
+        ),
+        blocking=not side_ok,
     ))
 
 
@@ -118,12 +158,21 @@ def bull_regime(
     # Downside only. An up-gap is followed by a *smaller* pullback (corr -0.156 IBIT, -0.118
     # GLD), so it is directionally favourable and merely makes the entry less likely to fill --
     # which the touch probability already prices. A gap down is what breaks the bull thesis.
-    calm_open = gap_atr >= -float(config.max_gap_down_atr)
+    # One ceiling, applied to whichever end of the open is adverse for this direction.
+    ceiling = float(config.gap_atr)
+    if bearish:
+        calm_open = gap_atr <= ceiling
+        gap_label = "Open not a gap up"
+        gap_limit = f"gap ≤ +{ceiling:.2f} ATR (down-gaps are allowed)"
+    else:
+        calm_open = gap_atr >= -ceiling
+        gap_label = "Open not a gap down"
+        gap_limit = f"gap ≥ -{ceiling:.2f} ATR (up-gaps are allowed)"
     checks.append(Check(
-        label="Open not a gap down",
+        label=gap_label,
         ok=calm_open,
         value=f"{gap_atr:+.2f} ATR ({(session_open / prior_close - 1.0) if prior_close else 0:+.2%})",
-        limit=f"gap ≥ -{float(config.max_gap_down_atr):.2f} ATR (up-gaps are allowed)",
+        limit=gap_limit,
         blocking=not calm_open and not for_exit,
     ))
 
@@ -134,19 +183,28 @@ def bull_regime(
     # Above VWAP, or below it but recovering off the opening-range low -- the spec's "above, or
     # recovering toward". A symbol pinned under VWAP *and* under its opening low is not pulling
     # back within an uptrend, it is falling.
-    above = price > vwap > 0
-    recovering = bool(vwap > 0 and price > opening["low"] > 0 and price <= vwap)
-    vwap_ok = above or recovering
+    if bearish:
+        # The reflection: a symbol pinned *above* VWAP and above its opening high is not selling
+        # off within a downtrend, it is rallying.
+        on_side = bool(vwap > 0 and price < vwap)
+        fading = bool(vwap > 0 and 0 < opening["high"] and price < opening["high"] and price >= vwap)
+        vwap_ok = on_side or fading
+        vwap_note = (" — below" if on_side else (" — fading off the opening high" if fading
+                                                 else " — above, and above the opening high"))
+        vwap_limit = "below VWAP, or fading toward it"
+    else:
+        on_side = price > vwap > 0
+        fading = bool(vwap > 0 and price > opening["low"] > 0 and price <= vwap)
+        vwap_ok = on_side or fading
+        vwap_note = (" — above" if on_side else (" — recovering off the opening low" if fading
+                                                 else " — below, and below the opening low"))
+        vwap_limit = "above VWAP, or recovering toward it"
     checks.append(Check(
-        label="Holding VWAP",
+        label="Under VWAP" if bearish else "Holding VWAP",
         ok=vwap_ok,
-        value=(
-            f"${price:,.2f} vs VWAP ${vwap:,.2f}"
-            + (" — above" if above else (" — recovering off the opening low" if recovering
-                                         else " — below, and below the opening low"))
-            if vwap > 0 else "no intraday volume yet"
-        ),
-        limit="above VWAP, or recovering toward it",
+        value=(f"${price:,.2f} vs VWAP ${vwap:,.2f}" + vwap_note if vwap > 0
+               else "no intraday volume yet"),
+        limit=vwap_limit,
         blocking=not vwap_ok and not for_exit,
     ))
 
@@ -174,3 +232,19 @@ def bull_regime(
 
     eligible = all(not check.blocking for check in checks)
     return eligible, readings, checks
+
+
+#: The long-side name this module carried while it was the only side. Kept so nothing that only
+#: ever wanted the bull gates has to learn about directions.
+def bull_regime(
+    daily_bars: pd.DataFrame,
+    intraday_today: pd.DataFrame,
+    *,
+    price: float,
+    config: Any,
+    for_exit: bool = False,
+) -> tuple[bool, dict[str, Any], list[Check]]:
+    return regime(
+        daily_bars, intraday_today, price=price, config=config,
+        direction=CALL, for_exit=for_exit,
+    )

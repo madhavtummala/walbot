@@ -52,7 +52,15 @@ def _summarize(symbol: str, log: pd.DataFrame, daily: pd.DataFrame) -> dict[str,
         "wins": 0, "losses": 0, "win_rate": 0.0,
         "avg_pl": 0.0, "max_gain": 0.0, "max_loss": 0.0, "total_pl": 0.0,
         "still_held": int(((daily["state_at_close"] == "held")).iloc[-1]) if not daily.empty else 0,
+        "open_pl": 0.0,
     }
+    # Unrealized, kept in its own column rather than folded into ``total_pl``: a mark is not a
+    # fill, and a variant whose result rests on an open position should not be comparable to one
+    # that closed its trades without that being visible. See ``MARK_OPEN`` in the walk-forward.
+    if not log.empty and "event" in log:
+        marks = log[log["event"] == "MARK_OPEN"]
+        if not marks.empty:
+            row["open_pl"] = float(((marks["price"] - marks["entry_price"]) * MULTIPLIER).sum())
     if exits.empty:
         return row
     dollar_pl = (exits["price"] - exits["entry_price"]) * MULTIPLIER

@@ -172,7 +172,7 @@ algorithms:
     min_dte: 10
     min_open_interest: 100
     max_spread_pct: 0.06
-    max_gap_down_atr: 1
+    gap_atr: 1
     max_annual_volatility: 0.8
     plan:
       call:

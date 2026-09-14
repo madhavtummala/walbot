@@ -7,6 +7,18 @@ guarantee a fill, so the touch/target probabilities matter as much as the levels
 
 Horizons are asymmetric: the dip is measured over one session (an unfilled entry is abandoned at
 the close), the run over the whole hold (that's how long the position has to find it).
+
+**The put side is the same model read in a mirror**, and the vocabulary is worth stating once
+because every name in it is written from the call's point of view. The "dip" is the move *toward*
+the entry -- down for a call, up for a put, since a put is bought into an intraday rally. The
+"run" is the move *away* from it toward the target -- up for a call, down for a put. So
+``E = P + k_entry × ATR`` and ``T = E - k_target × ATR`` on the short side, and both quantiles
+are learned from the same sessions measured in the opposite direction.
+
+This is a reflection, not a finding. Measured across 9 ETFs and 25,326 sessions, the two sides
+are *not* empirically symmetric: adverse and favourable excursions stay within 14% of each other
+everywhere on the short side, where the long side's edge is what this model was tuned against. The
+mirror is the honest starting point; the quantiles it should use are a walk-forward question.
 """
 
 from __future__ import annotations
@@ -15,6 +27,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+
+from ...core.options import CALL, PUT
 
 #: Below this many comparable sessions a bucket is anecdote and the unconditional sample is used.
 MIN_BUCKET = 20
@@ -30,14 +44,19 @@ def _day_frames(intraday_history: pd.DataFrame, lookback: int = 0) -> list[pd.Da
 
 def excursion_samples(
     intraday_history: pd.DataFrame, *, minute: int, atr: float, lookback: int = 0,
-    run_horizon: int = 1,
+    run_horizon: int = 1, direction: str = CALL,
 ) -> pd.DataFrame:
     """For each past session: the further dip and further run from ``minute``, in ATR units.
 
     The dip is a single-session measure (an unfilled entry is abandoned at the close); the run is
     measured over ``run_horizon`` (``max_hold_sessions``) sessions, since that's how long a hold
     has to find it. ATR units so one set of multiples works across symbols and vol regimes.
+
+    Both columns are returned as positive magnitudes whichever side is asked for, so every
+    quantile and comparison downstream is sign-free and the direction is applied exactly once,
+    in :func:`conditional_levels`, when the magnitudes become prices.
     """
+    bearish = direction == PUT
     rows = []
     frames = _day_frames(intraday_history, lookback)
     span = max(int(run_horizon), 1)
@@ -55,11 +74,21 @@ def excursion_samples(
         forward = frames[index:index + span]
         if len(forward) < span:
             continue
-        highs = [float(after["high"].astype(float).max())]
-        highs += [float(f["high"].astype(float).max()) for f in forward[1:]]
+        if bearish:
+            # A put is bought into the session's further *rise* and paid by the multi-session
+            # *fall* that follows -- the same two windows, read the other way up.
+            lows = [float(after["low"].astype(float).min())]
+            lows += [float(f["low"].astype(float).min()) for f in forward[1:]]
+            dip = (float(after["high"].astype(float).max()) - price) / atr
+            run = (price - min(lows)) / atr
+        else:
+            highs = [float(after["high"].astype(float).max())]
+            highs += [float(f["high"].astype(float).max()) for f in forward[1:]]
+            dip = (price - float(after["low"].astype(float).min())) / atr
+            run = (max(highs) - price) / atr
         rows.append({
-            "dip": (price - float(after["low"].astype(float).min())) / atr,
-            "run": (max(highs) - price) / atr,
+            "dip": dip,
+            "run": run,
             "pos_vs_open": (price / session_open - 1.0) if session_open > 0 else 0.0,
         })
     return pd.DataFrame(rows)
@@ -73,6 +102,7 @@ def conditional_levels(
     session_open: float,
     atr: float,
     config: Any,
+    direction: str = CALL,
 ) -> dict[str, Any]:
     """``E``, ``T`` and the probabilities of reaching them, from comparable sessions.
 
@@ -89,6 +119,7 @@ def conditional_levels(
         intraday_history, minute=minute, atr=atr,
         lookback=int(getattr(config, "level_lookback_days", 0) or 0),
         run_horizon=int(getattr(config, "max_hold_sessions", 1) or 1),
+        direction=direction,
     )
     if samples.empty:
         return blank
@@ -116,8 +147,10 @@ def conditional_levels(
     k_target = float(np.quantile(runs, 1.0 - float(config.exit_reach)))
     p_target = float((runs >= k_target).mean()) if len(runs) else 0.0
 
-    entry = price - k_entry * atr
-    target = entry + k_target * atr
+    # The one place the direction becomes a price. Everything above is a magnitude.
+    step = -1.0 if direction == PUT else 1.0
+    entry = price - step * k_entry * atr
+    target = entry + step * k_target * atr
 
     return {
         "entry": entry, "target": target,

@@ -1467,7 +1467,7 @@ def test_every_gate_that_can_refuse_a_trade_is_in_the_formula() -> None:
 
     formula = " ".join(EXPLAINERS["options_flip"]["formula"])
     for knob in (
-        "min_trend_strength", "regime_fast_ma_days", "VWAP", "max_gap_down_atr",
+        "min_trend_strength", "regime_fast_ma_days", "VWAP", "gap_atr",
         "entry_reach", "exit_reach", "entry_cutoff_fraction", "min_profit_per_contract",
         "max_annual_volatility", "min_dte", "target_delta", "min_open_interest",
         "max_quote_age_seconds",

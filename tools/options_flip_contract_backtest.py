@@ -52,7 +52,7 @@ from src.algorithms.options_flip.levels import conditional_levels
 from src.algorithms.options_flip.lifecycle import HELD, plan_symbol
 from src.algorithms.options_flip.option_band import choose_band, prepare_option_bars
 from src.algorithms.options_flip.regime import bull_regime
-from src.core.options import CALL, black_scholes_delta
+from src.core.options import CALL, PUT, black_scholes_delta
 from src.data.bars import read_history
 
 logger = logging.getLogger("optflip_contract")
@@ -99,8 +99,14 @@ def _load_intraday(symbol: str) -> pd.DataFrame:
     return merged.copy()
 
 
-def _load_option_strikes(symbol: str) -> pd.DataFrame:
-    st = pd.read_csv(os.path.join(CACHE, f"{symbol}_optstrikes.csv"))
+def _load_option_strikes(symbol: str, option_type: str = CALL) -> pd.DataFrame:
+    """Every cached strike's 5m bars for one side, concatenated with strike/OI carried along.
+
+    The two sides live in separate summary files because they were fetched separately and a put
+    at strike 600 is a different contract from the call at 600 -- see ``_optcache/fetch.py``.
+    """
+    summary = f"{symbol}_putstrikes.csv" if option_type == PUT else f"{symbol}_optstrikes.csv"
+    st = pd.read_csv(os.path.join(CACHE, summary))
     maps = []
     for _, row in st.iterrows():
         path = os.path.join(CACHE, row["file"])
@@ -144,9 +150,9 @@ def _realized_ann_vol(daily: pd.DataFrame, asof: date) -> float:
     return float(r.std() * (252 ** 0.5)) if len(r) >= 2 else 0.0
 
 
-def _bs_delta(spot: float, strike: float, asof: date, vol: float) -> float:
+def _bs_delta(spot: float, strike: float, asof: date, vol: float, option_type: str = CALL) -> float:
     years = max((EXPIRY - asof).days, 0) / 365.0
-    return black_scholes_delta(spot, strike, years, vol, CALL)
+    return black_scholes_delta(spot, strike, years, vol, option_type)
 
 
 # ── the economic "Worth trading" gate on the option's own historical price ────
@@ -158,29 +164,41 @@ def _bs_delta(spot: float, strike: float, asof: date, vol: float) -> float:
 # greeks. That IV is the only piece real option data supplies that a generic realized-vol delta
 # cannot, and it is exactly what makes a 1-month contract "worse" than a near-dated one worth
 # measuring.
-def _bs_price_iv(spot: float, strike: float, years: float, price: float) -> float:
+def _bs_price_iv(spot: float, strike: float, years: float, price: float,
+                 option_type: str = CALL) -> float:
+    """IV backed out of the contract's own real mark, by bisection on its own price formula.
+
+    The put must be inverted against the *put* price, not the call's. Inverting a put's mark
+    against the call formula does not fail visibly -- it converges on whatever IV makes a call
+    worth what the put costs, which for an in-the-money put is a wildly wrong number, and every
+    greek derived from it is then wrong in the same direction.
+    """
     from math import log, sqrt, erf, exp
 
     def _norm(x):
         return 0.5 * (1.0 + erf(x / sqrt(2.0)))
 
-    def _bs_call(iv):
+    def _bs_price(iv):
         sd = sqrt(max(years, 1e-6))
         d1 = (log(spot / strike) + (0.04 + 0.5 * iv * iv) * years) / (iv * sd)
         d2 = d1 - iv * sd
-        return spot * _norm(d1) - strike * exp(-0.04 * years) * _norm(d2)
+        discounted = strike * exp(-0.04 * years)
+        if option_type == PUT:
+            return discounted * _norm(-d2) - spot * _norm(-d1)
+        return spot * _norm(d1) - discounted * _norm(d2)
 
     lo, hi = 0.05, 4.0
     for _ in range(80):
         mid = (lo + hi) / 2
-        if _bs_call(mid) > price:
+        if _bs_price(mid) > price:
             hi = mid
         else:
             lo = mid
     return (lo + hi) / 2
 
 
-def _bs_greeks(spot: float, strike: float, years: float, iv: float, price: float) -> dict:
+def _bs_greeks(spot: float, strike: float, years: float, iv: float, price: float,
+               option_type: str = CALL) -> dict:
     from math import log, sqrt, exp, erf, pi
 
     def _norm_pdf(x):
@@ -195,16 +213,25 @@ def _bs_greeks(spot: float, strike: float, years: float, iv: float, price: float
         return {}
     d1 = (log(spot / strike) + (r + 0.5 * iv * iv) * years) / (iv * sd)
     d2 = d1 - iv * sd
-    delta = _norm(d1)
+    # Gamma and vega are the same for both sides (put-call parity differentiates away); delta and
+    # theta are not. A put's delta is negative, which is the sign ``option_price_for`` and the
+    # delta band both rely on -- returning the call's positive delta for a put would translate an
+    # underlying *fall* into a premium *fall*, i.e. price the trade exactly backwards.
     gamma = _norm_pdf(d1) / (spot * iv * sd)
     vega = spot * _norm_pdf(d1) * sqrt(years) / 100.0  # per IV point (chain convention)
-    theta = -(spot * _norm_pdf(d1) * iv) / (2 * sd) - r * strike * exp(-r * years) * _norm(d2)
+    carry = r * strike * exp(-r * years)
+    if option_type == PUT:
+        delta = _norm(d1) - 1.0
+        theta = -(spot * _norm_pdf(d1) * iv) / (2 * sd) + carry * _norm(-d2)
+    else:
+        delta = _norm(d1)
+        theta = -(spot * _norm_pdf(d1) * iv) / (2 * sd) - carry * _norm(d2)
     return {"delta": delta, "gamma": gamma, "vega": vega, "theta": theta / 365.0, "implied_vol": iv}
 
 
 def _worth_trading_gate(
     spot: float, strike: float, asof: date, opt_mark: float,
-    entry_underlying: float, target_underlying: float, cfg,
+    entry_underlying: float, target_underlying: float, cfg, option_type: str = CALL,
 ) -> tuple[bool, float]:
     """Run the production worth-trading logic and return (passes, per_contract_profit)."""
     from src.algorithms.options_flip.pricing import expected_profit, scenarios
@@ -212,8 +239,8 @@ def _worth_trading_gate(
     if opt_mark <= 0 or spot <= 0:
         return False, 0.0
     years = max((EXPIRY - asof).days, 0) / 365.0
-    iv = _bs_price_iv(spot, strike, years, opt_mark)
-    g = _bs_greeks(spot, strike, years, iv, opt_mark)
+    iv = _bs_price_iv(spot, strike, years, opt_mark, option_type)
+    g = _bs_greeks(spot, strike, years, iv, opt_mark, option_type)
     if not g or iv <= 0:
         return False, 0.0
     contract = SimpleNamespace(delta=g["delta"], gamma=g["gamma"], vega=g["vega"], theta=g["theta"])
