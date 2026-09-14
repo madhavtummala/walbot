@@ -25,7 +25,12 @@ COPY web ./web
 COPY data/tradable_etfs.csv ./data/tradable_etfs.csv
 # Shipped defaults live outside /config: that path is bind-mounted at runtime, which
 # shadows anything baked into it. The entrypoint seeds missing files from here.
-COPY --chown=app:app config/ ./config-defaults/
+#
+# The template by name, not the whole directory. Copying config/ would bake whatever live
+# walbot.yaml the builder happens to have sitting there into a published image -- the file is
+# gitignored, not build-ignored, so a local `docker build .` would have picked up real account
+# numbers. Naming the one shipped file makes that impossible rather than merely unlikely.
+COPY --chown=app:app config/walbot.yaml.sample ./config-defaults/
 
 USER app
 EXPOSE 8000
