@@ -19,13 +19,19 @@ from typing import Any, Dict, Iterable, List
 Fill = Dict[str, Any]
 
 
-def realized_from_fills(fills: Iterable[Fill]) -> Dict[str, Any]:
+def realized_from_fills(fills: Iterable[Fill], *, since: str = "") -> Dict[str, Any]:
     """Realized P/L across a sequence of fills, oldest first.
 
     Returns ``{realized_pl, closes, unmatched}``. ``unmatched`` counts sells this could find no
     open position for, which happens for a position opened before the window began -- its cost
     is genuinely unknown, so it is left out of the total and counted instead. A caller that
     reports the total without the count would be publishing a number that is quietly too small.
+
+    ``since`` (an ISO date) scopes which *closes* count, without scoping which buys inform the
+    basis. That distinction is the whole point: a year-to-date figure must still know what a
+    position bought last November cost, so the walk always starts from the earliest fill it was
+    given and only the counting begins at ``since``. Filtering the fills themselves instead
+    would invent an unmatched sell for every position opened before January.
     """
     #: Open position per symbol, as running shares and running average cost per share.
     open_lots: Dict[str, List[float]] = {}
@@ -41,6 +47,9 @@ def realized_from_fills(fills: Iterable[Fill]) -> Dict[str, Any]:
         if not symbol or quantity <= 0 or price <= 0:
             continue
 
+        # Compared as ISO text, which sorts chronologically -- the same property the walk
+        # below already relies on for ordering.
+        counts = not since or str(fill.get("date") or "")[:10] >= since
         shares, average = open_lots.get(symbol, [0.0, 0.0])
         if str(fill.get("action") or "").lower() == "buy":
             total = shares + quantity
@@ -53,15 +62,18 @@ def realized_from_fills(fills: Iterable[Fill]) -> Dict[str, Any]:
         if shares <= 0:
             # A sell with nothing open: either a short, or a close of something bought before
             # the window. Both make the basis unknowable from this feed alone.
-            unmatched += 1
+            unmatched += 1 if counts else 0
             continue
 
         # A sell larger than what is open closes what it can; the rest is unmatched.
         closed = min(quantity, shares)
-        realized += (price - average) * closed * multiplier
-        closes += 1
-        if quantity > shares:
-            unmatched += 1
+        if counts:
+            realized += (price - average) * closed * multiplier
+            closes += 1
+            if quantity > shares:
+                unmatched += 1
+        # The position shrinks either way. A close before ``since`` is not counted, but it did
+        # happen, and leaving the shares open would let a later sell match against them twice.
         open_lots[symbol] = [shares - closed, average]
 
     return {"realized_pl": realized, "closes": closes, "unmatched": unmatched}

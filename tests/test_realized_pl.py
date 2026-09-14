@@ -102,3 +102,64 @@ def test_an_account_that_never_closed_anything_has_realized_nothing() -> None:
     result = realized_from_fills([_fill("SPY", "buy", 10, 100.0, "2026-09-01")])
 
     assert result == {"realized_pl": 0.0, "closes": 0, "unmatched": 0}
+
+
+def test_year_to_date_counts_only_this_years_closes() -> None:
+    """A loss banked last December is not this year's business."""
+    result = realized_from_fills(
+        [
+            _fill("QQQ", "buy", 5, 50.0, "2025-10-01"),
+            _fill("QQQ", "sell", 5, 40.0, "2025-12-01"),
+            _fill("SPY", "buy", 10, 100.0, "2026-02-01"),
+            _fill("SPY", "sell", 10, 120.0, "2026-03-01"),
+        ],
+        since="2026-01-01",
+    )
+
+    assert result["realized_pl"] == 200.0
+    assert result["closes"] == 1
+
+
+def test_year_to_date_still_knows_what_a_position_cost_last_year() -> None:
+    """The cutoff scopes which closes count, never which buys inform the basis.
+
+    Filtering the fills themselves would invent an unmatched sell for every position opened
+    before January -- and report a year-to-date figure of nothing at all for an account that
+    simply holds things longer than a calendar year.
+    """
+    fills = [
+        _fill("SPY", "buy", 10, 100.0, "2025-11-01"),
+        _fill("SPY", "sell", 10, 120.0, "2026-02-01"),
+    ]
+
+    result = realized_from_fills(fills, since="2026-01-01")
+
+    assert result["realized_pl"] == 200.0
+    assert result["unmatched"] == 0, "the November buy is known, so nothing is unmatched"
+
+
+def test_a_close_before_the_cutoff_still_consumes_the_position() -> None:
+    """It happened, even though it is not counted.
+
+    Leaving those shares open would let a later sell match against them a second time, and
+    report a gain the account never made.
+    """
+    result = realized_from_fills(
+        [
+            _fill("SPY", "buy", 10, 100.0, "2025-06-01"),
+            _fill("SPY", "sell", 10, 110.0, "2025-07-01"),
+            _fill("SPY", "sell", 10, 130.0, "2026-03-01"),
+        ],
+        since="2026-01-01",
+    )
+
+    assert result["realized_pl"] == 0.0, "nothing was open left to sell in 2026"
+    assert result["unmatched"] == 1
+
+
+def test_an_unmatched_sell_before_the_cutoff_is_not_this_years_problem() -> None:
+    result = realized_from_fills(
+        [_fill("SPY", "sell", 10, 110.0, "2025-07-01")], since="2026-01-01"
+    )
+
+    assert result["unmatched"] == 0

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from alpaca.trading.enums import QueryOrderStatus
@@ -33,8 +33,9 @@ from ..controls import load_controls
 logger = logging.getLogger(__name__)
 
 
-#: How far back realized P/L is matched. The same trailing year as income, for the same
-#: reason -- it is one request, and it is inside Schwab's transactions window.
+#: How far back fills are read. Still a trailing year: it is one request, it is inside Schwab's
+#: transactions window, and it is the widest basis the year-to-date figure can be matched from.
+#: What the page *reports* is year to date -- see ``_realized_pl``.
 REALIZED_ACTIVITY_DAYS = 364
 
 #: How far back the account page totals income. Just under a year: comparable to a trailing
@@ -142,7 +143,10 @@ def _realized_pl(brokerage: Any, config: Any) -> dict[str, Any]:
     """
     from ...brokerages.realized import realized_from_fills
 
-    blank = {"realized_pl": None, "realized_closes": 0, "realized_unmatched": 0}
+    blank = {
+        "realized_pl": None, "realized_closes": 0, "realized_unmatched": 0,
+        "realized_pl_1y": None, "realized_year": "",
+    }
     try:
         end = datetime.now(timezone.utc).date()
         fills = brokerage.get_fills(end - timedelta(days=REALIZED_ACTIVITY_DAYS), end)
@@ -153,13 +157,21 @@ def _realized_pl(brokerage: Any, config: Any) -> dict[str, Any]:
     # that has not closed anything -- the first is unknown, the second is zero.
     if fills is None:
         return blank
-    matched = realized_from_fills(fills)
+    # One fetch, two windows: the trailing year contains the calendar year to date, so asking
+    # twice would be asking the same question twice.
+    year_start = date(end.year, 1, 1).isoformat()
+    ytd = realized_from_fills(fills, since=year_start)
+    trailing = realized_from_fills(fills)
     return {
-        "realized_pl": matched["realized_pl"],
-        "realized_closes": matched["closes"],
+        # Year to date leads, because it is the figure a broker's own statement shows and so
+        # the only one a reader can check us against.
+        "realized_pl": ytd["realized_pl"],
+        "realized_closes": ytd["closes"],
         # Sells this could find no opening buy for, because the position was opened before the
         # window. Surfaced so the page can say the total is partial instead of just being wrong.
-        "realized_unmatched": matched["unmatched"],
+        "realized_unmatched": ytd["unmatched"],
+        "realized_pl_1y": trailing["realized_pl"],
+        "realized_year": str(end.year),
     }
 
 
@@ -220,6 +232,8 @@ def _blank_analytics(account_id: str) -> dict[str, Any]:
         "realized_pl": None,
         "realized_closes": 0,
         "realized_unmatched": 0,
+        "realized_pl_1y": None,
+        "realized_year": "",
         "error": "",
     }
 

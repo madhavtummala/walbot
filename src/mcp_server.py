@@ -263,8 +263,11 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
         this morning differ in the first and can agree in the second.
 
         ``realized_pl`` is the third and measures what the other two cannot: profit already
-        banked, matched from the broker's fills over the trailing year, and read fresh on
-        every call to this tool. It carries its own ``computed_at`` regardless, because the
+        banked. It is **year to date**, matched from the broker's fills, and read fresh on every
+        call to this tool; ``realized_pl_1y`` is the same figure over the trailing year, and
+        ``realized_year`` names the calendar year the first one covers. Year to date leads
+        because it is what a broker's own statement totals, so it is the one figure here a user
+        can check against their account. It carries its own ``computed_at`` regardless, because the
         dashboard serves the same figure from a background recompute and may show it older. An account that closed a
         winning trade and went back to cash holds nothing, so its open and day figures are both
         zero while ``realized_pl`` carries the entire gain -- never read a zero ``total_pl`` as

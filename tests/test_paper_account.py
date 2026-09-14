@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from src.api.api_payloads import account_activity_payload, accounts_payload, positions_payload
@@ -814,3 +816,46 @@ def test_both_figures_come_from_one_resolved_brokerage(monkeypatch) -> None:
     accounts.account_analytics_payload("schwab2", refresh=True)
 
     assert len(resolved) == 1
+
+
+def test_the_page_reports_year_to_date_and_carries_the_trailing_year_beside_it(monkeypatch) -> None:
+    """Year to date leads because it is what a broker's own statement totals.
+
+    A Schwab account reported a trailing-year profit against the broker's own year-to-date
+    loss, and the two were never comparable in the first place.
+    """
+    from src.api.payloads import accounts
+    from src.common.lazy_field import LazyField
+
+    class FakeBrokerage:
+        def get_dividend_activity(self, start=None, end=None):
+            return []
+
+        def get_fills(self, start=None, end=None):
+            year = datetime.now(timezone.utc).year
+            return [
+                # Last year's loss: inside the trailing year, outside this calendar one.
+                {"symbol": "QQQ", "action": "buy", "quantity": 5.0, "price": 50.0,
+                 "multiplier": 1.0, "date": f"{year - 1}-10-01"},
+                {"symbol": "QQQ", "action": "sell", "quantity": 5.0, "price": 40.0,
+                 "multiplier": 1.0, "date": f"{year - 1}-12-01"},
+                # This year's gain, opened before January -- the basis still has to be known.
+                {"symbol": "SPY", "action": "buy", "quantity": 10.0, "price": 100.0,
+                 "multiplier": 1.0, "date": f"{year - 1}-11-01"},
+                {"symbol": "SPY", "action": "sell", "quantity": 10.0, "price": 120.0,
+                 "multiplier": 1.0, "date": f"{year}-02-01"},
+            ]
+
+    _patch_payloads(monkeypatch, "get_account_broker_type", lambda _account: "schwab")
+    monkeypatch.setattr("src.core.pipeline.resolve_brokerage", lambda _config: FakeBrokerage())
+    monkeypatch.setattr(
+        accounts, "ANALYTICS",
+        LazyField("test", accounts._compute_analytics, spawn=lambda work: work()),
+    )
+
+    payload = accounts.account_analytics_payload("schwab2", refresh=True)
+
+    assert payload["realized_pl"] == 200.0, "year to date: the SPY gain only"
+    assert payload["realized_pl_1y"] == 150.0, "trailing year: the QQQ loss as well"
+    assert payload["realized_year"] == str(datetime.now(timezone.utc).year)
+    assert payload["realized_unmatched"] == 0

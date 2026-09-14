@@ -2535,17 +2535,13 @@ function renderAccountPage(content, accountId) {
             : `${escapeHtml(money(positions.day_pl, 2))} (${escapeHtml(percent(positions.day_pl_percent))})`}</strong></div>
         <div class="metric"><span>Open P/L</span><strong class="${(positions?.total_pl || 0) >= 0 ? "gain" : "loss"}">${
           positions ? escapeHtml(money(positions.total_pl, 2)) : "--"}</strong></div>
-        <div class="metric"><span>Realized P/L (1y)</span><strong class="${(analytics?.realized_pl || 0) >= 0 ? "gain" : "loss"}">${
+        <div class="metric"><span>Realized P/L${analytics?.realized_year ? ` (${escapeHtml(analytics.realized_year)})` : " (YTD)"}</span><strong class="${(analytics?.realized_pl || 0) >= 0 ? "gain" : "loss"}">${
           // Banked profit, which Open P/L cannot show: an account that closed a winning trade
-          // and went back to cash has no open position left to carry the gain.
+          // and went back to cash has no open position left to carry the gain. Year to date
+          // rather than trailing, so it lines up with what the broker's own statement totals.
           analytics?.realized_pl === null || analytics?.realized_pl === undefined
             ? "--"
-            : escapeHtml(money(analytics.realized_pl, 2))}</strong>${
-          // Sells whose opening buy predates the window: the total is real but partial, and
-          // saying so beats quietly reporting a number that is too small.
-          analytics?.realized_unmatched
-            ? `<span class="tableNote">+ ${analytics.realized_unmatched} unmatched</span>`
-            : ""}</div>
+            : escapeHtml(money(analytics.realized_pl, 2))}</strong>${realizedNote(analytics)}</div>
         <div class="metric"><span>Dividends (1y)</span><strong class="${(analytics?.dividend_pl || 0) >= 0 ? "gain" : "loss"}">${
           // Reported beside Open P/L, never inside it. Price appreciation and income are
           // different things, and a T-bill sleeve earns almost entirely through this one.
@@ -2599,6 +2595,19 @@ function renderAccountPage(content, accountId) {
     // position read. The Refresh button is what recomputes.
     ensureAnalytics(account.id);
   }
+}
+
+function realizedNote(analytics) {
+  // Two things worth saying under the headline figure, and both are caveats rather than
+  // decoration: what the trailing year says, and how much of the window could not be priced.
+  const parts = [];
+  if (analytics?.realized_pl_1y !== null && analytics?.realized_pl_1y !== undefined) {
+    parts.push(`${money(analytics.realized_pl_1y, 2)} over 1y`);
+  }
+  // Sells whose opening buy predates the window: the total is real but partial, and saying so
+  // beats quietly reporting a number that is too small.
+  if (analytics?.realized_unmatched) parts.push(`${analytics.realized_unmatched} unmatched`);
+  return parts.length ? `<span class="tableNote">${escapeHtml(parts.join(" · "))}</span>` : "";
 }
 
 function analyticsNote(analytics, busy) {
