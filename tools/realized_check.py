@@ -6,7 +6,10 @@ symbol and date of each sell that had no opening buy to match against.
 
 Run it where the broker's credentials already live, so only one machine touches them:
 
-    docker exec walbot python -m tools.realized_check schwab_main
+    docker exec walbot python -m tools.realized_check schwab3
+
+Pass ``--raw`` to dump the broker's own transaction JSON instead, which is how to tell whether
+a closing trade carries its own cost basis.
 """
 
 from __future__ import annotations
@@ -17,6 +20,48 @@ from datetime import datetime, timedelta, timezone
 from src.api.payloads.accounts import REALIZED_ACTIVITY_DAYS
 from src.core.config import get_config
 from src.core.pipeline import resolve_brokerage
+
+
+def dump_raw(account_id: str = "", limit: int = 3) -> int:
+    """Print raw Schwab TRADE transactions, to see what the broker actually sends.
+
+    The matcher reconstructs cost basis by pairing sells against buys, which cannot work for a
+    position opened before the window began. If Schwab reports a cost basis on the closing trade
+    itself, no pairing is needed and the window stops mattering -- so the first question is
+    whether that field is there. This prints the JSON rather than guessing at it.
+    """
+    import json
+
+    config = get_config(account_id=account_id) if account_id else get_config()
+    brokerage = resolve_brokerage(config)
+    end = datetime.now(timezone.utc).date()
+    start = end - timedelta(days=REALIZED_ACTIVITY_DAYS)
+    if not hasattr(brokerage, "_transactions"):
+        print(f"{config.account_id}: this broker exposes no raw transaction feed to dump.")
+        return 0
+
+    rows = brokerage._transactions("TRADE", start, end)
+    print(f"{config.account_id}: {len(rows)} TRADE transactions; showing up to {limit} sells\n")
+    shown = 0
+    for item in rows:
+        legs = item.get("transferItems") or []
+        # A sell is the interesting one: it is the leg that would carry a cost basis.
+        if not any(float(leg.get("amount") or 0.0) < 0 for leg in legs):
+            continue
+        print(json.dumps(item, indent=2)[:2000])
+        print("-" * 70)
+        shown += 1
+        if shown >= limit:
+            break
+    if not shown:
+        print("No sells in the window.")
+    else:
+        print(
+            "\nLook for a cost-basis field on the sold leg. If Schwab sends one, realized P/L\n"
+            "can be read per trade instead of reconstructed, and every unmatched sell above\n"
+            "stops being unmatched."
+        )
+    return 0
 
 
 def main(account_id: str = "") -> int:
@@ -87,4 +132,6 @@ def main(account_id: str = "") -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1] if len(sys.argv) > 1 else ""))
+    positional = [arg for arg in sys.argv[1:] if not arg.startswith("-")]
+    account = positional[0] if positional else ""
+    raise SystemExit(dump_raw(account) if "--raw" in sys.argv else main(account))
