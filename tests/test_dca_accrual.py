@@ -227,7 +227,7 @@ def test_hourly_and_daily_cadences_deploy_the_same_monthly_total(monkeypatch) ->
 
 
 def test_an_empty_plan_trades_nothing(monkeypatch) -> None:
-    """Turning the algorithm off is the binding's switch, not the plan's -- a disabled binding
+    """Turning the algorithm off is the deployment's switch, not the plan's -- a disabled one
     never reaches ``plan`` at all. Emptying the plan is the only "off" the algorithm has.
     """
     simulation = _steady_simulation(

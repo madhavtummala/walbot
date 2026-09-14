@@ -13,8 +13,8 @@ Anything else: answer it directly.
 
 List the MCP tools and read their descriptions. No copy of them lives here; a copy would drift.
 
-Accounts fan out: `list_accounts()`, then `get_account(id)` and `get_account_orders(id)` per
-row. If one broker fails, report that account and carry on.
+Accounts fan out: `list_accounts()`, then `get_account_positions(id)` and
+`get_account_orders(id)` per row. If one broker fails, report that account and carry on.
 
 ## Rules
 

@@ -95,27 +95,12 @@ tradable_universe:
   - XYLD
 algorithm_bot:
   trading_account_id: alpaca1
-  strategy: bursty_dca
   backtest_period: 3m
-  bindings:
-  - id: b2
-    strategy: bursty_dca
+algorithms:
+  bursty_dca:
     account_id: schwab1
     enabled: false
     cron: 0 11 * * 1-5
-  - id: b4
-    strategy: rally_rotation
-    account_id: alpaca1
-    enabled: false
-    cron: '*/30 10-15 * * 1-5'
-  - id: b5
-    strategy: options_flip
-    account_id: local_paper
-    enabled: false
-    cron: 2/10 10-15 * * 1-5
-  enabled: false
-algorithms:
-  bursty_dca:
     regime_ma_days: 150
     scaling_factor: 0.5
     max_monthly_multiple: 3
@@ -139,6 +124,9 @@ algorithms:
         amount: 0
         items: []
   rally_rotation:
+    account_id: local_paper
+    enabled: false
+    cron: '*/30 10-15 * * 1-5'
     risk_on_universe:
     - QQQM
     - XSD
@@ -167,6 +155,9 @@ algorithms:
     meso_days: 3
     macro_days: 20
   options_flip:
+    account_id: alpaca1
+    enabled: false
+    cron: 2/10 10-15 * * 1-5
     stop_loss_pct: 0.5
     max_hold_sessions: 5
     target_delta: 0.75

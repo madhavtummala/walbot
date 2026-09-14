@@ -32,19 +32,19 @@ class DummyMCP:
         return decorator
 
 
-def _binding(**overrides) -> dict:
-    """A binding an agent is allowed to drive: switched on, parked on ``mcp``."""
-    binding = {"id": "b1", "strategy": "rally_rotation", "account_id": "paper", "enabled": True, "cron": ""}
-    binding.update(overrides)
-    return binding
+def _deployment(**overrides) -> dict:
+    """A deployment an agent is allowed to drive: switched on, no cron."""
+    deployment = {"algorithm": "rally_rotation", "account_id": "paper", "enabled": True, "cron": ""}
+    deployment.update(overrides)
+    return deployment
 
 
-def _build(monkeypatch, bindings: list[dict] | None = None) -> DummyMCP:
+def _build(monkeypatch, deployments: list[dict] | None = None) -> DummyMCP:
     fake_server = DummyMCP()
     monkeypatch.setattr(mcp_server, "_server", lambda *args, **kwargs: fake_server)
-    controls = {"bindings": [_binding()] if bindings is None else bindings}
+    controls = {"deployments": [_deployment()] if deployments is None else deployments}
     # Patched in both namespaces: the tools read controls directly, and
-    # ``resolve_binding_for_origin`` reads them through its own module.
+    # ``resolve_deployment_for_origin`` reads them through its own module.
     monkeypatch.setattr(mcp_server, "load_controls", lambda *a, **k: controls)
     monkeypatch.setattr(controls_module, "load_controls", lambda *a, **k: controls)
     mcp_server.create_mcp_server()
@@ -55,10 +55,10 @@ def test_create_mcp_server_exposes_expected_tools(monkeypatch) -> None:
     fake_server = _build(monkeypatch)
 
     assert [tool.__name__ for tool in fake_server.tools] == [
-        "list_bindings",
+        "list_algorithms",
         "get_algorithm_plan",
         "list_accounts",
-        "get_account",
+        "get_account_positions",
         "get_account_orders",
         "place_orders",
     ]
@@ -77,14 +77,14 @@ def _plan(**overrides) -> AlgorithmPlan:
     return AlgorithmPlan(**fields)
 
 
-def _token(plan: AlgorithmPlan | None = None, *, binding_id: str = "b1", account_id: str = "default") -> str:
+def _token(plan: AlgorithmPlan | None = None, *, algorithm: str = "rally_rotation", account_id: str = "default") -> str:
     """Stash a plan the way get_algorithm_plan would, and return its token.
 
     ``account_id`` matches ``Config()``'s own default, so a test that does not care about the
     account is not tripped by the guard that a plan must execute against the book it was sized
     against.
     """
-    return plan_cache.stash(plan if plan is not None else _plan(), binding_id=binding_id, account_id=account_id)
+    return plan_cache.stash(plan if plan is not None else _plan(), algorithm=algorithm, account_id=account_id)
 
 
 def _placing(monkeypatch, *, positions: dict | None = None, outcome: dict | None = None) -> dict:
@@ -209,7 +209,7 @@ def test_an_expired_plan_is_refused_rather_than_submitted_stale(monkeypatch) -> 
     """A plan commits the prices it was built with, so an old one submits stale limit prices."""
     fake_server = _build(monkeypatch)
     _placing(monkeypatch)
-    token = plan_cache.stash(_plan(), binding_id="b1", account_id="paper", ttl_seconds=1)
+    token = plan_cache.stash(_plan(), algorithm="rally_rotation", account_id="paper", ttl_seconds=1)
     # Reach past the clock rather than sleeping: the expiry is a timestamp comparison.
     monkeypatch.setattr(plan_cache, "_now", lambda: datetime.now(timezone.utc) + timedelta(seconds=30))
 
@@ -219,15 +219,15 @@ def test_an_expired_plan_is_refused_rather_than_submitted_stale(monkeypatch) -> 
     assert "get_algorithm_plan" in result["reason"]
 
 
-def test_a_binding_switched_off_after_planning_refuses_the_submission(monkeypatch) -> None:
+def test_a_deployment_switched_off_after_planning_refuses_the_submission(monkeypatch) -> None:
     """The gap between reviewing and submitting is exactly where a kill decision lands."""
-    controls = {"bindings": [_binding()]}
-    fake_server = _build(monkeypatch, controls["bindings"])
+    controls = {"deployments": [_deployment()]}
+    fake_server = _build(monkeypatch, controls["deployments"])
     _placing(monkeypatch)
     token = _token()
 
     # Switched off while the agent was reading the news.
-    off = {"bindings": [_binding(enabled=False)]}
+    off = {"deployments": [_deployment(enabled=False)]}
     monkeypatch.setattr(mcp_server, "load_controls", lambda *a, **k: off)
     monkeypatch.setattr(controls_module, "load_controls", lambda *a, **k: off)
 
@@ -237,10 +237,10 @@ def test_a_binding_switched_off_after_planning_refuses_the_submission(monkeypatc
     assert "switched off" in result["reason"]
 
 
-def test_a_plan_is_refused_if_its_binding_now_points_at_another_account(monkeypatch) -> None:
+def test_a_plan_is_refused_if_its_algorithm_now_points_at_another_account(monkeypatch) -> None:
     """Quantities are sized against one book's holdings and equity; repointed, they describe an
     account these orders would no longer reach."""
-    fake_server = _build(monkeypatch, [_binding(account_id="schwab2")])
+    fake_server = _build(monkeypatch, [_deployment(account_id="schwab2")])
     _placing(monkeypatch)
     monkeypatch.setattr(mcp_server, "get_config", lambda **kw: Config(kill_switch=False, account_id="schwab2"))
 
@@ -313,7 +313,7 @@ def test_an_edit_cannot_change_a_size(monkeypatch) -> None:
 def test_edits_are_refused_for_an_order_book_plan(monkeypatch) -> None:
     """Reconciliation cancels whatever is not in ``desired_orders``, so removing a leg there
     cancels a resting stop rather than declining an action. No safe partial edit exists."""
-    fake_server = _build(monkeypatch, [_binding(strategy="options_flip")])
+    fake_server = _build(monkeypatch, [_deployment(strategy="options_flip")])
     _placing(monkeypatch)
     plan = AlgorithmPlan(
         strategy="options_flip",
@@ -360,13 +360,13 @@ def test_placing_without_edits_reports_an_empty_edit_list(monkeypatch) -> None:
     assert fake_server.place_orders(_token())["applied_edits"] == []
 
 
-def test_place_orders_refuses_a_binding_the_scheduler_drives(monkeypatch) -> None:
-    """The invariant: one origin per enabled binding, never both.
+def test_place_orders_refuses_a_deployment_the_scheduler_drives(monkeypatch) -> None:
+    """The invariant: one origin per enabled deployment, never both.
 
-    A binding with a cron is the scheduler's. Letting an agent submit for it too is
+    A deployment with a cron is the scheduler's. Letting an agent submit for it too is
     two live origins on one algorithm, which is what this gate exists to prevent.
     """
-    fake_server = _build(monkeypatch, [_binding(cron="30 9 * * 1-5")])
+    fake_server = _build(monkeypatch, [_deployment(cron="30 9 * * 1-5")])
 
     result = fake_server.place_orders(_token())
 
@@ -374,8 +374,8 @@ def test_place_orders_refuses_a_binding_the_scheduler_drives(monkeypatch) -> Non
     assert "scheduler places its orders" in result["reason"].replace(", so the ", " ")
 
 
-def test_place_orders_refuses_a_switched_off_binding(monkeypatch) -> None:
-    fake_server = _build(monkeypatch, [_binding(enabled=False)])
+def test_place_orders_refuses_a_switched_off_deployment(monkeypatch) -> None:
+    fake_server = _build(monkeypatch, [_deployment(enabled=False)])
 
     result = fake_server.place_orders(_token())
 
@@ -383,36 +383,39 @@ def test_place_orders_refuses_a_switched_off_binding(monkeypatch) -> None:
     assert "switched off" in result["reason"]
 
 
-def test_place_orders_refuses_an_algorithm_with_no_binding(monkeypatch) -> None:
-    fake_server = _build(monkeypatch, [_binding(strategy="dca")])
+def test_place_orders_refuses_an_algorithm_with_no_deployment(monkeypatch) -> None:
+    """Only ``dca`` is deployed, and the stashed plan is Rally Rotation's."""
+    fake_server = _build(monkeypatch, [_deployment(algorithm="dca")])
 
-    # No binding id on the stash, so resolution falls back to the plan's own strategy.
-    result = fake_server.place_orders(_token(binding_id=""))
-
-    assert result["status"] == "refused"
-    assert "No binding is configured" in result["reason"]
-
-
-def test_place_orders_refuses_to_guess_between_two_eligible_bindings(monkeypatch) -> None:
-    """Two bindings can share a strategy on different accounts, and guessing the binding is
-    guessing the account -- the difference between a paper order and a real one."""
-    fake_server = _build(monkeypatch, [_binding(id="b1"), _binding(id="b2", account_id="schwab")])
-
-    result = fake_server.place_orders(_token(binding_id=""))
+    result = fake_server.place_orders(_token())
 
     assert result["status"] == "refused"
-    assert "binding_id" in result["reason"]
+    assert "not deployed" in result["reason"]
 
-    # Naming one resolves it.
+
+def test_the_algorithm_alone_names_the_deployment(monkeypatch) -> None:
+    """No disambiguating argument, because ambiguity is unrepresentable.
+
+    One algorithm has at most one account, so the plan's own algorithm resolves the account it
+    submits against. This used to take a second addressing argument precisely because two
+    deployments could share a strategy, and guessing between them was guessing between a paper
+    account and a real one.
+    """
+    fake_server = _build(monkeypatch, [_deployment(account_id="schwab")])
+    # Stubbed, so it reports ``Config``'s own default account whatever it is handed; the stash
+    # matches that, leaving the authorisation gate as the only thing under test here.
     monkeypatch.setattr(mcp_server, "get_config", lambda **kw: Config(kill_switch=True))
-    named = fake_server.place_orders(_token(binding_id="b2"))
-    assert named["status"] == "skipped"  # got past the gate, stopped by the kill switch
+
+    result = fake_server.place_orders(_token())
+
+    # Got past the authorisation gate on the algorithm alone, and stopped by the kill switch.
+    assert result["status"] == "skipped"
 
 
-def test_place_orders_uses_the_bindings_account_not_the_default(monkeypatch) -> None:
+def test_place_orders_uses_the_deployments_account_not_the_default(monkeypatch) -> None:
     """The bug this replaced: get_config() with no account_id resolves the *default* account,
     so an algorithm bound to a live account could have had its orders sent to a paper one."""
-    fake_server = _build(monkeypatch, [_binding(account_id="schwab2")])
+    fake_server = _build(monkeypatch, [_deployment(account_id="schwab2")])
     seen: dict = {}
 
     def fake_get_config(**kwargs):
@@ -425,41 +428,62 @@ def test_place_orders_uses_the_bindings_account_not_the_default(monkeypatch) -> 
     assert seen["account_id"] == "schwab2"
 
 
-def test_get_algorithm_plan_runs_for_a_scheduled_binding_but_says_it_cannot_trade(monkeypatch) -> None:
+def test_get_algorithm_plan_runs_for_a_scheduled_deployment_but_says_it_cannot_trade(monkeypatch) -> None:
     """Computing a proposal is a read, like a backtest, so it is not gated -- but the agent is
     told plainly that acting on it will be refused."""
-    fake_server = _build(monkeypatch, [_binding(cron="30 9 * * 1-5")])
+    fake_server = _build(monkeypatch, [_deployment(cron="30 9 * * 1-5")])
     monkeypatch.setattr(mcp_server, "get_config", lambda **kw: Config(kill_switch=True))
 
     result = fake_server.get_algorithm_plan("rally_rotation")
 
     assert result["can_place_orders"] is False
-    assert result["status"] == "error"  # stopped by the kill switch, not by the binding
+    assert result["status"] == "error"  # stopped by the kill switch, not by the deployment
 
 
-def test_list_bindings_reports_what_the_agent_may_drive(monkeypatch) -> None:
+def test_list_algorithms_reports_what_the_agent_may_drive(monkeypatch) -> None:
     fake_server = _build(
         monkeypatch,
-        [_binding(id="b1"), _binding(id="b2", strategy="rally_rotation", cron="30 9 * * 1-5"), _binding(id="b3", enabled=False)],
+        [
+            _deployment(algorithm="rally_rotation"),
+            _deployment(algorithm="bursty_dca", cron="30 9 * * 1-5"),
+            _deployment(algorithm="options_flip", enabled=False),
+        ],
     )
 
-    rows = {row["binding_id"]: row for row in fake_server.list_bindings()["bindings"]}
+    rows = {row["algorithm"]: row for row in fake_server.list_algorithms()["algorithms"]}
 
-    assert rows["b1"]["can_place_orders"] is True
-    assert rows["b1"]["driven_by"] == "mcp"
-    assert rows["b2"]["can_place_orders"] is False
-    assert rows["b2"]["driven_by"] == "schedule"
-    assert rows["b3"]["can_place_orders"] is False
+    assert rows["rally_rotation"]["can_place_orders"] is True
+    assert rows["rally_rotation"]["driven_by"] == "mcp"
+    assert rows["bursty_dca"]["can_place_orders"] is False
+    assert rows["bursty_dca"]["driven_by"] == "schedule"
+    assert rows["options_flip"]["can_place_orders"] is False
 
 
-def test_one_binding_is_driven_by_exactly_one_origin() -> None:
+def test_list_algorithms_reports_undeployed_ones_too(monkeypatch) -> None:
+    """The registry is the list, not the config.
+
+    An algorithm deployed nowhere used to be invisible over MCP, so an agent had no way to
+    learn it existed -- and the ids are what every other algorithm tool takes.
+    """
+    fake_server = _build(monkeypatch, [_deployment(algorithm="rally_rotation")])
+
+    rows = {row["algorithm"]: row for row in fake_server.list_algorithms()["algorithms"]}
+
+    assert {"bursty_dca", "rally_rotation", "options_flip"} <= set(rows)
+    assert rows["bursty_dca"]["deployed"] is False
+    assert rows["bursty_dca"]["account_id"] == ""
+    assert rows["bursty_dca"]["can_place_orders"] is False
+    assert "not deployed" in rows["bursty_dca"]["reason"]
+
+
+def test_one_deployment_is_driven_by_exactly_one_origin() -> None:
     """The scheduler and the MCP tools ask the same function, so the two can never both say yes."""
     for cron in ("*/15 9-15 * * 1-5", "0 11 * * 1-5", "30 9 * * 1", ""):
-        binding = _binding(cron=cron)
-        schedule_ok = not controls_module.binding_refusal(binding, controls_module.ORIGIN_SCHEDULE)
-        mcp_ok = not controls_module.binding_refusal(binding, controls_module.ORIGIN_MCP)
+        deployment = _deployment(cron=cron)
+        schedule_ok = not controls_module.deployment_refusal(deployment, controls_module.ORIGIN_SCHEDULE)
+        mcp_ok = not controls_module.deployment_refusal(deployment, controls_module.ORIGIN_MCP)
         assert schedule_ok != mcp_ok, cron
 
-    off = _binding(enabled=False)
-    assert controls_module.binding_refusal(off, controls_module.ORIGIN_SCHEDULE)
-    assert controls_module.binding_refusal(off, controls_module.ORIGIN_MCP)
+    off = _deployment(enabled=False)
+    assert controls_module.deployment_refusal(off, controls_module.ORIGIN_SCHEDULE)
+    assert controls_module.deployment_refusal(off, controls_module.ORIGIN_MCP)

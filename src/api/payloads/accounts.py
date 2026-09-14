@@ -45,7 +45,7 @@ def positions_payload(account_id: str = "") -> dict[str, Any]:
     """Live holdings and P/L for one account.
 
     Per account rather than per algorithm: the broker reports a single blended position per
-    symbol, so two bindings trading the same account cannot be told apart here.
+    symbol, so two algorithms trading the same account cannot be told apart here.
     """
     try:
         config = get_config(account_id=account_id) if account_id else get_config()
@@ -135,9 +135,13 @@ def accounts_payload() -> dict[str, Any]:
     raw = load_accounts_config()
     items = _account_items(raw)
     controls = load_controls()
+    # Several algorithms may be deployed to one account, so this is a list per account. The
+    # reverse never happens: an algorithm names at most one account.
     deployed: dict[str, list[str]] = {}
-    for binding in controls.get("bindings") or []:
-        deployed.setdefault(str(binding.get("account_id") or ""), []).append(str(binding.get("strategy") or ""))
+    for deployment in controls.get("deployments") or []:
+        deployed.setdefault(str(deployment.get("account_id") or ""), []).append(
+            str(deployment.get("algorithm") or "")
+        )
 
     rows = []
     for account_id, section in items.items():
@@ -156,7 +160,7 @@ def accounts_payload() -> dict[str, Any]:
                 "api_secret_env": secret_env,
                 "credentials_ready": not missing,
                 "missing_env": missing,
-                "deployments": sorted(set(deployed.get(str(account_id), []))),
+                "deployments": sorted(deployed.get(str(account_id), [])),
             }
         )
     rows.sort(key=lambda row: row["id"])
@@ -203,15 +207,18 @@ def delete_account_payload(account_id: str) -> dict[str, Any]:
         if len(items) <= 1:
             raise ValueError("Keep at least one deployment target.")
 
-        # Inside the transaction: the bindings are read to decide whether this delete is
+        # Inside the transaction: the deployments are read to decide whether this delete is
         # allowed, so a deployment added between the check and the write would be left
         # pointing at an account that no longer resolves.
         controls = load_controls()
-        in_use = [b for b in (controls.get("bindings") or []) if str(b.get("account_id")) == account_id]
+        in_use = [
+            d for d in (controls.get("deployments") or []) if str(d.get("account_id")) == account_id
+        ]
         if in_use:
             # Deleting a target out from under a running deployment would leave it pointed at an
             # account that no longer resolves, which fails at order time rather than here.
-            raise ValueError(f"{account_id} still has {len(in_use)} deployment(s). Remove them first.")
+            names = ", ".join(str(d.get("algorithm")) for d in in_use)
+            raise ValueError(f"{account_id} still runs {names}. Undeploy first.")
 
         items.pop(account_id)
         if str(raw.get("default") or "") == account_id:

@@ -89,7 +89,7 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
     account_config = _section(account_items, selected_account_id)
     if not account_config and account_items:
         # A specifically-named account that doesn't exist must raise, not fall back silently
-        # -- otherwise orders for a renamed/deleted binding would land in the default account.
+        # -- otherwise orders for a renamed/deleted deployment would land in the default account.
         if account_id and account_id != UNNAMED_ACCOUNT_ID:
             raise UnknownAccountError(str(account_id), sorted(account_items))
         selected_account_id = default_account_id if default_account_id in account_items else next(iter(account_items))

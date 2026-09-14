@@ -31,7 +31,7 @@ def test_universe_payload_returns_configured_rows() -> None:
 def test_controls_payload_returns_switches() -> None:
     payload = controls_payload()
 
-    assert {"algorithm_enabled"} <= set(payload["controls"])
+    assert {"deployments", "trading_account_id"} <= set(payload["controls"])
 
 
 def _assets():
@@ -157,7 +157,7 @@ def test_one_colour_rule_drives_algorithms_accounts_and_the_bot() -> None:
     app_js, _, _ = _assets()
 
     rule = app_js[app_js.index("function deploymentStatus"):app_js.index("function renderSidebar")]
-    assert "normalizeBindingCron(deployment.cron))) return \"live\"" in rule
+    assert "normalizeDeploymentCron(deployment.cron))) return \"live\"" in rule
     assert 'if (armed.length) return "idle"' in rule
     assert 'return "off"' in rule
     # Every consumer goes through it rather than re-deriving.
@@ -165,15 +165,15 @@ def test_one_colour_rule_drives_algorithms_accounts_and_the_bot() -> None:
     assert "deployments.length ? \"idle\" : \"off\"" not in app_js, "the old per-place reading is gone"
 
 
-def test_the_footer_reports_every_binding_not_just_the_first() -> None:
+def test_the_footer_reports_every_deployment_not_just_the_first() -> None:
     """One scheduler loop per deployment, so a single loop's state is not the bot's state."""
     app_js, _, _ = _assets()
 
     summary = app_js[app_js.index("function runtimeSummary"):]
-    assert "Object.values(bot.bindings || {})" in summary
+    assert "Object.values(bot.deployments || {})" in summary
     assert "loops.filter((loop) => loop.running)" in summary
-    # A binding parked on "mcp" is armed but deliberately unscheduled.
-    assert "!normalizeBindingCron(binding.cron)" in summary
+    # A deployment with no cron is armed but deliberately unscheduled.
+    assert "!normalizeDeploymentCron(deployment.cron)" in summary
     assert "state.bot?.algorithm" not in app_js, "the single-loop shortcut is what caused the bug"
 
 
@@ -198,10 +198,10 @@ def test_algorithm_order_journal_is_recorded_by_the_bot_and_shown_per_algorithm(
 def test_account_picker_is_not_a_link_and_has_no_delete() -> None:
     app_js, _, _ = _assets()
 
-    header = app_js[app_js.index("const deployment = deploymentFor(strategy.key);"):app_js.index("content.innerHTML = `")]
+    header = app_js[app_js.index("function renderAlgorithmPage"):app_js.index("content.innerHTML = `")]
     assert 'id="deployTargetSelect"' in header
     assert "href=" not in header
-    assert "data-remove-binding" not in header
+    assert "data-remove-deployment" not in header
     assert "&times;" not in header
     # Changing the picker re-points the deployment rather than needing a deploy button.
     assert "async function setDeploymentAccount" in app_js
@@ -551,14 +551,14 @@ def test_the_bot_pill_describes_the_algorithms_not_the_container() -> None:
     """Running an MCP server alongside the dashboard says nothing about what is switched on.
 
     The pill used to read "MCP mode" whenever the container was started with --mcp, even with
-    every algorithm off. What runs is a per-binding fact: on with a cron, or on and
+    every algorithm off. What runs is a per-deployment fact: on with a cron, or on and
     parked on "mcp" awaiting an external request.
     """
     app_js, _, _ = _assets()
 
     summary = app_js[app_js.index("function runtimeSummary"):]
     assert 'runtime_mode === "mcp"' not in summary
-    assert "const armed = bindings().filter((binding) => binding.enabled);" in summary
+    assert "const armed = deployments().filter((deployment) => deployment.enabled);" in summary
     assert "const status = deploymentStatus(armed);" in summary
     assert '"Bot off"' in summary
     # The dot carries it; the words only repeated the colour, so they live in the tooltip.

@@ -12,13 +12,15 @@ import uvicorn
 
 from src.api.controls import (
     ORIGIN_MCP,
-    binding_driver,
-    binding_refusal,
+    deployment_driver,
+    deployment_refusal,
+    find_deployment,
     load_controls,
-    resolve_binding_for_origin,
+    resolve_deployment_for_origin,
 )
 from src.core.config import get_config
 from src.core.interfaces import AlgorithmPlan, OrderRequest
+from src.core.strategy_models import STRATEGY_LABELS
 from src.core.pipeline import (
     TradingRefused,
     UnknownBrokerageError,
@@ -126,34 +128,50 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
     mcp = _server("walbot", host, port)
 
     @mcp.tool()
-    def list_bindings() -> dict[str, Any]:
-        """List the configured algorithm bindings and say which ones this agent may trade.
+    def list_algorithms() -> dict[str, Any]:
+        """Every algorithm this bot has, and for each one where it trades and who drives it.
 
-        A binding pairs an algorithm with an account and decides what drives it: a cron
-        expression in market time, or an empty ``cron`` for "an agent drives this one". Only
-        bindings reported here with ``can_place_orders: true`` will accept place_orders; the
-        rest are switched off or are the scheduler's to run.
+        Start here: this is the only way to learn which algorithm ids exist, and the id is what
+        every other algorithm tool takes.
+
+        Deployment is a property of the algorithm, reported inline:
+
+        - ``deployed: false`` -- it names no account, so it has nothing to trade against.
+          ``get_algorithm_plan`` still works on it (against the default account) but
+          ``place_orders`` will refuse.
+        - ``account_id`` -- the one account it trades. An algorithm never has more than one;
+          several algorithms may share an account, which costs attribution, not correctness.
+        - ``cron`` -- a schedule in market time means the scheduler owns it, and an agent may
+          not place its orders. Empty means an agent drives it. Exactly one of the two, always,
+          reported as ``driven_by``.
+
+        Only rows with ``can_place_orders: true`` will accept place_orders; every other row
+        carries the ``reason`` it will not.
         """
+        from src.algorithms.registry import ALGORITHMS
+
         controls = load_controls()
-        return {
-            "status": "ok",
-            "bindings": [
+        rows = []
+        for algorithm in ALGORITHMS.names():
+            deployment = find_deployment(controls, algorithm)
+            refusal = deployment_refusal(deployment, ORIGIN_MCP)
+            rows.append(
                 {
-                    "binding_id": binding["id"],
-                    "algorithm": binding["strategy"],
-                    "account_id": binding["account_id"],
-                    "enabled": bool(binding["enabled"]),
-                    "cron": binding["cron"],
-                    "driven_by": binding_driver(binding),
-                    "can_place_orders": not binding_refusal(binding, ORIGIN_MCP),
-                    "reason": binding_refusal(binding, ORIGIN_MCP),
+                    "algorithm": algorithm,
+                    "name": STRATEGY_LABELS.get(algorithm, algorithm),
+                    "deployed": deployment is not None,
+                    "account_id": (deployment or {}).get("account_id", ""),
+                    "enabled": bool((deployment or {}).get("enabled", False)),
+                    "cron": (deployment or {}).get("cron", ""),
+                    "driven_by": deployment_driver(deployment) if deployment else "",
+                    "can_place_orders": not refusal,
+                    "reason": refusal,
                 }
-                for binding in (controls.get("bindings") or [])
-            ],
-        }
+            )
+        return {"status": "ok", "algorithms": rows}
 
     @mcp.tool()
-    def get_algorithm_plan(algorithm: str = DEFAULT_ALGORITHM, binding_id: str = "") -> dict[str, Any]:
+    def get_algorithm_plan(algorithm: str = DEFAULT_ALGORITHM) -> dict[str, Any]:
         """Run the algorithm against market data and return the plan it proposes.
 
         The proposal lives in one of two places depending on the algorithm's shape, and reading
@@ -177,18 +195,24 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
         same read-only act as a backtest, and "what would this do right now" is worth answering
         for an algorithm the scheduler owns. Whether the plan may be *acted* on is reported as
         ``can_place_orders`` rather than decided here.
+
+        Sized against the account the algorithm is deployed to, whatever its switch says. An
+        algorithm deployed nowhere is still planned, against the default account, and reports
+        ``can_place_orders: false``.
         """
-        binding, refusal = resolve_binding_for_origin(ORIGIN_MCP, binding_id=binding_id, strategy=algorithm)
-        # The account matters even for a read: a proposal is sized against the holdings and
-        # equity of a specific account, so reporting one binding's plan against another's book
-        # would be wrong in exactly the way that is hard to notice.
-        config = get_config(account_id=(binding or {}).get("account_id") or None, strategy_id=algorithm)
+        deployment = find_deployment(load_controls(), algorithm)
+        refusal = deployment_refusal(deployment, ORIGIN_MCP)
+        # The account comes from the deployment itself, not from the permission check: a
+        # proposal is sized against the holdings and equity of a specific account, and a
+        # switched-off algorithm still has an account to be sized against. Reading it off the
+        # authorisation instead is how a refused deployment's plan came to be computed against
+        # whichever account happened to be the default.
+        config = get_config(account_id=(deployment or {}).get("account_id") or None, strategy_id=algorithm)
         # Carried on every return, including the failures: an agent that is told only "kill
-        # switch is enabled" cannot tell whether the binding would have accepted an order.
+        # switch is enabled" cannot tell whether the deployment would have accepted an order.
         context = {
-            "binding_id": (binding or {}).get("id", ""),
             "account_id": config.account_id,
-            "can_place_orders": binding is not None,
+            "can_place_orders": not refusal,
             "reason": refusal,
         }
         if config.kill_switch:
@@ -197,7 +221,7 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
         # Held here rather than round-tripped through the agent, so the plan that executes is
         # the plan that was reviewed. The token is the only part of this payload place_orders
         # reads back; everything else is for the agent to form a judgement on.
-        token = stash(plan, binding_id=context["binding_id"], account_id=config.account_id)
+        token = stash(plan, algorithm=algorithm, account_id=config.account_id)
         return {"status": "ok", **context, "plan_token": token, **_plan_payload(plan)}
 
     @mcp.tool()
@@ -205,7 +229,7 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
         """Name every configured account. Start here, then ask the other two tools per account.
 
         Cheap and money-free: ids, labels, broker, and ``deployments`` (the algorithms bound to
-        each). Reading a portfolio is this list plus one get_account call per row -- fanned out
+        each). Reading a portfolio is this list plus one get_account_positions call per row -- fanned out
         this way rather than as one all-accounts call so a slow or unreachable broker costs you
         that account and not the answer.
         """
@@ -222,7 +246,7 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
         }
 
     @mcp.tool()
-    def get_account(account_id: str = "") -> dict[str, Any]:
+    def get_account_positions(account_id: str = "") -> dict[str, Any]:
         """Holdings, cash and P/L for one account. Defaults to the default account.
 
         The account is the unit, not the algorithm: a broker reports one blended position per
@@ -284,8 +308,9 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
         An edit naming a symbol the plan neither proposes nor holds is refused too, rather than
         ignored, because that is nearly always a mistyped ticker.
 
-        The binding is the one the plan was computed against, re-checked here -- a binding
-        switched off between planning and submitting refuses, and so does the kill switch.
+        The deployment is the one the plan was computed against, re-checked here -- an
+        algorithm switched off between planning and submitting refuses, and so does the kill
+        switch.
 
         **Allocation strategies (Bursty DCA, Rally Rotation).** Orders are fitted to the
         account's available funds before submission, so ``status`` distinguishes:
@@ -311,29 +336,27 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
         except PlanUnavailable as unavailable:
             return {"status": "refused", "reason": unavailable.reason}
         plan = pending.plan
-        # Re-resolved rather than trusted from the stash: a binding can be switched off, or
+        # Re-resolved rather than trusted from the stash: a deployment can be switched off, or
         # handed to the scheduler, in the gap between proposing a plan and submitting it, and
         # the authorisation that matters is the one in force now.
-        binding, refusal = resolve_binding_for_origin(
-            ORIGIN_MCP, binding_id=pending.binding_id, strategy=plan.strategy
-        )
-        if binding is None:
+        deployment, refusal = resolve_deployment_for_origin(ORIGIN_MCP, algorithm=pending.algorithm)
+        if deployment is None:
             return {"strategy": plan.strategy, "status": "refused", "reason": refusal}
-        # The binding's account, not the default one. get_config() with no account_id resolves
-        # whatever account is default, so an algorithm bound to a live account could have its
-        # orders submitted to a paper one -- or the reverse. The scheduler has always passed the
-        # binding's account through run_once; this path simply never did.
-        config = get_config(account_id=binding["account_id"] or None, strategy_id=plan.strategy)
+        # The deployment's account, not the default one. get_config() with no account_id
+        # resolves whatever account is default, so an algorithm deployed to a live account
+        # could have its orders submitted to a paper one -- or the reverse. The scheduler has
+        # always passed the deployment's account through run_once; this path simply never did.
+        config = get_config(account_id=deployment["account_id"] or None, strategy_id=plan.strategy)
         # A plan's quantities are sized against one specific book's holdings and equity. If the
-        # binding has been repointed since it was proposed, those numbers describe an account
+        # algorithm has been repointed since it was proposed, those numbers describe an account
         # this order would no longer reach.
         if pending.account_id and pending.account_id != config.account_id:
             return {
                 "strategy": plan.strategy,
                 "status": "refused",
                 "reason": (
-                    f"That plan was sized against {pending.account_id}, but {binding['id']} now "
-                    f"points at {config.account_id}. Call get_algorithm_plan again."
+                    f"That plan was sized against {pending.account_id}, but {pending.algorithm} "
+                    f"now trades {config.account_id}. Call get_algorithm_plan again."
                 ),
             }
 

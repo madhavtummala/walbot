@@ -62,7 +62,7 @@ def config_transaction() -> Iterator[None]:
     """Hold the config documents for a whole read-modify-write.
 
     Every saver here rewrites an entire file from a dict the caller just loaded, so the load and
-    the save are one operation: two requests interleaving between them -- adding a binding while
+    the save are one operation: two requests interleaving between them -- deploying an algorithm while
     another toggles a switch -- means the second write is built on a snapshot taken before the
     first, and one change disappears. FastAPI serves requests on a thread pool, so this is
     reachable from ordinary dashboard use rather than only under load.

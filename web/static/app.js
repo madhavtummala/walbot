@@ -71,8 +71,7 @@ const state = {
   universe: [],
   controls: {
     trading_account_id: "",
-    algorithm_enabled: false,
-    active_strategy: "rally_rotation",
+    deployments: [],
   },
   accounts: { rows: [] },
   bot: null,
@@ -109,7 +108,6 @@ const state = {
   universeApplying: false,
   deckWheelLocked: false,
   schwabAuth: null,
-  renderedBindingKey: "",
   algorithmConfigs: {},
   algorithmConfigLoading: {},
   positions: {},
@@ -1174,28 +1172,22 @@ function algorithmChoices() {
   return STRATEGIES;
 }
 
-//: Bindings are pairs of algorithm and account. Signals and backtests are keyed by strategy,
-//: but they are *computed* per account: a DCA plan is per account, so the account is not only
-//: an execution detail. ``accountForStrategy`` is the frontend half of the same rule the API
-//: applies in ``controls.account_for_strategy`` -- both pick the same binding, so the plan the
-//: board edits is the plan the signal view and the backtest read.
-function bindings() {
-  return state.controls?.bindings || [];
+//: A deployment is an algorithm and the one account it trades. Signals and backtests are keyed
+//: by strategy, but they are *computed* per account: a DCA plan is per account, so the account
+//: is not only an execution detail. ``accountForStrategy`` is the frontend half of the same
+//: rule the API applies in ``controls.account_for_strategy`` -- both read the same deployment,
+//: so the plan the board edits is the plan the signal view and the backtest read.
+function deployments() {
+  return state.controls?.deployments || [];
 }
 
 function accountForStrategy(strategyKey) {
-  const candidates = bindings().filter((binding) => binding.strategy === strategyKey);
-  if (!candidates.length) return "";
-  return (candidates.find((binding) => binding.enabled) || candidates[0]).account_id || "";
-}
-
-function bindingById(bindingId) {
-  return bindings().find((binding) => String(binding.id) === String(bindingId)) || null;
+  return deploymentFor(strategyKey)?.account_id || "";
 }
 
 function isPlanStrategyEnabled() {
-  // The board edits one algorithm's plan, so it is that algorithm's bindings that light it up.
-  return bindings().some((binding) => binding.enabled && binding.strategy === planStrategyKey());
+  // The board edits one algorithm's plan, so it is that algorithm's deployment that lights it up.
+  return Boolean(deploymentFor(planStrategyKey())?.enabled);
 }
 
 function configFieldKind(value) {
@@ -2185,15 +2177,11 @@ function currentRoute() {
   return { page: "algo", id: DEFAULT_ALGORITHM_KEY, tab: DEFAULT_TAB };
 }
 
-function deploymentsFor(strategyKey) {
-  return bindings().filter((binding) => binding.strategy === strategyKey);
-}
-
 //: One algorithm runs against at most one account, so a deployment is singular. That keeps
-//: P/L attributable: the broker blends positions per account, and with one algorithm per
-//: account the account's numbers *are* this algorithm's numbers.
+//: P/L attributable: the broker blends positions per account, and an algorithm's own account
+//: is the only book its numbers can come from.
 function deploymentFor(strategyKey) {
-  return deploymentsFor(strategyKey)[0] || null;
+  return deployments().find((deployment) => deployment.algorithm === strategyKey) || null;
 }
 
 function accountRows() {
@@ -2213,7 +2201,7 @@ function accountLabel(accountId) {
 //: identical to "the agent is driving it".
 function deploymentStatus(deployments) {
   const armed = (deployments || []).filter((deployment) => deployment.enabled);
-  if (armed.some((deployment) => normalizeBindingCron(deployment.cron))) return "live";
+  if (armed.some((deployment) => normalizeDeploymentCron(deployment.cron))) return "live";
   if (armed.length) return "idle";
   return "off";
 }
@@ -2223,15 +2211,15 @@ function renderSidebar() {
   const algorithmNav = $("#algorithmNav");
   if (algorithmNav) {
     algorithmNav.innerHTML = algorithmChoices().map((strategy) => {
-      const deployments = deploymentsFor(strategy.key);
+      const deployment = deploymentFor(strategy.key);
       const active = route.page === "algo" && route.id === strategy.key;
-      const status = deploymentStatus(deployments);
+      const status = deploymentStatus(deployment ? [deployment] : []);
       return `
         <li>
-          <a class="navItem${active ? " is-active" : ""}" href="#/algo/${escapeHtml(strategy.key)}/${escapeHtml(route.page === "algo" ? route.tab : DEFAULT_TAB)}">
+          <a class="navItem${active ? " is-active" : ""}" href="#/algo/${escapeHtml(strategy.key)}/${escapeHtml(route.page === "algo" ? route.tab : DEFAULT_TAB)}"
+            title="${escapeHtml(deployment ? `${strategy.name} · ${accountLabel(deployment.account_id)}` : `${strategy.name} · not deployed`)}">
             <span class="statusDot is-${status}" aria-hidden="true"></span>
             <span class="navItemLabel">${escapeHtml(strategy.name)}</span>
-            ${deployments.length ? `<span class="navBadge">${deployments.length}</span>` : ""}
           </a>
         </li>`;
     }).join("");
@@ -2254,7 +2242,7 @@ function renderAccountNav() {
   }
   const route = currentRoute();
   host.innerHTML = rows.map((account) => {
-    const deployed = bindings().filter((binding) => binding.account_id === account.id);
+    const deployed = deployments().filter((deployment) => deployment.account_id === account.id);
     // An account is only as live as the algorithms pointed at it, and it cannot be live at
     // all without credentials.
     const status = account.credentials_ready ? deploymentStatus(deployed) : "off";
@@ -2265,7 +2253,7 @@ function renderAccountNav() {
       ? `<span class="navStat is-muted">--</span>`
       : `<span class="navStat ${pl >= 0 ? "gain" : "loss"}">${escapeHtml(money(pl, 2))}</span>`;
     const title = account.credentials_ready
-      ? `${account.label} · ${deployed.length ? `runs ${deployed.map((binding) => strategyByKey(binding.strategy).name).join(", ")}` : "no algorithm deployed"}`
+      ? `${account.label} · ${deployed.length ? `runs ${deployed.map((deployment) => strategyByKey(deployment.algorithm).name).join(", ")}` : "no algorithm deployed"}`
       : `${account.label} · credentials missing`;
     const inner = `
       <span class="statusDot is-${status}" aria-hidden="true"></span>
@@ -2302,26 +2290,26 @@ function renderNavFooter() {
     </span>`;
 }
 
-//: Every deployment gets its own scheduler loop, so the runtime has one state *per binding*.
+//: Every deployment gets its own scheduler loop, so the runtime has one state *per algorithm*.
 //: Reading the first of them -- which is what this did -- reported "paused" whenever the one
 //: armed algorithm happened not to be first in the dict.
 function runtimeSummary() {
   const bot = state.bot || {};
-  const loops = Object.values(bot.bindings || {});
+  const loops = Object.values(bot.deployments || {});
   if (!loops.length && bot.algorithm) loops.push(bot.algorithm);
 
   // Deliberately not keyed on the container's runtime mode. That only says an MCP server was
   // started alongside the dashboard; it says nothing about whether any algorithm is on, and
   // reporting "MCP mode" with everything switched off described the process rather than the
-  // bot. What runs is decided per binding: switched on with a frequency, or switched on and
+  // bot. What runs is decided per deployment: switched on with a schedule, or switched on and
   // parked on "mcp" to wait for an external request.
   const running = loops.filter((loop) => loop.running);
-  const armed = bindings().filter((binding) => binding.enabled);
+  const armed = deployments().filter((deployment) => deployment.enabled);
   // The bot pill takes the same colour as the algorithms: green while anything is on a
   // clock, orange when everything that is on is waiting for the agent instead.
   const status = deploymentStatus(armed);
-  const scheduled = armed.filter((binding) => normalizeBindingCron(binding.cron));
-  const agentDriven = armed.filter((binding) => !normalizeBindingCron(binding.cron));
+  const scheduled = armed.filter((deployment) => normalizeDeploymentCron(deployment.cron));
+  const agentDriven = armed.filter((deployment) => !normalizeDeploymentCron(deployment.cron));
   const lastRun = loops
     .map((loop) => loop.last_finished_at)
     .filter(Boolean)
@@ -2340,10 +2328,10 @@ function runtimeSummary() {
     ? error
     : [
         scheduled.length
-          ? `Scheduled: ${scheduled.map((binding) => `${strategyByKey(binding.strategy).name} ${describeCron(binding.cron)}`).join(", ")}`
+          ? `Scheduled: ${scheduled.map((deployment) => `${strategyByKey(deployment.algorithm).name} ${describeCron(deployment.cron)}`).join(", ")}`
           : "",
         agentDriven.length
-          ? `Agent-driven: ${agentDriven.map((binding) => strategyByKey(binding.strategy).name).join(", ")}`
+          ? `Agent-driven: ${agentDriven.map((deployment) => strategyByKey(deployment.algorithm).name).join(", ")}`
           : "",
         armed.length ? "" : "No algorithm is switched on",
         lastRun ? `Last run ${formatActivityTime(lastRun)}` : "No run yet",
@@ -2409,19 +2397,19 @@ function render(options = {}) {
 
 // -- algorithm page ----------------------------------------------------------------------
 
-// A binding's schedule is a cron expression in market time; empty means an agent drives it.
+// A deployment's schedule is a cron expression in market time; empty means an agent drives it.
 // Validated here only well enough to keep an obviously broken string from being saved -- the
 // server re-parses with src/core/cron.py, which is the authority on what will actually run.
 // The prose comes from the vendored cronstrue, which reads arbitrary expressions back in
 // words; anything it cannot phrase falls back to the expression itself.
 const CRON_FIELD_BOUNDS = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
 
-function normalizeBindingCron(value) {
+function normalizeDeploymentCron(value) {
   return String(value ?? "").trim().replace(/\s+/g, " ");
 }
 
 function cronError(expression) {
-  const text = normalizeBindingCron(expression);
+  const text = normalizeDeploymentCron(expression);
   if (!text) return "";
   const parts = text.split(" ");
   if (parts.length !== 5) {
@@ -2447,7 +2435,7 @@ function cronError(expression) {
 }
 
 function describeCron(expression) {
-  const text = normalizeBindingCron(expression);
+  const text = normalizeDeploymentCron(expression);
   if (!text) return "Agent-driven (MCP)";
   if (cronError(text)) return "Invalid schedule";
   try {
@@ -2459,14 +2447,13 @@ function describeCron(expression) {
 
 function renderAlgorithmPage(content, strategyKey, tab) {
   const strategy = strategyByKey(strategyKey);
-  const deployments = deploymentsFor(strategy.key);
   const deployment = deploymentFor(strategy.key);
   // Every account is offered to every algorithm. Sharing one account between algorithms is
   // allowed; it only costs attribution, which the overview says plainly when it happens.
   const options = accountRows();
-  const savedCron = normalizeBindingCron(deployment?.cron);
+  const savedCron = normalizeDeploymentCron(deployment?.cron);
   const actions = options.length
-    ? `<div class="deployControl"${deployment ? ` data-binding="${escapeHtml(deployment.id)}"` : ""}>
+    ? `<div class="deployControl"${deployment ? ` data-algorithm="${escapeHtml(deployment.algorithm)}"` : ""}>
          <button class="ctl powerButton${deployment?.enabled ? " on" : ""}" type="button" data-role="power"
            aria-pressed="${Boolean(deployment?.enabled)}" aria-label="Toggle trading"
            title="${deployment?.enabled ? "Pause" : "Start"} trading"><span aria-hidden="true">&#9211;</span></button>
@@ -2475,7 +2462,7 @@ function renderAlgorithmPage(content, strategyKey, tab) {
          </select>
          <span class="cronField">
            <input class="ctl cronInput" id="deployCronInput" type="text" spellcheck="false"
-             aria-label="Schedule (cron, market time)" data-binding="${escapeHtml(deployment?.id || "")}"
+             aria-label="Schedule (cron, market time)" data-algorithm="${escapeHtml(deployment?.algorithm || "")}"
              value="${escapeHtml(savedCron)}" placeholder="0 11 * * 1-5"
              title="Cron in US Eastern: minute hour day-of-month month day-of-week. Leave blank to let an agent drive it."
              ${!deployment ? "disabled" : ""}>
@@ -2512,7 +2499,7 @@ function renderAccountPage(content, accountId) {
 
   const positions = state.positions[account.id];
   const activity = state.activity[account.id];
-  const deployed = bindings().filter((binding) => binding.account_id === account.id);
+  const deployed = deployments().filter((deployment) => deployment.account_id === account.id);
   const status = deploymentStatus(deployed);
   const busy = Boolean(state.positionsLoading[account.id] || state.activityLoading[account.id]);
   const meta = `<span class="pill is-${status}">${
@@ -2553,9 +2540,9 @@ function renderAccountPage(content, accountId) {
             // would be nonsense here: nothing but this bot can touch a local book.
             ? "A local book, not a broker. Orders fill instantly at the last price the algorithm saw, and no real money moves."
             : "Everything the broker reports for this account, including orders you placed yourself."}${
-            deployed.length ? ` Algorithms running here: ${deployed.map((binding) => strategyByKey(binding.strategy).name).join(", ")}.` : ""}</p>`}
-      ${deployed.length ? `<div class="chipRow">${deployed.map((binding) => `
-        <a class="chip is-link" href="#/algo/${escapeHtml(binding.strategy)}/${DEFAULT_TAB}">${escapeHtml(strategyByKey(binding.strategy).name)}</a>`).join("")}</div>` : ""}
+            deployed.length ? ` Algorithms running here: ${deployed.map((deployment) => strategyByKey(deployment.algorithm).name).join(", ")}.` : ""}</p>`}
+      ${deployed.length ? `<div class="chipRow">${deployed.map((deployment) => `
+        <a class="chip is-link" href="#/algo/${escapeHtml(deployment.algorithm)}/${DEFAULT_TAB}">${escapeHtml(strategyByKey(deployment.algorithm).name)}</a>`).join("")}</div>` : ""}
     </section>
     <div class="accountLayout">
       <div class="accountStack">
@@ -2749,7 +2736,7 @@ function renderBudgetBoard(host, strategy) {
   const entry = state.algorithmConfigs[strategy.key];
   const plan = entry?.explainer?.parameters?.plan;
   // The board edits this algorithm's own plan, so which page you are on decides what you are
-  // editing. It used to edit the first DCA binding's account whichever page you were on.
+  // editing. It used to edit the first DCA deployment's account whichever page you were on.
   if (state.planStrategy !== strategy.key) {
     // A different algorithm's board: drop the old bubbles rather than animating them into
     // place as though they were this plan's.
@@ -3141,7 +3128,7 @@ async function saveCurrentConfig(strategyKey) {
   }
 }
 
-async function saveBindings() {
+async function saveDeployments() {
   try {
     const payload = await api("/api/controls", {
       method: "POST",
@@ -3162,16 +3149,16 @@ async function setDeploymentAccount(strategyKey, accountId) {
   if (deployment) {
     if (deployment.account_id === accountId) return;
     deployment.account_id = accountId;
-    await saveBindings();
+    await saveDeployments();
     return;
   }
   await deployTo(strategyKey, accountId);
 }
 
-async function setDeploymentCron(bindingId, expression) {
-  const binding = bindingById(bindingId);
-  if (!binding) return;
-  const cron = normalizeBindingCron(expression);
+async function setDeploymentCron(strategyKey, expression) {
+  const deployment = deploymentFor(strategyKey);
+  if (!deployment) return;
+  const cron = normalizeDeploymentCron(expression);
   const problem = cronError(cron);
   if (problem) {
     // Refused rather than saved-and-corrected. Falling back silently would leave the field
@@ -3180,37 +3167,35 @@ async function setDeploymentCron(bindingId, expression) {
     showToast(problem);
     return;
   }
-  binding.cron = cron;
-  await saveBindings();
+  deployment.cron = cron;
+  await saveDeployments();
   showToast(cron ? `Schedule: ${describeCron(cron)}` : "Schedule cleared -- agent-driven");
 }
 
 async function deployTo(strategyKey, accountId) {
-  const used = new Set(bindings().map((binding) => String(binding.id)));
-  let index = 1;
-  while (used.has(`b${index}`)) index += 1;
   // No cron key at all: the server fills in the algorithm's own default. Sending "" here
-  // would mean "this binding wants no clock", and a new deployment would sit switched on
+  // would mean "this algorithm wants no clock", and a new deployment would sit switched on
   // and never run.
-  bindings().push({ id: `b${index}`, strategy: strategyKey, account_id: accountId, enabled: false });
-  await saveBindings();
+  if (!state.controls.deployments) state.controls.deployments = [];
+  state.controls.deployments.push({ algorithm: strategyKey, account_id: accountId, enabled: false });
+  await saveDeployments();
   showToast(`Deployed to ${accountLabel(accountId)}`);
 }
 
-async function toggleDeployment(bindingId) {
-  const binding = bindingById(bindingId);
-  if (!binding) return;
-  binding.enabled = !binding.enabled;
-  await saveBindings();
+async function toggleDeployment(strategyKey) {
+  const deployment = deploymentFor(strategyKey);
+  if (!deployment) return;
+  deployment.enabled = !deployment.enabled;
+  await saveDeployments();
 }
 
-async function removeDeployment(bindingId) {
-  if (bindings().length <= 1) {
-    showToast("Keep at least one deployment");
-    return;
-  }
-  state.controls.bindings = bindings().filter((binding) => String(binding.id) !== String(bindingId));
-  await saveBindings();
+async function removeDeployment(strategyKey) {
+  // Undeploying is how an algorithm stops trading entirely; there is no floor to keep, since
+  // an account with nothing deployed is a perfectly ordinary state.
+  state.controls.deployments = deployments().filter(
+    (deployment) => deployment.algorithm !== strategyKey,
+  );
+  await saveDeployments();
 }
 
 async function loadSchwabAuth() {
@@ -3296,18 +3281,18 @@ function wireEvents() {
     if (event.target.closest("#refreshUniverseButton")) return recommendUniverse();
     if (event.target.closest("[data-apply-universe]")) return applyUniverseProposal();
     if (event.target.closest('[data-role="power"]')) {
-      const deployment = deploymentFor(route.id);
+      // A deployment is addressed by its algorithm, so the page you are on names it.
+      if (deploymentFor(route.id)) return toggleDeployment(route.id);
       // Arming with no deployment yet means deploying to whatever the picker shows.
-      if (deployment) return toggleDeployment(deployment.id);
       const target = $("#deployTargetSelect")?.value;
-      if (target) return deployTo(route.id, target).then(() => toggleDeployment(deploymentFor(route.id)?.id));
+      if (target) return deployTo(route.id, target).then(() => toggleDeployment(route.id));
       return;
     }
   });
 
   // Reads back the expression as it is typed, before the change event saves it. A cron string
   // is write-only otherwise: nothing on the screen tells you "0 11 * * 1-5" is 11am weekdays
-  // until after you have committed it to a live binding.
+  // until after you have committed it to a live deployment.
   $("#content")?.addEventListener("input", (event) => {
     if (event.target.id !== "deployCronInput") return;
     const hint = $("#deployCronHint");
@@ -3323,8 +3308,8 @@ function wireEvents() {
       return;
     }
     if (event.target.id === "deployCronInput") {
-      const bindingId = event.target.dataset.binding;
-      if (bindingId) setDeploymentCron(bindingId, event.target.value);
+      const algorithm = event.target.dataset.algorithm;
+      if (algorithm) setDeploymentCron(algorithm, event.target.value);
       return;
     }
     if (event.target.id === "backtestPeriodSelect") {

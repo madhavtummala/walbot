@@ -41,8 +41,8 @@ python -m src.container_entrypoint
 ```
 
 This starts the dashboard/API on port `8000` and the MCP tool server for external agents on
-port `8001`. The built-in bot scheduler also runs, but nothing fires unless a binding is
-switched on in the dashboard (see below).
+port `8001`. The built-in bot scheduler also runs, but nothing fires unless an algorithm is
+deployed and switched on in the dashboard (see below).
 
 Open the dashboard at:
 
@@ -86,9 +86,21 @@ After setup, run the dashboard with the command in [Running the Dashboard](#runn
 
 There are no `--bot` / `--mcp` process-wide modes. The dashboard, the bot scheduler, and the
 MCP tool server all start together; whether an algorithm is driven by the clock or by an agent
-is a property of its *binding*. Each binding carries a **cron expression** evaluated in market
-time — `0 11 * * 1-5` — or an empty one, which parks it: switched on, waiting for an agent. A
-process mode could only contradict the binding's own schedule.
+is a property of its *deployment*. An algorithm is deployed by naming the one account it
+trades, and carries a **cron expression** evaluated in market time — `0 11 * * 1-5` — or an
+empty one, which parks it: switched on, waiting for an agent. A process mode could only
+contradict the deployment's own schedule.
+
+An algorithm trades at most one account; an account may run several algorithms. Deployment
+lives on the algorithm's own section in `walbot.yaml`, beside its tuning:
+
+```yaml
+algorithms:
+  options_flip:
+    account_id: local_paper   # omit to leave it undeployed
+    enabled: false
+    cron: 2/10 10-15 * * 1-5  # empty means an agent drives it
+```
 
 There is no out-of-band trade approval. Review happens through the MCP flow instead:
 `get_algorithm_plan` runs the algorithm, places nothing, and returns the plan with a

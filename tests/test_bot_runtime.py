@@ -1,8 +1,8 @@
-"""Scheduling: which minute a binding fires on, and how it says it wants no clock at all.
+"""Scheduling: which minute a deployment fires on, and how it says it wants no clock at all.
 
-Timing used to be split between a binding ``frequency`` and the algorithm class's ``Schedule``,
+Timing used to be split between a deployment ``frequency`` and the algorithm class's ``Schedule``,
 and only the second one ever timed anything -- ``frequency_minutes`` was read exclusively as
-``is None``. These now exercise one mechanism: the binding's cron expression, in market time.
+``is None``. These now exercise one mechanism: the deployment's cron expression, in market time.
 """
 
 from __future__ import annotations
@@ -31,9 +31,9 @@ class _FrozenClock:
         return self._moment.astimezone(tz) if tz else self._moment
 
 
-def _binding_controls(cron: str = "*/30 9-15 * * 1-5", strategy: str = "rally_rotation") -> dict:
+def _deployment_controls(cron: str = "*/30 9-15 * * 1-5", strategy: str = "rally_rotation") -> dict:
     return {
-        "bindings": [{"id": "b1", "strategy": strategy, "account_id": "paper",
+        "deployments": [{"algorithm": strategy, "account_id": "paper",
                       "enabled": True, "cron": cron}],
         "trading_account_id": "paper",
     }
@@ -161,54 +161,54 @@ def test_separate_times_produce_separate_keys() -> None:
 
 
 # --------------------------------------------------------------------------------------
-# The binding wiring
+# The deployment wiring
 # --------------------------------------------------------------------------------------
 
 
-def test_a_binding_fires_on_its_own_cron(monkeypatch) -> None:
-    monkeypatch.setattr(bot_runtime, "load_controls", lambda: _binding_controls("0 11 * * 1-5"))
+def test_a_deployment_fires_on_its_own_cron(monkeypatch) -> None:
+    monkeypatch.setattr(bot_runtime, "load_controls", lambda: _deployment_controls("0 11 * * 1-5"))
     _at(monkeypatch, WEDNESDAY, 11, 0)
 
-    key = bot_runtime._binding_run_key("b1")()
+    key = bot_runtime._deployment_run_key("rally_rotation")()
 
-    assert key is not None and key.startswith("b1:")
+    assert key is not None and key.startswith("rally_rotation:")
 
 
-def test_a_binding_does_not_fire_off_its_cron(monkeypatch) -> None:
-    monkeypatch.setattr(bot_runtime, "load_controls", lambda: _binding_controls("0 11 * * 1-5"))
+def test_a_deployment_does_not_fire_off_its_cron(monkeypatch) -> None:
+    monkeypatch.setattr(bot_runtime, "load_controls", lambda: _deployment_controls("0 11 * * 1-5"))
     _at(monkeypatch, SUNDAY, 11, 0)
 
-    assert bot_runtime._binding_run_key("b1")() is None
+    assert bot_runtime._deployment_run_key("rally_rotation")() is None
 
 
-def test_the_bindings_cron_overrides_the_algorithm_default(monkeypatch) -> None:
-    """The whole point of moving the schedule onto the binding: a deployment can choose.
+def test_the_deployments_cron_overrides_the_algorithm_default(monkeypatch) -> None:
+    """The whole point of moving the schedule onto the deployment: it can choose its own.
 
-    Bursty DCA's class default is 11:00, and this binding says 14:00 -- so 14:00 is when it
+    Bursty DCA's class default is 11:00, and this deployment says 14:00 -- so 14:00 is when it
     runs, and 11:00 is not.
     """
-    monkeypatch.setattr(bot_runtime, "load_controls", lambda: _binding_controls("0 14 * * 1-5", "bursty_dca"))
+    monkeypatch.setattr(bot_runtime, "load_controls", lambda: _deployment_controls("0 14 * * 1-5", "bursty_dca"))
 
     _at(monkeypatch, WEDNESDAY, 11, 0)
-    assert bot_runtime._binding_run_key("b1")() is None
+    assert bot_runtime._deployment_run_key("bursty_dca")() is None
     _at(monkeypatch, WEDNESDAY, 14, 0)
-    assert bot_runtime._binding_run_key("b1")() is not None
+    assert bot_runtime._deployment_run_key("bursty_dca")() is not None
 
 
 def test_an_empty_cron_is_never_scheduled(monkeypatch) -> None:
-    """How a binding says an agent drives it, replacing the ``mcp`` frequency."""
-    monkeypatch.setattr(bot_runtime, "load_controls", lambda: _binding_controls(""))
+    """How a deployment says an agent drives it, replacing the ``mcp`` frequency."""
+    monkeypatch.setattr(bot_runtime, "load_controls", lambda: _deployment_controls(""))
     _at(monkeypatch, WEDNESDAY, 12, 0)
 
-    assert bot_runtime._binding_run_key("b1")() is None
-    assert bot_runtime._binding_enabled("b1")(_binding_controls("")) is False
+    assert bot_runtime._deployment_run_key("rally_rotation")() is None
+    assert bot_runtime._deployment_enabled("rally_rotation")(_deployment_controls("")) is False
 
 
 def test_a_hand_edited_unusable_cron_refuses_to_fire(monkeypatch) -> None:
     """Saving is validated, so this is a config edited outside the dashboard. Not firing is
     the safe reading -- a schedule nobody can parse must not be guessed at."""
     controls = {
-        "bindings": [{"id": "b1", "strategy": "rally_rotation", "account_id": "paper",
+        "deployments": [{"algorithm": "rally_rotation", "account_id": "paper",
                       "enabled": True, "cron": "0 99 * * *"}],
         "trading_account_id": "paper",
     }
@@ -216,7 +216,7 @@ def test_a_hand_edited_unusable_cron_refuses_to_fire(monkeypatch) -> None:
     monkeypatch.setattr(bot_runtime, "normalize_cron", lambda value, strategy=None: str(value))
     _at(monkeypatch, WEDNESDAY, 12, 0)
 
-    assert bot_runtime._binding_run_key("b1")() is None
+    assert bot_runtime._deployment_run_key("rally_rotation")() is None
 
 
 # --------------------------------------------------------------------------------------
@@ -225,7 +225,7 @@ def test_a_hand_edited_unusable_cron_refuses_to_fire(monkeypatch) -> None:
 
 
 def test_each_algorithm_states_a_runnable_default() -> None:
-    """A default nobody can parse would be worse than none: it reaches bindings silently."""
+    """A default nobody can parse would be worse than none: it reaches deployments silently."""
     from src.algorithms.registry import get_algorithm_class
 
     for algorithm_id in ("bursty_dca", "rally_rotation", "options_flip"):
@@ -244,8 +244,8 @@ def test_dca_defaults_to_one_weekday_run() -> None:
 def test_runtime_has_no_dca_loop_of_its_own() -> None:
     """Two schedulers driving one accrual state was the hazard this collapse removes."""
     assert not hasattr(bot_runtime.bot_runtime, "dca")
-    # "algorithm" mirrors the first binding for callers that predate the binding list.
-    assert set(bot_runtime.bot_runtime.snapshot()) == {"bindings", "algorithm"}
+    # "algorithm" mirrors the first deployment for callers that want a single runtime state.
+    assert set(bot_runtime.bot_runtime.snapshot()) == {"deployments", "algorithm"}
 
 
 # --------------------------------------------------------------------------------------

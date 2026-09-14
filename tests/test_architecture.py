@@ -236,11 +236,11 @@ def test_the_sweep_tool_measures_the_configuration_that_is_deployed() -> None:
             assert len(changed) <= 4, f"{label} moves {len(changed)} knobs at once: {sorted(changed)}"
 
 
-def test_the_binding_frequency_vocabulary_is_declared_once() -> None:
+def test_the_deployment_frequency_vocabulary_is_declared_once() -> None:
     """One list of cadences, in one place.
 
     It used to be written out four times -- ``VALID_FREQUENCIES``, the normaliser five lines
-    below it that re-listed rather than read it, ``bot_runtime._binding_frequency``, and
+    below it that re-listed rather than read it, ``bot_runtime._deployment_frequency``, and
     ``bot_runtime._frequency_minutes`` -- each with its own fallback. Adding a cadence to the
     dashboard's list therefore produced a value the normaliser rewrote to ``1hr`` and the
     scheduler then timed as sixty minutes: accepted, silently renamed, wrongly clocked.

@@ -190,7 +190,7 @@ tradable_universe:
 
 
 def test_a_plan_carries_only_what_to_buy_and_how_much() -> None:
-    """Cadence lives on the algorithm class and the on/off switch is the binding's, so a plan
+    """Cadence lives on the algorithm class and the on/off switch is the deployment's, so a plan
     carrying either would be a second source of truth that nothing reads."""
     from src.algorithms.bursty_dca.config import sanitize_plan
 
@@ -206,27 +206,31 @@ def test_a_plan_carries_only_what_to_buy_and_how_much() -> None:
 def test_controls_payload_returns_persisted_choices() -> None:
     payload = controls_payload()
 
-    assert {"equities", "algorithm_enabled", "active_strategy"} <= set(payload["controls"])
+    assert {"deployments", "trading_account_id"} <= set(payload["controls"])
     assert {"algorithm"} <= set(payload["bot"])
     assert "dca" not in payload["bot"]
 
 
 def test_save_controls_payload_does_not_wake_runtimes(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("TRADING_ALGORITHM_BOT_FILE", str(tmp_path / "algorithm_bot.yaml"))
+    config_path = tmp_path / "walbot.yaml"
+    config_path.write_text("algorithms: {}\n", encoding="utf-8")
+    monkeypatch.setenv("TRADING_CONFIG_FILE", str(config_path))
+    monkeypatch.setenv("TRADING_ALGORITHM_BOT_FILE", str(config_path))
+    monkeypatch.setenv("TRADING_ALGORITHMS_FILE", str(config_path))
 
     payload = api_payloads.save_controls_payload(
         {
             "controls": {
-                "active_strategy": "none",
-                "algorithm_enabled": True,
+                "deployments": [
+                    {"algorithm": "bursty_dca", "account_id": "local_paper", "enabled": True, "cron": ""}
+                ]
             }
         }
     )
 
-    # A saved "none" resolves to DCA but lands off: it used to force the bot idle whatever
-    # the enabled flag said, so carrying that flag over would start trading on upgrade.
-    assert payload["controls"]["active_strategy"] == "bursty_dca"
-    assert payload["controls"]["algorithm_enabled"] is False
+    saved = payload["controls"]["deployments"]
+    assert [d["algorithm"] for d in saved] == ["bursty_dca"]
+    assert saved[0]["enabled"] is True
     # Asserted on the module that owns the controls payload: ``api_payloads`` is a facade and
     # forwards only the names it exports, so a runtime handle would not be visible through it.
     from src.api.payloads import controls as controls_payloads
@@ -393,7 +397,7 @@ def test_none_strategy_resolves_to_dca(monkeypatch) -> None:
 def test_dca_view_states_its_planned_total(monkeypatch) -> None:
     """What the plan commits to per month, not what happens to be deployable this minute.
 
-    There is no Schedule row: cadence is set per binding on the dashboard and every algorithm
+    There is no Schedule row: cadence is set per deployment on the dashboard and every algorithm
     runs inside the trading session regardless, so restating it beside the signals only
     repeated the deployment the reader had just configured.
     """
@@ -428,10 +432,10 @@ def test_dca_view_states_its_planned_total(monkeypatch) -> None:
     assert "Schedule" not in {row["label"] for row in payload["summary"]}
 
 
-def _binding_controls(strategy: str, account_id: str) -> dict:
+def _deployment_controls(strategy: str, account_id: str) -> dict:
     return {
-        "bindings": [
-            {"id": "b1", "strategy": strategy, "account_id": account_id, "enabled": True, "frequency": "1hr"}
+        "deployments": [
+            {"algorithm": strategy, "account_id": account_id, "enabled": True, "cron": ""}
         ]
     }
 
@@ -440,7 +444,7 @@ def test_signal_view_is_computed_for_the_account_the_strategy_is_deployed_on(mon
     """A DCA plan is per account, so which account the view reads is not a detail.
 
     The signal view used to build its config with no account at all, so it fell back to the
-    default account while the dashboard's bubble board wrote the plan of the binding's account.
+    default account while the dashboard's bubble board wrote the plan of the deployment's account.
     The two never showed the same plan, an edit appeared to do nothing, and -- because
     ``analyze`` persists accrual -- the preview wrote a ledger under the wrong account too.
     """
@@ -453,7 +457,7 @@ def test_signal_view_is_computed_for_the_account_the_strategy_is_deployed_on(mon
         captured["account_id"] = account_id
         return Config(symbols=["SPY"], account_id=str(account_id or ""))
 
-    monkeypatch.setattr(controls_module, "load_controls", lambda *a, **kw: _binding_controls("bursty_dca", "local_paper"))
+    monkeypatch.setattr(controls_module, "load_controls", lambda *a, **kw: _deployment_controls("bursty_dca", "local_paper"))
     monkeypatch.setattr(strategy_config, "get_config", capturing_get_config)
 
     assert strategy_config.config_for_strategy_view("bursty_dca").account_id == "local_paper"
@@ -463,10 +467,10 @@ def test_signal_view_is_computed_for_the_account_the_strategy_is_deployed_on(mon
     assert strategy_config.config_for_strategy_view("bursty_dca", "paper").account_id == "paper"
 
 
-def test_signal_view_survives_a_binding_naming_a_deleted_account(monkeypatch) -> None:
-    """``sanitize_binding`` never checks the account exists, so a binding can outlive one.
+def test_signal_view_survives_a_deployment_naming_a_deleted_account(monkeypatch) -> None:
+    """``sanitize_deployment`` never checks the account exists, so a deployment can outlive one.
 
-    Refusing here would take the whole dashboard down for a stale binding, so the view falls
+    Refusing here would take the whole dashboard down for a stale deployment, so the view falls
     back to the default account. It reports which account it used, so the substitution is
     visible rather than silent.
     """
@@ -479,14 +483,14 @@ def test_signal_view_survives_a_binding_naming_a_deleted_account(monkeypatch) ->
             raise UnknownAccountError(str(account_id), ["paper"])
         return Config(symbols=["SPY"], account_id="paper")
 
-    monkeypatch.setattr(controls_module, "load_controls", lambda *a, **kw: _binding_controls("bursty_dca", "deleted"))
+    monkeypatch.setattr(controls_module, "load_controls", lambda *a, **kw: _deployment_controls("bursty_dca", "deleted"))
     monkeypatch.setattr(strategy_config, "get_config", strict_get_config)
 
     assert strategy_config.config_for_strategy_view("bursty_dca").account_id == "paper"
 
 
 def test_backtest_cache_key_separates_accounts(monkeypatch) -> None:
-    """Two DCA bindings on different accounts have different plans, so different curves.
+    """One DCA deployment viewed against two accounts has different plans, so different curves.
 
     Without the account in the basis they collided on one cache entry and whichever ran first
     answered for both -- and editing one account's plan did not invalidate the other's.

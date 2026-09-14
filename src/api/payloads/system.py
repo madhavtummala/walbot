@@ -15,9 +15,9 @@ from typing import Any
 import pandas as pd
 
 from ...core.bot_runtime import bot_runtime
-from ...core.config import DEFAULT_STRATEGY_ID, get_config
+from ...core.config import get_config
 from ...data.universe import resolve_project_path
-from ..controls import load_controls
+from ..controls import load_controls, primary_algorithm
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ def _display_path(path: Path) -> str:
 
 def status_payload() -> dict[str, Any]:
     controls = load_controls()
-    strategy = str(controls.get("active_strategy") or DEFAULT_STRATEGY_ID)
+    strategy = primary_algorithm(controls)
     config = get_config(strategy_id=strategy)
     social_info = _file_info(config.social_trends_csv)
     social_rows = 0

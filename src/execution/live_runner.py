@@ -1,9 +1,9 @@
 from __future__ import annotations
 import logging
-from ..api.controls import load_controls
+from ..api.controls import load_controls, primary_algorithm
 from ..core import pipeline
 from ..core.runner import execute_algorithm, run_algorithm
-from ..core.config import DEFAULT_STRATEGY_ID, get_config
+from ..core.config import get_config
 from ..common.logging_utils import configure_logging, log_signals, log_portfolio, log_orders, log_position_changes
 from ..core.strategy_models import STRATEGY_LABELS
 from ..data.order_journal import record_orders
@@ -15,12 +15,12 @@ logger = logging.getLogger(__name__)
 def run_once(account_id: str | None = None, strategy: str | None = None) -> None:
     """Run one algorithm against one account.
 
-    ``strategy`` is passed explicitly by the runtime, which drives several bindings at once and
-    cannot rely on a single selected strategy in controls. It falls back to that selection so a
-    bare ``run_once()`` from a shell still does the obvious thing.
+    ``strategy`` is passed explicitly by the runtime, which drives every deployed algorithm at
+    once and so has no single selected strategy to rely on. It falls back to the first
+    deployment so a bare ``run_once()`` from a shell still does the obvious thing.
     """
     controls = load_controls()
-    strategy = canonical_algorithm_id(strategy or controls.get("active_strategy") or DEFAULT_STRATEGY_ID)
+    strategy = canonical_algorithm_id(strategy or primary_algorithm(controls))
     config = (
         get_config(account_id=account_id, strategy_id=strategy)
         if account_id
@@ -34,7 +34,7 @@ def run_once(account_id: str | None = None, strategy: str | None = None) -> None
         config.alpaca_base_url,
     )
 
-    # No global enable check. Whether this algorithm trades is the binding's own switch, and
+    # No global enable check. Whether this algorithm trades is the deployment's own switch, and
     # the scheduler already refused to call run_once if it were off -- a second, dashboard-wide
     # flag could only disagree with the thing the user actually toggled.
     #

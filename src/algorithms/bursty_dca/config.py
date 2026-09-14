@@ -20,7 +20,7 @@ from ...common.config_utils import as_float
 MAX_ITEM_AMOUNT = 5_000.0
 
 #: The plan carries what to buy and how much, and nothing else -- cadence and enablement live
-#: on the binding, not here.
+#: on the deployment, not here.
 BUCKETS = ("buy", "sell")
 
 

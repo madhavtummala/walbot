@@ -32,7 +32,7 @@ global.AbortController = class { constructor(){ this.signal = {}; } abort(){} };
 const PAYLOADS = {
   "/api/status": { config: { backtest_period: "2m" }, runtime_mode: "bot" },
   "/api/universe": { rows: [{ symbol: "SPY", enabled: true }] },
-  "/api/controls": { controls: { bindings: [{ id: "b1", strategy: "bursty_dca", account_id: "paper", enabled: true }], trading_account_id: "paper" }, bot: {} },
+  "/api/controls": { controls: { deployments: [{ algorithm: "bursty_dca", account_id: "paper", enabled: true, cron: "" }], trading_account_id: "paper" }, bot: {} },
   "/api/accounts": { default: "paper", rows: [{ id: "paper", label: "Alpaca Paper", broker: "alpaca", base_url: "u", data_feed: "iex", api_key_env: "K", api_secret_env: "S", credentials_ready: true, missing_env: [], deployments: ["bursty_dca"] }] },
   "/api/dca": { account_id: "paper", plan: { max_item_amount: 2000, buy: { amount: 100, items: [{ symbol: "SPY", amount: 50 }] }, sell: { amount: 0, items: [] } }, available: [], preview: {} },
   "/api/positions": { account_id: "paper", equity: 100, cash: 10, day_pl: 1, day_pl_percent: 0.01, total_pl: 2, rows: [], error: "" },

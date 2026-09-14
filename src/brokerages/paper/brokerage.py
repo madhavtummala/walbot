@@ -62,8 +62,8 @@ class PaperBrokerage(BaseBrokerage):
         """Run a mutation against freshly-read state, with this book held for the whole of it.
 
         The book is loaded once in ``__init__`` and lives on the instance, which is fine for
-        reading and wrong for writing: the scheduler runs a thread per binding and several
-        bindings may be deployed on one account, so two instances of this class can hold the
+        reading and wrong for writing: the scheduler runs a thread per deployment and several
+        algorithms may be deployed on one account, so two instances of this class can hold the
         same book at once. Each would fill its orders against the balance it read at
         construction and write the whole blob back, and the second write would discard the
         first's cash and positions -- fills silently vanishing from a book that is supposed to
@@ -199,7 +199,7 @@ class PaperBrokerage(BaseBrokerage):
         if str(self.state.get("opening_day") or "") == today:
             return float(self.state.get("opening_equity", equity) or equity)
         with self._transaction():
-            # Re-checked inside the lock: two bindings reading this book at once must not each
+            # Re-checked inside the lock: two deployments reading this book at once must not each
             # decide they are the first of the day and stamp a different number.
             if str(self.state.get("opening_day") or "") != today:
                 self.state["opening_day"] = today

@@ -9,8 +9,8 @@ After the close. **The unit is the account, not the algorithm.**
 
 ## 1. Gather
 
-`list_accounts()`, then `get_account(id)` and `get_account_orders(id)` per account.
-`list_bindings()` once.
+`list_accounts()`, then `get_account_positions(id)` and `get_account_orders(id)` per account.
+`list_algorithms()` once.
 
 Orders come back in every state — filled, replaced, rejected, resting — in one list.
 
@@ -22,8 +22,8 @@ If an account errors, name it and carry on.
 - A rejection is the most important line. Quote the broker's reason verbatim and say what it
   means for tomorrow.
 - Resting orders are tomorrow's exposure. A stop protects, an entry intends. Say which.
-- Mention bindings only when they change the outlook: nothing armed, or armed on an empty
-  account. An armed binding that traded nothing is a normal day.
+- Mention deployments only when they change the outlook: nothing armed, or armed on an empty
+  account. An armed deployment that traded nothing is a normal day.
 
 ## 3. Outside information
 
@@ -55,7 +55,7 @@ RESTING OVERNIGHT
 
 TOMORROW
 • CPI 08:30 ET. Schwab Main holds IWM into it.
-• All three bindings are switched off — nothing will trade.
+• All three deployed algorithms are switched off — nothing will trade.
 ```
 
 - `MONEY` first: total, then the per-account split.

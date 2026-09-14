@@ -188,7 +188,7 @@ def _checks(row: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def signal_view(plan: AlgorithmPlan, *, unknown: list[str]) -> SignalView:
-    """Render every configured bucket, whether or not the algorithm is running -- the binding's
+    """Render every configured bucket, whether or not the algorithm is running -- the deployment's
     switch controls placing orders, not whether the plan exists."""
     ma_days = int(plan.metadata.get("regime_ma_days") or 0)
     rows = [
