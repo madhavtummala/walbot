@@ -127,12 +127,24 @@ def select_contract(
         ))
         return None, None, checks
 
-    deepest = max((c.open_interest for c in dated if abs(c.delta - target) <= DELTA_TOLERANCE), default=0)
+    # Both measures, because the filter above tests both. Reporting only open interest made a
+    # spread rejection read as a contradiction -- "best open interest 998 ... needs OI ≥ 100" --
+    # which sends a reader looking for a bug in the gate rather than at the 8% spread that
+    # actually blocked it.
+    in_band_all = [c for c in dated if abs(c.delta - target) <= DELTA_TOLERANCE]
+    deepest = max((c.open_interest for c in in_band_all), default=0)
+    tightest = min((c.spread_pct for c in in_band_all if c.spread_pct > 0), default=0.0)
+    measured = f"best open interest {deepest}"
+    if max_spread > 0:
+        measured += f", tightest spread {tightest:.1%}" if tightest > 0 else ", no quoted spread"
     checks.append(Check(
         label="Liquid enough to trade",
         ok=False,
-        value=f"best open interest {deepest} across {considered} expiries",
-        limit=f"OI ≥ {min_interest}",
+        value=f"{measured} across {considered} expiries",
+        limit=(
+            f"OI ≥ {min_interest}"
+            + (f", spread ≤ {max_spread:.1%}" if max_spread > 0 else "")
+        ),
         blocking=True,
     ))
     return None, best_effort, checks
