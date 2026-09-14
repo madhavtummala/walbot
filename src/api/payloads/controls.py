@@ -21,8 +21,6 @@ logger = logging.getLogger(__name__)
 def controls_payload() -> dict[str, Any]:
     config = get_config()
     controls = load_controls()
-    if not controls.get("trading_account_id"):
-        controls["trading_account_id"] = config.account_id
     return {
         "controls": controls,
         "accounts": config.account_options,
@@ -58,7 +56,7 @@ def save_controls_payload(body: dict[str, Any]) -> dict[str, Any]:
     controls = save_controls(raw_controls)
     return {
         "controls": controls,
-        "accounts": _account_options(str(controls.get("trading_account_id") or "")),
+        "accounts": _account_options(""),
         "bot": bot_runtime.snapshot(),
     }
 

@@ -206,7 +206,9 @@ def test_a_plan_carries_only_what_to_buy_and_how_much() -> None:
 def test_controls_payload_returns_persisted_choices() -> None:
     payload = controls_payload()
 
-    assert {"deployments", "trading_account_id"} <= set(payload["controls"])
+    assert "deployments" in payload["controls"]
+    # No global default account: a deployment names its own, or it does not run.
+    assert "trading_account_id" not in payload["controls"]
     assert {"algorithm"} <= set(payload["bot"])
     assert "dca" not in payload["bot"]
 

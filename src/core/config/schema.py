@@ -12,7 +12,7 @@ from ...data.universe import load_tradable_names
 
 from ...common.config_utils import direct_or_env
 from .coercion import _algorithm_sections, _config_value, _normalize_data_sources, _parse_symbols, _provider_credential, _provider_secret, _section, _str_to_bool, reader
-from .defaults import ALGORITHM_EQUITY_CAP, ALPACA_BASE_URL, ALPACA_DATA_FEED, ALPHA_VANTAGE_MAX_SYMBOLS, ALPHA_VANTAGE_NEWS_CSV, ALPHA_VANTAGE_NEWS_LIMIT, ALPHA_VANTAGE_NEWS_LOOKBACK_DAYS, ALPHA_VANTAGE_REQUEST_DELAY_SECONDS, BACKTEST_PERIOD, BACKTEST_STARTING_EQUITY, CASH_BUFFER, CASH_EQUIVALENTS, DEFAULT_STRATEGY_ID, DIVIDEND_PROVIDER_ORDER, EOD_MARKET_DATA_PROVIDER_ORDER, HISTORY_EXTRA_BUFFER_DAYS, INTRADAY_MARKET_DATA_PROVIDER_ORDER, KILL_SWITCH, MARKET_DATA_BAR_MINUTES, MARKET_DATA_CACHE_TTL_SECONDS, MARKET_DATA_PROVIDER_ORDER, MAX_PORTFOLIO_EXPOSURE, MAX_WEIGHT_PER_SYMBOL, MIN_TRADE_DOLLARS, MOMENTUM_LOOKBACK_DAYS, NEWS_SENTIMENT_CACHE_TTL_SECONDS, NEWS_SENTIMENT_PROVIDER_ORDER, REBALANCE_THRESHOLD, SYMBOLS, TRADABLES_CSV, TRANSACTION_COST_BPS, UNNAMED_ACCOUNT_ID
+from .defaults import ALGORITHM_EQUITY_CAP, ALPACA_BASE_URL, ALPACA_DATA_FEED, ALPHA_VANTAGE_MAX_SYMBOLS, ALPHA_VANTAGE_NEWS_CSV, ALPHA_VANTAGE_NEWS_LIMIT, ALPHA_VANTAGE_NEWS_LOOKBACK_DAYS, ALPHA_VANTAGE_REQUEST_DELAY_SECONDS, BACKTEST_STARTING_EQUITY, CASH_BUFFER, CASH_EQUIVALENTS, DEFAULT_STRATEGY_ID, DIVIDEND_PROVIDER_ORDER, EOD_MARKET_DATA_PROVIDER_ORDER, HISTORY_EXTRA_BUFFER_DAYS, INTRADAY_MARKET_DATA_PROVIDER_ORDER, KILL_SWITCH, MARKET_DATA_BAR_MINUTES, MARKET_DATA_CACHE_TTL_SECONDS, MARKET_DATA_PROVIDER_ORDER, MAX_PORTFOLIO_EXPOSURE, MAX_WEIGHT_PER_SYMBOL, MIN_TRADE_DOLLARS, MOMENTUM_LOOKBACK_DAYS, NEWS_SENTIMENT_CACHE_TTL_SECONDS, NEWS_SENTIMENT_PROVIDER_ORDER, REBALANCE_THRESHOLD, SYMBOLS, TRADABLES_CSV, TRANSACTION_COST_BPS, UNNAMED_ACCOUNT_ID
 from .yaml_io import load_accounts_config, load_algorithm_bot_config, load_algorithms_config, load_connectors_config, load_universe_config
 
 from .accounts import UnknownAccountError, _normalize_accounts_config
@@ -34,7 +34,6 @@ class Config:
     rebalance_threshold: float = REBALANCE_THRESHOLD
     transaction_cost_bps: float = TRANSACTION_COST_BPS
     backtest_starting_equity: float = BACKTEST_STARTING_EQUITY
-    backtest_period: str = BACKTEST_PERIOD
     algorithm_equity_cap: float = ALGORITHM_EQUITY_CAP
     kill_switch: bool = KILL_SWITCH
     alpaca_api_key: str = ""
@@ -108,16 +107,7 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
             break
         algorithm = _section(algorithm_configs, legacy_id)
     algorithm_bot = _section(raw_algorithm_bot_config, "algorithm_bot")
-    runtime = {
-        **_section(raw_algorithm_bot_config, "runtime"),
-        **{
-            key: value
-            for key, value in algorithm_bot.items()
-            if key in {
-                "backtest_period",
-            }
-        },
-    }
+    runtime = _section(raw_algorithm_bot_config, "runtime")
     social = _section(raw_algorithm_bot_config, "social")
     alpha_vantage = _section(raw_algorithm_bot_config, "alpha_vantage")
     raw_connectors_config = load_connectors_config()
@@ -213,7 +203,6 @@ def get_config(account_id: str | None = None, strategy_id: str | None = None) ->
         rebalance_threshold=read_algorithm("rebalance_threshold", REBALANCE_THRESHOLD),
         transaction_cost_bps=read_algorithm("transaction_cost_bps", TRANSACTION_COST_BPS),
         backtest_starting_equity=read_algorithm("backtest_starting_equity", BACKTEST_STARTING_EQUITY),
-        backtest_period=str(_config_value(runtime, "backtest_period", "BACKTEST_PERIOD", BACKTEST_PERIOD)).strip().lower() or BACKTEST_PERIOD,
         algorithm_equity_cap=read_algorithm("algorithm_equity_cap", ALGORITHM_EQUITY_CAP),
         kill_switch=kill_switch,
         alpaca_api_key=api_key,

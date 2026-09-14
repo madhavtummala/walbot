@@ -43,7 +43,9 @@ MIN_TRADE_DOLLARS = 50.0
 REBALANCE_THRESHOLD = 0.02
 TRANSACTION_COST_BPS = 1.0
 BACKTEST_STARTING_EQUITY = 10_000.0
-BACKTEST_PERIOD = "4m"
+#: The backtest window the dashboard opens on. Not configurable: the period selector already
+#: changes it per look, so a config knob only set which value that selector started at.
+BACKTEST_PERIOD = "3m"
 ALGORITHM_EQUITY_CAP = 0.0
 KILL_SWITCH = False
 ALPACA_BASE_URL = "https://paper-api.alpaca.markets"

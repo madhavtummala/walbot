@@ -51,7 +51,7 @@ class _RuntimeLoop:
         self._run_fn = run_fn
         self._interval_fn = interval_fn
         self._run_key_fn = run_key_fn
-        self._account_id_fn = account_id_fn or (lambda controls: str(controls.get("trading_account_id") or ""))
+        self._account_id_fn = account_id_fn or (lambda _controls: "")
         self._lock = threading.Lock()
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -187,7 +187,10 @@ def _deployment_enabled(algorithm: str):
 def _deployment_account_id(algorithm: str):
     def account_id(controls: dict[str, Any]) -> str:
         deployment = find_deployment(controls, algorithm)
-        return str((deployment or {}).get("account_id") or controls.get("trading_account_id") or "")
+        # No global fallback. A deployment that names no account is misconfigured, and
+        # running it against some default meant an algorithm could trade an account nobody
+        # pointed it at.
+        return str((deployment or {}).get("account_id") or "")
 
     return account_id
 

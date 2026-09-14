@@ -62,7 +62,6 @@ def cron_is_scheduled(cron: Any) -> bool:
 
 
 DEFAULT_CONTROLS: dict[str, Any] = {
-    "trading_account_id": "",
     "deployments": [],
 }
 
@@ -121,11 +120,7 @@ def sanitize_controls(controls: dict[str, Any] | None) -> dict[str, Any]:
         deployments.append(deployment)
 
     deployments.sort(key=lambda row: row["algorithm"])
-    first_account = deployments[0]["account_id"] if deployments else ""
-    return {
-        "trading_account_id": str(raw.get("trading_account_id") or first_account or "")[:80],
-        "deployments": deployments,
-    }
+    return {"deployments": deployments}
 
 
 def find_deployment(controls: dict[str, Any], algorithm: str) -> dict[str, Any] | None:
@@ -217,9 +212,6 @@ def _controls_from_algorithms_config(path: str | None = None) -> dict[str, Any]:
     sections = _algorithm_sections(load_algorithms_config(path))
     algorithm_bot = load_algorithm_bot_config(path).get("algorithm_bot")
     return {
-        # Not a deployment field: the dashboard's default account, which outlives whatever is
-        # deployed and is edited on its own page.
-        "trading_account_id": (algorithm_bot or {}).get("trading_account_id", ""),
         "deployments": [
             {"algorithm": algorithm, **{key: section[key] for key in DEPLOYMENT_KEYS if key in section}}
             for algorithm, section in sections.items()
@@ -263,10 +255,5 @@ def save_controls(controls: dict[str, Any], path: str | None = None) -> dict[str
         # unified walbot.yaml, so this has to pick up the algorithms written just above --
         # and when the sections are split across files it is a separate document anyway.
         bot_document = load_algorithm_bot_config(path)
-        algorithm_bot = bot_document.get("algorithm_bot")
-        if not isinstance(algorithm_bot, dict):
-            algorithm_bot = {}
-            bot_document["algorithm_bot"] = algorithm_bot
-        algorithm_bot["trading_account_id"] = sanitized["trading_account_id"]
         save_algorithm_bot_config(bot_document, path)
     return sanitized

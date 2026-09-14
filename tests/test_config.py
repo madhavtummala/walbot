@@ -97,7 +97,10 @@ data_sources:
     # The kill switch is env-only now: a deployment brake, not a dashboard control, so a
     # runtime: block in the config document no longer turns it on.
     assert config.kill_switch is False
-    assert config.backtest_period == "4m"
+    # Deliberately absent: the dashboard's period selector is the only thing that chooses a
+    # backtest window, and it does not persist the choice, so there was nothing for a config
+    # knob to configure.
+    assert not hasattr(config, "backtest_period")
     assert config.social_trends_csv == "data/custom_social.csv"
     assert config.market_data_provider_order == ["finnhub", "alpaca"]
     assert config.market_data_cache_ttl_seconds == 15

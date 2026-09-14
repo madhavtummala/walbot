@@ -15,11 +15,12 @@ const DEFAULT_WHEEL_STEP = 25;
 //: lands on the number it is editing rather than near it.
 const AMOUNT_LABEL_DY = 14;
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
-let BACKTEST_PERIOD = "4m";
-let BACKTEST_LABEL = "4M";
+//: The window every backtest view opens on. The selector below changes it for a look; nothing
+//: persists that choice, which is why this is a constant rather than config.
+let BACKTEST_PERIOD = "3m";
+let BACKTEST_LABEL = "3M";
 
-//: Selectable backtest windows. The configured default from status still wins on first load;
-//: this only lets you look at a different window without editing config.
+//: Selectable backtest windows.
 const BACKTEST_PERIOD_CHOICES = ["1m", "3m", "6m", "12m", "24m"];
 
 //: Two bucket colours, by position rather than by name. The board serves any algorithm's
@@ -70,7 +71,6 @@ const state = {
   status: null,
   universe: [],
   controls: {
-    trading_account_id: "",
     deployments: [],
   },
   accounts: { rows: [] },
@@ -1276,12 +1276,12 @@ function isBacktestPayload(payload) {
 
 function normalizeBacktestPeriod(period) {
   const normalized = String(period || "").trim().toLowerCase();
-  return /^[1-9][0-9]*m$/.test(normalized) ? normalized : "4m";
+  return /^[1-9][0-9]*m$/.test(normalized) ? normalized : "3m";
 }
 
 function backtestPeriodLabel(period) {
   const match = normalizeBacktestPeriod(period).match(/^([1-9][0-9]*)m$/);
-  return match ? `${match[1]}M` : "4M";
+  return match ? `${match[1]}M` : "3M";
 }
 
 function configureBacktestPeriod(period) {
@@ -3529,7 +3529,6 @@ async function init() {
       api("/api/controls", { timeoutMs: 5000 }),
     ]);
     state.status = statusPayload;
-    configureBacktestPeriod(statusPayload.config?.backtest_period);
     state.universe = universePayload.rows || [];
     state.controls = controlsPayload.controls || state.controls;
     state.bot = controlsPayload.bot || statusPayload.bot || null;

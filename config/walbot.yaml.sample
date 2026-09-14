@@ -62,10 +62,6 @@ tradable_universe:
   - SGOV
   - SPYM
 
-algorithm_bot:
-  trading_account_id: paper1
-  backtest_period: 3m
-
 algorithms:
   # One algorithm, shown with the three keys every algorithm has: where it trades, whether it
   # is running, and when. Everything below those is its own tuning.
