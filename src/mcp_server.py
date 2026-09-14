@@ -253,7 +253,8 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
         symbol, so two algorithms trading the same account cannot be told apart here.
 
         Carries ``equity``, ``cash``, ``day_pl`` (and percent), ``total_pl``, ``dividend_pl``
-        and the holdings in ``rows``. ``day_pl: null`` means the broker did not report where the
+        and the holdings in ``rows``. ``dividend_pl`` is year to date like ``realized_pl``, with
+        ``dividend_pl_1y`` beside it for the trailing year. ``day_pl: null`` means the broker did not report where the
         session started -- "unknown", not "flat". An unreachable broker fills ``error`` and
         leaves the figures null rather than reporting zeros.
 
@@ -265,7 +266,7 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
         ``realized_pl`` is the third and measures what the other two cannot: profit already
         banked. It is **year to date**, matched from the broker's fills, and read fresh on every
         call to this tool; ``realized_pl_1y`` is the same figure over the trailing year, and
-        ``realized_year`` names the calendar year the first one covers. Year to date leads
+        ``activity_year`` names the calendar year both year-to-date figures cover. Year to date leads
         because it is what a broker's own statement totals, so it is the one figure here a user
         can check against their account. It carries its own ``computed_at`` regardless, because the
         dashboard serves the same figure from a background recompute and may show it older. An account that closed a
@@ -282,11 +283,26 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
 
         # Forced, unlike a page load: an agent gets one shot at an answer and cannot come back
         # a second later to see whether a background recompute landed.
+        positions = positions_payload(account_id)
+        analytics = account_analytics_payload(account_id, refresh=True)
+        # Merged by hand rather than by ``**``, which let the second dict's empty ``error`` erase
+        # the first's real one -- an unreachable broker reported null balances and said nothing
+        # about why. ``state`` and ``computed_at`` are dropped or renamed for the same reason:
+        # beside an account's balances, a bare "state" reads as the account's.
+        carried = {
+            key: value for key, value in analytics.items()
+            if key not in ("error", "state", "computed_at", "account_id")
+        }
+        errors = [text for text in (positions.get("error"), analytics.get("error")) if text]
         return {
             "status": "ok",
             "updated_at": datetime.now(timezone.utc).isoformat(),
-            **positions_payload(account_id),
-            **account_analytics_payload(account_id, refresh=True),
+            **positions,
+            **carried,
+            # Only the realized/dividend half is ever served from a computation; the balances
+            # above are always read live, so one timestamp could not have covered both.
+            "realized_computed_at": analytics.get("computed_at", ""),
+            "error": "; ".join(errors),
         }
 
     @mcp.tool()

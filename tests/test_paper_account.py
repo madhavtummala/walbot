@@ -857,5 +857,38 @@ def test_the_page_reports_year_to_date_and_carries_the_trailing_year_beside_it(m
 
     assert payload["realized_pl"] == 200.0, "year to date: the SPY gain only"
     assert payload["realized_pl_1y"] == 150.0, "trailing year: the QQQ loss as well"
-    assert payload["realized_year"] == str(datetime.now(timezone.utc).year)
+    assert payload["activity_year"] == str(datetime.now(timezone.utc).year)
     assert payload["realized_unmatched"] == 0
+
+
+def test_dividends_are_reported_on_the_same_two_windows_as_realized(monkeypatch) -> None:
+    """One window across the page, so two income figures beside each other are comparable."""
+    from src.api.payloads import accounts
+    from src.common.lazy_field import LazyField
+
+    year = datetime.now(timezone.utc).year
+
+    class FakeBrokerage:
+        def get_dividend_activity(self, start=None, end=None):
+            return [
+                {"symbol": "SGOV", "date": f"{year}-03-01", "amount": 40.0, "description": "div"},
+                {"symbol": "SGOV", "date": f"{year}-01-02", "amount": 10.0, "description": "div"},
+                # Inside the trailing year, outside the calendar one.
+                {"symbol": "SGOV", "date": f"{year - 1}-11-01", "amount": 25.0, "description": "div"},
+            ]
+
+        def get_fills(self, start=None, end=None):
+            return []
+
+    _patch_payloads(monkeypatch, "get_account_broker_type", lambda _account: "schwab")
+    monkeypatch.setattr("src.core.pipeline.resolve_brokerage", lambda _config: FakeBrokerage())
+    monkeypatch.setattr(
+        accounts, "ANALYTICS",
+        LazyField("test", accounts._compute_analytics, spawn=lambda work: work()),
+    )
+
+    payload = accounts.account_analytics_payload("schwab2", refresh=True)
+
+    assert payload["dividend_pl"] == 50.0, "year to date"
+    assert payload["dividend_pl_1y"] == 75.0, "trailing year includes November"
+    assert len(payload["dividend_rows"]) == 3, "the rows themselves are not windowed away"

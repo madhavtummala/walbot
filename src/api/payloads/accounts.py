@@ -126,9 +126,16 @@ def _dividend_pl(brokerage: Any, config: Any) -> dict[str, Any]:
         rows = brokerage.get_dividend_activity(end - timedelta(days=DIVIDEND_ACTIVITY_DAYS), end)
     except Exception as error:  # noqa: BLE001 - income is a detail, not the whole page
         logger.warning("Could not read dividend activity for %s: %s", config.account_id, error)
-        return {"dividend_pl": None, "dividend_rows": []}
+        return {"dividend_pl": None, "dividend_pl_1y": None, "dividend_rows": []}
+    # The same two windows realized P/L reports, for the same reason: one figure a statement
+    # can be checked against, and the trailing year beside it for context.
+    year_start = date(end.year, 1, 1).isoformat()
     return {
-        "dividend_pl": float(sum(float(row.get("amount") or 0.0) for row in rows)),
+        "dividend_pl": float(
+            sum(float(row.get("amount") or 0.0) for row in rows
+                if str(row.get("date") or "")[:10] >= year_start)
+        ),
+        "dividend_pl_1y": float(sum(float(row.get("amount") or 0.0) for row in rows)),
         "dividend_rows": rows[:40],
     }
 
@@ -145,7 +152,7 @@ def _realized_pl(brokerage: Any, config: Any) -> dict[str, Any]:
 
     blank = {
         "realized_pl": None, "realized_closes": 0, "realized_unmatched": 0,
-        "realized_pl_1y": None, "realized_year": "",
+        "realized_pl_1y": None,
     }
     try:
         end = datetime.now(timezone.utc).date()
@@ -171,7 +178,6 @@ def _realized_pl(brokerage: Any, config: Any) -> dict[str, Any]:
         # window. Surfaced so the page can say the total is partial instead of just being wrong.
         "realized_unmatched": ytd["unmatched"],
         "realized_pl_1y": trailing["realized_pl"],
-        "realized_year": str(end.year),
     }
 
 
@@ -184,7 +190,12 @@ def _compute_analytics(account_id: str) -> dict[str, Any]:
     # a fresh session is another OAuth exchange and another account lookup -- helpers resolving
     # independently made one page load authenticate four times.
     brokerage = resolve_brokerage(config)
-    return {**_dividend_pl(brokerage, config), **_realized_pl(brokerage, config)}
+    return {
+        **_dividend_pl(brokerage, config),
+        **_realized_pl(brokerage, config),
+        # One label for both figures, because both now cover the same calendar year.
+        "activity_year": str(datetime.now(timezone.utc).year),
+    }
 
 
 #: In memory rather than the state store: it caches something the broker can always be asked
@@ -227,13 +238,14 @@ def _blank_analytics(account_id: str) -> dict[str, Any]:
         "computed_at": "",
         "state": "computing",
         "dividend_pl": None,
+        "dividend_pl_1y": None,
         "dividend_rows": [],
         # Banked, as opposed to ``total_pl``, which only measures what is still held.
         "realized_pl": None,
         "realized_closes": 0,
         "realized_unmatched": 0,
         "realized_pl_1y": None,
-        "realized_year": "",
+        "activity_year": "",
         "error": "",
     }
 

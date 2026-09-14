@@ -487,3 +487,31 @@ def test_one_deployment_is_driven_by_exactly_one_origin() -> None:
     off = _deployment(enabled=False)
     assert controls_module.deployment_refusal(off, controls_module.ORIGIN_SCHEDULE)
     assert controls_module.deployment_refusal(off, controls_module.ORIGIN_MCP)
+
+
+def test_account_positions_carries_both_halves_without_losing_an_error() -> None:
+    """The balances and the computed figures are two reads, merged into one answer.
+
+    A plain ``{**positions, **analytics}`` let the second dict's empty ``error`` erase the
+    first's real one, so an unreachable broker reported null balances and said nothing about
+    why -- the one case where an agent most needs to be told.
+    """
+    from src.api.payloads.accounts import _blank_analytics
+
+    positions = {
+        "account_id": "schwab3", "equity": None, "cash": None, "rows": [],
+        "error": "Schwab API returned 401: token expired",
+    }
+    analytics = _blank_analytics("schwab3")
+
+    carried = {
+        key: value for key, value in analytics.items()
+        if key not in ("error", "state", "computed_at", "account_id")
+    }
+    errors = [text for text in (positions.get("error"), analytics.get("error")) if text]
+    merged = {**positions, **carried, "error": "; ".join(errors)}
+
+    assert "401" in merged["error"], "a positions failure must survive the merge"
+    # And the analytics keys are still carried, so the shape does not change with the failure.
+    assert "realized_pl" in merged and "dividend_pl" in merged
+    assert "state" not in merged, "a bare 'state' beside balances reads as the account's"
