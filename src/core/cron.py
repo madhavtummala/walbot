@@ -5,10 +5,10 @@ Five standard fields -- ``minute hour day-of-month month day-of-week`` -- evalua
 and a schedule that drifted an hour against the trading session twice a year would be a
 different schedule in summer than in winter.
 
-This replaces a pair of overlapping controls. A binding carried a ``frequency``
+This replaces a pair of overlapping controls. A deployment carried a ``frequency``
 (``15m``/``1hr``/``1d``/...) and the algorithm class carried a ``Schedule`` of start time,
 end time and refresh interval -- but only the second ever timed anything. ``frequency_minutes``
-was consumed in exactly one way, ``is None``, to sort scheduled bindings from agent-driven
+was consumed in exactly one way, ``is None``, to sort scheduled deployments from agent-driven
 ones, so choosing ``15m`` over ``2hr`` for Bursty DCA changed nothing at all: it fired at 11:00
 and 15:00 either way. The dropdown was a control that could not control its own subject.
 

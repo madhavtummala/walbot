@@ -9,8 +9,8 @@ from typing import Any
 from src.core.config import DEFAULT_STRATEGY_ID
 from ..api.controls import (
     ORIGIN_SCHEDULE,
-    binding_refusal,
-    find_binding,
+    deployment_refusal,
+    find_deployment,
     load_controls,
     normalize_cron,
 )
@@ -165,49 +165,41 @@ class _RuntimeLoop:
                 self._state.last_finished_at = datetime.now(timezone.utc).isoformat()
 
 
-def _binding_cron(binding_id: str) -> str:
-    """This binding's schedule as saved, re-read every tick so an edit takes effect at once."""
-    controls = load_controls()
-    binding = find_binding(controls, binding_id)
-    return normalize_cron((binding or {}).get("cron"), _binding_strategy(binding_id, controls))
+def _deployment_cron(algorithm: str) -> str:
+    """This deployment's schedule as saved, re-read every tick so an edit takes effect at once."""
+    deployment = find_deployment(load_controls(), algorithm)
+    return normalize_cron((deployment or {}).get("cron"), algorithm)
 
 
-def _binding_enabled(binding_id: str):
-    """Enabled check scoped to one binding, re-read from controls on every tick.
+def _deployment_enabled(algorithm: str):
+    """Enabled check scoped to one algorithm, re-read from controls on every tick.
 
-    Delegates to ``binding_refusal`` so the scheduler and the MCP tools apply one rule about
-    which origin owns a binding, rather than each carrying its own opinion.
+    Delegates to ``deployment_refusal`` so the scheduler and the MCP tools apply one rule about
+    which origin owns a deployment, rather than each carrying its own opinion.
     """
 
     def enabled(controls: dict[str, Any]) -> bool:
-        return not binding_refusal(find_binding(controls, binding_id), ORIGIN_SCHEDULE)
+        return not deployment_refusal(find_deployment(controls, algorithm), ORIGIN_SCHEDULE)
 
     return enabled
 
 
-def _binding_account_id(binding_id: str):
+def _deployment_account_id(algorithm: str):
     def account_id(controls: dict[str, Any]) -> str:
-        binding = find_binding(controls, binding_id)
-        return str((binding or {}).get("account_id") or controls.get("trading_account_id") or "")
+        deployment = find_deployment(controls, algorithm)
+        return str((deployment or {}).get("account_id") or controls.get("trading_account_id") or "")
 
     return account_id
 
 
-def _binding_strategy(binding_id: str, controls: dict[str, Any] | None = None) -> str:
-    controls = controls if controls is not None else load_controls()
-    binding = find_binding(controls, binding_id)
-    return str((binding or {}).get("strategy") or DEFAULT_STRATEGY_ID)
-
-
-def _binding_run_fn(binding_id: str):
+def _deployment_run_fn(algorithm: str):
     def run(account_id: str | None, run_key: str = "") -> None:
-        # Resolved per run, so switching a binding's strategy takes effect on the next tick.
-        run_once(account_id=account_id, strategy=_binding_strategy(binding_id))
+        run_once(account_id=account_id, strategy=algorithm)
 
     return run
 
 
-def _binding_run_key(binding_id: str):
+def _deployment_run_key(algorithm: str):
     """The fire time this tick belongs to, used once and then remembered as ``last_run_key``.
 
     Keyed on the *scheduled* minute rather than the current one, so every poll inside a fire's
@@ -215,8 +207,8 @@ def _binding_run_key(binding_id: str):
     """
 
     def run_key() -> str | None:
-        cron = _binding_cron(binding_id)
-        # An empty cron is not a cadence the clock failed to parse -- it is a binding that
+        cron = _deployment_cron(algorithm)
+        # An empty cron is not a cadence the clock failed to parse -- it is a deployment that
         # says an agent decides when it runs.
         if not cron:
             return None
@@ -225,17 +217,17 @@ def _binding_run_key(binding_id: str):
         except CronError:
             # Saving is validated, so reaching here means a hand-edited config. Refusing to
             # fire is the safe reading: a schedule nobody can parse must not be guessed at.
-            logger.warning("Binding %s has an unusable schedule %r; not running it", binding_id, cron)
+            logger.warning("%s has an unusable schedule %r; not running it", algorithm, cron)
             return None
         fired_at = cron_fire_key(spec, datetime.now(MARKET_TZ))
         if fired_at is None:
             return None
-        return f"{binding_id}:{fired_at}"
+        return f"{algorithm}:{fired_at}"
 
     return run_key
 
 
-def _binding_check_seconds(binding_id: str) -> Any:
+def _deployment_check_seconds(algorithm: str) -> Any:
     def check_seconds() -> int:
         # Wake far more often than any schedule fires. A cron names a minute, and a loop that
         # slept until roughly the next one would drift past it; polling cheaply and testing the
@@ -247,11 +239,11 @@ def _binding_check_seconds(binding_id: str) -> Any:
 
 
 class BotRuntime:
-    """One scheduler loop per algorithm binding.
+    """One scheduler loop per deployed algorithm.
 
-    Bindings are user-editable at runtime, so the loop set is reconciled against controls
-    rather than fixed at construction: adding a binding in the dashboard starts a loop for it,
-    removing one stops that loop and leaves the others alone.
+    Deployments are user-editable at runtime, so the loop set is reconciled against controls
+    rather than fixed at construction: deploying an algorithm in the dashboard starts a loop
+    for it, undeploying stops that loop and leaves the others alone.
     """
 
     def __init__(self) -> None:
@@ -259,31 +251,31 @@ class BotRuntime:
         self._algorithm_loops: dict[str, _RuntimeLoop] = {}
         self._started = False
 
-    def _make_loop(self, binding_id: str) -> _RuntimeLoop:
+    def _make_loop(self, algorithm: str) -> _RuntimeLoop:
         return _RuntimeLoop(
-            f"algorithm-{binding_id}",
-            _binding_enabled(binding_id),
-            _binding_run_fn(binding_id),
-            _binding_check_seconds(binding_id),
-            _binding_run_key(binding_id),
-            _binding_account_id(binding_id),
+            f"algorithm-{algorithm}",
+            _deployment_enabled(algorithm),
+            _deployment_run_fn(algorithm),
+            _deployment_check_seconds(algorithm),
+            _deployment_run_key(algorithm),
+            _deployment_account_id(algorithm),
         )
 
     def reconcile(self) -> None:
         try:
-            bindings = load_controls().get("bindings") or []
+            deployments = load_controls().get("deployments") or []
         except Exception:  # noqa: BLE001 - a bad config must not kill the runtime
-            logger.exception("Could not read bindings; leaving runtime loops as they are")
+            logger.exception("Could not read deployments; leaving runtime loops as they are")
             return
-        wanted = {str(binding.get("id")) for binding in bindings}
+        wanted = {str(deployment.get("algorithm")) for deployment in deployments}
         with self._lock:
-            for binding_id in list(self._algorithm_loops):
-                if binding_id not in wanted:
-                    self._algorithm_loops.pop(binding_id).stop()
-            for binding_id in wanted:
-                if binding_id not in self._algorithm_loops:
-                    loop = self._make_loop(binding_id)
-                    self._algorithm_loops[binding_id] = loop
+            for algorithm in list(self._algorithm_loops):
+                if algorithm not in wanted:
+                    self._algorithm_loops.pop(algorithm).stop()
+            for algorithm in wanted:
+                if algorithm not in self._algorithm_loops:
+                    loop = self._make_loop(algorithm)
+                    self._algorithm_loops[algorithm] = loop
                     if self._started:
                         loop.start()
 
@@ -304,20 +296,20 @@ class BotRuntime:
 
     @property
     def algorithm(self) -> _RuntimeLoop:
-        """The first binding's loop, for callers that predate multiple bindings."""
+        """The first deployment's loop, for callers that want a single runtime state."""
         self.reconcile()
         with self._lock:
             loops = list(self._algorithm_loops.values())
-        return loops[0] if loops else self._make_loop("b1")
+        return loops[0] if loops else self._make_loop(DEFAULT_STRATEGY_ID)
 
     def snapshot(self) -> dict[str, Any]:
         self.reconcile()
         with self._lock:
             loops = dict(self._algorithm_loops)
-        bindings = {binding_id: loop.snapshot() for binding_id, loop in loops.items()}
-        first = next(iter(bindings.values()), None)
+        deployments = {algorithm: loop.snapshot() for algorithm, loop in loops.items()}
+        first = next(iter(deployments.values()), None)
         return {
-            "bindings": bindings,
+            "deployments": deployments,
             "algorithm": first if first is not None else RuntimeState().__dict__,
         }
 

@@ -144,7 +144,7 @@ def _cache_key(strategy: str, period: str, account_id: str = "") -> str:
 
     The algorithm declares its own half through ``config_fingerprint`` -- how DCA's plan gets
     in without this function knowing DCA exists. The account is part of the basis too, since
-    some config is per account: without it, two DCA bindings on different accounts would
+    some config is per account: without it, one algorithm viewed against two accounts would
     collide on one cache entry.
     """
     config = config_for_strategy_view(strategy, account_id)
@@ -398,7 +398,7 @@ def _compute_backtest(strategy: str, period: str, account_id: str = "") -> dict[
     starting_equity = _backtest_starting_equity()
     config = config_for_strategy_view(strategy, account_id)
     algorithm = get_algorithm_class(strategy).from_config(config)
-    # The class default, not a binding's cron -- a backtest describes the strategy, not a
+    # The class default, not a deployment's cron -- a backtest describes the strategy, not a
     # particular deployment's schedule.
     cron = parse_cron(algorithm.cron)
     requirements = algorithm.requirements(config, {})

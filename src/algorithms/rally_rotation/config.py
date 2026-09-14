@@ -65,7 +65,7 @@ class RallyRotationConfig:
     # 3. How often it changes its mind
     # =====================================================================================
     #: How often the cross-section is re-ranked, in elapsed *trading days* since the last
-    #: re-rank (not runs -- the binding's cron cadence has nothing to say about how often a
+    #: re-rank (not runs -- the deployment's cron cadence has nothing to say about how often a
     #: medium-term signal should act). Selection, entry and replacement all sit on this clock;
     #: :func:`crash_stop` does not, since a name can gap 30% while the algorithm waits its turn.
     #: 0 means every run; do not tune this from a one-at-a-time sweep, it interacts badly.

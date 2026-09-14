@@ -9,16 +9,14 @@ The prompt names the algorithm. Same steps for all of them.
 
 ## 1. Check it is yours
 
-`list_bindings()`. Find this algorithm's binding.
+`list_algorithms()`. Find this algorithm's row.
 
+- `deployed: false` → it trades no account. Report that, stop.
 - `can_place_orders: false` → report the `reason`, stop.
-- Two bindings, no `binding_id` in the prompt → report the ambiguity, stop. Never guess the
-  account.
 
 ## 2. Get the plan
 
-`get_algorithm_plan(algorithm, binding_id)`. Places nothing. Returns the proposal and a
-`plan_token`.
+`get_algorithm_plan(algorithm)`. Places nothing. Returns the proposal and a `plan_token`.
 
 Read the tool's description for which field holds the proposal. It differs per algorithm, and
 reading the wrong one looks like an empty plan.

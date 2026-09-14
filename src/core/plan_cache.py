@@ -51,10 +51,10 @@ class PlanUnavailable(Exception):
 
 @dataclass(frozen=True)
 class PendingPlan:
-    """A proposal waiting on a decision, with the binding it was sized against."""
+    """A proposal waiting on a decision, with the deployment it was sized against."""
 
     plan: AlgorithmPlan
-    binding_id: str
+    algorithm: str
     account_id: str
     stashed_at: datetime
     expires_at: datetime
@@ -77,7 +77,7 @@ def _evict_expired(now: datetime) -> None:
 def stash(
     plan: AlgorithmPlan,
     *,
-    binding_id: str,
+    algorithm: str,
     account_id: str,
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
 ) -> str:
@@ -91,7 +91,7 @@ def stash(
     token = secrets.token_urlsafe(16)
     entry = PendingPlan(
         plan=plan,
-        binding_id=binding_id,
+        algorithm=algorithm,
         account_id=account_id,
         stashed_at=now,
         expires_at=now + timedelta(seconds=max(1, int(ttl_seconds))),
@@ -110,7 +110,7 @@ def claim(token: str) -> PendingPlan:
     batch of orders twice.
 
     Spent even when a later gate refuses the submission, which costs a wasted token on a
-    binding that turned out to be switched off. That is the right way round: re-planning is a
+    deployment that turned out to be switched off. That is the right way round: re-planning is a
     cheap read, and an agent that reaches a gate, waits for it to open, and then submits should
     be acting on prices from after the wait rather than from before it.
     """

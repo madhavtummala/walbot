@@ -648,7 +648,7 @@ def test_the_last_run_of_a_session_is_the_one_that_counts() -> None:
     assert qualifying_days(history["IAU"]) == 0, "it faded by the close, so the day does not count"
 
 
-def test_a_paused_binding_does_not_backfill_the_days_it_missed() -> None:
+def test_a_paused_deployment_does_not_backfill_the_days_it_missed() -> None:
     """Absent days are not evidence. A pause slows qualifying; it must not disqualify."""
     config = RallyRotationConfig(eligibility_window=10, entry_min_eligible_days=3, entry_rank_max=3)
     state: dict = {}
@@ -711,7 +711,7 @@ def test_a_shrunken_entry_survives_the_band_but_not_the_notional_floor() -> None
 def test_each_kind_of_action_keeps_its_own_clock() -> None:
     """One clock per decision, counted in elapsed sessions rather than in runs.
 
-    Runs are the wrong unit because the binding states the cron: at five fires a session a
+    Runs are the wrong unit because the deployment states the cron: at five fires a session a
     three-"day" interval came due three times before lunch. Sessions rather than calendar days
     because wall-clock days do not survive a weekend -- a three-day interval set on a Friday
     would be satisfied by Monday, throttling Tuesday-to-Thursday decisions while waving every
@@ -751,10 +751,10 @@ def test_the_rerank_clock_skips_the_weekend_rather_than_counting_it() -> None:
     assert action_due(state, "rerank", 3, thursday + timedelta(days=5)) is True, "Tuesday"
 
 
-def test_a_paused_binding_comes_back_due_rather_than_frozen_mid_interval() -> None:
+def test_a_paused_deployment_comes_back_due_rather_than_frozen_mid_interval() -> None:
     """The complaint that motivated dropping the run counter: no runs, so no clock.
 
-    Counting runs meant a binding switched off for a fortnight came back believing no time had
+    Counting runs meant a deployment switched off for a fortnight came back believing no time had
     passed, and went on holding a book selected against a cross-section three weeks stale.
     """
     state: dict = {}

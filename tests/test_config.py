@@ -339,7 +339,7 @@ tradable_universe:
 
 
 def test_the_kill_switch_is_an_environment_brake_not_a_config_key(tmp_path, monkeypatch) -> None:
-    """Per-binding switches decide what trades; this stays for an emergency stop on the host."""
+    """Per-deployment switches decide what trades; this stays for an emergency stop on the host."""
     from src.core.config import get_config
 
     config_path = tmp_path / "walbot.yaml"

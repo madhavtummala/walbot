@@ -14,7 +14,7 @@ from .duckdb_store import DUCKDB_STATE_PATH, _connect
 
 STATE_DUCKDB_PATH = DUCKDB_STATE_PATH
 
-#: One lock per key, so a read-modify-write on one binding's state cannot interleave with
+#: One lock per key, so a read-modify-write on one deployment's state cannot interleave with
 #: another's. Process-wide is the right scope: the dashboard, the MCP server and every scheduler
 #: loop run in a single process (see ``src/container_entrypoint.py``), and the DuckDB handle is
 #: shared within it. ``defaultdict`` under its own lock, since two threads can arrive at a key
@@ -35,9 +35,9 @@ _EPHEMERAL_STATE: ContextVar[dict[str, Any] | None] = ContextVar("ephemeral_stat
 
 
 def algorithm_state_key(algorithm_id: str, account_id: str) -> str:
-    """Where one binding's algorithm state lives.
+    """Where one deployment's algorithm state lives.
 
-    Keyed on the pair, because a binding is an algorithm *and* an account: the runtime drives
+    Keyed on the pair, because a deployment is an algorithm *and* an account: the runtime drives
     several at once, and two accounts running the same algorithm are two separate books. A key
     without the account would let fills in one draw down the other's accrued budget and share
     its cooldowns. Built here rather than by each algorithm, which is what left the codebase
@@ -108,7 +108,7 @@ def state_lock(key: str) -> Iterator[None]:
 
     State derived from its own previous value -- a cash balance, a position book, an accrued
     budget -- cannot be updated with a bare ``load_state`` then ``save_state``. The scheduler
-    runs one thread per binding and several bindings may share an account, so two runs read the
+    runs one thread per deployment and several may share an account, so two runs read the
     same balance, both fill their orders, and the second write discards the first's.
 
     Callers must re-read inside the block: taking the lock around a value read before it

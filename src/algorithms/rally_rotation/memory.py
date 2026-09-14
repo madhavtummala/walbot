@@ -5,7 +5,7 @@ Mutated in place and handed back on the plan -- persisted by ``execute``, only i
 out.
 
 **Everything here is measured in market days, never in runs.** Counting runs makes every
-interval a function of the binding's cron cadence rather than the config: the schedule controls
+interval a function of the deployment's cron cadence rather than the config: the schedule controls
 the *opportunity* to act, never the rate.
 """
 
@@ -127,7 +127,7 @@ def _track(
     Keyed by day, not appended per run, so a cron that fires several times a session doesn't
     count one morning as several days of evidence. Within a day the **last** run wins, as the
     best-informed look. Only days this algorithm actually ran are recorded -- an absent day is
-    not evidence of failure, so a paused binding makes a name take longer to qualify rather than
+    not evidence of failure, so a paused deployment makes a name take longer to qualify rather than
     disqualifying it retroactively.
     """
     window = max(config.eligibility_window, 1)

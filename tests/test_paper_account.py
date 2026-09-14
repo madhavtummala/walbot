@@ -139,7 +139,7 @@ def test_asking_for_an_account_that_does_not_exist_is_an_error() -> None:
 
     Silently substituting the default meant an account page could show another account's
     money under the requested name, and -- because ``live_runner.run_once(account_id=...)``
-    resolves the same way -- a binding naming a renamed or deleted account would have sent its
+    resolves the same way -- a deployment naming a renamed or deleted account would have sent its
     orders to the default book.
     """
     with pytest.raises(UnknownAccountError):
@@ -299,9 +299,9 @@ def test_paper_refuses_a_bracket_it_cannot_hold(tmp_path) -> None:
             ))
 
 
-def test_two_bindings_on_one_paper_account_do_not_lose_each_others_fills() -> None:
-    """The dashboard permits several bindings on one account, and the scheduler runs a thread
-    per binding -- so two instances of this class can hold the same book at once.
+def test_two_deployments_on_one_paper_account_do_not_lose_each_others_fills() -> None:
+    """The dashboard permits several algorithms on one account, and the scheduler runs a thread
+    per deployment -- so two instances of this class can hold the same book at once.
 
     The book used to be read once at construction and written back whole, so both threads
     started from the same balance and the second write discarded the first's cash and

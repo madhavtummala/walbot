@@ -27,7 +27,7 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "how far the price sits from its moving average, and how far ahead of or behind its "
             "plan that symbol already is. Cheap names buy more, rich names buy less or sell, "
             "and a symbol that has already overspent resists spending again until it catches "
-            "up. Runs on the schedule its binding states — by default once a weekday at 11 AM."
+            "up. Runs on the schedule its deployment states — by default once a weekday at 11 AM."
         ),
         "formula": [
             "z = (moving_average − price) / stdev, clamped to ±3σ",

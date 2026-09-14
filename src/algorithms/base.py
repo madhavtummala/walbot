@@ -127,7 +127,7 @@ class BaseAlgorithm:
     #: :meth:`tuning`. Every algorithm has one; there is no such thing as an untuned strategy.
     tuning_class: type | None = None
 
-    #: Default cadence (cron, market time) -- a binding's own cron overrides this.
+    #: Default cadence (cron, market time) -- a deployment's own cron overrides this.
     cron: str = "*/30 9-15 * * 1-5"
 
     #: Whether the replay can meaningfully simulate this algorithm. The backtester fills at the

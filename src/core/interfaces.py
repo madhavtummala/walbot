@@ -46,11 +46,11 @@ class AlgorithmContext:
     latest_prices: Dict[str, float] = field(default_factory=dict)
     equity: float = 0.0
     account_id: str = ""
-    #: What this binding remembered from its last run -- an accrued budget, a re-entry
+    #: What this deployment remembered from its last run -- an accrued budget, a re-entry
     #: cooldown, an eligibility history. Loaded by the context builder when
     #: ``AlgorithmRequirements.needs_state`` asks for it, so the algorithm reads memory the
     #: same way it reads bars: as data it was handed, never as a store it goes to itself.
-    #: Keyed per binding, since two accounts running one algorithm are two separate books.
+    #: Keyed per deployment, since an algorithm and its account are one book.
     state: Dict[str, Any] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     extra: Dict[str, Any] = field(default_factory=dict)

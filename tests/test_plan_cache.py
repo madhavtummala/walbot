@@ -23,17 +23,17 @@ def test_a_stashed_plan_comes_back_identical() -> None:
     """Identity, not equality: the object that executes is the one the algorithm produced, so
     nothing in between can have re-derived it from a serialised copy."""
     plan = _plan()
-    token = plan_cache.stash(plan, binding_id="b1", account_id="paper")
+    token = plan_cache.stash(plan, algorithm="dca", account_id="paper")
 
     pending = plan_cache.claim(token)
 
     assert pending.plan is plan
-    assert pending.binding_id == "b1"
+    assert pending.algorithm == "dca"
     assert pending.account_id == "paper"
 
 
 def test_claiming_consumes_the_token() -> None:
-    token = plan_cache.stash(_plan(), binding_id="b1", account_id="paper")
+    token = plan_cache.stash(_plan(), algorithm="dca", account_id="paper")
     plan_cache.claim(token)
 
     with pytest.raises(plan_cache.PlanUnavailable, match="already been used"):
@@ -46,7 +46,7 @@ def test_an_unknown_token_is_refused() -> None:
 
 
 def test_an_empty_token_is_refused_rather_than_matching_something() -> None:
-    plan_cache.stash(_plan(), binding_id="b1", account_id="paper")
+    plan_cache.stash(_plan(), algorithm="dca", account_id="paper")
 
     for empty in ("", None):
         with pytest.raises(plan_cache.PlanUnavailable):
@@ -55,7 +55,7 @@ def test_an_empty_token_is_refused_rather_than_matching_something() -> None:
 
 def test_a_plan_expires(monkeypatch) -> None:
     """Prices ride on the plan and are committed rather than re-read, so age is staleness."""
-    token = plan_cache.stash(_plan(), binding_id="b1", account_id="paper", ttl_seconds=60)
+    token = plan_cache.stash(_plan(), algorithm="dca", account_id="paper", ttl_seconds=60)
     monkeypatch.setattr(plan_cache, "_now", lambda: datetime.now(timezone.utc) + timedelta(seconds=61))
 
     with pytest.raises(plan_cache.PlanUnavailable):
@@ -63,26 +63,26 @@ def test_a_plan_expires(monkeypatch) -> None:
 
 
 def test_a_plan_inside_its_ttl_survives(monkeypatch) -> None:
-    token = plan_cache.stash(_plan(), binding_id="b1", account_id="paper", ttl_seconds=60)
+    token = plan_cache.stash(_plan(), algorithm="dca", account_id="paper", ttl_seconds=60)
     monkeypatch.setattr(plan_cache, "_now", lambda: datetime.now(timezone.utc) + timedelta(seconds=30))
 
-    assert plan_cache.claim(token).binding_id == "b1"
+    assert plan_cache.claim(token).algorithm == "dca"
 
 
 def test_expired_plans_do_not_accumulate(monkeypatch) -> None:
     """The cache is never swept on a timer, so eviction has to ride on the calls it does get."""
     for _ in range(3):
-        plan_cache.stash(_plan(), binding_id="b1", account_id="paper", ttl_seconds=1)
+        plan_cache.stash(_plan(), algorithm="dca", account_id="paper", ttl_seconds=1)
     assert len(plan_cache._pending) == 3
 
     monkeypatch.setattr(plan_cache, "_now", lambda: datetime.now(timezone.utc) + timedelta(seconds=30))
-    plan_cache.stash(_plan(), binding_id="b1", account_id="paper")
+    plan_cache.stash(_plan(), algorithm="dca", account_id="paper")
 
     assert len(plan_cache._pending) == 1
 
 
 def test_tokens_are_unguessable_and_distinct() -> None:
-    tokens = {plan_cache.stash(_plan(), binding_id="b1", account_id="paper") for _ in range(50)}
+    tokens = {plan_cache.stash(_plan(), algorithm="dca", account_id="paper") for _ in range(50)}
 
     assert len(tokens) == 50
     assert all(len(token) >= 20 for token in tokens)

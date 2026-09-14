@@ -79,7 +79,9 @@ def test_live_runner_uses_selected_template_strategy(monkeypatch) -> None:
         ),
     )
     monkeypatch.setattr(
-        live_runner, "load_controls", lambda: {"algorithm_enabled": True, "active_strategy": "rally_rotation"}
+        live_runner,
+        "load_controls",
+        lambda: {"deployments": [{"algorithm": "rally_rotation", "account_id": "a1", "enabled": True}]},
     )
 
     monkeypatch.setattr(pipeline, "get_brokerage_class", lambda _t: lambda _c: FakeBrokerage(is_open=True))
@@ -119,7 +121,9 @@ def test_live_runner_exits_when_market_clock_is_closed(monkeypatch) -> None:
     monkeypatch.setattr(live_runner, "configure_logging", lambda *a, **kw: None)
     monkeypatch.setattr(live_runner, "get_config", lambda **kw: Config(kill_switch=False))
     monkeypatch.setattr(
-        live_runner, "load_controls", lambda: {"algorithm_enabled": True, "active_strategy": "rally_rotation"}
+        live_runner,
+        "load_controls",
+        lambda: {"deployments": [{"algorithm": "rally_rotation", "account_id": "a1", "enabled": True}]},
     )
     monkeypatch.setattr(pipeline, "get_brokerage_class", lambda _t: lambda _c: FakeBrokerage(is_open=False))
     monkeypatch.setattr(market_context, "create_data_client", lambda config: called.__setitem__("data_client", True))

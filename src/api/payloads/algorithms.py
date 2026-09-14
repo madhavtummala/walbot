@@ -15,6 +15,7 @@ from typing import Any
 import pandas as pd
 
 from .strategy_config import config_for_strategy_view
+from ..controls import DEPLOYMENT_KEYS
 
 from ...core.config import (
     DEFAULT_STRATEGY_ID,
@@ -133,6 +134,11 @@ def algorithm_config_payload(strategy: str) -> dict[str, Any]:
         (legacy for legacy in LEGACY_ALGORITHM_IDS.get(strategy, []) if legacy in sections), strategy
     )
     values = sections.get(key) if isinstance(sections.get(key), dict) else {}
+    # The deployment keys share this section with the tuning but are not tuning: they are
+    # where the algorithm trades and what drives it, edited from the deploy control and saved
+    # through ``save_controls``. Left in, the generic parameter form would offer ``account_id``
+    # as a knob and a save here would write one editor's view over the other's.
+    values = {name: value for name, value in values.items() if name not in DEPLOYMENT_KEYS}
     values = _with_seeded_board(strategy, values)
     return {
         "strategy": strategy,
@@ -172,7 +178,13 @@ def save_algorithm_config_payload(strategy: str, values: Any) -> dict[str, Any]:
         key = strategy if strategy in sections else next(
             (legacy for legacy in LEGACY_ALGORITHM_IDS.get(strategy, []) if legacy in sections), strategy
         )
-        sections[key] = values
+        # Carried across rather than taken from ``values``: the deployment keys live in this
+        # same section but belong to the deploy control, and this payload never carries them.
+        # Assigning the section wholesale would undeploy the algorithm as a side effect of
+        # saving its tuning.
+        existing = sections.get(key) if isinstance(sections.get(key), dict) else {}
+        preserved = {name: existing[name] for name in DEPLOYMENT_KEYS if name in existing}
+        sections[key] = {**values, **preserved}
         save_algorithms_config(raw)
     return algorithm_config_payload(strategy)
 
