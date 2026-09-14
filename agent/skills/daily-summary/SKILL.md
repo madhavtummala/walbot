@@ -1,9 +1,9 @@
 ---
 name: daily-summary
-description: After-hours wrap of every Walbot account — worth, today's move, what is resting overnight, what tomorrow brings. Use when a cron prompt asks for the daily summary.
+description: After-hours brief on every Walbot account — worth, today's move, what is resting overnight, and the news behind it. Use when a cron prompt asks for the daily summary.
 ---
 
-# Daily wrap
+# Daily Brief
 
 After the close. **The unit is the account, not the algorithm.**
 
@@ -20,20 +20,31 @@ If an account errors, name it and carry on.
 
 - P/L with no orders behind it is market drift. Say so.
 - A rejection is the most important line. Quote the broker's reason verbatim and say what it
-  means for tomorrow.
-- Resting orders are tomorrow's exposure. A stop protects, an entry intends. Say which.
+  means for the next session.
+- Resting orders are overnight exposure. A stop protects, an entry intends. Say which.
 - Mention deployments only when they change the outlook: nothing armed, or armed on an empty
   account. An armed deployment that traded nothing is a normal day.
 
-## 3. Outside information
+## 3. News
 
-One or two searches, only for symbols held or resting: what is scheduled tomorrow (earnings,
-CPI, FOMC, expiry), or the cause of a big move. Skip on a quiet day.
+`web_search`, two or three searches, **only for symbols actually held or resting.** A symbol the
+portfolio has no exposure to is not news, it is reading.
+
+Search for the *cause*, not the calendar. The question is "why did this move, or what is about to
+move it" — an earnings print, a guidance cut, a Fed decision, a sector downgrade, an expiry that
+concentrates open interest. "Markets were mixed" is not an answer; omit the line instead.
+
+Attribute every claim to its source in the line itself, and only report what a source actually
+says. A plausible-sounding reason you inferred is worse than no line, because it reads exactly
+like one you found. If a move has no visible explanation, that is the finding: say it is
+unexplained.
+
+Skip the section entirely on a quiet day with nothing held. Never pad it.
 
 ## 4. Report
 
 ```
-📊 Daily wrap · Wed 10 Sep
+📊 Daily Brief · Wed 10 Sep
 
 MONEY
 • Total $204,514 — up $257 (+0.13%) today
@@ -53,15 +64,22 @@ WHAT MOVED
 RESTING OVERNIGHT
 • Nothing. No stops, no entries.
 
-TOMORROW
-• CPI 08:30 ET. Schwab Main holds IWM into it.
-• All three deployed algorithms are switched off — nothing will trade.
+NEWS
+• USO — crude fell 3.1% after OPEC+ signalled a quota increase (Reuters).
+  The 142C we sold into it was the right side of that.
+• IWM — CPI lands 08:30 ET tomorrow; Schwab Main holds it into the print.
+• SPYM — no explanation found for the −0.4% drift. Unexplained.
+
+⚠️ NOTHING ARMED
+• All three deployed algorithms are switched off. Nothing will trade.
 ```
 
 - `MONEY` first: total, then the per-account split.
 - Group by account. Use labels, not ids.
-- Empty sections get `• Nothing.` Never drop one.
+- Empty sections get `• Nothing.` Never drop one — except `NEWS`, which is omitted whole when
+  there is nothing held to search for.
 - `⚠️ REJECTED` only when something was, and above `RESTING`.
-- **If nothing is armed, say so in `TOMORROW`.** A wrap that reads normally while the bot is
-  switched off is the worst message you can send.
+- **`⚠️ NOTHING ARMED` whenever no deployed algorithm is switched on**, as the last block so it
+  is the line the reader ends on. A brief that reads normally while the bot is switched off is
+  the worst message you can send.
 - Under 20 lines.
