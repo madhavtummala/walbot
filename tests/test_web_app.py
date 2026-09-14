@@ -618,14 +618,21 @@ def test_an_order_row_says_which_price_it_is_showing() -> None:
 def test_the_gate_panel_reads_at_the_table_it_expands_from() -> None:
     """The panel explains the row above it, so it is part of that table, not a footnote.
 
-    It sat at 10px against the row's 12px, with 2px of vertical padding against the row's 5px,
-    so opening a row dropped into what looked like a different document. Measured in a browser:
-    row cells 12px / 5px, gate items were 10px / 2px.
+    It sat at 10px with 2px of vertical padding against the row's 5px, so opening a row dropped
+    into what looked like a different document.
+
+    The size is asserted by its *absence*. Pinning it to a number is what caused the second bug:
+    the panel was set to ``.dataTable``'s 12px while ``.signalTable`` had already overridden the
+    rows to 11px, so the gates rendered a pixel larger than the row they explain -- invisible on
+    a wide viewport, obvious under 720px where the gate row restacks into two columns. Inheriting
+    leaves one source of truth, so the two cannot drift again.
     """
     _, app_css, _ = _assets()
 
     panel = app_css[app_css.index(".gateItem {"):app_css.index(".gateItem:last-child")]
-    assert "font-size: 12px;" in panel, "the panel must read at the table's scale"
+    assert "font-size:" not in panel, (
+        "the panel must inherit .signalTable's scale, not restate a size that can drift from it"
+    )
     assert "padding: 5px 0;" in panel, "and share the row's vertical rhythm"
     assert "line-height: 1.45;" in panel, "set explicitly rather than left to 'normal'"
 

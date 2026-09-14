@@ -681,31 +681,16 @@ select.ctl {
 
 .gateItem {
   display: grid;
-  /* Fixed rather than fractional: on a wide viewport 1.6fr pushed "260 bars" halfway across
-     the page, so the measurement no longer read as belonging to the gate beside it.
-     The measurement track is wide enough for the longest measurement any algorithm publishes;
-     at 22em it wrapped Bursty DCA's onto two lines with 300px of the row still empty beside
-     it. Do not reach for min()/max() here: a math function may not contain an intrinsic
-     keyword like max-content, so `minmax(160px, min(max-content, 26em))` is invalid, and the
-     whole declaration is dropped -- which silently collapses the gates to a single stacked
-     column rather than failing visibly. */
-  /* The threshold column takes the slack (``1fr``) while the first three stay capped. Capping
-     all four left the row 640px wide inside a 1134px panel, so the measurement and the threshold
-     both wrapped onto two lines with 500px of the row empty beside them -- the failure the fixed
-     tracks were meant to prevent, arrived at from the other direction. Only the last column
-     grows, so the measurement still sits beside the gate it belongs to rather than drifting
-     across the page. */
-  /* The caps are sized to the longest content each column actually carries -- labels run to
-     about 34 characters and measurements to about 30, while thresholds are the long ones. Giving
-     the first two the widths they need and no more leaves the slack where the prose is. */
+  /* Fixed caps rather than fractions: fractional tracks pushed the measurement halfway across a
+     wide panel, away from the gate it belongs to. Only the threshold column takes the slack.
+     Do not reach for min()/max(): a math function may not contain max-content, so the whole
+     declaration would be dropped and the gates would silently collapse to one column. */
   grid-template-columns: 40px minmax(140px, 21em) minmax(90px, 18em) minmax(80px, 1fr);
   gap: 8px;
   justify-content: start;
   align-items: baseline;
-  /* The panel reads at the table's own scale. It sat at 10px against the row's 12px, with 2px
-     of vertical padding against the row's 5px, so expanding a row dropped into what looked like
-     a different document -- and the panel is an explanation *of* that row, not a footnote. */
-  font-size: 12px;
+  /* No font-size here on purpose: the panel explains the row it hangs under, so it inherits the
+     row's scale from .signalTable. Restating a size here is what let the two drift apart. */
   line-height: 1.45;
   padding: 5px 0;
   border-bottom: 1px solid var(--line);
