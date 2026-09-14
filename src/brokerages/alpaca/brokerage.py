@@ -63,12 +63,19 @@ class AlpacaBrokerage(BaseBrokerage):
 
     def get_account_state(self) -> Dict[str, Any]:
         account = self.client.get_account()
-        return {
+        state = {
             "equity": float(account.equity),
             "cash": float(account.cash),
             "buying_power": float(account.buying_power),
             "is_market_open": is_market_open(self.client)
         }
+        # Where the session started, which is what makes a day's P/L expressible. Absent stays
+        # absent: the account page reads a missing opening value as "unknown", and a zero would
+        # render the whole balance as today's gain.
+        last_equity = getattr(account, "last_equity", None)
+        if last_equity is not None:
+            state["last_equity"] = float(last_equity)
+        return state
 
     def get_positions(self) -> Dict[str, float]:
         return get_positions(self.client)
@@ -88,9 +95,6 @@ class AlpacaBrokerage(BaseBrokerage):
                 "market_value": float(getattr(position, "market_value", 0.0) or 0.0),
                 "unrealized_pl": float(getattr(position, "unrealized_pl", 0.0) or 0.0),
                 "unrealized_plpc": float(getattr(position, "unrealized_plpc", 0.0) or 0.0),
-                # Alpaca's ``unrealized_pl`` is the position's whole life; the session's own
-                # move is a separate field. Both are reported so the account page can show
-                # them side by side rather than guess which one it is holding.
                 "day_pl": float(getattr(position, "unrealized_intraday_pl", 0.0) or 0.0),
                 "day_pl_percent": float(getattr(position, "unrealized_intraday_plpc", 0.0) or 0.0),
             })
@@ -121,8 +125,6 @@ class AlpacaBrokerage(BaseBrokerage):
                 "symbol": to_osi_form(symbol, padded=True) if option else symbol,
                 "action": str(item.get("side") or "").lower(),
                 "quantity": quantity,
-                # Alpaca quotes an option per share and fills it a hundred at a time, so the
-                # contract's multiplier is what turns a $5.25 move into $525.
                 "multiplier": 100.0 if option else 1.0,
                 "price": price,
                 "date": stamp,

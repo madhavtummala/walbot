@@ -60,8 +60,6 @@ def realized_from_fills(fills: Iterable[Fill], *, since: str = "") -> Dict[str, 
             continue
 
         if shares <= 0:
-            # A sell with nothing open: either a short, or a close of something bought before
-            # the window. Both make the basis unknowable from this feed alone.
             unmatched += 1 if counts else 0
             continue
 

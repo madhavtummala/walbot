@@ -605,7 +605,7 @@ def test_a_closed_winning_trade_shows_up_as_realized_not_open(monkeypatch) -> No
     _patch_payloads(monkeypatch, "get_account_broker_type", lambda _account: "schwab")
     monkeypatch.setattr("src.core.pipeline.resolve_brokerage", lambda _config: FakeBrokerage())
 
-    assert api_payloads.positions_payload("schwab2")["total_pl"] is None  # nothing held
+    assert api_payloads.positions_payload("schwab2")["total_pl"] == 0.0  # nothing held, nothing open
 
     payload = _analytics("schwab2", refresh=True)
 

@@ -15,7 +15,6 @@ from alpaca.trading.enums import QueryOrderStatus
 from alpaca.trading.requests import GetOrdersRequest
 
 from ...brokerages.alpaca.client import create_trading_client
-from ...brokerages.paper.brokerage import PaperBrokerage
 from ...common.config_utils import json_number
 from ...core.config import (
     UnknownAccountError,
@@ -78,37 +77,14 @@ def positions_payload(account_id: str = "") -> dict[str, Any]:
         "day_pl": None,
         "day_pl_percent": None,
         "total_pl": None,
-        # Reported beside price P/L, not inside it -- different questions, and a cash sleeve
-        # earns almost entirely through the second one.
         "rows": [],
         "error": "",
     }
-    # Routed by broker. Only the Alpaca path below is Alpaca-specific; anything else asking
-    # create_trading_client would silently report the *Alpaca* account's money under another
-    # account's name, which is what a Schwab account used to show.
+    # One path for every broker, through the registry. There used to be a hand-written Alpaca
+    # branch here reading the SDK directly, which is how Day P/L and Open P/L came to be
+    # computed two different ways and drift apart.
     broker = get_account_broker_type(config.account_id)
-    if broker == "paper":
-        return {**payload, **_paper_positions(config)}
-    if broker != "alpaca":
-        return {**payload, **_brokerage_positions(config, broker)}
-    try:
-        client = create_trading_client(config)
-        account = client.get_account()
-        equity = float(getattr(account, "equity", 0.0) or 0.0)
-        last_equity = float(getattr(account, "last_equity", 0.0) or 0.0)
-        payload["equity"] = equity
-        payload["cash"] = float(getattr(account, "cash", 0.0) or 0.0)
-        if last_equity:
-            payload["day_pl"] = equity - last_equity
-            payload["day_pl_percent"] = (equity - last_equity) / last_equity
-        from ...brokerages.alpaca.brokerage import AlpacaBrokerage
-        rows = AlpacaBrokerage(config).get_position_details()
-        payload["rows"] = rows
-        payload["total_pl"] = sum(float(row["unrealized_pl"]) for row in rows) if rows else 0.0
-    except Exception as error:  # noqa: BLE001 - a broker outage must not blank the dashboard
-        logger.warning("Could not load positions for %s: %s", config.account_id, error)
-        payload["error"] = str(error)
-    return payload
+    return {**payload, **_brokerage_positions(config, broker)}
 
 
 def _dividend_pl(brokerage: Any, config: Any) -> dict[str, Any]:
@@ -174,8 +150,6 @@ def _realized_pl(brokerage: Any, config: Any) -> dict[str, Any]:
         # the only one a reader can check us against.
         "realized_pl": ytd["realized_pl"],
         "realized_closes": ytd["closes"],
-        # Sells this could find no opening buy for, because the position was opened before the
-        # window. Surfaced so the page can say the total is partial instead of just being wrong.
         "realized_unmatched": ytd["unmatched"],
         "realized_pl_1y": trailing["realized_pl"],
     }
@@ -205,11 +179,6 @@ ANALYTICS = LazyField("account analytics", _compute_analytics)
 
 def account_analytics_payload(account_id: str = "", *, refresh: bool = False) -> dict[str, Any]:
     """Income and realized P/L for one account -- the figures that cost a year of transactions.
-
-    Split out of the positions payload because the two answer at different speeds. Balances and
-    holdings are one read of what the account is right now; these crawl a trailing year per
-    broker, and paying for that on every page load meant reloading to check a price also re-read
-    a year of history.
 
     Lazy, not manual. A plain read is instant and answers with whatever was last computed, while
     starting a recompute in the background if that is missing or stale -- so the value fills
@@ -380,23 +349,12 @@ def _account_rows(brokerage: Any, *, label: str, account_id: str) -> dict[str, A
         "cash": float(state.get("cash") or 0.0),
         "day_pl": day_pl,
         "day_pl_percent": (day_pl / float(opening)) if day_pl is not None and float(opening) else None,
-        # Open P/L, summed from what the broker reports per position -- each row's
-        # ``unrealized_pl`` is the broker's own since-opened figure, not a local reconstruction
-        # from cost basis and mark. It used to sum the *day* figure instead, which is why this
-        # tracked Day P/L so closely that the two looked like one number reported twice.
-        "total_pl": sum(float(row["unrealized_pl"]) for row in rows) if rows else None,
+        # Open P/L: the broker's own since-opened figure per position, not the day's move.
+        # Zero when nothing is held: no open position is a real answer, not an unknown one.
+        # A failed read never reaches here -- it returns an error above.
+        "total_pl": sum(float(row["unrealized_pl"]) for row in rows),
         "rows": rows,
     }
-
-
-def _paper_positions(config: Any) -> dict[str, Any]:
-    """Holdings and P/L from the local paper book."""
-    try:
-        brokerage = PaperBrokerage(config)
-    except Exception as error:  # noqa: BLE001 - a corrupt book must not blank the page
-        logger.warning("Could not read the paper book for %s: %s", config.account_id, error)
-        return {"error": str(error)}
-    return _account_rows(brokerage, label="paper", account_id=config.account_id)
 
 
 def _brokerage_positions(config: Any, broker: str) -> dict[str, Any]:

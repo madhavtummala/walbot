@@ -22,6 +22,21 @@ from src.core.config import get_config
 from src.core.pipeline import resolve_brokerage
 
 
+#: Fields in Schwab's raw JSON that identify the account rather than the trade. Redacted on the
+#: way out: this output is meant to be pasted into a bug report, and account numbers were the
+#: whole reason the config stopped being committed.
+_IDENTIFYING = ("accountNumber", "accountId", "accountHash", "hashValue")
+
+
+def _redacted(text: str) -> str:
+    """Blank the value of any account-identifying field, leaving the trade data intact."""
+    import re
+
+    for field in _IDENTIFYING:
+        text = re.sub(rf'("{field}"\s*:\s*)"[^"]*"', r'\1"REDACTED"', text)
+    return text
+
+
 def dump_raw(account_id: str = "", limit: int = 3) -> int:
     """Print raw Schwab TRADE transactions, to see what the broker actually sends.
 
@@ -48,7 +63,7 @@ def dump_raw(account_id: str = "", limit: int = 3) -> int:
         # A sell is the interesting one: it is the leg that would carry a cost basis.
         if not any(float(leg.get("amount") or 0.0) < 0 for leg in legs):
             continue
-        print(json.dumps(item, indent=2)[:2000])
+        print(_redacted(json.dumps(item, indent=2)[:2000]))
         print("-" * 70)
         shown += 1
         if shown >= limit:
