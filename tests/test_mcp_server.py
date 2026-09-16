@@ -57,6 +57,7 @@ def test_create_mcp_server_exposes_expected_tools(monkeypatch) -> None:
     assert [tool.__name__ for tool in fake_server.tools] == [
         "list_algorithms",
         "get_algorithm_plan",
+        "get_price",
         "list_accounts",
         "get_account_positions",
         "get_account_orders",
@@ -506,7 +507,7 @@ def test_account_positions_carries_both_halves_without_losing_an_error() -> None
 
     carried = {
         key: value for key, value in analytics.items()
-        if key not in ("error", "state", "computed_at", "account_id")
+        if key not in ("error", "state", "computed_at", "account_id", "dividend_rows")
     }
     errors = [text for text in (positions.get("error"), analytics.get("error")) if text]
     merged = {**positions, **carried, "error": "; ".join(errors)}
@@ -515,3 +516,400 @@ def test_account_positions_carries_both_halves_without_losing_an_error() -> None
     # And the analytics keys are still carried, so the shape does not change with the failure.
     assert "realized_pl" in merged and "dividend_pl" in merged
     assert "state" not in merged, "a bare 'state' beside balances reads as the account's"
+
+
+def _price_tool(monkeypatch, bars: list[tuple[str, float, int]] | None = None):
+    """The tool with the bar store faked as ``[(stamp, close, interval_minutes), ...]``.
+
+    The fake picks the nearest bar the way the real query's ``ORDER BY abs(...)`` does, so a
+    test exercises the tool's contract rather than DuckDB's arithmetic.
+    """
+    import pandas as pd
+    from src.data import duckdb_store
+
+    rows = list(bars or [])
+
+    def read_closest_bar(symbol, at, **kwargs):
+        if not rows:
+            return None
+        target = pd.Timestamp(at)
+        stamp, close, interval = min(
+            rows, key=lambda row: abs((pd.Timestamp(row[0]) - target).total_seconds())
+        )
+        return {"timestamp": pd.Timestamp(stamp), "open": close, "close": close,
+                "interval_minutes": interval}
+
+    monkeypatch.setattr(mcp_server, "get_config", lambda *a, **k: Config())
+    monkeypatch.setattr(duckdb_store, "read_closest_bar", read_closest_bar)
+    return _build(monkeypatch).get_price
+
+
+def test_price_answers_with_the_nearest_bar(monkeypatch) -> None:
+    tool = _price_tool(monkeypatch, [
+        ("2026-07-15T13:40:00+00:00", 120.7291, 5),
+        ("2026-07-15T15:30:00+00:00", 118.63, 5),
+    ])
+
+    answer = tool("USO", "2026-07-15T15:35:00Z")
+
+    assert answer["status"] == "ok"
+    assert answer["price"] == 118.63
+    assert answer["as_of"].startswith("2026-07-15T15:30")
+
+
+def test_price_rounds_to_four_places(monkeypatch) -> None:
+    tool = _price_tool(monkeypatch, [("2026-07-15T15:30:00+00:00", 120.72913456, 5)])
+
+    assert tool("USO", "2026-07-15T15:30:00Z")["price"] == 120.7291
+
+
+def test_a_time_of_day_gets_an_intraday_price_where_the_store_has_one(monkeypatch) -> None:
+    """The point of searching both grids at once.
+
+    A daily close is struck at the session's end, so answering "what was it at half past ten"
+    with one hands back a price from hours after the moment asked about -- silently, since the
+    number is plausible and nothing about it says it is six hours late.
+    """
+    tool = _price_tool(monkeypatch, [
+        ("2026-07-15T13:40:00+00:00", 120.73, 5),
+        ("2026-07-15T15:30:00+00:00", 118.63, 5),
+        ("2026-07-15T21:00:00+00:00", 121.38, 1440),
+    ])
+
+    morning = tool("USO", "2026-07-15T13:45:00Z")
+    afternoon = tool("USO", "2026-07-15T15:35:00Z")
+
+    assert morning["price"] == 120.73
+    assert afternoon["price"] == 118.63, "a different time is a different price"
+
+
+def test_an_old_date_falls_through_to_the_daily_series(monkeypatch) -> None:
+    """Intraday history is shallower than daily history, and the caller neither chooses nor
+    needs to know which grid answered -- ``as_of`` says what was struck."""
+    tool = _price_tool(monkeypatch, [("2025-09-15T20:00:00+00:00", 74.23, 1440)])
+
+    answer = tool("USO", "2025-09-15T14:30:00Z")
+
+    assert answer["status"] == "ok" and answer["price"] == 74.23
+    assert answer["as_of"].startswith("2025-09-15")
+
+
+def test_price_defaults_to_now(monkeypatch) -> None:
+    from datetime import datetime as _dt, timezone as _tz
+
+    recent = _dt.now(_tz.utc).isoformat()
+    tool = _price_tool(monkeypatch, [("2020-01-02T00:00:00+00:00", 10.0, 1440), (recent, 155.49, 5)])
+
+    assert tool("USO")["price"] == 155.49, "no timestamp means now, not the oldest bar"
+
+
+def test_price_normalises_the_symbol(monkeypatch) -> None:
+    tool = _price_tool(monkeypatch, [("2026-07-15T15:30:00+00:00", 601.0, 5)])
+
+    assert tool("  uso ")["symbol"] == "USO"
+
+
+def test_price_reports_an_unpriceable_symbol_rather_than_failing(monkeypatch) -> None:
+    tool = _price_tool(monkeypatch, [])
+
+    answer = tool("NOSUCH")
+
+    assert answer["status"] == "error"
+    assert answer["price"] is None, "never a zero someone might do arithmetic with"
+    assert "NOSUCH" in answer["error"]
+
+
+def test_price_refuses_an_empty_symbol_or_an_unreadable_date(monkeypatch) -> None:
+    tool = _price_tool(monkeypatch, [("2026-07-15T15:30:00+00:00", 601.0, 5)])
+
+    assert tool("")["status"] == "error"
+    unreadable = tool("USO", "last Tuesday")
+    assert unreadable["status"] == "error"
+    assert "ISO" in unreadable["error"], "say what a readable date looks like"
+
+
+def test_price_survives_a_dead_bar_store(monkeypatch) -> None:
+    """Reported as itself, not as "no such symbol" -- the two call for different actions."""
+    from src.data import duckdb_store
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("bar store locked")
+
+    monkeypatch.setattr(mcp_server, "get_config", lambda *a, **k: Config())
+    monkeypatch.setattr(duckdb_store, "read_closest_bar", explode)
+
+    answer = _build(monkeypatch).get_price("USO")
+
+    assert answer["status"] == "error"
+    assert "bar store locked" in answer["error"]
+def _positions_tool(monkeypatch, *, positions: dict, analytics: dict):
+    """The tool with both halves of the account read faked, so no test reaches a broker."""
+    from src.api.payloads import accounts as accounts_module
+
+    monkeypatch.setattr(accounts_module, "positions_payload", lambda *a, **k: positions)
+    monkeypatch.setattr(accounts_module, "account_analytics_payload", lambda *a, **k: analytics)
+    return _build(monkeypatch).get_account_positions
+
+
+def test_positions_does_not_carry_the_dividend_rows(monkeypatch) -> None:
+    """Forty distributions rode along on every call to report one number nobody read.
+
+    The merge carried everything the analytics payload had except a named few, so
+    ``dividend_rows`` -- each row a symbol, a date, an amount and the broker's own description
+    string -- arrived on every account read. Nothing documents it and nothing uses it: the
+    summed ``dividend_pl`` beside it is the whole of what this tool promises. The dashboard
+    still renders the rows, reading the analytics payload directly rather than through here.
+    """
+    from src.api.payloads.accounts import _blank_analytics
+
+    analytics = {
+        **_blank_analytics("schwab1"),
+        "dividend_pl": 41.2,
+        "dividend_rows": [
+            {"symbol": "SPYM", "date": "2026-03-20", "amount": 20.6,
+             "description": "CASH DIVIDEND ON 40 SHARES AT 0.515 PER SHARE"},
+        ] * 40,
+    }
+    answer = _positions_tool(
+        monkeypatch,
+        positions={"account_id": "schwab1", "equity": 100.0, "rows": [], "error": ""},
+        analytics=analytics,
+    )()
+
+    assert "dividend_rows" not in answer
+    assert answer["dividend_pl"] == 41.2, "the summed figure is the part that was ever wanted"
+
+
+def test_positions_rounds_money_to_cents_and_ratios_finely_enough_to_survive(monkeypatch) -> None:
+    """A ratio rounded like money is a day's move erased.
+
+    ``day_pl_percent`` is a fraction: at two decimals a 0.13% day reads as ``0.0``, which is
+    precisely the figure the brief leads with. Money rounds to the cent, ratios to four places.
+    """
+    from src.api.payloads.accounts import _blank_analytics
+
+    answer = _positions_tool(
+        monkeypatch,
+        positions={
+            "account_id": "alpaca1", "equity": 10525.339999999998, "cash": 1.005,
+            "day_pl": 13.679999999999836, "day_pl_percent": 0.0013012345, "error": "",
+            "rows": [{"symbol": "USO", "qty": 40.0, "unrealized_pl": 66.39599999999973,
+                      "unrealized_plpc": 0.010789781591263647, "day_pl": None,
+                      "day_pl_percent": None}],
+        },
+        analytics=_blank_analytics("alpaca1"),
+    )()
+
+    assert answer["equity"] == 10525.34
+    assert answer["day_pl"] == 13.68
+    assert answer["day_pl_percent"] == 0.0013, "a 0.13% day must not round away to nothing"
+    row = answer["rows"][0]
+    assert row["unrealized_pl"] == 66.4
+    assert row["unrealized_plpc"] == 0.0108
+    # Null is a claim this tool makes on purpose: the broker did not say where the session
+    # started. Dropping the key would leave a reader unable to tell that from "flat".
+    assert row["day_pl"] is None and "day_pl" in row
+
+
+def _orders_tool(monkeypatch, rows: list[dict]):
+    from src.api.payloads import accounts as accounts_module
+
+    monkeypatch.setattr(
+        accounts_module, "account_activity_payload",
+        lambda *a, **k: {"account_id": "alpaca1", "rows": rows, "error": ""},
+    )
+    return _build(monkeypatch).get_account_orders
+
+
+def test_orders_keep_a_refusal_and_drop_what_does_not_apply(monkeypatch) -> None:
+    """The reason is the line the brief is built on; the empty prices are the weight.
+
+    A market order has no limit and no stop, and an unfilled one no fill price. Sent as nulls
+    they cost a reader three keys to learn what ``order_type`` and ``status`` already said. The
+    broker's refusal is the opposite: it is the one thing a rejected order is read for, and it
+    was not being carried at all.
+    """
+    answer = _orders_tool(monkeypatch, [
+        {"symbol": "USO260916C00142000", "side": "sell", "status": "rejected", "qty": 2.0,
+         "filled_qty": 0.0, "filled_avg_price": None, "order_type": "market",
+         "limit_price": None, "stop_price": None, "submitted_at": "2026-09-15T14:31:02Z",
+         "reason": "account not eligible to trade uncovered option contracts"},
+        {"symbol": "SPYM", "side": "buy", "status": "filled", "qty": 2.0, "filled_qty": 2.0,
+         "filled_avg_price": 89.739999999, "order_type": "limit", "limit_price": 89.75,
+         "stop_price": None, "submitted_at": "2026-09-15T13:32:00Z", "reason": ""},
+    ])()
+
+    refused, filled = answer["rows"]
+    assert refused["reason"].startswith("account not eligible")
+    for absent in ("limit_price", "stop_price", "filled_avg_price"):
+        assert absent not in refused, f"a market order has no {absent} to report"
+    # Nobody refused the second one, so it says nothing about why.
+    assert "reason" not in filled
+    assert "stop_price" not in filled
+    assert filled["limit_price"] == 89.75 and filled["filled_avg_price"] == 89.74
+    # A real zero is a fact, not an absence: this order has genuinely filled nothing yet.
+    assert refused["filled_qty"] == 0.0
+
+
+def test_orders_surface_a_rejection_the_broker_never_recorded(monkeypatch) -> None:
+    """The rows that were invisible, and the most important ones in the view.
+
+    When ``submit_order`` raises -- "not eligible to trade uncovered option contracts", a halt,
+    no buying power -- the broker never creates an order. It has no id and appears in no order
+    feed, so reading the broker alone reports a clean session for an account whose every order
+    was thrown out. Only the bot's journal witnessed it.
+    """
+    from src.api.payloads import accounts as accounts_module
+
+    monkeypatch.setattr(accounts_module, "get_account_broker_type", lambda *a, **k: "schwab")
+    monkeypatch.setattr(
+        accounts_module, "_brokerage_activity",
+        lambda *a, **k: {"rows": [{
+            "symbol": "SPYM", "side": "buy", "status": "filled", "qty": 2.0, "filled_qty": 2.0,
+            "filled_avg_price": 89.74, "order_type": "limit", "limit_price": 89.75,
+            "stop_price": None, "submitted_at": "2026-09-15T13:32:00+00:00", "reason": "",
+        }], "error": ""},
+    )
+    monkeypatch.setattr(accounts_module, "load_order_journal", lambda **k: [{
+        "symbol": "USO260916C00142000", "side": "sell", "status": "rejected", "quantity": 2.0,
+        "order_type": "market", "limit_price": 0.0, "stop_price": 0.0, "order_id": "",
+        "submitted_at": "2026-09-15T14:31:02+00:00",
+        "reason": "account not eligible to trade uncovered option contracts",
+    }, {
+        # Already at the broker, so the broker's own row is the better record of the two.
+        "symbol": "SPYM", "side": "buy", "status": "rejected", "quantity": 2.0,
+        "order_type": "limit", "order_id": "schwab-1001", "submitted_at": "2026-09-15T13:32:00+00:00",
+        "reason": "should not appear -- this one has an id",
+    }])
+
+    payload = accounts_module.account_activity_payload("schwab1", limit=20)
+    rows = payload["rows"]
+
+    assert [row["symbol"] for row in rows] == ["USO260916C00142000", "SPYM"], "newest first"
+    assert rows[0]["reason"].startswith("account not eligible")
+    assert all(row["reason"] != "should not appear -- this one has an id" for row in rows)
+
+
+def test_a_journal_rejection_reaches_the_mcp_tool_with_its_reason(monkeypatch) -> None:
+    """End to end: the compaction keeps a real reason and still drops the empty ones."""
+    from src.api.payloads import accounts as accounts_module
+
+    monkeypatch.setattr(accounts_module, "get_account_broker_type", lambda *a, **k: "schwab")
+    monkeypatch.setattr(accounts_module, "_brokerage_activity", lambda *a, **k: {"rows": [], "error": ""})
+    monkeypatch.setattr(accounts_module, "load_order_journal", lambda **k: [{
+        "symbol": "USO", "side": "buy", "status": "rejected", "quantity": 1.0,
+        "order_type": "market", "order_id": "", "submitted_at": "2026-09-15T14:31:02+00:00",
+        "reason": "insufficient buying power",
+    }])
+
+    row = _build(monkeypatch).get_account_orders("schwab1")["rows"][0]
+
+    assert row["reason"] == "insufficient buying power"
+    assert "limit_price" not in row, "a market order still drops what does not apply"
+
+
+def test_list_algorithms_describes_each_one_in_a_line(monkeypatch) -> None:
+    """The one-line form, not the explainer's paragraph.
+
+    This lists every algorithm at once; ``rally_rotation``'s summary alone is 787 characters,
+    more than the entire payload was before. A reader needs enough to say which algorithm a
+    report is about, not how it sizes.
+    """
+    rows = _build(monkeypatch).list_algorithms()["algorithms"]
+    by_id = {row["algorithm"]: row for row in rows}
+
+    assert by_id["rally_rotation"]["description"], "every algorithm carries one"
+    for row in rows:
+        assert len(row["description"]) < 200, f'{row["algorithm"]} is a paragraph, not a line'
+
+
+def _listing(monkeypatch, *, rows, headline=None, ready=True):
+    from src.api.payloads import accounts as accounts_module
+
+    monkeypatch.setattr(
+        accounts_module, "accounts_payload",
+        lambda *a, **k: {"default": "alpaca1", "rows": rows},
+    )
+    calls = []
+
+    def fake_headline(account_id):
+        calls.append(account_id)
+        return dict(headline or {})
+
+    monkeypatch.setattr(accounts_module, "account_headline", fake_headline)
+    return _build(monkeypatch).list_accounts, calls
+
+
+def test_list_accounts_carries_a_headline_per_account(monkeypatch) -> None:
+    """So an agent can tell which accounts are worth a detail call before making any."""
+    tool, _ = _listing(
+        monkeypatch,
+        rows=[{"id": "alpaca1", "label": "Alpaca Paper", "broker": "alpaca",
+               "deployments": ["options_flip"], "credentials_ready": True}],
+        headline={"equity": 10525.339999, "cash": 1.0, "day_pl": 560.12345,
+                  "day_pl_percent": 0.0013012345, "total_pl": 1200.0,
+                  "realized_pl": 41.2, "positions": 3, "orders_today": 4, "error": ""},
+    )
+
+    row = tool()["accounts"][0]
+
+    assert row["label"] == "Alpaca Paper" and row["positions"] == 3 and row["orders_today"] == 4
+    assert row["equity"] == 10525.34, "money rounded like every other tool rounds it"
+    assert row["day_pl_percent"] == 0.0013, "a 0.13% day must not round away to nothing"
+    assert "error" not in row, "an empty error is dropped rather than sent"
+
+
+def test_list_accounts_does_not_ask_a_broker_it_has_no_keys_for(monkeypatch) -> None:
+    """A guaranteed error per row tells the reader nothing ``credentials_ready`` did not."""
+    tool, calls = _listing(
+        monkeypatch,
+        rows=[{"id": "schwab9", "label": "Unwired", "broker": "schwab",
+               "deployments": [], "credentials_ready": False}],
+    )
+
+    row = tool()["accounts"][0]
+
+    assert calls == [], "no broker read attempted"
+    assert row["credentials_ready"] is False
+    assert "equity" not in row
+
+
+def test_a_headline_reports_nulls_and_an_error_rather_than_zeros(monkeypatch) -> None:
+    """"We could not ask" and "nothing happened" must not look alike in a summary.
+
+    Only one of the two is news, and a zero day P/L beside a zero order count reads as a quiet
+    session rather than as a broker that never answered.
+    """
+    from src.api.payloads import accounts as accounts_module
+
+    monkeypatch.setattr(accounts_module, "positions_payload", lambda *a, **k: {
+        "equity": None, "cash": None, "day_pl": None, "day_pl_percent": None,
+        "total_pl": None, "rows": [], "error": "Schwab API returned 401: token expired",
+    })
+    monkeypatch.setattr(accounts_module, "account_analytics_payload", lambda *a, **k: {"realized_pl": None})
+    monkeypatch.setattr(accounts_module, "account_activity_payload", lambda *a, **k: {"rows": [], "error": ""})
+
+    row = accounts_module.account_headline("schwab3")
+
+    assert row["equity"] is None and row["day_pl"] is None
+    assert "401" in row["error"]
+
+
+def test_a_headline_survives_one_source_dying(monkeypatch) -> None:
+    """Three independent reads. A broker slow on positions still contributes its order count."""
+    from src.api.payloads import accounts as accounts_module
+
+    def explode(*a, **k):
+        raise RuntimeError("positions timed out")
+
+    monkeypatch.setattr(accounts_module, "positions_payload", explode)
+    monkeypatch.setattr(accounts_module, "account_analytics_payload", lambda *a, **k: {"realized_pl": 88.0})
+    monkeypatch.setattr(accounts_module, "account_activity_payload", lambda *a, **k: {
+        "rows": [{"symbol": "USO"}, {"symbol": "SPYM"}], "error": "",
+    })
+
+    row = accounts_module.account_headline("schwab1")
+
+    assert row["orders_today"] == 2 and row["realized_pl"] == 88.0
+    assert row["equity"] is None
+    assert "positions timed out" in row["error"]

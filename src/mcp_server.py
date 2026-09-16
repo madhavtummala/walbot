@@ -45,6 +45,57 @@ logger = logging.getLogger(__name__)
 DEFAULT_ALGORITHM = "rally_rotation"
 
 
+#: Money to the cent, ratios to four places -- a ratio is read as a percent with two decimals.
+#: Applied only on the way out of a tool, never to the payload functions themselves, because
+#: the dashboard formats its own display and would rather keep the full float.
+_RATIO_FIELDS = ("day_pl_percent", "unrealized_plpc")
+
+#: What an order does not have. A market order carries no limit and no stop, an unfilled one no
+#: fill price, and an order nobody refused no reason; all four say nothing a reader did not
+#: already know from ``order_type`` and ``status``. Dropped from the row rather than sent empty.
+_ORDER_ABSENCES = ("limit_price", "stop_price", "filled_avg_price", "reason")
+
+
+def _compact(value: Any, *, drop: tuple[str, ...] = ()) -> Any:
+    """The same answer in fewer characters, for tools whose reader pays by the token.
+
+    An agent reading a portfolio holds every one of these rows in its context at once, so a
+    float printed to seventeen places costs it real room for no information -- ``unrealized_pl``
+    came back as ``66.39599999999973`` where ``66.4`` is the whole of what anyone can act on.
+    Rounding only; nothing is renamed, reordered, or reinterpreted, and a ``None`` stays
+    ``None`` except for the keys in ``drop``, where absence is the same fact as empty. Those
+    drop on any empty value, not just ``None``: a reason is missing as ``""`` and a price as
+    ``null``, and both mean the row has nothing to say about it.
+    """
+    if isinstance(value, dict):
+        return {
+            key: _compact(item, drop=drop)
+            for key, item in value.items()
+            if not (key in drop and not item)
+        }
+    if isinstance(value, list):
+        return [_compact(item, drop=drop) for item in value]
+    if isinstance(value, bool) or not isinstance(value, float):
+        return value
+    return round(value, 2)
+
+
+def _compact_rows(rows: Any, *, ratios: tuple[str, ...] = (), drop: tuple[str, ...] = ()) -> Any:
+    """``_compact`` for a list of rows, with the ratio columns kept at four places."""
+    if not isinstance(rows, list):
+        return rows
+    compacted = []
+    for row in rows:
+        if not isinstance(row, dict):
+            compacted.append(_compact(row, drop=drop))
+            continue
+        tidy = _compact(row, drop=drop)
+        for field in ratios:
+            if isinstance(row.get(field), float):
+                tidy[field] = round(row[field], 4)
+        compacted.append(tidy)
+    return compacted
+
 def _order_request_payload(request: OrderRequest) -> dict[str, Any]:
     return {
         "symbol": request.symbol, "action": request.action, "quantity": request.quantity,
@@ -132,7 +183,9 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
         """Every algorithm this bot has, and for each one where it trades and who drives it.
 
         Start here: this is the only way to learn which algorithm ids exist, and the id is what
-        every other algorithm tool takes.
+        every other algorithm tool takes. ``description`` is one line on what each one does --
+        enough to say which algorithm a report is about without calling get_algorithm_plan,
+        which is the only way to see what it proposes *today*.
 
         Deployment is a property of the algorithm, reported inline:
 
@@ -148,6 +201,7 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
         Only rows with ``can_place_orders: true`` will accept place_orders; every other row
         carries the ``reason`` it will not.
         """
+        from src.algorithms.explainers import EXPLAINERS
         from src.algorithms.registry import ALGORITHMS
 
         controls = load_controls()
@@ -159,6 +213,10 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
                 {
                     "algorithm": algorithm,
                     "name": STRATEGY_LABELS.get(algorithm, algorithm),
+                    # The one-line form, not the explainer's paragraph: this is a list of every
+                    # algorithm at once, and three paragraphs here would cost more than the
+                    # whole rest of the payload.
+                    "description": (EXPLAINERS.get(algorithm) or {}).get("headline", ""),
                     "deployed": deployment is not None,
                     "account_id": (deployment or {}).get("account_id", ""),
                     "enabled": bool((deployment or {}).get("enabled", False)),
@@ -187,18 +245,14 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
           greeks-priced profit), and ``contract``/``state``/``headline``.
 
         Returns a ``plan_token``. Review the plan, then pass *only* that token to place_orders;
-        the plan itself stays on this side and is never sent back. It expires in about a minute
-        and a half, and is good for one submission -- an expired token is a normal outcome, not
-        a fault: call this again and review the fresh plan.
+        the plan itself stays on this side and is never sent back. It expires in about five
+        minutes, and is good for one submission -- an expired token is a normal outcome, not a
+        fault: call this again and review the fresh plan.
 
-        Deliberately runs whatever it is asked to, switched on or not: computing a plan is the
-        same read-only act as a backtest, and "what would this do right now" is worth answering
-        for an algorithm the scheduler owns. Whether the plan may be *acted* on is reported as
-        ``can_place_orders`` rather than decided here.
-
-        Sized against the account the algorithm is deployed to, whatever its switch says. An
-        algorithm deployed nowhere is still planned, against the default account, and reports
-        ``can_place_orders: false``.
+        Runs whatever it is asked to, switched on or not; whether the plan may be *acted* on
+        is reported as ``can_place_orders`` rather than decided here. Sized against the account
+        the algorithm is deployed to. An algorithm deployed nowhere is still planned, against
+        the default account, and reports ``can_place_orders: false``.
         """
         deployment = find_deployment(load_controls(), algorithm)
         refusal = deployment_refusal(deployment, ORIGIN_MCP)
@@ -225,24 +279,109 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
         return {"status": "ok", **context, "plan_token": token, **_plan_payload(plan)}
 
     @mcp.tool()
-    def list_accounts() -> dict[str, Any]:
-        """Name every configured account. Start here, then ask the other two tools per account.
+    def get_price(symbol: str, timestamp: str = "") -> dict[str, Any]:
+        """One price for one symbol, from this bot's own market data.
 
-        Cheap and money-free: ids, labels, broker, and ``deployments`` (the algorithms bound to
-        each). Reading a portfolio is this list plus one get_account_positions call per row -- fanned out
-        this way rather than as one all-accounts call so a slow or unreachable broker costs you
-        that account and not the answer.
+        **Prefer this over a web search for any price.** A search engine answers with whatever
+        a page said when it was indexed, which for a quote is routinely days old and is never
+        marked as such. This reads the bar store the algorithms trade on.
+
+        ``timestamp`` is ISO 8601 -- ``"2026-07-15"`` or ``"2026-07-15T14:30:00Z"`` -- and
+        defaults to now. The answer is the nearest bar in time, from the five-minute series
+        where the store has it and the daily series otherwise, so a stamp naming a time gets
+        an intraday price for a recent date and a session close for an old one.
+
+        **Read ``as_of``, always, and quote it rather than the timestamp you asked for.** It is
+        what was actually struck, and the gap can be minutes on a recent intraday date or days
+        on a weekend, a holiday, or a date before the symbol listed. ``price`` is that bar's
+        close.
+
+        A bare date is midnight, so for a date with intraday bars it answers near that
+        session's *open* rather than its close -- roughly a day's range away from what "the
+        closing price on the 15th" would mean. Name a time if you need one end of the session.
+        Two prices read the same way are still a sound comparison: a return between two bare
+        dates measures open to open.
+
+        One symbol, one point. A 60-day return is two calls and a subtraction; a trend is a
+        call per point you want.
+
+        A symbol the store has never held answers ``status: "error"`` with a null ``price``,
+        never a zero -- a zero is a number someone might do arithmetic with.
         """
-        from src.api.payloads.accounts import accounts_payload
+        from src.api.payloads.accounts import _parse_stamp
+        from src.data.duckdb_store import read_closest_bar
+
+        ticker = str(symbol or "").strip().upper()[:12]
+        if not ticker:
+            return {"status": "error", "symbol": "", "price": None,
+                    "error": "No symbol given. Pass one, e.g. 'SPY'."}
+
+        raw = str(timestamp or "").strip()
+        wanted_at = _parse_stamp(raw) if raw else datetime.now(timezone.utc)
+        if wanted_at is None:
+            return {"status": "error", "symbol": ticker, "price": None,
+                    "error": f"Could not read {timestamp!r} as a date. Use ISO 8601, e.g. '2026-07-15'."}
+
+        try:
+            bar = read_closest_bar(ticker, wanted_at)
+        except Exception as error:  # noqa: BLE001 - reported as itself, not as "no such symbol"
+            logger.warning("Price lookup failed for %s: %s", ticker, error)
+            return {"status": "error", "symbol": ticker, "price": None,
+                    "error": f"Could not read prices for {ticker}: {error}"}
+        if bar is None:
+            return {"status": "error", "symbol": ticker, "price": None,
+                    "error": f"Nothing could price {ticker}."}
+
+        struck = bar["timestamp"]
+        return {
+            "status": "ok",
+            "symbol": ticker,
+            "price": round(bar["close"], 4),
+            "as_of": struck.isoformat() if hasattr(struck, "isoformat") else str(struck),
+            "error": "",
+        }
+
+    @mcp.tool()
+    def list_accounts() -> dict[str, Any]:
+        """Every account, each with a headline of what it is worth and what it did today.
+
+        Start here. Ids, labels, broker and ``deployments`` (the algorithms bound to each),
+        plus the figures that decide whether an account is worth a closer look: ``equity``,
+        ``cash``, ``day_pl`` (and percent), ``total_pl``, ``realized_pl``, ``positions`` and
+        ``orders_today``.
+
+        ``total_pl`` is *open* P/L -- the gain on what is still held, since each position was
+        opened -- and is the same figure get_account_positions reports under that name.
+        ``day_pl`` is only today's move. The two are not interchangeable.
+
+        **An account flat on the day with no orders needs no further call.** That is what this
+        is for: read the headline, then spend get_account_positions and get_account_orders only
+        on the accounts that actually did something.
+
+Every figure is current, ``realized_pl`` included. The answer is small -- each field is
+        one number -- but not instant: every row is a live broker read and realized P/L matches
+        a year of fills, so expect seconds, not bytes. Read per account, so a slow or
+        unreachable broker costs you that account's figures and not the listing; it reports
+        ``error`` and nulls, never zeros, because "we could not ask" and "nothing happened" are
+        different answers.
+        """
+        from src.api.payloads.accounts import account_headline, accounts_payload
 
         payload = accounts_payload()
+        accounts = []
+        for row in payload["rows"]:
+            identity = {k: row[k] for k in ("id", "label", "broker", "deployments", "credentials_ready")}
+            # Only for accounts that could answer. Asking a broker we have no keys for buys a
+            # guaranteed error per row and tells the reader nothing they cannot see from
+            # ``credentials_ready``.
+            headline = account_headline(row["id"]) if row.get("credentials_ready") else {}
+            accounts.append({**identity, **headline})
         return {
             "status": "ok",
             "default_account": payload["default"],
-            "accounts": [
-                {k: row[k] for k in ("id", "label", "broker", "deployments", "credentials_ready")}
-                for row in payload["rows"]
-            ],
+            # Rounded like every other money figure these tools hand over, so the same number
+            # does not arrive to two different precisions from two different tools.
+            "accounts": _compact_rows(accounts, ratios=_RATIO_FIELDS, drop=("error",)),
         }
 
     @mcp.tool()
@@ -252,33 +391,30 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
         The account is the unit, not the algorithm: a broker reports one blended position per
         symbol, so two algorithms trading the same account cannot be told apart here.
 
-        Carries ``equity``, ``cash``, ``day_pl`` (and percent), ``total_pl``, ``dividend_pl``
-        and the holdings in ``rows``. ``dividend_pl`` is year to date like ``realized_pl``, with
-        ``dividend_pl_1y`` beside it for the trailing year. ``day_pl: null`` means the broker did not report where the
-        session started -- "unknown", not "flat". An unreachable broker fills ``error`` and
-        leaves the figures null rather than reporting zeros.
+        ``day_pl: null`` means the broker did not report where the session started --
+        "unknown", not "flat". An unreachable broker fills ``error`` and leaves the figures
+        null, never zero.
 
-        Three P/L figures, never interchangeable. ``total_pl`` and a row's ``unrealized_pl`` are
-        *open* P/L: the whole gain since each position was opened. ``day_pl`` and a row's
-        ``day_pl`` are only today's move. A position bought months ago and a position bought
-        this morning differ in the first and can agree in the second.
+        Three P/L figures, never interchangeable. ``total_pl`` and a row's ``unrealized_pl``
+        are *open* P/L, the whole gain since each position was opened; ``day_pl`` is only
+        today's move. A position bought months ago and one bought this morning differ in the
+        first and can agree in the second.
 
-        ``realized_pl`` is the third and measures what the other two cannot: profit already
-        banked. It is **year to date**, matched from the broker's fills, and read fresh on every
-        call to this tool; ``realized_pl_1y`` is the same figure over the trailing year, and
-        ``activity_year`` names the calendar year both year-to-date figures cover. Year to date leads
-        because it is what a broker's own statement totals, so it is the one figure here a user
-        can check against their account. It carries its own ``computed_at`` regardless, because the
-        dashboard serves the same figure from a background recompute and may show it older. An account that closed a
+        ``realized_pl`` is profit already banked, **year to date**, as is ``dividend_pl``. The
+        window is not a trailing year, so do not infer one from it. An account that closed a
         winning trade and went back to cash holds nothing, so its open and day figures are both
         zero while ``realized_pl`` carries the entire gain -- never read a zero ``total_pl`` as
-        "this account has not made money". ``realized_unmatched`` counts sells whose opening buy
-        predates the window, whose cost is unknowable: when it is above zero the total is real
-        but partial.
+        "this account has not made money". ``realized_unmatched`` above zero means some sells'
+        opening buys predate the window and could not be priced: the total is real but partial.
 
-        This is the same function the dashboard's account page calls, through the brokerage
-        interface, so every broker answers it the same way.
+        Money is rounded to the cent and ratios to four places -- ``day_pl_percent: 0.0013`` is
+        a 0.13% day. A total and its parts can differ by a cent.
         """
+        # Year to date because that is what a broker's own statement totals, making it the one
+        # figure here a user can check us against. Fills are still read over a trailing year --
+        # matching this year's sells needs last year's buys -- but no trailing-year total is
+        # ever reported. The same function the dashboard's account page calls, through the
+        # brokerage interface, so every broker answers it the same way.
         from src.api.payloads.accounts import account_analytics_payload, positions_payload
 
         # Forced, unlike a page load: an agent gets one shot at an answer and cannot come back
@@ -289,12 +425,18 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
         # the first's real one -- an unreachable broker reported null balances and said nothing
         # about why. ``state`` and ``computed_at`` are dropped or renamed for the same reason:
         # beside an account's balances, a bare "state" reads as the account's.
+        #
+        # ``dividend_rows`` is dropped because it was never anything but weight here: up to forty
+        # distributions, each with the broker's own description string, carried on every call to
+        # summarise them into the one number -- ``dividend_pl`` -- that this tool documents and
+        # any reader actually uses. The dashboard still renders the rows; it reads the analytics
+        # payload directly and is unaffected.
         carried = {
             key: value for key, value in analytics.items()
-            if key not in ("error", "state", "computed_at", "account_id")
+            if key not in ("error", "state", "computed_at", "account_id", "dividend_rows")
         }
         errors = [text for text in (positions.get("error"), analytics.get("error")) if text]
-        return {
+        merged = {
             "status": "ok",
             "updated_at": datetime.now(timezone.utc).isoformat(),
             **positions,
@@ -304,14 +446,32 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
             "realized_computed_at": analytics.get("computed_at", ""),
             "error": "; ".join(errors),
         }
+        # Rounded last, so nothing above has to think about presentation. Row nulls are kept:
+        # this tool's whole claim about ``day_pl`` is that null means "unknown, not flat", and a
+        # missing key could not say that. ``_compact_rows`` is handed the merged dict as a
+        # single-row list so the account's own ``day_pl_percent`` is rounded as the ratio it is
+        # -- at two places a 0.13% day reads as 0.0, which is the one number that must not round
+        # to nothing.
+        compacted = _compact_rows([merged], ratios=_RATIO_FIELDS)[0]
+        compacted["rows"] = _compact_rows(merged["rows"], ratios=_RATIO_FIELDS)
+        return compacted
 
     @mcp.tool()
-    def get_account_orders(account_id: str = "", limit: int = 40) -> dict[str, Any]:
+    def get_account_orders(account_id: str = "", limit: int = 20) -> dict[str, Any]:
         """**Today's** orders for one account, in every state, most recent first.
 
         Filled, partially filled, replaced, cancelled, rejected and still-resting arrive in one
         list -- a live order simply appears with a resting status and an unfilled quantity, so
         there is no separate working-orders question to ask.
+
+        A refused order carries ``reason``, the broker's own words for why. Only a refused one:
+        the key is absent rather than empty when there is nothing to explain, as are
+        ``limit_price`` and ``stop_price`` on a market order and ``filled_avg_price`` on an
+        order that has not filled. Absent here means "does not apply", never "unknown".
+
+        ``limit`` is per account and counts orders, not fills. Twenty covers any ordinary
+        session; raise it for an account you know traded heavily, since the oldest of the day
+        are the ones dropped.
 
         Today means the current *trading* day in market time, not the last 24 hours and not the
         UTC day: an order entered at 4pm ET is still today's.
@@ -321,27 +481,31 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
         from get_account_positions rather than inferring them from this list, and do not
         conclude from an empty result that the account is flat.
 
-        The same function the dashboard's account page calls, but narrowed: the page caps by
-        count alone and shows orders from any date. It reads the broker's own record where
-        the broker keeps one, so a trade placed by hand in the broker's own app shows up here
-        exactly like one this bot placed; only the local paper book, which has no broker, falls
-        back to the bot's order journal.
+        Reads the broker's own record, so a trade placed by hand in the broker's app shows up
+        exactly like one this bot placed. An order the broker refused outright never reached it
+        and has no id there, so those come from the bot's own journal and carry the reason it
+        gave at submission -- the only place that explanation exists.
         """
+        # The same function the dashboard's account page calls, but narrowed: the page caps by
+        # count alone and shows orders from any date. The local paper book has no broker, so
+        # its journal is the whole record rather than a supplement to one.
         from src.api.payloads.accounts import account_activity_payload, market_day_start
 
+        payload = account_activity_payload(account_id, limit=limit, since=market_day_start())
         return {
             "status": "ok",
-            **account_activity_payload(account_id, limit=limit, since=market_day_start()),
+            **payload,
+            "rows": _compact_rows(payload.get("rows", []), drop=_ORDER_ABSENCES),
         }
 
     @mcp.tool()
     def place_orders(plan_token: str, edits: list[dict[str, str]] | None = None) -> dict[str, Any]:
         """Submit a reviewed plan. The response shape depends on the plan's own shape.
 
-        ``plan_token`` is the token get_algorithm_plan returned. The plan itself never travels
-        back: it is held here, so what executes is exactly what you reviewed. Submits
-        immediately. The token is single-use and expires in about ninety seconds -- if it has,
-        call get_algorithm_plan again rather than treating it as a failure.
+        ``plan_token`` is the token get_algorithm_plan returned; the plan itself never travels
+        back, so what executes is exactly what you reviewed. Submits immediately. Single-use,
+        and expires in about five minutes -- an expired token is normal, not a failure: plan
+        again and resubmit.
 
         **To decline a plan, do not call this tool.** That is the whole veto, and it needs no
         argument. Say in your report what you declined and why.
@@ -355,11 +519,10 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
 
         Editing is refused for an order-book plan (Options Flip): a leg removed there cancels a
         resting order rather than declining it, so that shape is submit-whole or decline-whole.
-        An edit naming a symbol the plan neither proposes nor holds is refused too, rather than
-        ignored, because that is nearly always a mistyped ticker.
+        An edit naming a symbol the plan neither proposes nor holds is refused rather than
+        ignored -- that is nearly always a mistyped ticker.
 
-        The deployment is the one the plan was computed against, re-checked here -- an
-        algorithm switched off between planning and submitting refuses, and so does the kill
+        An algorithm switched off between planning and submitting refuses, as does the kill
         switch.
 
         **Allocation strategies (Bursty DCA, Rally Rotation).** Orders are fitted to the

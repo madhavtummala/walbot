@@ -950,3 +950,49 @@ def write_sentiment_records(
 def compact_storage(db_path: str | None = None) -> None:
     with _connect(db_path or DUCKDB_STATE_PATH) as connection:
         connection.execute("CHECKPOINT")
+
+
+#: The grids :func:`read_closest_bar` searches: the fine one the store keeps for recent
+#: sessions, and the daily one that reaches back years. Between them they cover every date
+#: anyone asks about, at whatever resolution that date happens to have.
+CLOSEST_BAR_INTERVALS = (5, DAILY_INTERVAL_MINUTES)
+
+
+def read_closest_bar(
+    symbol: str,
+    at: datetime,
+    *,
+    intervals: tuple[int, ...] = CLOSEST_BAR_INTERVALS,
+    db_path: str | None = None,
+) -> dict[str, Any] | None:
+    """The single stored bar nearest ``at`` in time, or ``None`` when the symbol has none.
+
+    Nearest by absolute distance rather than the newest at or before, which keeps this one
+    ordering instead of a search per grid with a fallback between them. The difference only
+    shows up inside a session -- asked for 10:00 it may answer with 10:05's bar rather than
+    09:55's -- and at that distance the two prices are the same answer to the question.
+
+    Both grids are searched at once so the fine bars win wherever they exist and the daily
+    series answers everywhere else, without the caller choosing or knowing which it got. The
+    returned ``timestamp`` says what was actually struck, which is the part that matters.
+    """
+    placeholders = ", ".join("?" for _ in intervals)
+    query = f"""
+        SELECT timestamp, open, close, interval_minutes
+        FROM market_bars
+        WHERE symbol = ? AND interval_minutes IN ({placeholders})
+        ORDER BY abs(epoch(timestamp) - epoch(?::TIMESTAMPTZ))
+        LIMIT 1
+    """
+    params = [symbol.upper(), *[int(i) for i in intervals], pd.Timestamp(at).to_pydatetime()]
+    with _connect(db_path) as connection:
+        rows = connection.execute(query, params).fetchall()
+    if not rows:
+        return None
+    timestamp, open_price, close_price, interval = rows[0]
+    return {
+        "timestamp": timestamp,
+        "open": float(open_price),
+        "close": float(close_price),
+        "interval_minutes": int(interval),
+    }

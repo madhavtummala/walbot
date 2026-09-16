@@ -32,9 +32,10 @@ from ..controls import load_controls
 logger = logging.getLogger(__name__)
 
 
-#: How far back fills are read. Still a trailing year: it is one request, it is inside Schwab's
-#: transactions window, and it is the widest basis the year-to-date figure can be matched from.
-#: What the page *reports* is year to date -- see ``_realized_pl``.
+#: How far back fills are read. A trailing year even though the figure reported is year to
+#: date, and the gap is deliberate: a sell in January closes a buy from last autumn, and
+#: without that buy in hand the match fails and the close is counted as unmatched instead of
+#: priced. The window is the matching basis, not the reporting period -- see ``_realized_pl``.
 REALIZED_ACTIVITY_DAYS = 364
 
 #: How far back the account page totals income. Just under a year: comparable to a trailing
@@ -46,6 +47,11 @@ DIVIDEND_ACTIVITY_DAYS = 364
 #: *names* of environment variables, so the dashboard can wire up a target without ever handling
 #: an API key. Setting the secret stays a deploy-time action on the host.
 ACCOUNT_FIELDS = ("label", "broker", "base_url", "data_feed", "api_key_env", "api_secret_env")
+
+#: Sort floor for a row whose timestamp will not parse. Oldest rather than newest: an undateable
+#: row is pushed to the bottom of the view rather than promoted above orders that are genuinely
+#: recent, which is what a "now" default would do.
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def positions_payload(account_id: str = "") -> dict[str, Any]:
@@ -102,16 +108,16 @@ def _dividend_pl(brokerage: Any, config: Any) -> dict[str, Any]:
         rows = brokerage.get_dividend_activity(end - timedelta(days=DIVIDEND_ACTIVITY_DAYS), end)
     except Exception as error:  # noqa: BLE001 - income is a detail, not the whole page
         logger.warning("Could not read dividend activity for %s: %s", config.account_id, error)
-        return {"dividend_pl": None, "dividend_pl_1y": None, "dividend_rows": []}
-    # The same two windows realized P/L reports, for the same reason: one figure a statement
-    # can be checked against, and the trailing year beside it for context.
+        return {"dividend_pl": None, "dividend_rows": []}
+    # Year to date, the same window realized P/L reports, so the two figures beside each other
+    # cover the same span. The fetch stays a trailing year because ``dividend_rows`` is the
+    # recent-activity list and wants more than this year's.
     year_start = date(end.year, 1, 1).isoformat()
     return {
         "dividend_pl": float(
             sum(float(row.get("amount") or 0.0) for row in rows
                 if str(row.get("date") or "")[:10] >= year_start)
         ),
-        "dividend_pl_1y": float(sum(float(row.get("amount") or 0.0) for row in rows)),
         "dividend_rows": rows[:40],
     }
 
@@ -126,10 +132,7 @@ def _realized_pl(brokerage: Any, config: Any) -> dict[str, Any]:
     """
     from ...brokerages.realized import realized_from_fills
 
-    blank = {
-        "realized_pl": None, "realized_closes": 0, "realized_unmatched": 0,
-        "realized_pl_1y": None,
-    }
+    blank = {"realized_pl": None, "realized_closes": 0, "realized_unmatched": 0}
     try:
         end = datetime.now(timezone.utc).date()
         fills = brokerage.get_fills(end - timedelta(days=REALIZED_ACTIVITY_DAYS), end)
@@ -140,18 +143,14 @@ def _realized_pl(brokerage: Any, config: Any) -> dict[str, Any]:
     # that has not closed anything -- the first is unknown, the second is zero.
     if fills is None:
         return blank
-    # One fetch, two windows: the trailing year contains the calendar year to date, so asking
-    # twice would be asking the same question twice.
-    year_start = date(end.year, 1, 1).isoformat()
-    ytd = realized_from_fills(fills, since=year_start)
-    trailing = realized_from_fills(fills)
+    # Year to date and nothing else: it is the figure a broker's own statement shows, and so
+    # the only one a reader can check us against. The trailing year is still fetched, because
+    # matching this year's sells needs last year's buys, but it is never reported.
+    ytd = realized_from_fills(fills, since=date(end.year, 1, 1).isoformat())
     return {
-        # Year to date leads, because it is the figure a broker's own statement shows and so
-        # the only one a reader can check us against.
         "realized_pl": ytd["realized_pl"],
         "realized_closes": ytd["closes"],
         "realized_unmatched": ytd["unmatched"],
-        "realized_pl_1y": trailing["realized_pl"],
     }
 
 
@@ -164,12 +163,7 @@ def _compute_analytics(account_id: str) -> dict[str, Any]:
     # a fresh session is another OAuth exchange and another account lookup -- helpers resolving
     # independently made one page load authenticate four times.
     brokerage = resolve_brokerage(config)
-    return {
-        **_dividend_pl(brokerage, config),
-        **_realized_pl(brokerage, config),
-        # One label for both figures, because both now cover the same calendar year.
-        "activity_year": str(datetime.now(timezone.utc).year),
-    }
+    return {**_dividend_pl(brokerage, config), **_realized_pl(brokerage, config)}
 
 
 #: In memory rather than the state store: it caches something the broker can always be asked
@@ -207,16 +201,77 @@ def _blank_analytics(account_id: str) -> dict[str, Any]:
         "computed_at": "",
         "state": "computing",
         "dividend_pl": None,
-        "dividend_pl_1y": None,
         "dividend_rows": [],
         # Banked, as opposed to ``total_pl``, which only measures what is still held.
         "realized_pl": None,
         "realized_closes": 0,
         "realized_unmatched": 0,
-        "realized_pl_1y": None,
-        "activity_year": "",
         "error": "",
     }
+
+
+def account_headline(account_id: str) -> dict[str, Any]:
+    """One account in one row: what it is worth, how it moved, and how busy it was today.
+
+    The summary an agent reads *before* deciding which accounts are worth a closer look. An
+    account that is flat, holds what it held yesterday and placed nothing needs no further
+    call, and saying so in a dozen numbers is far cheaper than the two detail reads it saves.
+
+    Best effort, and never raises. Each of the three sources is caught on its own, so a broker
+    that is slow on positions still contributes its order count, and an account that is
+    unreachable entirely reports nulls and an ``error`` rather than zeros -- "we could not ask"
+    and "nothing happened" must not look alike in a summary, because only one of them is
+    news.
+
+    ``realized_pl`` is forced current, like every other figure here. It costs a year of
+    transactions to match, which is the slowest thing in this row -- but it is seconds, not
+    bytes, and an agent gets one shot at an answer. Reading the last computed value instead
+    returned ``null`` on the first call after a restart, which is the call a scheduled brief
+    actually makes: a figure that is absent exactly when it is wanted is not worth the time it
+    saves.
+    """
+    row: dict[str, Any] = {
+        "equity": None, "cash": None, "day_pl": None, "day_pl_percent": None,
+        "total_pl": None, "realized_pl": None, "positions": None, "orders_today": None,
+        "error": "",
+    }
+    errors: list[str] = []
+
+    try:
+        positions = positions_payload(account_id)
+        row.update({
+            key: positions.get(key)
+            for key in ("equity", "cash", "day_pl", "day_pl_percent", "total_pl")
+        })
+        row["positions"] = len(positions.get("rows") or [])
+        if positions.get("error"):
+            errors.append(str(positions["error"]))
+    except Exception as error:  # noqa: BLE001 - one account must not blank the listing
+        logger.warning("Headline positions failed for %s: %s", account_id, error)
+        errors.append(str(error))
+
+    try:
+        # Forced, like get_account_positions and for the same reason: an agent cannot come back
+        # a second later to see whether a background recompute landed. Measured at about five
+        # seconds across five accounts, which is time rather than payload.
+        analytics = account_analytics_payload(account_id, refresh=True)
+        row["realized_pl"] = analytics.get("realized_pl")
+    except Exception as error:  # noqa: BLE001
+        logger.warning("Headline analytics failed for %s: %s", account_id, error)
+
+    try:
+        # Counted rather than listed, and with a cap high enough that the count is a count and
+        # not the cap: the detail tool's twenty would quietly report "20" for a busy session.
+        activity = account_activity_payload(account_id, limit=200, since=market_day_start())
+        row["orders_today"] = len(activity.get("rows") or [])
+        if activity.get("error"):
+            errors.append(str(activity["error"]))
+    except Exception as error:  # noqa: BLE001
+        logger.warning("Headline activity failed for %s: %s", account_id, error)
+        errors.append(str(error))
+
+    row["error"] = "; ".join(dict.fromkeys(errors))
+    return row
 
 
 def _account_items(raw: dict[str, Any]) -> dict[str, Any]:
@@ -390,6 +445,10 @@ def _paper_activity(config: Any, limit: int, since: datetime | None = None) -> d
                 "limit_price": entry.get("limit_price") or None,
                 "stop_price": entry.get("stop_price") or None,
                 "submitted_at": entry.get("submitted_at", ""),
+                # The journal has recorded this since it was written and nothing read it, so a
+                # refused paper order arrived here saying only "rejected". It is the one field
+                # a reader of a rejection actually wants.
+                "reason": entry.get("reason", ""),
             }
         )
     return {"rows": _since(rows, since)}
@@ -478,12 +537,55 @@ def _brokerage_activity(
                 "limit_price": json_number(order.get("limit_price")) or None,
                 "stop_price": json_number(order.get("stop_price")) or None,
                 "submitted_at": str(order.get("entered_time") or ""),
+                # Empty unless the broker refused it and said why. A venue that reports no
+                # reason leaves this empty rather than filling in a stand-in phrase, so a
+                # missing explanation is never mistaken for the broker's own words.
+                "reason": str(order.get("reason") or ""),
             }
         )
     rows.sort(key=lambda row: row["submitted_at"], reverse=True)
     # Trimmed by date first, so ``limit`` caps what survives the window rather than deciding
     # which orders the window gets to consider.
     return {"rows": _since(rows, since)[:limit]}
+
+
+def _refused_before_the_broker(config: Any, limit: int, since: datetime | None) -> list[dict[str, Any]]:
+    """Orders this bot tried to place and the broker refused outright, from the bot's journal.
+
+    Invisible to every other path here, and the most important rows in the view. When
+    ``submit_order`` raises -- "account not eligible to trade uncovered option contracts", a
+    halt, no buying power -- the broker never creates an order, so it has no id and appears in
+    no order feed. Reading the broker alone therefore reports a clean session for an account
+    whose every order was thrown out, which is the one failure a reader must never be handed
+    quietly.
+
+    Only entries with no ``order_id`` are taken, which is exactly the set that never reached
+    the broker: anything the broker did create is in its own feed already, with its own live
+    status, and is the better record of the two. So these can be concatenated without a
+    dedup pass -- the two sources are disjoint by construction.
+    """
+    rows = []
+    for entry in load_order_journal(account_id=config.account_id, limit=limit):
+        if str(entry.get("status") or "") != "rejected" or entry.get("order_id"):
+            continue
+        rows.append(
+            {
+                "symbol": entry.get("symbol", ""),
+                "side": entry.get("side", ""),
+                "status": "rejected",
+                "qty": entry.get("quantity"),
+                "filled_qty": 0.0,
+                "filled_avg_price": None,
+                "order_type": entry.get("order_type", ""),
+                "limit_price": entry.get("limit_price") or None,
+                "stop_price": entry.get("stop_price") or None,
+                "submitted_at": entry.get("submitted_at", ""),
+                # The whole point of the row. The broker's own words, caught at submission,
+                # which is the only moment they exist -- nothing persists them but this.
+                "reason": entry.get("reason", ""),
+            }
+        )
+    return _since(rows, since)
 
 
 def account_activity_payload(
@@ -513,7 +615,11 @@ def account_activity_payload(
         # here, which made this view "orders this bot placed" rather than the account's activity:
         # anything traded by hand in the broker's own app was invisible, and an agent reading the
         # MCP tool would conclude the account had never bought what it plainly holds.
-        return {**payload, **_brokerage_activity(config, broker, limit, since)}
+        activity = _brokerage_activity(config, broker, limit, since)
+        return {**payload, **activity,
+                "rows": _newest_first(
+                    list(activity.get("rows") or []) + _refused_before_the_broker(config, limit, since)
+                )[:limit]}
     try:
         client = create_trading_client(config)
         try:
@@ -539,14 +645,30 @@ def account_activity_payload(
                     "limit_price": json_number(getattr(order, "limit_price", None)),
                     "stop_price": json_number(getattr(order, "stop_price", None)),
                     "submitted_at": submitted.isoformat() if hasattr(submitted, "isoformat") else str(submitted or ""),
+                    # Alpaca's order model carries no rejection reason -- there is no such field
+                    # on it, so a rejected order arrives saying only "rejected". Read with
+                    # ``getattr`` anyway in case a later SDK grows one, and left empty rather
+                    # than filled with a guess: the bot's own journal recorded the reason the
+                    # broker gave at submission, and that is where it would have to come from.
+                    "reason": str(getattr(order, "reject_reason", "") or ""),
                 }
             )
-        rows.sort(key=lambda row: row["submitted_at"], reverse=True)
-        payload["rows"] = _since(rows, since)[:limit]
+        payload["rows"] = _newest_first(
+            _since(rows, since) + _refused_before_the_broker(config, limit, since)
+        )[:limit]
     except Exception as error:  # noqa: BLE001 - a broker outage must not blank the page
         logger.warning("Could not load activity for %s: %s", config.account_id, error)
         payload["error"] = str(error)
     return payload
+
+
+def _newest_first(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Most recent first, across rows that came from different sources.
+
+    Sorted on the parsed stamp rather than the string: the broker spells its timestamps one way
+    and the journal another, and comparing those as text interleaves them by punctuation.
+    """
+    return sorted(rows, key=lambda row: (_parse_stamp(row.get("submitted_at")) or _EPOCH), reverse=True)
 
 
 def _enum_value(value: Any) -> str:
