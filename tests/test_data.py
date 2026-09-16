@@ -86,7 +86,9 @@ def test_warm_market_data_cache_forces_yfinance_fetches(monkeypatch) -> None:
     assert result["fetched"]["eod_rows"] == {"SPY": 1}
     assert result["fetched"]["intraday_rows"] == {"SPY": 1}
     assert calls == [
-        ("eod", ["SPY"], 98, True, "yfinance", None, None),
+        # 76 bars is the fixed three-month window: the warm-up covers exactly what the
+        # dashboard's default backtest will ask for.
+        ("eod", ["SPY"], 76, True, "yfinance", None, None),
         ("intraday", ["SPY"], 1170, 5, True, "yfinance", None, None),
     ]
 

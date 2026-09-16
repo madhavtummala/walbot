@@ -102,9 +102,24 @@ One package per venue, each with the same two roles — the same rule the algori
 ## Agent/MCP Direction
 
 The clean MCP boundary is around deterministic components, not around the whole bot loop.
-`src/mcp_server.py` exposes six tools: `list_bindings`, `get_algorithm_plan`, `list_accounts`,
-`get_account`, `get_account_orders`, `place_orders`. The account is the unit for reading —
-`list_accounts` then one call per row, so a slow broker costs that account and not the answer.
+`src/mcp_server.py` exposes seven tools: `list_algorithms`, `get_algorithm_plan`,
+`get_price`, `list_accounts`, `get_account_positions`, `get_account_orders`,
+`place_orders`. The account is the unit for reading — `list_accounts` then one call per row,
+so a slow broker costs that account and not the answer.
+
+`get_price` is the odd one out: it decides nothing, and exists to keep the agent off a web
+search. One symbol, one point, from the bar store the algorithms trade on. `read_closest_bar`
+answers it with a single query ordered by distance in time across the five-minute and daily
+grids at once, so fine bars win wherever they exist and the daily series answers everywhere
+else -- no per-grid search, no fallback ladder, and no caller choosing a resolution. `as_of`
+carries what was actually struck, which is the part that matters.
+
+It replaced `get_market_data`, which returned quotes *and* up to 400 daily bars for up to
+twenty symbols at once. That shape was a context bomb aimed at whatever agent called it: at
+its documented maximum one call emitted roughly 135,000 characters, and at its *defaults*
+five symbols cost about 34,000 -- for a caller that almost always wanted one number. A reply
+is now about 100 characters, a return over a window is two calls and a subtraction, and a
+trend is a call per point.
 
 Proposing and submitting are two calls with a gap for judgement in between:
 

@@ -34,7 +34,15 @@ logger = logging.getLogger(__name__)
 
 #: Short enough that the prices riding on a claimed plan are still roughly the market's, long
 #: enough for an agent to read the signals and run a sentiment check against the news.
-DEFAULT_TTL_SECONDS = 90
+#:
+#: Five minutes rather than ninety seconds because the news check is a delegated one: the
+#: reviewing agent spawns a research sub-agent and waits for it, and a spawn plus a handful of
+#: web searches does not reliably finish inside ninety seconds. The old value made expiry the
+#: normal outcome of doing the check properly, which pushed an agent toward either skipping it
+#: or re-planning in a loop. Still far shorter than the horizon of anything here: the fastest
+#: algorithm reranks on a multi-minute clock, and a limit price five minutes old is one the
+#: reconciler would replace rather than one the market has left behind.
+DEFAULT_TTL_SECONDS = 300
 
 
 class PlanUnavailable(Exception):

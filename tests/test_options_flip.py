@@ -208,6 +208,28 @@ class TestContractSelection:
         liquidity = next(c for c in checks if c.label == "Liquid enough to trade")
         assert liquidity.blocking and "open interest" in liquidity.value
 
+    def test_a_spread_rejection_says_so_instead_of_blaming_open_interest(self) -> None:
+        """The gate tests two things, so a failure has to name both.
+
+        A contract with 998 open interest against a floor of 100, rejected for an 8% spread,
+        used to report "best open interest 998 ... needs OI >= 100" -- a sentence that reads as
+        a contradiction and sends the reader hunting for a bug in the gate.
+        """
+        wide = [contract(bid=2.00, ask=2.20, delta=0.45, open_interest=998)]
+
+        best, _candidate, checks = select_contract(
+            wide, direction=CALL, as_of=date(2026, 2, 1), config=cfg(max_spread_pct=0.06)
+        )
+
+        assert best is None
+        liquidity = next(c for c in checks if c.label == "Liquid enough to trade")
+        assert liquidity.blocking
+        # The measure that actually blocked, and the ceiling it broke.
+        assert "tightest spread" in liquidity.value
+        assert "spread" in liquidity.limit
+        # And the one that did not, so the reader can see it was fine.
+        assert "998" in liquidity.value
+
     def test_thin_open_interest_is_rejected(self) -> None:
         thin = [contract(open_interest=5, delta=0.45)]
         best, _candidate, _checks = select_contract(thin, direction=CALL, as_of=date(2026, 2, 1), config=cfg())

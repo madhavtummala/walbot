@@ -485,7 +485,12 @@ class Brokerage(ABC):
     def get_orders(self, status: str = "WORKING") -> List[Dict[str, Any]]:
         """Orders currently in ``status`` at the broker, as
         ``{order_id, symbol, action, quantity, filled_quantity, order_type, limit_price,
-        stop_price, status, asset_type}``.
+        stop_price, status, asset_type}``, plus ``reason`` where the broker explains a refusal.
+
+        ``reason`` is the broker's own words and empty when there is nothing to explain. A
+        brokerage that cannot report one omits the key rather than inventing a description:
+        "no reason given" is a fact about the venue, and a reader must be able to tell it from
+        a reason we simply failed to carry.
 
         The broker is the source of truth for what is resting, and this is how a lifecycle
         algorithm reads it. Reconstructing it from what we remember submitting cannot survive a

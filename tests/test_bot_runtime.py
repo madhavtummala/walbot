@@ -35,7 +35,6 @@ def _deployment_controls(cron: str = "*/30 9-15 * * 1-5", strategy: str = "rally
     return {
         "deployments": [{"algorithm": strategy, "account_id": "paper",
                       "enabled": True, "cron": cron}],
-        "trading_account_id": "paper",
     }
 
 
@@ -210,7 +209,6 @@ def test_a_hand_edited_unusable_cron_refuses_to_fire(monkeypatch) -> None:
     controls = {
         "deployments": [{"algorithm": "rally_rotation", "account_id": "paper",
                       "enabled": True, "cron": "0 99 * * *"}],
-        "trading_account_id": "paper",
     }
     monkeypatch.setattr(bot_runtime, "load_controls", lambda: controls)
     monkeypatch.setattr(bot_runtime, "normalize_cron", lambda value, strategy=None: str(value))
@@ -352,3 +350,19 @@ def test_a_new_fire_time_starts_its_attempts_over() -> None:
 
     loop._run_key_fn = lambda: "2026-08-12T15:00"
     assert loop._next_run_key() == "2026-08-12T15:00"
+
+
+def test_a_deployment_without_an_account_does_not_fall_back_to_a_default() -> None:
+    """It refuses instead.
+
+    There used to be a global ``trading_account_id`` behind every deployment, so an algorithm
+    whose own account was missing quietly ran against whichever account that named. Trading the
+    wrong account is worse than not trading.
+    """
+    from src.core.bot_runtime import _deployment_account_id
+
+    resolve = _deployment_account_id("bursty_dca")
+
+    assert resolve({"deployments": [{"algorithm": "bursty_dca", "account_id": "schwab1"}]}) == "schwab1"
+    assert resolve({"deployments": [{"algorithm": "bursty_dca"}]}) == ""
+    assert resolve({"deployments": []}) == ""

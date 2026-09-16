@@ -17,6 +17,7 @@ import pandas as pd
 
 from ...algorithms.registry import canonical_algorithm_id, get_algorithm_class
 from ...brokerages.alpaca.client import create_data_client
+from ...core.config.defaults import BACKTEST_PERIOD
 from ...core.config import DEFAULT_STRATEGY_ID, get_config
 from ...core.cron import parse_cron
 from ...core.strategy_models import STRATEGY_LABELS, prepared_strategy_frame
@@ -62,7 +63,7 @@ def _period_start(period: str) -> pd.Timestamp:
     normalized = period.lower()
     if normalized == "ytd":
         return pd.Timestamp(now.year, 1, 1, tz="UTC")
-    return now - pd.DateOffset(months=_period_months(_default_backtest_period()) or 4)
+    return now - pd.DateOffset(months=_period_months(BACKTEST_PERIOD))
 
 
 def _period_label(period: str) -> str:
@@ -79,7 +80,7 @@ def _period_row_count(period: str) -> int:
     months = _period_months(period)
     if months:
         return max(int(round(months * 22)), 2)
-    return max(int(round((_period_months(_default_backtest_period()) or 4) * 22)), 2)
+    return max(int(round((_period_months(BACKTEST_PERIOD)) * 22)), 2)
 
 
 def _period_months(period: str) -> int | None:
@@ -104,7 +105,8 @@ def _period_months(period: str) -> int | None:
 
 
 def _default_backtest_period() -> str:
-    return str(get_config().backtest_period or "4m").strip().lower() or "4m"
+    """The window a backtest runs when the caller names none. Fixed, not configured."""
+    return BACKTEST_PERIOD
 
 
 def _load_backtest_cache(path: str = BACKTEST_CACHE_PATH) -> dict[str, Any]:

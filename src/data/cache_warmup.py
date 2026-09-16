@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from src.connectors.grid import resolve_bar_minutes
 from src.connectors.sources import INTRADAY_MARKET_CATEGORY
 from src.core.config import MARKET_DATA_BAR_MINUTES, get_config, load_algorithms_config
+from src.core.config.defaults import BACKTEST_PERIOD
 from src.data.duckdb_store import DAILY_INTERVAL_MINUTES, clear_market_bars, market_bars_summary
 from src.data.provider_cache import clear_cached_payloads
 
@@ -76,7 +77,7 @@ def _count_rows(bars_by_symbol: dict[str, Any]) -> dict[str, int]:
 
 
 def _default_eod_lookback_bars() -> int:
-    period = str(getattr(get_config(), "backtest_period", "4m") or "4m").strip().lower()
+    period = BACKTEST_PERIOD
     match = re.fullmatch(r"([1-9][0-9]*)m", period)
     months = int(match.group(1)) if match else 4
     return max(int(round(months * 22)) + DEFAULT_BACKTEST_BUFFER_BARS, 2)

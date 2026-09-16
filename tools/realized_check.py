@@ -130,8 +130,8 @@ def main(account_id: str = "") -> int:
         print(f"  {stamp}  SELL  {symbol:24} {closed:>8.2f} @ {price:>9.2f}  -> {gain:+.2f}{note}")
 
     print(f"\nRealized P/L: {realized:,.2f} across the window ({start} to {end}).")
-    print("The dashboard reports year to date, which is a subset of this -- see realized_pl_1y")
-    print("for the figure this line matches.")
+    print("The dashboard reports year to date, which is a subset of this: re-run with a start")
+    print("of 1 January for the figure the account page shows.")
     still_open = {s: lot for s, lot in open_lots.items() if lot[0] > 0}
     if still_open:
         print(f"Still open (not counted): {', '.join(f'{s} {lot[0]:g}' for s, lot in still_open.items())}")

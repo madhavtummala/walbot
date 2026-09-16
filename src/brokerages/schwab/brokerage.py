@@ -643,6 +643,11 @@ def _flatten_order(order: Dict[str, Any], *, parent_order_id: str) -> List[Dict[
             # verified live, a sell limit at 0.59 filled at 0.61 on price improvement. The real
             # number is buried in the execution legs, quantity-weighted in case of partial fills.
             "filled_avg_price": _average_fill_price(order),
+            # Why Schwab refused it, in Schwab's words. Empty for an order nobody refused.
+            # Gathered here as well as at submission because a rejection is most often read
+            # *after* the fact, from the activity view, where the submit-time exception that
+            # carried this reason is long gone -- leaving a REJECTED row that said only that.
+            "reason": _rejection_reason(order),
         })
     for child in order.get("childOrderStrategies") or []:
         rows.extend(_flatten_order(child, parent_order_id=order_id or parent_order_id))

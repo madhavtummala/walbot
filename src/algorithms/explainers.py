@@ -6,6 +6,7 @@ renamed in an algorithm will not automatically update here -- ``tests/test_expla
 guards that by checking every documented parameter still exists in the saved config.
 
 Each entry is:
+  headline  -- one line, for a list that shows every algorithm at once
   summary   -- one paragraph on what the algorithm is trying to do
   formula   -- the actual arithmetic, in the same terms the code uses
   parameters -- per knob: what it is, and which direction to move it for which effect
@@ -22,6 +23,9 @@ from typing import Any
 
 EXPLAINERS: dict[str, dict[str, Any]] = {
     "bursty_dca": {
+        "headline": (
+            "Dollar-cost averages on an accrued budget, buying more when a name is cheap against its average and less when it is rich."
+        ),
         "summary": (
             "Accrues a monthly budget per symbol, then sizes each order by two things at once: "
             "how far the price sits from its moving average, and how far ahead of or behind its "
@@ -69,6 +73,9 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
         },
     },
     "rally_rotation": {
+        "headline": (
+            "Holds the few strongest ETFs among those already trending, and sits in a defensive sleeve when too few qualify."
+        ),
         "summary": (
             "Ranks every ETF against the others and holds the best few, but only from among "
             "those already in an uptrend of their own. The ranking is relative -- a robust "
@@ -149,6 +156,9 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
         },
     },
     "options_flip": {
+        "headline": (
+            "Buys calls on trending symbols at a pullback limit and sells into the rebound. Every price is a limit, never a market order."
+        ),
         "summary": (
             "Buys calls on trending symbols, bidding at a pullback level comparable sessions "
             "actually reached and selling into the rebound. Every price is a limit, so a missed "

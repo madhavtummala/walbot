@@ -86,3 +86,14 @@ def test_tokens_are_unguessable_and_distinct() -> None:
 
     assert len(tokens) == 50
     assert all(len(token) >= 20 for token in tokens)
+
+
+def test_the_default_ttl_leaves_room_for_a_delegated_news_check() -> None:
+    """Ninety seconds made expiry the normal outcome of doing the check properly.
+
+    The reviewing agent spawns a research sub-agent and waits for it, and a spawn plus a few
+    web searches does not reliably finish inside ninety seconds -- so the old default pushed an
+    agent toward either skipping the check or re-planning in a loop. Pinned here so that
+    shortening it again is a decision rather than a tidy-up.
+    """
+    assert plan_cache.DEFAULT_TTL_SECONDS == 300

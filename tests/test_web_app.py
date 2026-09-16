@@ -31,7 +31,8 @@ def test_universe_payload_returns_configured_rows() -> None:
 def test_controls_payload_returns_switches() -> None:
     payload = controls_payload()
 
-    assert {"deployments", "trading_account_id"} <= set(payload["controls"])
+    assert "deployments" in payload["controls"]
+    assert "trading_account_id" not in payload["controls"]
 
 
 def _assets():
@@ -422,8 +423,10 @@ def test_shell_is_mobile_adaptable() -> None:
 def test_frontend_keeps_the_configured_backtest_period_and_chart() -> None:
     app_js, _, index_html = _assets()
 
-    assert 'let BACKTEST_PERIOD = "4m";' in app_js
-    assert "configureBacktestPeriod(statusPayload.config?.backtest_period)" in app_js
+    assert 'let BACKTEST_PERIOD = "3m";' in app_js
+    assert "configureBacktestPeriod(statusPayload.config?.backtest_period)" not in app_js, (
+        "the opening window is a constant now; the dashboard does not ask the server for it"
+    )
     assert "chart-crosshair" in app_js
     assert "backtestPositions(row.positions)" in app_js
     assert "renderUniverseProposalRows" in app_js
