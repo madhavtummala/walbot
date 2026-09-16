@@ -2238,6 +2238,13 @@ function renderSidebar() {
 //: Accounts sit under the algorithms because that is the reading order of the question the
 //: sidebar answers: what runs, and what is it doing to the money. The number shown is day
 //: P/L, which is the only figure the broker reports without a cost-basis round trip.
+// Work that should happen, but after everything the user is waiting on. Falls back to a short
+// timer where requestIdleCallback is missing; the timeout caps how long a busy page can starve it.
+function whenIdle(fn) {
+  if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(fn, { timeout: 2000 });
+  else setTimeout(fn, 200);
+}
+
 function renderAccountNav() {
   const host = $("#accountNav");
   if (!host) return;
@@ -2270,8 +2277,14 @@ function renderAccountNav() {
         <a class="navItem navItem--stat${active ? " is-active" : ""}" href="#/account/${escapeHtml(account.id)}" title="${escapeHtml(title)}">${inner}</a>
       </li>`;
   }).join("");
-  // The sidebar is the only place an idle account's P/L shows, so it pulls its own numbers.
-  rows.filter((account) => account.credentials_ready).forEach((account) => ensurePositions(account.id));
+  // The sidebar is the only place an idle account's P/L shows, so it pulls its own numbers --
+  // but last, and only once the page the user actually opened has had its turn. Five broker
+  // reads fired eagerly here raced the current page's own fetches and made both slower, on an
+  // algorithm page that wanted none of them. ``ensurePositions`` treats "already present" as
+  // nothing to do, so calling it again on the next paint costs nothing.
+  whenIdle(() => rows
+    .filter((account) => account.credentials_ready)
+    .forEach((account) => ensurePositions(account.id)));
 }
 
 function renderNavFooter() {
@@ -2477,6 +2490,10 @@ function renderAlgorithmPage(content, strategyKey, tab) {
        </div>`
     : `<span class="pill is-idle">No account available</span>`;
 
+  // Marks whose shell is in the DOM. The account page patches its regions in place when
+  // the marker already says "account", so leaving a stale one here would have it patch
+  // into a tree this page just replaced.
+  content.dataset.shell = "algo";
   content.innerHTML = `
     ${pageHeader({ title: strategy.name, subtitle: strategy.blurb, actions })}
     ${tabBar(strategy.key, tab)}
@@ -2494,9 +2511,68 @@ function renderAlgorithmPage(content, strategyKey, tab) {
 //: Holdings and orders live here rather than on the algorithm because the broker reports
 //: them per account and knows nothing about which algorithm -- or which hand-placed order --
 //: produced them. Attributing an account's blended P/L to one algorithm would be a lie.
+// The account page paints in two ways, and which one runs is the difference between a page
+// that flickers and one that does not.
+//
+// A route change builds the shell once. Everything after -- positions landing, the activity
+// read, the analytics crawl finishing a second later -- patches the regions that own those
+// numbers and leaves the rest of the tree alone. Rebuilding ``#content`` wholesale on every
+// settle was three full teardowns for one visit to a fresh account: the browser discarded and
+// recreated the whole page twice over while the user was reading it, losing scroll position
+// each time. Nothing about the data required that; only the way it was painted did.
+//
+// Switching between two accounts patches as well. The shell is the same shape either way, so
+// the values change in place and the layout never blinks.
+function accountMetricsHtml(positions, analytics) {
+  return `
+    <div class="metric"><span>Equity</span><strong>${positions ? escapeHtml(money(positions.equity, 2)) : "--"}</strong></div>
+    <div class="metric"><span>Cash</span><strong>${positions ? escapeHtml(money(positions.cash, 2)) : "--"}</strong></div>
+    <div class="metric"><span>Day P/L</span><strong class="${(positions?.day_pl || 0) >= 0 ? "gain" : "loss"}">${
+      // A local book has no yesterday to compare against, so it reports no day figure.
+      positions?.day_pl === null || positions?.day_pl === undefined
+        ? "--"
+        : `${escapeHtml(money(positions.day_pl, 2))} (${escapeHtml(percent(positions.day_pl_percent))})`}</strong></div>
+    <div class="metric"><span>Open P/L</span><strong class="${(positions?.total_pl || 0) >= 0 ? "gain" : "loss"}">${
+      positions ? escapeHtml(money(positions.total_pl, 2)) : "--"}</strong></div>
+    <div class="metric"><span>Realized P/L (YTD)</span><strong class="${(analytics?.realized_pl || 0) >= 0 ? "gain" : "loss"}">${
+      // Banked profit, which Open P/L cannot show: an account that closed a winning trade
+      // and went back to cash has no open position left to carry the gain. Year to date
+      // rather than trailing, so it lines up with what the broker's own statement totals.
+      analytics?.realized_pl === null || analytics?.realized_pl === undefined
+        ? "--"
+        : escapeHtml(money(analytics.realized_pl, 2))}</strong>${realizedNote(analytics)}</div>
+    <div class="metric"><span>Dividends (YTD)</span><strong class="${(analytics?.dividend_pl || 0) >= 0 ? "gain" : "loss"}">${
+      // Reported beside Open P/L, never inside it. Price appreciation and income are
+      // different things, and a T-bill sleeve earns almost entirely through this one.
+      analytics?.dividend_pl === null || analytics?.dividend_pl === undefined
+        ? "--"
+        : escapeHtml(money(analytics.dividend_pl, 2))}</strong></div>`;
+}
+
+function accountNotesHtml(account, analytics, busy, deployed) {
+  return `
+    ${account.credentials_ready ? `<p class="cardHint">${analyticsNote(analytics, busy)}</p>` : ""}
+    ${!account.credentials_ready
+      ? `<p class="cardHint">Credentials missing: set <code>${escapeHtml(account.missing_env.join("</code> and <code>"))}</code> in <code>.env</code> and restart. It cannot trade until then.</p>`
+      : `<p class="cardHint">${account.broker === "paper"
+          // No broker holds this money, so the usual "including your own orders" caveat
+          // would be nonsense here: nothing but this bot can touch a local book.
+          ? "A local book, not a broker. Orders fill instantly at the last price the algorithm saw, and no real money moves."
+          : "Everything the broker reports for this account, including orders you placed yourself."}${
+          deployed.length ? ` Algorithms running here: ${deployed.map((deployment) => strategyByKey(deployment.algorithm).name).join(", ")}.` : ""}</p>`}
+    ${deployed.length ? `<div class="chipRow">${deployed.map((deployment) => `
+      <a class="chip is-link" href="#/algo/${escapeHtml(deployment.algorithm)}/${DEFAULT_TAB}">${escapeHtml(strategyByKey(deployment.algorithm).name)}</a>`).join("")}</div>` : ""}`;
+}
+
+function setRegion(id, html) {
+  const host = document.getElementById(id);
+  if (host && host.innerHTML !== html) host.innerHTML = html;
+}
+
 function renderAccountPage(content, accountId) {
   const account = accountRows().find((row) => row.id === accountId);
   if (!account) {
+    content.dataset.shell = "";
     content.innerHTML = `
       ${pageHeader({ title: accountId, subtitle: "Unknown account" })}
       <section class="card"><p class="emptyState">No account with this id is configured.</p></section>`;
@@ -2515,78 +2591,59 @@ function renderAccountPage(content, accountId) {
     status === "live" ? "Trading" : status === "idle" ? "Agent-driven" : deployed.length ? "Deployed, paused" : "No algorithm"}</span>`;
   const actions = `<button class="ctl" type="button" id="refreshAccountButton" data-account="${escapeHtml(account.id)}"
     ${busy ? "disabled" : ""}>${busy ? "Refreshing." : "Refresh"}</button>`;
+  const header = pageHeader({
+    title: account.label,
+    subtitle: `${account.broker}${account.data_feed ? ` · ${account.data_feed}` : ""} · ${account.id}`,
+    meta,
+    actions,
+  });
 
-  content.innerHTML = `
-    ${pageHeader({
-      title: account.label,
-      subtitle: `${account.broker}${account.data_feed ? ` · ${account.data_feed}` : ""} · ${account.id}`,
-      meta,
-      actions,
-    })}
+  if (content.dataset.shell === "account") {
+    setRegion("acctHeader", header);
+    setRegion("acctMetrics", accountMetricsHtml(positions, analytics));
+    setRegion("acctNotes", accountNotesHtml(account, analytics, busy, deployed));
+    setRegion("acctPositionsCount", positions?.rows?.length ? `${positions.rows.length} open` : "");
+    setRegion("acctPositions", accountPositionsTable(positions));
+    setRegion("acctDividendsCount", analytics?.dividend_rows?.length ? `${analytics.dividend_rows.length} shown` : "");
+    setRegion("acctDividends", accountDividendsTable(analytics));
+    setRegion("acctOrdersCount", activity?.rows?.length ? `${activity.rows.length} shown` : "");
+    setRegion("acctOrders", accountOrdersTable(activity));
+  } else {
+    content.dataset.shell = "account";
+    content.innerHTML = `
+    <div id="acctHeader">${header}</div>
     <div class="pageBody">
     <section class="card">
-      <div class="metricRow">
-        <div class="metric"><span>Equity</span><strong>${positions ? escapeHtml(money(positions.equity, 2)) : "--"}</strong></div>
-        <div class="metric"><span>Cash</span><strong>${positions ? escapeHtml(money(positions.cash, 2)) : "--"}</strong></div>
-        <div class="metric"><span>Day P/L</span><strong class="${(positions?.day_pl || 0) >= 0 ? "gain" : "loss"}">${
-          // A local book has no yesterday to compare against, so it reports no day figure.
-          positions?.day_pl === null || positions?.day_pl === undefined
-            ? "--"
-            : `${escapeHtml(money(positions.day_pl, 2))} (${escapeHtml(percent(positions.day_pl_percent))})`}</strong></div>
-        <div class="metric"><span>Open P/L</span><strong class="${(positions?.total_pl || 0) >= 0 ? "gain" : "loss"}">${
-          positions ? escapeHtml(money(positions.total_pl, 2)) : "--"}</strong></div>
-        <div class="metric"><span>Realized P/L (YTD)</span><strong class="${(analytics?.realized_pl || 0) >= 0 ? "gain" : "loss"}">${
-          // Banked profit, which Open P/L cannot show: an account that closed a winning trade
-          // and went back to cash has no open position left to carry the gain. Year to date
-          // rather than trailing, so it lines up with what the broker's own statement totals.
-          analytics?.realized_pl === null || analytics?.realized_pl === undefined
-            ? "--"
-            : escapeHtml(money(analytics.realized_pl, 2))}</strong>${realizedNote(analytics)}</div>
-        <div class="metric"><span>Dividends (YTD)</span><strong class="${(analytics?.dividend_pl || 0) >= 0 ? "gain" : "loss"}">${
-          // Reported beside Open P/L, never inside it. Price appreciation and income are
-          // different things, and a T-bill sleeve earns almost entirely through this one.
-          analytics?.dividend_pl === null || analytics?.dividend_pl === undefined
-            ? "--"
-            : escapeHtml(money(analytics.dividend_pl, 2))}</strong></div>
-      </div>
-      ${account.credentials_ready ? `<p class="cardHint">${analyticsNote(analytics, busy)}</p>` : ""}
-      ${!account.credentials_ready
-        ? `<p class="cardHint">Credentials missing: set <code>${escapeHtml(account.missing_env.join("</code> and <code>"))}</code> in <code>.env</code> and restart. It cannot trade until then.</p>`
-        : `<p class="cardHint">${account.broker === "paper"
-            // No broker holds this money, so the usual "including your own orders" caveat
-            // would be nonsense here: nothing but this bot can touch a local book.
-            ? "A local book, not a broker. Orders fill instantly at the last price the algorithm saw, and no real money moves."
-            : "Everything the broker reports for this account, including orders you placed yourself."}${
-            deployed.length ? ` Algorithms running here: ${deployed.map((deployment) => strategyByKey(deployment.algorithm).name).join(", ")}.` : ""}</p>`}
-      ${deployed.length ? `<div class="chipRow">${deployed.map((deployment) => `
-        <a class="chip is-link" href="#/algo/${escapeHtml(deployment.algorithm)}/${DEFAULT_TAB}">${escapeHtml(strategyByKey(deployment.algorithm).name)}</a>`).join("")}</div>` : ""}
+      <div class="metricRow" id="acctMetrics">${accountMetricsHtml(positions, analytics)}</div>
+      <div id="acctNotes">${accountNotesHtml(account, analytics, busy, deployed)}</div>
     </section>
     <div class="accountLayout">
       <div class="accountStack">
         <section class="card">
           <div class="cardHead">
             <h2>Positions</h2>
-            <span class="cardHint">${positions?.rows?.length ? `${positions.rows.length} open` : ""}</span>
+            <span class="cardHint" id="acctPositionsCount">${positions?.rows?.length ? `${positions.rows.length} open` : ""}</span>
           </div>
-          ${accountPositionsTable(positions)}
+          <div id="acctPositions">${accountPositionsTable(positions)}</div>
         </section>
         <section class="card">
           <div class="cardHead">
             <h2>Dividends received</h2>
-            <span class="cardHint">${analytics?.dividend_rows?.length ? `${analytics.dividend_rows.length} shown` : ""}</span>
+            <span class="cardHint" id="acctDividendsCount">${analytics?.dividend_rows?.length ? `${analytics.dividend_rows.length} shown` : ""}</span>
           </div>
-          ${accountDividendsTable(analytics)}
+          <div id="acctDividends">${accountDividendsTable(analytics)}</div>
         </section>
       </div>
       <section class="card">
         <div class="cardHead">
           <h2>Recent orders</h2>
-          <span class="cardHint">${activity?.rows?.length ? `${activity.rows.length} shown` : ""}</span>
+          <span class="cardHint" id="acctOrdersCount">${activity?.rows?.length ? `${activity.rows.length} shown` : ""}</span>
         </div>
-        ${accountOrdersTable(activity)}
+        <div id="acctOrders">${accountOrdersTable(activity)}</div>
       </section>
     </div>
     </div>`;
+  }
 
   if (account.credentials_ready) {
     ensurePositions(account.id);
