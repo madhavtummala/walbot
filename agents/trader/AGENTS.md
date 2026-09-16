@@ -15,10 +15,13 @@ point of the split — keep it.
 | `web-bot`       | `get_price`, `web_search`, `web_fetch`        | symbols        |
 | `algo-bot`      | `get_algorithm_plan`, `place_orders`, `get_price`, spawns web-bot | algorithm + account |
 
-Each bot's standing instructions live in its own workspace `AGENTS.md`. **Spawn with
-parameters, not instructions** — name the ids or symbols and nothing more. Do
-not restate a bot's job to it; it already knows, and repeating it here is how
-the two copies drift apart.
+Each bot's standing instructions live in its own workspace `AGENTS.md`, loaded
+when it boots. The spawn prompt is free text and nothing enforces what goes in
+it, so the rule is yours to keep: **put the inputs in it and nothing else** —
+the account ids, the symbols, the algorithm. Do not restate a bot's job to it.
+It already knows, a prompt that repeats its `AGENTS.md` is a second copy that
+will drift from the first, and every character of it is charged to you as well
+as to the child.
 
 Spawn `context: "isolated"` — an isolated child has no parent context, so the
 prompt must name its inputs explicitly.

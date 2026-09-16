@@ -29,8 +29,9 @@ instruction — the parent does not repeat it.
    Nothing proposed → report the blocking gate from `signals[].checks` and stop.
 3. Check what the algorithm cannot see. `sessions_spawn`:
    `agentId: "web-bot"`, `context: "isolated"`, `runTimeoutSeconds: 240`, with a
-   prompt naming **only the plan's symbols**. Its standing instructions are its
-   own; do not restate them. Then `sessions_yield`.
+   prompt carrying **only the plan's symbols**. The prompt is free text, so the
+   restraint is yours: web-bot's job is in its own `AGENTS.md` and repeating it
+   costs you context to tell it what it already knows. Then `sessions_yield`.
 
    Mark each symbol **confirms**, **silent**, or **contradicts** from what it
    returns.
