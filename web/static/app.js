@@ -2282,9 +2282,20 @@ function renderAccountNav() {
   // reads fired eagerly here raced the current page's own fetches and made both slower, on an
   // algorithm page that wanted none of them. ``ensurePositions`` treats "already present" as
   // nothing to do, so calling it again on the next paint costs nothing.
-  whenIdle(() => rows
-    .filter((account) => account.credentials_ready)
-    .forEach((account) => ensurePositions(account.id)));
+  //
+  // Orders and dividends follow, because switching account was waiting on them: positions were
+  // warm from this prefetch and painted at once, while those two cards dropped to "Loading" for
+  // about a second -- half the page holding and half tearing down, which reads worse than a
+  // whole page would. They go one at a time, after the positions pass: nothing on screen is
+  // waiting for them, and firing fifteen reads at once would race the foreground this defers to.
+  whenIdle(async () => {
+    const ready = rows.filter((account) => account.credentials_ready);
+    await Promise.all(ready.map((account) => ensurePositions(account.id)));
+    for (const account of ready) {
+      await ensureActivity(account.id);
+      await ensureAnalytics(account.id);
+    }
+  });
 }
 
 function renderNavFooter() {
@@ -2676,9 +2687,24 @@ function analyticsNote(analytics, busy) {
   return `Realized P/L and dividends as of ${formatActivityTime(analytics.computed_at)}.${stale} Everything else is live. Press Refresh to recompute now.`;
 }
 
+// A table's shape while its rows are still in flight. The point is the *height*: a card that
+// collapses to one line of "Loading" and springs back re-lays out everything under it, and on a
+// page where its neighbours kept their content that lurch is what reads as a reload. Column
+// widths are left to the real header, so the skeleton cannot disagree with what replaces it.
+function tableSkeleton(columns, rows = 5) {
+  const cells = (tag) => Array.from({ length: columns }, () => `<${tag}><span class="skelBar"></span></${tag}>`).join("");
+  return `
+    <div class="tableWrap is-scroll" aria-busy="true">
+      <table class="dataTable is-skeleton">
+        <thead><tr>${cells("th")}</tr></thead>
+        <tbody>${Array.from({ length: rows }, () => `<tr>${cells("td")}</tr>`).join("")}</tbody>
+      </table>
+    </div>`;
+}
+
 function accountPositionsTable(positions) {
   if (positions?.error) return `<p class="emptyState">${escapeHtml(positions.error)}</p>`;
-  if (!positions) return `<p class="emptyState">Loading positions.</p>`;
+  if (!positions) return tableSkeleton(7, 8);
   if (!positions.rows?.length) return `<p class="emptyState">No open positions.</p>`;
   return `
     <div class="tableWrap is-scroll">
@@ -2710,7 +2736,7 @@ function accountPositionsTable(positions) {
 
 function accountDividendsTable(analytics) {
   if (analytics?.error) return `<p class="emptyState">${escapeHtml(analytics.error)}</p>`;
-  if (!analytics) return `<p class="emptyState">Loading dividends.</p>`;
+  if (!analytics) return tableSkeleton(3);
   if (!analytics.computed_at) {
     // Not yet looked, rather than looked and found nothing. Saying "no dividends" here would
     // be a claim this page has not earned.
@@ -2758,7 +2784,10 @@ function dividendSecurity(row) {
 
 function accountOrdersTable(activity) {
   if (activity?.error) return `<p class="emptyState">${escapeHtml(activity.error)}</p>`;
-  if (!activity) return `<p class="emptyState">Loading activity.</p>`;
+  // Enough rows to reach the card's own scroll cap. This is the longest of the three by far --
+  // a session's orders across every algorithm -- so a short skeleton here is the one that moves
+  // the page most when the real rows arrive.
+  if (!activity) return tableSkeleton(5, 14);
   if (!activity.rows?.length) return `<p class="emptyState">No orders yet.</p>`;
   return `
     <div class="tableWrap is-scroll">

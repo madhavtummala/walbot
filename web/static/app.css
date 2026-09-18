@@ -1933,6 +1933,34 @@ h2 {
   vertical-align: baseline;
 }
 
+/* A table waiting on its rows. Cells keep the real table's padding and border, so the skeleton
+   occupies the height its content will, and nothing below it moves when the rows land. */
+.dataTable.is-skeleton .skelBar {
+  display: block;
+  height: 9px;
+  border-radius: 3px;
+  background: var(--line);
+  animation: skelPulse 1.3s ease-in-out infinite;
+}
+
+.dataTable.is-skeleton thead .skelBar {
+  height: 7px;
+  width: 60%;
+}
+
+/* Staggered so the block reads as loading rather than as a grid of identical bars. */
+.dataTable.is-skeleton tbody tr:nth-child(2n) .skelBar { animation-delay: 0.15s; }
+.dataTable.is-skeleton tbody tr:nth-child(3n) .skelBar { animation-delay: 0.3s; }
+
+@keyframes skelPulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 0.9; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dataTable.is-skeleton .skelBar { animation: none; }
+}
+
 .dataTable th.num,
 .dataTable td.num {
   text-align: right;

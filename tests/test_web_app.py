@@ -120,9 +120,12 @@ def test_broker_holdings_and_orders_live_on_the_account_page() -> None:
 
     assert '{ page: "account"' in app_js
     assert "function renderAccountPage" in app_js
-    page = app_js[app_js.index("function renderAccountPage"):app_js.index("function accountPositionsTable")]
-    assert "day_pl" in page and "total_pl" in page
-    assert "including orders you placed yourself" in page
+    # The metrics and the notes moved into their own builders when the page started patching
+    # regions instead of rebuilding itself, so each is asserted where it now lives rather than
+    # on the one slice that used to hold all of it.
+    region = app_js[app_js.index("function accountMetricsHtml"):app_js.index("function renderAccountPage")]
+    assert "day_pl" in region and "total_pl" in region
+    assert "including orders you placed yourself" in region
     # The algorithm page links out to the account rather than reproducing its numbers.
     assert '"#/account/' in app_js
     assert 'id="accountNav"' in index_html
@@ -140,7 +143,9 @@ def test_every_unbounded_list_panel_scrolls_inside_its_card() -> None:
     without bound."""
     app_js, app_css, _ = _assets()
 
-    assert app_js.count('class="tableWrap is-scroll"') == 5
+    # Five panels, plus the loading skeleton -- which shares the wrapper precisely so that it
+    # scrolls and caps at the same height as the rows that replace it.
+    assert app_js.count('class="tableWrap is-scroll"') == 6
     assert ".tableWrap.is-scroll {" in app_css
     # One shared cap, so signals and the tables cut off at the same height.
     assert "--panel-scroll: min(46vh, 420px);" in app_css
