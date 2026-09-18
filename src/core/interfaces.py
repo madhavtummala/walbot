@@ -482,7 +482,9 @@ class Brokerage(ABC):
     def cancel_all_orders(self) -> None:
         pass
 
-    def get_orders(self, status: str = "WORKING") -> List[Dict[str, Any]]:
+    def get_orders(
+        self, status: str = "WORKING", *, days: int | None = None
+    ) -> List[Dict[str, Any]]:
         """Orders currently in ``status`` at the broker, as
         ``{order_id, symbol, action, quantity, filled_quantity, order_type, limit_price,
         stop_price, status, asset_type}``, plus ``reason`` where the broker explains a refusal.
@@ -499,6 +501,12 @@ class Brokerage(ABC):
         Defaults to raising rather than to ``[]``: an empty list is indistinguishable from "no
         orders", which would make a brokerage that cannot answer look like a flat book and
         prompt a reconciler to re-submit everything.
+
+        ``days`` bounds how far back to look, for brokers that window their listing; ``None``
+        leaves the bound to the brokerage. Narrowing it is a correctness decision rather than a
+        tuning one -- a resting order older than the window reads as absent, and a reconciler
+        that believes the book is empty submits it again -- so callers pass only a bound they
+        already hold: the period the view covers, or the furthest expiry the strategy trades.
         """
         raise NotImplementedError(f"{type(self).__name__} cannot list orders")
 

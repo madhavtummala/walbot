@@ -7,6 +7,7 @@ importable from ``api_payloads``.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -499,6 +500,20 @@ def _since(rows: list[dict[str, Any]], since: datetime | None) -> list[dict[str,
     return [row for row in rows if (_parse_stamp(row.get("submitted_at")) or since) >= since]
 
 
+def _window_days(since: datetime | None) -> int | None:
+    """``since`` as a number of days back, for brokers that window their order listing.
+
+    The cutoff was applied in :func:`_since` *after* the broker had been asked for its own
+    default window, so a view of the current session pulled sixty days and discarded all but
+    today. Rounded up and never below a day, since the broker cuts on entry time and this cuts
+    on a date; ``None`` keeps whatever the brokerage would have given.
+    """
+    if since is None:
+        return None
+    elapsed = datetime.now(since.tzinfo or timezone.utc) - since
+    return max(1, math.ceil(elapsed.total_seconds() / 86_400) + 1)
+
+
 def _brokerage_activity(
     config: Any, broker: str, limit: int, since: datetime | None = None
 ) -> dict[str, Any]:
@@ -515,7 +530,7 @@ def _brokerage_activity(
 
     try:
         brokerage = resolve_brokerage(config)
-        orders = brokerage.get_orders("")
+        orders = brokerage.get_orders("", days=_window_days(since))
     except Exception as error:  # noqa: BLE001 - a broker outage must not blank the page
         logger.warning("Could not load %s activity for %s: %s", broker, config.account_id, error)
         return {"error": str(error)}

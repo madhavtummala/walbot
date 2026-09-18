@@ -135,10 +135,15 @@ class AlpacaBrokerage(BaseBrokerage):
         order = self.client.submit_order(order_data=build_order_request(request))
         return _order_result(order)
 
-    def get_orders(self, status: str = "WORKING") -> List[Dict[str, Any]]:
+    def get_orders(
+        self, status: str = "WORKING", *, days: int | None = None
+    ) -> List[Dict[str, Any]]:
         """Open orders, in the shape :meth:`Brokerage.get_orders` promises.
 
         Alpaca calls the resting set ``open``; the interface speaks Schwab's word ``WORKING``.
+
+        ``days`` is accepted and ignored: Alpaca filters by status rather than windowing by
+        time, so there is no cutoff here to narrow.
         """
         wanted = "open" if str(status).upper() in ("WORKING", "OPEN", "") else str(status).lower()
         return [_order_row(order) for order in get_open_orders(self.client, wanted)]

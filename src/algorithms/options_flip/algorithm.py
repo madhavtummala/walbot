@@ -543,6 +543,10 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
                 brokerage,
                 dict(state.get(ORDER_IDS_KEY) or {}),
                 persist=persist,
+                # An order cannot outlive the contract under it, and every contract this chooses
+                # is at most ``max_dte`` out -- so anything entered longer ago than that is on an
+                # expired option and cannot still be working.
+                order_window_days=self.tuning(config).max_dte,
             )
         except Exception:
             # Whatever ``persist`` last wrote stands: it names every order that reached the

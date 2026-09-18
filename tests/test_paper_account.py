@@ -380,7 +380,7 @@ def test_a_schwab_accounts_orders_come_from_the_broker_not_the_bot_journal(monke
     from src.api import api_payloads
 
     class FakeBrokerage:
-        def get_orders(self, status="WORKING"):
+        def get_orders(self, status="WORKING", *, days=60):
             assert status == "", "every state, not just the resting ones"
             return [
                 {
@@ -416,7 +416,7 @@ def test_an_unreachable_broker_reports_itself_rather_than_an_empty_order_list(mo
     from src.api import api_payloads
 
     class FakeBrokerage:
-        def get_orders(self, status="WORKING"):
+        def get_orders(self, status="WORKING", *, days=60):
             raise RuntimeError("schwab is down")
 
     _patch_payloads(monkeypatch, "get_account_broker_type", lambda _account: "schwab")
@@ -493,7 +493,7 @@ def _week_ago():
 
 def _fake_schwab(monkeypatch, orders: list[dict]) -> None:
     class FakeBrokerage:
-        def get_orders(self, status="WORKING"):
+        def get_orders(self, status="WORKING", *, days=60):
             return orders
 
     _patch_payloads(monkeypatch, "get_account_broker_type", lambda _account: "schwab")

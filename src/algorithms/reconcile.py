@@ -46,6 +46,7 @@ def reconcile_orders(
     recorded: Dict[str, str],
     *,
     persist: Any = None,
+    order_window_days: int | None = None,
 ) -> Dict[str, Any]:
     """Cancel what is no longer wanted, then place or re-price the rest.
 
@@ -66,7 +67,9 @@ def reconcile_orders(
     partial, so "absent from the listing" is never on its own taken as "no longer exists".
     """
     try:
-        working = brokerage.get_orders("WORKING")
+        # Unset leaves the bound to the brokerage: reading too short a window is what makes this
+        # resubmit the book, so only a caller that knows what bounds its orders narrows it.
+        working = brokerage.get_orders("WORKING", days=order_window_days)
     except NotImplementedError as exc:
         # Refusing here is the safe direction: proceeding would resubmit the whole desired book
         # every run, since nothing would ever look already-present.

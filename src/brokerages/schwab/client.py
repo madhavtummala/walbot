@@ -50,6 +50,11 @@ class SchwabSession:
         self._session = session or requests.Session()
         self._access_token = ""
         self._expires_at = 0.0
+        #: Account number (digits only) to Schwab's hash for it. See :func:`account_hash`.
+        self.account_hashes: dict[str, str] = {}
+        #: ``(monotonic stamp, is_open)`` from the last market-hours read, or ``None``. Held here
+        #: rather than on the brokerage because a brokerage lasts one request and this does not.
+        self.market_hours: tuple[float, bool] | None = None
 
         stored = load_state(TOKEN_STATE_KEY, {}) or {}
         self._refresh_token = str(getattr(config, "schwab_refresh_token", "") or stored.get("refresh_token") or "")
@@ -140,6 +145,33 @@ class SchwabSession:
         return self.request("DELETE", url, **kwargs)
 
 
+#: Live sessions by app key, so the access token outlives the object that fetched it. Keyed on
+#: the credentials rather than the account: one token reaches all of a user's accounts.
+_SESSIONS: dict[str, "SchwabSession"] = {}
+
+
+def shared_session(config: Any) -> SchwabSession:
+    """The session for these credentials, reused across brokerages and requests.
+
+    ``resolve_brokerage`` builds a fresh brokerage per request and per bot run, and a fresh
+    session with it -- which left the expiry check in :meth:`SchwabSession.access_token`
+    unreachable, so every page load paid an OAuth round trip per account before reading
+    anything. Callers passing their own session bypass this.
+    """
+    app_key = str(getattr(config, "schwab_app_key", "") or "")
+    if not app_key:
+        # Nothing to key on, and the missing-credential error belongs to the session itself.
+        return SchwabSession(config)
+    if app_key not in _SESSIONS:
+        _SESSIONS[app_key] = SchwabSession(config)
+    return _SESSIONS[app_key]
+
+
+def reset_shared_sessions() -> None:
+    """Drop the cached sessions. For tests and for a credentials change."""
+    _SESSIONS.clear()
+
+
 def _digits(value: Any) -> str:
     """An account number reduced to its digits, so formatting never decides identity."""
     return "".join(character for character in str(value or "") if character.isdigit())
@@ -151,12 +183,32 @@ def account_hash(session: SchwabSession, account_number: str = "") -> str:
     Account-scoped endpoints reject the plain account number, so every call must go through
     ``/accounts/accountNumbers`` first. Returns the hash for ``account_number``, or the first
     account when none is specified.
+
+    Cached on the *session*, which owns the credentials the mapping belongs to. Schwab mints a
+    hash once, so re-resolving it cost a round trip per request for an answer that cannot
+    change. A session carrying no cache is resolved uncached rather than refused: anything with
+    a ``get`` is usable here, and an optimization is no reason to narrow that.
     """
+    wanted = _digits(account_number)
+    cache = getattr(session, "account_hashes", None)
+    if cache is not None and cache.get(wanted):
+        return cache[wanted]
+
     accounts = session.get(f"{TRADER_BASE}/accounts/accountNumbers") or []
     if not accounts:
         raise SchwabAPIError(404, "Schwab returned no accounts for these credentials")
 
-    wanted = _digits(account_number)
+    # One response lists every account, so every account is cached from it. Keeping only the one
+    # asked for meant a page reading five accounts fetched this same listing five times.
+    if cache is not None:
+        for entry in accounts:
+            number, value = _digits(entry.get("accountNumber", "")), str(entry.get("hashValue", ""))
+            if number and value:
+                cache[number] = value
+        first = str(accounts[0].get("hashValue", ""))
+        if first:
+            cache[""] = first
+
     for entry in accounts:
         # Compared on digits alone. Schwab's API reports the number bare -- "12345678" -- while
         # every human-facing surface, statements and the website included, writes it "1234-5678".
@@ -164,7 +216,8 @@ def account_hash(session: SchwabSession, account_number: str = "") -> str:
         # dashboard falls back to the default account on error, the Schwab tab then showed
         # Alpaca's money under Schwab's name.
         if not wanted or _digits(entry.get("accountNumber", "")) == wanted:
-            return str(entry.get("hashValue", ""))
+            resolved = str(entry.get("hashValue", ""))
+            return resolved
     raise SchwabAPIError(
         404,
         f"Schwab account {account_number} not found in {len(accounts)} account(s)",
