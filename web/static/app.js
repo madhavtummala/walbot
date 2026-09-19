@@ -15,10 +15,8 @@ const DEFAULT_WHEEL_STEP = 25;
 //: lands on the number it is editing rather than near it.
 const AMOUNT_LABEL_DY = 14;
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
-//: The window every backtest view opens on. The selector below changes it for a look; nothing
-//: persists that choice, which is why this is a constant rather than config.
-let BACKTEST_PERIOD = "3m";
-let BACKTEST_LABEL = "3M";
+//: The window a backtest view opens on when the route does not name one.
+const DEFAULT_BACKTEST_PERIOD = "3m";
 
 //: Selectable backtest windows.
 const BACKTEST_PERIOD_CHOICES = ["1m", "3m", "6m", "12m", "24m"];
@@ -1284,65 +1282,74 @@ function backtestPeriodLabel(period) {
   return match ? `${match[1]}M` : "3M";
 }
 
-function configureBacktestPeriod(period) {
-  const normalized = normalizeBacktestPeriod(period);
-  const label = backtestPeriodLabel(normalized);
-  if (normalized !== BACKTEST_PERIOD) {
-    state.backtests = {};
-  }
-  BACKTEST_PERIOD = normalized;
-  BACKTEST_LABEL = label;
+//: Which window the open page is showing, read from the route rather than from a global. It
+//: used to be a module variable that the selector reassigned, which made the period a property
+//: of the tab rather than of the address: the URL could not say which window it meant, a reload
+//: silently fell back to 3M, and the cache -- keyed on the strategy alone -- served whichever
+//: window had been fetched last under whatever label was current. Changing it now navigates,
+//: which is what makes a period change an ordinary visit like any other.
+function routeBacktestPeriod(route = currentRoute()) {
+  return normalizeBacktestPeriod(route.period || DEFAULT_BACKTEST_PERIOD);
 }
 
-async function loadBacktest(strategyKey, refresh, options = {}) {
-  const cacheOnly = Boolean(options.cacheOnly);
-  let changed = false;
-  if (!cacheOnly) state.backtestLoading[strategyKey] = true;
-  if (!cacheOnly && state.backtests[strategyKey]?.error) delete state.backtests[strategyKey];
-  if (!cacheOnly) render();
+//: A backtest is one replay of one window, so the window belongs in the key. Keying on the
+//: strategy alone meant switching 3M to 12M painted the 3M curve under a 12M label until the
+//: new one landed -- and, because the old code cleared the whole cache on every change, threw
+//: away a finished replay the moment you looked at another window.
+function backtestKey(strategyKey, period) {
+  return `${strategyKey}|${normalizeBacktestPeriod(period)}`;
+}
+
+//: Tuning feeds the backtest cache key, so a saved config invalidates *every* window this
+//: algorithm has replayed, not only the one on screen. Deleting the bare strategy key used to
+//: be that statement; once the key carries a period it names nothing at all.
+function forgetBacktests(strategyKey) {
+  for (const key of Object.keys(state.backtests)) {
+    if (key.startsWith(`${strategyKey}|`)) delete state.backtests[key];
+  }
+}
+
+function configureBacktestPeriod(period) {
+  const route = currentRoute();
+  const normalized = normalizeBacktestPeriod(period);
+  if (normalized === routeBacktestPeriod(route)) return;
+  window.location.hash = `#/algo/${encodeURIComponent(route.id)}/backtest/${normalized}`;
+}
+
+async function loadBacktest(strategyKey, period, cold = false) {
+  const window_ = normalizeBacktestPeriod(period);
+  const key = backtestKey(strategyKey, window_);
+  if (state.backtestLoading[key]) return;
+  if (cold) delete state.backtests[key];
+  state.backtestLoading[key] = true;
+  render();
   try {
     const payload = await api("/api/backtest", {
       method: "POST",
       body: JSON.stringify({
         strategy: strategyKey,
-        period: BACKTEST_PERIOD,
-        refresh,
-        cache_only: cacheOnly,
+        period: window_,
+        refresh: Boolean(cold),
         // Same account as the signal view and the Tune board: a DCA plan is per account, so
         // replaying the default account backtested a plan nobody was editing.
         account_id: accountForStrategy(strategyKey),
       }),
-      // A fresh replay is the longest request the dashboard makes, and it grows with the
-      // window: the 24M option covers roughly five times the trade dates the 4M one does.
-      // The cache probe is a lookup and stays on the short timeout.
-      timeoutMs: cacheOnly ? 15000 : 300000,
+      // A lookup, not a replay. The request used to carry the replay itself and needed 300s
+      // for the 24M window; the work now runs behind the answer, so this is a cache read and
+      // the poll below is what waits.
+      timeoutMs: 15000,
     });
-    if (isBacktestPayload(payload)) {
-      state.backtests[strategyKey] = payload;
-      changed = true;
-    } else if (payload?.supported === false) {
-      // Kept even on the cache probe, unlike an ordinary error. "No cached run yet" is a state
-      // the next click can change; "this algorithm cannot be replayed" is a permanent property
-      // of the strategy, and discarding it leaves the tab offering a button that cannot work.
-      state.backtests[strategyKey] = { supported: false, error: payload.error };
-      changed = true;
-    } else if (payload?.error) {
-      if (!cacheOnly) {
-        state.backtests[strategyKey] = { error: payload.error };
-        changed = true;
-      }
-    }
+    // "This algorithm cannot be replayed" is a permanent property of the strategy rather than
+    // a state a later read can change, so it is kept as the answer instead of being retried.
+    state.backtests[key] = payload?.supported === false
+      ? { supported: false, error: payload.error }
+      : payload;
+    followRefresh(`backtest:${key}`, () => loadBacktest(strategyKey, window_), payload);
   } catch (error) {
-    if (!cacheOnly) {
-      state.backtests[strategyKey] = { error: error.message };
-      changed = true;
-    }
+    if (!state.backtests[key]) state.backtests[key] = { error: error.message };
   } finally {
-    if (!cacheOnly) state.backtestLoading[strategyKey] = false;
-    // Every render of the Backtest tab probes the cache, and this used to re-render whatever
-    // the probe found -- including "nothing". Repainting the page for a result that changed
-    // no state is what closed the period dropdown the instant it was opened.
-    if (changed || !cacheOnly) render();
+    state.backtestLoading[key] = false;
+    render();
   }
 }
 
@@ -1400,62 +1407,40 @@ function isSignalsPayload(payload) {
   return Boolean(payload && typeof payload === "object" && Array.isArray(payload.rows));
 }
 
-//: Live signals, cached exactly like a backtest: the tab opens on a stored snapshot and only
-//: recomputes when Refresh asks for it.
+//: Live signals, cached exactly like a backtest: the tab opens on the stored snapshot, and the
+//: visit itself asks for a newer one. ``cold`` -- an explicit reload -- drops the snapshot
+//: first, so the tab falls to its skeleton and fills with a run started for this visit.
 //:
-//: ``refresh`` and ``cacheOnly`` are sent because the endpoint requires them. Without them the
-//: API sees ``refresh=false`` on a cache miss and answers "No cached live signals are
-//: available" *without computing* -- which is exactly what it is meant to do for a probe, and
-//: meant the Refresh button could never populate the cache it was reporting empty. The two
-//: flags were plumbed through the API and never through the one caller that needed them.
+//: There was a ``cache_only`` probe here, and it could not do the job it was given: a plain
+//: read answered "No cached live signals are available" *without computing*, so the tab
+//: reported an empty cache and offered a button as the only way to fill it. The server now
+//: starts the run itself on a read, and the flag has nothing left to mean.
 //:
-//: A background refresh keeps the previous snapshot on screen while the new one computes, and
-//: a failure leaves the last good rows up rather than blanking the tab.
-async function loadSignals(strategyKey, refresh = false, options = {}) {
-  const cacheOnly = Boolean(options.cacheOnly);
+//: A failure leaves the last good rows up rather than blanking the tab.
+async function loadSignals(strategyKey, cold = false) {
   if (state.signalLoading[strategyKey]) return;
-  let changed = false;
-  if (!cacheOnly) {
-    state.signalLoading[strategyKey] = true;
-    // A stale error must not survive an explicit refresh, or the tab keeps explaining a
-    // failure that is currently being retried.
-    if (state.signals[strategyKey]?.error) delete state.signals[strategyKey];
-    render();
-  }
+  if (cold) delete state.signals[strategyKey];
+  state.signalLoading[strategyKey] = true;
+  render();
   try {
     // Sent explicitly so the view is computed against the same account the Tune board writes.
-    const account = accountForStrategy(strategyKey);
     const query = new URLSearchParams({
       strategy: strategyKey,
-      account_id: account,
-      refresh: String(Boolean(refresh)),
-      cache_only: String(cacheOnly),
+      account_id: accountForStrategy(strategyKey),
+      refresh: String(Boolean(cold)),
     });
-    const payload = await api(`/api/strategy-signals?${query}`, {
-      // A recompute runs the algorithm against live market data; the cache probe is a lookup.
-      timeoutMs: cacheOnly ? 15000 : 120000,
-    });
-    if (isSignalsPayload(payload)) {
-      state.signals[strategyKey] = payload;
-      changed = true;
-    } else if (payload?.error && !cacheOnly) {
-      // On a probe, "no cached snapshot" is not an error worth showing -- it is the state the
-      // Refresh button exists to change, and the tab already says so.
-      state.signals[strategyKey] = { error: payload.error };
-      changed = true;
-      showToast(`Signal refresh failed: ${payload.error}`);
-    }
+    const url = `/api/strategy-signals?${query}`;
+    // A lookup either way now: a plain read answers from the stored snapshot and a cold one
+    // schedules the run. Neither waits for an algorithm, which is what the old 120s timeout
+    // was for.
+    const payload = await api(url, { timeoutMs: 15000 });
+    state.signals[strategyKey] = payload;
+    followRefresh(url, () => loadSignals(strategyKey), payload);
   } catch (error) {
-    if (!cacheOnly) {
-      if (!state.signals[strategyKey]) state.signals[strategyKey] = { error: error.message };
-      changed = true;
-      showToast(`Signal refresh failed: ${error.message}`);
-    }
+    if (!state.signals[strategyKey]) state.signals[strategyKey] = { error: error.message };
   } finally {
-    if (!cacheOnly) state.signalLoading[strategyKey] = false;
-    // A probe that found nothing changed no state, so repainting for it would be the same
-    // spurious re-render the backtest tab's probe had to stop doing.
-    if (changed || !cacheOnly) render();
+    state.signalLoading[strategyKey] = false;
+    render();
   }
 }
 
@@ -1618,10 +1603,12 @@ function isNumericValue(value) {
 }
 
 function backtestStatusLabel(backtest, loading) {
-  if (loading) return "Refreshing";
   if (backtest?.error) return "Error";
-  if (isBacktestPayload(backtest)) return backtest.cached ? "Cached" : "Fresh";
-  return "Pending";
+  // A curve on screen with a replay running behind it is the normal state now, and saying so
+  // is the whole disclosure: the number you are reading is the last one, and a newer one is
+  // coming. "Cached" and "Fresh" only ever described how the last read was served.
+  if (isBacktestPayload(backtest)) return backtest.refreshing ? "Replaying" : "Ready";
+  return loading || backtest?.state === "computing" ? "Replaying" : "Pending";
 }
 
 function backtestCaptionText(backtest, loading) {
@@ -1629,7 +1616,10 @@ function backtestCaptionText(backtest, loading) {
   if (isBacktestPayload(backtest)) {
     return "";
   }
-  return loading ? `Refreshing ${BACKTEST_LABEL} backtest...` : `No ${BACKTEST_LABEL} backtest yet.`;
+  const label = backtestPeriodLabel(routeBacktestPeriod());
+  // Not "no backtest yet": arriving here started one, so the honest report is that it is
+  // running -- which is also the only thing the reader could do about it.
+  return `Replaying the ${label} window...`;
 }
 
 function backtestEquityText(backtest) {
@@ -1726,7 +1716,7 @@ function renderBacktestChart(payload, svg) {
     }))
     .filter((row) => Number.isFinite(row.equity) && !Number.isNaN(row.date.getTime()));
   if (rows.length < 2) {
-    svg.appendChild(textEl({ x: width / 2, y: height / 2, "text-anchor": "middle", class: "empty-chart" }, `No ${BACKTEST_LABEL} rows`));
+    svg.appendChild(textEl({ x: width / 2, y: height / 2, "text-anchor": "middle", class: "empty-chart" }, `No ${backtestPeriodLabel(routeBacktestPeriod())} rows`));
     return;
   }
 
@@ -1746,7 +1736,7 @@ function renderBacktestChart(payload, svg) {
     .map((row) => ({ x: xScale(row.date), y: yScale(row.equity) }))
     .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
   if (points.length < 2) {
-    svg.appendChild(textEl({ x: width / 2, y: height / 2, "text-anchor": "middle", class: "empty-chart" }, `No ${BACKTEST_LABEL} chart`));
+    svg.appendChild(textEl({ x: width / 2, y: height / 2, "text-anchor": "middle", class: "empty-chart" }, `No ${backtestPeriodLabel(routeBacktestPeriod())} chart`));
     return;
   }
   const path = points.map((point, index) => `${index ? "L" : "M"} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(" ");
@@ -2082,10 +2072,6 @@ function percent(value) {
 //: settles rather than one per tick.
 const PLAN_SAVE_DEBOUNCE_MS = 500;
 
-//: How long to give a background analytics computation before looking again. Comfortably longer
-//: than a year of transactions takes to read, so the second look almost always finds it done.
-const ANALYTICS_SETTLE_MS = 4000;
-
 //: What the board says about its own saving. The board writes on every gesture and has no
 //: save button, so without this an edit that reached the server and one that failed silently
 //: looked exactly the same -- which is how a plan being written to the wrong account went
@@ -2130,7 +2116,7 @@ async function savePlan(quiet = true) {
     });
     state.algorithmConfigs[strategyKey] = payload;
     // Only this algorithm's views are stale: the plans are no longer shared.
-    delete state.backtests[strategyKey];
+    forgetBacktests(strategyKey);
     delete state.signals[strategyKey];
     renderDca();
     setPlanSaveStatus(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
@@ -2175,12 +2161,17 @@ function currentRoute() {
   const parts = raw.split("/").filter(Boolean);
   if (parts[0] === "algo" && parts[1]) {
     const tab = TABS.some((tab) => tab.id === parts[2]) ? parts[2] : DEFAULT_TAB;
-    return { page: "algo", id: decodeURIComponent(parts[1]), tab };
+    // A fourth segment, used by the Backtest tab alone, names the window being replayed. It
+    // lives in the address so that a reload lands on the window you were looking at, and so a
+    // period change is a navigation -- which is what lets it behave like every other visit:
+    // cached curve shown at once, recompute behind it.
+    const period = tab === "backtest" && parts[3] ? normalizeBacktestPeriod(parts[3]) : "";
+    return { page: "algo", id: decodeURIComponent(parts[1]), tab, period };
   }
   if ((parts[0] === "account" || parts[0] === "target") && parts[1]) {
-    return { page: "account", id: decodeURIComponent(parts[1]), tab: "" };
+    return { page: "account", id: decodeURIComponent(parts[1]), tab: "", period: "" };
   }
-  return { page: "algo", id: DEFAULT_ALGORITHM_KEY, tab: DEFAULT_TAB };
+  return { page: "algo", id: DEFAULT_ALGORITHM_KEY, tab: DEFAULT_TAB, period: "" };
 }
 
 //: One algorithm runs against at most one account, so a deployment is singular. That keeps
@@ -2285,35 +2276,23 @@ function renderAccountNav() {
   // The sidebar is the only place an idle account's P/L shows, so it pulls its own numbers --
   // but last, and only once the page the user actually opened has had its turn. Five broker
   // reads fired eagerly here raced the current page's own fetches and made both slower, on an
-  // algorithm page that wanted none of them. ``ensurePositions`` treats "already present" as
-  // nothing to do, so calling it again on the next paint costs nothing.
+  // algorithm page that wanted none of them.
   //
-  // Orders and dividends follow, because switching account was waiting on them: positions were
-  // warm from this prefetch and painted at once, while those two cards dropped to "Loading" for
-  // about a second -- half the page holding and half tearing down, which reads worse than a
-  // whole page would. They go one at a time, after the positions pass: nothing on screen is
-  // waiting for them, and firing fifteen reads at once would race the foreground this defers to.
+  // Positions alone. It used to walk orders and dividends for every account too, to pre-warm a
+  // switch -- fifteen broker reads and some seconds of them, for cards on four pages nobody was
+  // looking at. The page you open now loads its own content on arrival, so the sidebar only
+  // needs what the sidebar draws: one day's P/L per account, which rides along on the position
+  // read (``equity - last_equity``, both top-level balances).
   //
-  // Armed once per account set, not once per paint. ``ensurePositions`` and its siblings do
-  // treat "already present" as nothing to do -- so re-arming never re-fetched -- but it queued
-  // a fresh idle callback on every render, and the walk it starts is fifteen broker reads deep
-  // and several seconds long. Running one of those at a time is the point; running a new one
-  // behind every paint meant the tail of one overlapped the head of the next for as long as
-  // anything on screen was still settling.
+  // Armed once per account set, not once per paint: re-arming never re-fetched, but it queued a
+  // fresh idle callback behind every render.
   const ready = rows.filter((account) => account.credentials_ready);
   const token = ready.map((account) => account.id).join(",");
   if (!token || token === prefetchedAccounts) return;
   prefetchedAccounts = token;
-  whenIdle(async () => {
-    // The open account first. The prefetch exists so that *switching* is instant, but the
-    // account you are already looking at is the one with cards on screen waiting on these
-    // reads, and it was previously served in whatever order the config happened to list it.
-    const open = currentRoute().page === "account" ? currentRoute().id : "";
-    const ordered = [...ready].sort((a, b) => (b.id === open) - (a.id === open));
-    await Promise.all(ordered.map((account) => ensurePositions(account.id)));
-    for (const account of ordered) {
-      await ensureActivity(account.id);
-      await ensureAnalytics(account.id);
+  whenIdle(() => {
+    for (const account of ready) {
+      if (!state.positions[account.id]) loadPositions(account.id);
     }
   });
 }
@@ -2444,8 +2423,48 @@ function render(options = {}) {
   });
 }
 
+//: The route the page is currently showing its content for, and whether the next visit is the
+//: first since the document loaded. Together they are the difference between the two things a
+//: reader can do: *navigate*, which shows what is cached and replaces it quietly, and *reload*,
+//: which clears to the skeleton and waits for a fresh value. There is no third action and so no
+//: Refresh button -- the address bar is the refresh control.
+let visitedRoute = "";
+let firstVisit = true;
+
+function routeKey(route) {
+  return [route.page, route.id, route.tab, route.period].join("|");
+}
+
+//: Everything the address asks for, fetched once when the address changes. Loading used to be
+//: triggered from inside the renderers, which meant it was driven by *paints* rather than by
+//: navigation -- so it had to be cache-first to avoid refetching on every repaint, and
+//: cache-first is what made a value fetched once stay on screen forever.
+function visitRoute(route, cold) {
+  if (route.page === "account") {
+    loadPositions(route.id, cold);
+    loadActivity(route.id, cold);
+    loadAnalytics(route.id, cold);
+    return;
+  }
+  ensureAlgorithmConfig(route.id);
+  if (route.tab === "overview") loadAlgorithmActivity(route.id, cold);
+  if (route.tab === "signals") loadSignals(route.id, cold);
+  if (route.tab === "backtest") loadBacktest(route.id, routeBacktestPeriod(route), cold);
+  // The Overview's backtest figure is read from whatever this session already has. Fetching it
+  // here would start a replay every time the default tab opened, which is a minute of Pi for a
+  // number nobody came to that tab for.
+}
+
 function renderNow(options = {}) {
   const route = currentRoute();
+  // Held until the accounts and deployments are in: a visit dispatched before them would ask
+  // for a signal view with no account and cache the answer to the wrong question.
+  if (state.accounts && routeKey(route) !== visitedRoute) {
+    visitedRoute = routeKey(route);
+    const cold = firstVisit;
+    firstVisit = false;
+    visitRoute(route, cold);
+  }
   renderSidebar();
   const content = $("#content");
   if (!content) return;
@@ -2579,6 +2598,14 @@ function renderAlgorithmPage(content, strategyKey, tab) {
 
 // -- account page ------------------------------------------------------------------------
 
+//: When the two computed metrics were computed, as a tooltip on the metrics themselves. These
+//: are the only figures on the page not read live, and that is worth being able to find out --
+//: but it is worth a hover, not a standing line of prose under every account on every visit.
+function computedAtTitle(analytics) {
+  if (!analytics?.computed_at) return "";
+  return ` title="${escapeHtml(`Computed ${formatActivityTime(analytics.computed_at)}. Everything else on this page is live.`)}"`;
+}
+
 //: Holdings and orders live here rather than on the algorithm because the broker reports
 //: them per account and knows nothing about which algorithm -- or which hand-placed order --
 //: produced them. Attributing an account's blended P/L to one algorithm would be a lie.
@@ -2605,14 +2632,14 @@ function accountMetricsHtml(positions, analytics) {
         : `${escapeHtml(money(positions.day_pl, 2))} (${escapeHtml(percent(positions.day_pl_percent))})`}</strong></div>
     <div class="metric"><span>Open P/L</span><strong class="${(positions?.total_pl || 0) >= 0 ? "gain" : "loss"}">${
       positions ? escapeHtml(money(positions.total_pl, 2)) : "--"}</strong></div>
-    <div class="metric"><span>Realized P/L (YTD)</span><strong class="${(analytics?.realized_pl || 0) >= 0 ? "gain" : "loss"}">${
+    <div class="metric"${computedAtTitle(analytics)}><span>Realized P/L (YTD)</span><strong class="${(analytics?.realized_pl || 0) >= 0 ? "gain" : "loss"}">${
       // Banked profit, which Open P/L cannot show: an account that closed a winning trade
       // and went back to cash has no open position left to carry the gain. Year to date
       // rather than trailing, so it lines up with what the broker's own statement totals.
       analytics?.realized_pl === null || analytics?.realized_pl === undefined
         ? "--"
         : escapeHtml(money(analytics.realized_pl, 2))}</strong>${realizedNote(analytics)}</div>
-    <div class="metric"><span>Dividends (YTD)</span><strong class="${(analytics?.dividend_pl || 0) >= 0 ? "gain" : "loss"}">${
+    <div class="metric"${computedAtTitle(analytics)}><span>Dividends (YTD)</span><strong class="${(analytics?.dividend_pl || 0) >= 0 ? "gain" : "loss"}">${
       // Reported beside Open P/L, never inside it. Price appreciation and income are
       // different things, and a T-bill sleeve earns almost entirely through this one.
       analytics?.dividend_pl === null || analytics?.dividend_pl === undefined
@@ -2620,17 +2647,19 @@ function accountMetricsHtml(positions, analytics) {
         : escapeHtml(money(analytics.dividend_pl, 2))}</strong></div>`;
 }
 
+//: Only what the page cannot say for itself. The standing descriptions that used to sit here --
+//: what a broker account contains, which algorithms run on it, when the two computed figures
+//: were computed -- said the same thing on every visit to every account, which is how prose
+//: stops being read at all. What the account *is* the header already says, and which algorithms
+//: run on it the chips below say in a form you can click. What remains is the two things that
+//: are neither standing nor derivable: a missing credential, and a read that failed.
 function accountNotesHtml(account, analytics, busy, deployed) {
+  const note = account.credentials_ready ? analyticsNote(analytics, busy) : "";
   return `
-    ${account.credentials_ready ? `<p class="cardHint">${analyticsNote(analytics, busy)}</p>` : ""}
+    ${note ? `<p class="cardHint">${note}</p>` : ""}
     ${!account.credentials_ready
       ? `<p class="cardHint">Credentials missing: set <code>${escapeHtml(account.missing_env.join("</code> and <code>"))}</code> in <code>.env</code> and restart. It cannot trade until then.</p>`
-      : `<p class="cardHint">${account.broker === "paper"
-          // No broker holds this money, so the usual "including your own orders" caveat
-          // would be nonsense here: nothing but this bot can touch a local book.
-          ? "A local book, not a broker. Orders fill instantly at the last price the algorithm saw, and no real money moves."
-          : "Everything the broker reports for this account, including orders you placed yourself."}${
-          deployed.length ? ` Algorithms running here: ${deployed.map((deployment) => strategyByKey(deployment.algorithm).name).join(", ")}.` : ""}</p>`}
+      : ""}
     ${deployed.length ? `<div class="chipRow">${deployed.map((deployment) => `
       <a class="chip is-link" href="#/algo/${escapeHtml(deployment.algorithm)}/${DEFAULT_TAB}">${escapeHtml(strategyByKey(deployment.algorithm).name)}</a>`).join("")}</div>` : ""}`;
 }
@@ -2678,13 +2707,13 @@ function renderAccountPage(content, accountId) {
       || state.analyticsLoading[account.id]);
   const meta = `<span class="pill is-${status}">${
     status === "live" ? "Trading" : status === "idle" ? "Agent-driven" : deployed.length ? "Deployed, paused" : "No algorithm"}</span>`;
-  const actions = `<button class="ctl" type="button" id="refreshAccountButton" data-account="${escapeHtml(account.id)}"
-    ${busy ? "disabled" : ""}>${busy ? "Refreshing." : "Refresh"}</button>`;
+  // No Refresh button. Arriving on this page is what refreshes it, and reloading is what
+  // clears it and fetches again -- so a control whose whole job was to re-ask for data the
+  // page now asks for itself would be a third way to do one of two things.
   const header = pageHeader({
     title: account.label,
     subtitle: `${account.broker}${account.data_feed ? ` · ${account.data_feed}` : ""} · ${account.id}`,
     meta,
-    actions,
   });
 
   if (content.dataset.shell === "account") {
@@ -2734,13 +2763,6 @@ function renderAccountPage(content, accountId) {
     </div>`;
   }
 
-  if (account.credentials_ready) {
-    ensurePositions(account.id);
-    ensureActivity(account.id);
-    // Cache read only: never computes on load, so opening the page stays as cheap as the
-    // position read. The Refresh button is what recomputes.
-    ensureAnalytics(account.id);
-  }
 }
 
 function realizedNote(analytics) {
@@ -2751,18 +2773,20 @@ function realizedNote(analytics) {
   return `<span class="tableNote">${escapeHtml(`${analytics.realized_unmatched} unmatched`)}</span>`;
 }
 
+//: Says something only while the two computed metrics are not simply *there*. In the steady
+//: state it says nothing: "as of <time>. Everything else is live. Press Refresh" was on screen
+//: every second of every visit to report that nothing was wrong, and Refresh is a button the
+//: reader can already see. The staleness it existed to disclose now rides on the metrics
+//: themselves as a tooltip, where it costs no line and is still there to be asked for.
 function analyticsNote(analytics, busy) {
-  // The two right-hand metrics are the only ones on this page not read live, so the page says
-  // where they stand rather than letting a computed figure pass for a current one.
   if (busy) return "Realized P/L and dividends: reading a year of transactions.";
   if (analytics?.error && !analytics?.computed_at) {
     return `Realized P/L and dividends unavailable: ${analytics.error}`;
   }
-  if (!analytics?.computed_at) {
-    return "Realized P/L and dividends read a year of transactions, so they are worked out in the background. They will appear shortly.";
-  }
-  const stale = analytics.error ? " Last attempt to update them failed." : "";
-  return `Realized P/L and dividends as of ${formatActivityTime(analytics.computed_at)}.${stale} Everything else is live. Press Refresh to recompute now.`;
+  if (!analytics?.computed_at) return "";
+  // A failed refresh is not the steady state: the figures on screen are the last good ones and
+  // the page is no longer keeping them current, which is the one thing a reader cannot infer.
+  return analytics.error ? "Last attempt to update realized P/L and dividends failed." : "";
 }
 
 // A table's shape while its rows are still in flight. The point is the *height*: a card that
@@ -2887,21 +2911,6 @@ function accountOrdersTable(activity) {
     </div>`;
 }
 
-//: The cached copies are what make the sidebar cheap, so a manual refresh has to drop them
-//: before asking again -- ensurePositions treats "already present" as "nothing to do".
-function refreshAccount(accountId) {
-  delete state.positions[accountId];
-  delete state.activity[accountId];
-  delete state.analytics[accountId];
-  ensurePositions(accountId);
-  ensureActivity(accountId);
-  // The only thing that reaches for a year of transactions. A page load serves whatever this
-  // last computed; pressing Refresh is what says the wait is worth it.
-  ensureAnalytics(accountId, true);
-  render();
-}
-
-
 function explainerCard(strategy) {
   const explainer = state.algorithmConfigs[strategy.key]?.explainer;
   if (!explainer?.summary) return "";
@@ -3023,8 +3032,10 @@ function orderedConfigFields(config, docs) {
 }
 
 function renderBacktestTab(body, strategy) {
-  const backtest = state.backtests[strategy.key];
-  const loading = Boolean(state.backtestLoading[strategy.key]);
+  const period = routeBacktestPeriod();
+  const key = backtestKey(strategy.key, period);
+  const backtest = state.backtests[key];
+  const loading = Boolean(state.backtestLoading[key]);
   // The backend says whether a replay is meaningful for this algorithm. Offering the controls
   // anyway would present an action that cannot succeed, and the reason only after it failed.
   if (backtest && backtest.supported === false) {
@@ -3042,12 +3053,9 @@ function renderBacktestTab(body, strategy) {
         <div class="cardHeadActions">
           <select class="ctl" id="backtestPeriodSelect" aria-label="Backtest period">
             ${BACKTEST_PERIOD_CHOICES.map((period) => `
-              <option value="${escapeHtml(period)}"${period === BACKTEST_PERIOD ? " selected" : ""}>${escapeHtml(backtestPeriodLabel(period))}</option>
+              <option value="${escapeHtml(period)}"${period === routeBacktestPeriod() ? " selected" : ""}>${escapeHtml(backtestPeriodLabel(period))}</option>
             `).join("")}
           </select>
-          <button class="ctl is-primary" type="button" id="runBacktestButton" ${loading ? "disabled" : ""}>
-            ${loading ? "Running." : "Run backtest"}
-          </button>
         </div>
       </div>
       <div class="metricRow">
@@ -3063,11 +3071,11 @@ function renderBacktestTab(body, strategy) {
         .join("")}
     </section>`);
   renderBacktestChart(backtest, $("#backtestChart"));
-  if (!backtest && !loading) loadBacktest(strategy.key, false, { cacheOnly: true });
 }
 
 function renderOverviewTab(body, strategy, deployment) {
-  const backtest = state.backtests[strategy.key];
+  // No period in this route, so the glance reports the default window and names it.
+  const backtest = state.backtests[backtestKey(strategy.key, DEFAULT_BACKTEST_PERIOD)];
   setHtml(body, `
     <div class="overviewGrid">
       <section class="card overviewHow">
@@ -3085,7 +3093,7 @@ function renderOverviewTab(body, strategy, deployment) {
           <div><dt>Account</dt><dd>${deployment
             ? `<a class="factLink" href="#/account/${escapeHtml(deployment.account_id)}">${escapeHtml(accountLabel(deployment.account_id))}</a>`
             : "none"}</dd></div>
-          <div><dt>${escapeHtml(BACKTEST_LABEL)} backtest</dt><dd>${backtest ? escapeHtml(percent(backtest.total_return)) : "--"}</dd></div>
+          <div><dt>${escapeHtml(backtestPeriodLabel(DEFAULT_BACKTEST_PERIOD))} backtest</dt><dd>${backtest ? escapeHtml(percent(backtest.total_return)) : "--"}</dd></div>
         </dl>
       </section>
       <section class="card overviewOrders">
@@ -3094,18 +3102,16 @@ function renderOverviewTab(body, strategy, deployment) {
           <div class="cardHeadActions">
             ${deployment ? `<span class="cardHint">on <a class="factLink" href="#/account/${escapeHtml(deployment.account_id)}">${escapeHtml(accountLabel(deployment.account_id))}</a></span>` : ""}
             <button class="ctl" type="button" id="clearAlgoOrdersButton">Clear</button>
-            <button class="ctl" type="button" id="refreshAlgoOrdersButton">Refresh</button>
           </div>
         </div>
         ${algorithmOrdersTable(state.algorithmActivity[strategy.key])}
       </section>
     </div>`);
-  ensureAlgorithmActivity(strategy.key);
 }
 
 function renderSignalsTab(body, strategy) {
-  // Cache-first: whatever snapshot was last computed stays on screen -- even while a refresh
-  // runs in the background -- and nothing is fetched just because the tab opened.
+  //: The last snapshot stays on screen while a newer one computes behind it. Arriving is what
+  //: asks for the newer one; reloading is what clears this to a skeleton and waits.
   const payload = state.signals[strategy.key];
   const loading = Boolean(state.signalLoading[strategy.key]);
   // Already ordered by the algorithm: what the run changed first, then holdings, then the rest.
@@ -3120,7 +3126,6 @@ function renderSignalsTab(body, strategy) {
         <div class="cardHeadActions">
           ${asOf}
           <button class="ctl" type="button" id="refreshUniverseButton" ${state.universeRefreshing ? "disabled" : ""}>Refresh universe</button>
-          <button class="ctl" type="button" id="refreshSignalsButton" ${loading ? "disabled" : ""}>${loading ? "Refreshing." : "Refresh"}</button>
         </div>
       </div>
       ${(payload?.summary || []).length ? `<div class="metricRow">
@@ -3131,17 +3136,16 @@ function renderSignalsTab(body, strategy) {
           ? renderUniverseProposalRows()
           : rows.length
             ? renderSignalTable(rows)
-            : loading
-              ? `<p class="emptyState">Fetching live signal snapshot.</p>`
-              : payload?.error
-                ? `<p class="emptyState">${escapeHtml(payload.error)}</p>`
+            : payload?.error
+              ? `<p class="emptyState">${escapeHtml(payload.error)}</p>`
+              : loading || payload?.state === "computing" || payload?.refreshing
+                ? tableSkeleton(4)
                 : payload
                   ? renderSignalFallbackRows(strategy, payload, (strategy.signals || []).slice(0, 5))
-                  : `<p class="emptyState">No live signals cached yet. Hit Refresh to compute them.</p>`}
+                  : tableSkeleton(4)}
       </div>
     </section>`);
   // Cache-first, like the Backtest tab: probe for a stored snapshot without ever computing.
-  if (!payload && !loading) loadSignals(strategy.key, false, { cacheOnly: true });
 }
 
 //: The bot's own journal, not the broker's feed: it is the only record that knows which
@@ -3242,69 +3246,82 @@ function formatActivityTime(value) {
   return date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
-async function ensureAnalytics(accountId, recompute = false) {
+//: A payload that says ``refreshing`` has a newer value being computed for it right now. This
+//: is the only route a background result has back to a page that has already been painted, so
+//: each loader hands its payload here and the reader looks again until the server stops saying
+//: so. Self-terminating: the poll re-arms from the *new* payload, and the server always clears
+//: the flag in a finally, so a failed compute ends the loop as surely as a successful one.
+const REFRESH_POLL_MS = 3000;
+const refreshTimers = {};
+
+function followRefresh(key, reload, payload) {
+  window.clearTimeout(refreshTimers[key]);
+  delete refreshTimers[key];
+  if (!payload?.refreshing) return;
+  refreshTimers[key] = window.setTimeout(reload, REFRESH_POLL_MS);
+}
+
+//: One shape for every read the page makes: keep what is on screen, ask again, swap in what
+//: comes back. ``cold`` is the difference between a visit and an explicit reload -- it clears
+//: first, so the card falls to its skeleton and fills with a fresh value, which is what a
+//: reader who reloaded asked to see. A visit never clears, so navigating somewhere you have
+//: been shows the last values immediately and replaces them without a flicker.
+//:
+//: This replaces a family of ``ensure*`` functions that returned early when anything was
+//: cached. Cache-first meant a value fetched once was shown forever: the only way to see a
+//: newer one was a Refresh button, which is a button that exists because the page declined to
+//: do the obvious thing on its own.
+async function loadLazy(store, loadingStore, key, url, { cold = false, timeoutMs = 15000, reload } = {}) {
+  if (loadingStore[key]) return;
+  if (cold) delete store[key];
+  loadingStore[key] = true;
+  render();
+  try {
+    const payload = await api(url, { timeoutMs });
+    store[key] = payload;
+    if (reload) followRefresh(`${url}`, reload, payload);
+  } catch (error) {
+    // A failed *refresh* must not throw away a good value that is already on screen; a failed
+    // first read has nothing to protect and reports itself.
+    if (!store[key]) store[key] = { error: error.message, rows: [] };
+  } finally {
+    loadingStore[key] = false;
+    render();
+  }
+}
+
+function loadAnalytics(accountId, cold = false) {
   const key = accountId || "";
-  // A plain read never waits on the broker: the server answers with what it has and works out
-  // the rest in the background. With recompute it crawls a year of transactions per broker.
-  if (state.analyticsLoading[key] || (state.analytics[key] && !recompute)) return;
-  state.analyticsLoading[key] = true;
-  try {
-    const payload = await api(
-      `/api/account-analytics?account_id=${encodeURIComponent(key)}${recompute ? "&refresh=true" : ""}`,
-      { timeoutMs: recompute ? 60000 : 8000 },
-    );
-    state.analytics[key] = payload;
-    // "computing" means the server started working it out for us. One look back, rather than
-    // a poll: the crawl takes a second or two, and if it is somehow still going the value
-    // lands on the next visit instead of this page holding a timer open forever.
-    if (payload.state === "computing") {
-      setTimeout(() => {
-        delete state.analytics[key];
-        ensureAnalytics(key);
-      }, ANALYTICS_SETTLE_MS);
-    }
-  } catch (error) {
-    state.analytics[key] = { error: error.message };
-  } finally {
-    state.analyticsLoading[key] = false;
-    render();
-  }
+  const url = `/api/account-analytics?account_id=${encodeURIComponent(key)}${cold ? "&refresh=true" : ""}`;
+  return loadLazy(state.analytics, state.analyticsLoading, key, url, {
+    cold,
+    // Never waits on the crawl either way: a plain read answers from the last snapshot and a
+    // forced one schedules the work rather than performing it, so both are lookups.
+    timeoutMs: 8000,
+    reload: () => loadAnalytics(accountId),
+  });
 }
 
-async function ensureActivity(accountId) {
+//: Live, not cached. Orders and holdings are what the account *is* right now, and a stale one
+//: would be a different kind of wrong from a stale realized-P/L figure -- so these two read the
+//: broker on every visit rather than being served from a snapshot.
+function loadActivity(accountId, cold = false) {
   const key = accountId || "";
-  if (state.activity[key] || state.activityLoading[key]) return;
-  state.activityLoading[key] = true;
-  try {
-    state.activity[key] = await api(`/api/activity?account_id=${encodeURIComponent(key)}`, { timeoutMs: 15000 });
-  } catch (error) {
-    state.activity[key] = { error: error.message, rows: [] };
-  } finally {
-    state.activityLoading[key] = false;
-    render();
-  }
+  return loadLazy(state.activity, state.activityLoading, key,
+    `/api/activity?account_id=${encodeURIComponent(key)}`, { cold });
 }
 
-async function ensureAlgorithmActivity(strategyKey) {
-  if (state.algorithmActivity[strategyKey] || state.algorithmActivityLoading[strategyKey]) return;
-  state.algorithmActivityLoading[strategyKey] = true;
-  try {
-    state.algorithmActivity[strategyKey] = await api(
-      `/api/algorithm-activity?strategy=${encodeURIComponent(strategyKey)}`, { timeoutMs: 8000 });
-  } catch (error) {
-    state.algorithmActivity[strategyKey] = { error: error.message, rows: [] };
-  } finally {
-    state.algorithmActivityLoading[strategyKey] = false;
-    render();
-  }
+function loadPositions(accountId, cold = false) {
+  const key = accountId || "";
+  return loadLazy(state.positions, state.positionsLoading, key,
+    `/api/positions?account_id=${encodeURIComponent(key)}`, { cold });
 }
 
-//: ensureAlgorithmActivity is cache-first (see above), so a "Refresh" click has to drop the
-//: cached copy before asking again -- calling it directly would just see the cache and do
-//: nothing, which is why the button used to appear to do nothing at all.
-function refreshAlgorithmActivity(strategyKey) {
-  delete state.algorithmActivity[strategyKey];
-  ensureAlgorithmActivity(strategyKey);
+//: The bot's own journal: a local read, always current, so there is nothing to cache and
+//: nothing to refresh behind. A visit re-reads it.
+function loadAlgorithmActivity(strategyKey, cold = false) {
+  return loadLazy(state.algorithmActivity, state.algorithmActivityLoading, strategyKey,
+    `/api/algorithm-activity?strategy=${encodeURIComponent(strategyKey)}`, { cold, timeoutMs: 8000 });
 }
 
 //: Clears this algorithm's own journal server-side -- not the broker's order history, which
@@ -3319,20 +3336,6 @@ async function clearAlgorithmActivity(strategyKey) {
     return;
   }
   render();
-}
-
-async function ensurePositions(accountId) {
-  const key = accountId || "";
-  if (state.positions[key] || state.positionsLoading[key]) return;
-  state.positionsLoading[key] = true;
-  try {
-    state.positions[key] = await api(`/api/positions?account_id=${encodeURIComponent(key)}`, { timeoutMs: 15000 });
-  } catch (error) {
-    state.positions[key] = { error: error.message, rows: [] };
-  } finally {
-    state.positionsLoading[key] = false;
-    render();
-  }
 }
 
 async function loadAccounts() {
@@ -3368,8 +3371,8 @@ async function saveCurrentConfig(strategyKey) {
       body: JSON.stringify({ strategy: strategyKey, config: merged }),
       timeoutMs: 8000,
     });
-    // Tuning feeds the backtest cache key, so the cached curve no longer describes this config.
-    delete state.backtests[strategyKey];
+    // Tuning feeds the backtest cache key, so the cached curves no longer describe this config.
+    forgetBacktests(strategyKey);
     delete state.signals[strategyKey];
     showToast("Configuration saved");
     render();
@@ -3511,14 +3514,7 @@ function wireEvents() {
   // Delegated: page bodies are replaced wholesale on every render.
   $("#content")?.addEventListener("click", (event) => {
     const route = currentRoute();
-    const refreshAccountButton = event.target.closest("#refreshAccountButton");
-    if (refreshAccountButton) return refreshAccount(refreshAccountButton.dataset.account);
     if (event.target.closest("#saveConfigButton")) return saveCurrentConfig(route.id);
-    if (event.target.closest("#runBacktestButton")) return loadBacktest(route.id, true);
-    if (event.target.closest("#refreshSignalsButton")) {
-      // Background refresh: the cached snapshot stays on screen until the new one lands.
-      return loadSignals(route.id, true);
-    }
     const signalRow = event.target.closest("[data-signal-symbol]");
     if (signalRow) {
       const symbol = signalRow.dataset.signalSymbol;
@@ -3526,7 +3522,6 @@ function wireEvents() {
       else state.expandedSignals.add(symbol);
       return render();
     }
-    if (event.target.closest("#refreshAlgoOrdersButton")) return refreshAlgorithmActivity(route.id);
     if (event.target.closest("#clearAlgoOrdersButton")) return clearAlgorithmActivity(route.id);
     if (event.target.closest("#refreshUniverseButton")) return recommendUniverse();
     if (event.target.closest("[data-apply-universe]")) return applyUniverseProposal();
@@ -3563,12 +3558,10 @@ function wireEvents() {
       return;
     }
     if (event.target.id === "backtestPeriodSelect") {
+      // Navigates. The hashchange repaints and the tab loads that window like any other
+      // visit, so there is nothing to force or fetch here -- this used to paint and probe by
+      // hand because the period lived in a global the address knew nothing about.
       configureBacktestPeriod(event.target.value);
-      // Forced: the select still holds focus after its own change event, so an ordinary
-      // render would defer, and the cached payload for the newly chosen window would sit in
-      // state unpainted until something else moved focus.
-      render({ force: true });
-      loadBacktest(currentRoute().id, false, { cacheOnly: true });
     }
   });
 

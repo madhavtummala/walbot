@@ -81,7 +81,11 @@ def test_overview_explains_the_algorithm_and_lists_what_it_traded() -> None:
     assert "At a glance" in tab
     assert "strategy.horizon" in tab and "strategy.risk" in tab
     assert "Orders this algorithm placed" in tab
-    assert "ensureAlgorithmActivity(strategy.key)" in tab
+    # The journal is rendered here and fetched by ``visitRoute`` on arrival -- loading moved out
+    # of the renderers when it stopped being cache-first, so asserting on a call inside this
+    # slice would now be asserting on the thing that was deliberately removed.
+    assert "state.algorithmActivity[strategy.key]" in tab
+    assert 'if (route.tab === "overview") loadAlgorithmActivity(route.id, cold);' in app_js
     # Blended broker P/L is not attributable to one algorithm, so it stays off this page.
     assert "day_pl" not in tab and "total_pl" not in tab
 
@@ -125,7 +129,12 @@ def test_broker_holdings_and_orders_live_on_the_account_page() -> None:
     # on the one slice that used to hold all of it.
     region = app_js[app_js.index("function accountMetricsHtml"):app_js.index("function renderAccountPage")]
     assert "day_pl" in region and "total_pl" in region
-    assert "including orders you placed yourself" in region
+    # The point is *where* the broker's feed is rendered, not the sentence that used to
+    # describe it: that copy said the same thing on every account on every visit and was
+    # dropped. Asserting on prose made this test fail for a wording change while it would
+    # still have passed had the orders table moved to the algorithm page, which is the one
+    # thing it exists to prevent.
+    assert "activity.rows.map" in app_js[app_js.index("function accountOrdersTable"):]
     # The algorithm page links out to the account rather than reproducing its numbers.
     assert '"#/account/' in app_js
     assert 'id="accountNav"' in index_html
@@ -231,13 +240,13 @@ def test_backtest_period_is_selectable() -> None:
 
     assert "const BACKTEST_PERIOD_CHOICES" in app_js
     assert 'id="backtestPeriodSelect"' in app_js
-    # Switching period clears cached curves so the chart cannot show the wrong window.
     assert "configureBacktestPeriod(event.target.value);" in app_js
-    # A <select> keeps focus after its own change event, and render() defers while a control
-    # is focused -- so without forcing, the cached payload for the newly chosen window landed
-    # in state and was never painted. It only appeared once something else moved focus, which
-    # made "Run backtest" look like the only way to change period.
-    assert "render({ force: true });" in app_js
+    # Switching period navigates. The window is part of the address, so the hashchange repaints
+    # and the tab loads that window like any other visit -- there is no cached payload left
+    # sitting unpainted behind a focused <select>, which is what the forced render was for.
+    assert "window.location.hash = `#/algo/${encodeURIComponent(route.id)}/backtest/${normalized}`" in app_js
+    # And the cache is keyed by window, so two periods cannot collide on one entry.
+    assert "function backtestKey(strategyKey, period)" in app_js
 
 
 def test_a_deferred_repaint_is_not_silently_dropped() -> None:
@@ -272,8 +281,10 @@ def test_tune_tab_renders_the_right_editor_per_algorithm() -> None:
     # Typed widgets, not a raw JSON box.
     assert "function configFieldKind" in app_js
     assert "function collectConfigValues" in app_js
-    # Saving tuning invalidates the cached backtest, which is keyed on that tuning.
-    assert "delete state.backtests[strategyKey];" in app_js
+    # Saving tuning invalidates every cached window, not just the one on screen: the curves are
+    # keyed by (strategy, period) now, so deleting the bare strategy key would name nothing.
+    assert "function forgetBacktests(strategyKey)" in app_js
+    assert "forgetBacktests(strategyKey);" in app_js
 
 
 def test_the_board_edits_the_algorithms_own_plan() -> None:
@@ -331,8 +342,7 @@ def test_signals_and_backtests_still_name_the_account_they_ran_for() -> None:
 
     assert "function accountForStrategy" in app_js
     # Signals: account_id goes into the query the fetch is built from.
-    assert "const account = accountForStrategy(strategyKey);" in app_js
-    assert "account_id: account," in app_js
+    assert "account_id: accountForStrategy(strategyKey)," in app_js
     # Backtests: the same answer, in the request body.
     assert "account_id: accountForStrategy(strategyKey)," in app_js
 
@@ -428,7 +438,10 @@ def test_shell_is_mobile_adaptable() -> None:
 def test_frontend_keeps_the_configured_backtest_period_and_chart() -> None:
     app_js, _, index_html = _assets()
 
-    assert 'let BACKTEST_PERIOD = "3m";' in app_js
+    assert 'const DEFAULT_BACKTEST_PERIOD = "3m";' in app_js
+    # Which window is on screen is the address's answer, not a module variable's: a reload lands
+    # on the window you were reading rather than silently falling back to the default.
+    assert "function routeBacktestPeriod(route = currentRoute())" in app_js
     assert "configureBacktestPeriod(statusPayload.config?.backtest_period)" not in app_js, (
         "the opening window is a constant now; the dashboard does not ask the server for it"
     )
@@ -530,7 +543,9 @@ def test_account_page_shows_broker_order_activity_beside_positions() -> None:
     page = app_js[app_js.index("function renderAccountPage"):app_js.index("function accountPositionsTable")]
     assert "Recent orders" in page
     assert "Positions" in page
-    assert "ensureActivity(account.id)" in page
+    assert "accountOrdersTable(activity)" in page
+    # Fetched on arrival rather than from inside the renderer, so that a repaint is not a read.
+    assert "loadActivity(route.id, cold);" in app_js
     assert "/api/activity?account_id=" in app_js
 
 

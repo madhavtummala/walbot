@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from ...data import fetch_daily_bars
 from ...data.bars import TRADING_MINUTES_PER_DAY
 from ...data.duckdb_store import pooled_connections
 from ...data.state_store import load_state, save_state
+from ...common.lazy_field import LazyField
 from ...data.universe import resolve_project_path
 from ...execution.metrics import calculate_performance_metrics
 from ...execution.replay import replay
@@ -139,6 +141,18 @@ def _save_backtest_cache(cache: dict[str, Any], path: str = BACKTEST_CACHE_PATH)
     cache_path = resolve_project_path(path)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
+
+
+#: How long a replayed curve is served before a visit starts recomputing it. A backtest does not
+#: age the way a signal view does -- the fingerprint in the cache key already catches a config
+#: change, and a finished replay of a closed window is the same curve tomorrow. What does move is
+#: the bar data underneath it, so this is a slow drip rather than a staleness rule: long enough
+#: that flipping between windows never queues a replay per click.
+BACKTEST_TTL_SECONDS = 6 * 60 * 60.0
+
+#: One row, read-modify-written, now from background threads. See the signals cache for the
+#: failure this prevents: two replays finishing together, the second dropping the first.
+_BACKTEST_LOCK = threading.Lock()
 
 
 def _cache_key(strategy: str, period: str, account_id: str = "") -> str:
@@ -471,46 +485,67 @@ def _unsupported_reason(strategy: str) -> str:
     )
 
 
+def _compute_and_store_backtest(key: str) -> dict[str, Any]:
+    """Replay one window and store the curve. The slow half, off the request thread.
+
+    The key carries the arguments rather than the fingerprint, so it can be read back into
+    them; the *stored* key is the fingerprinted one, which is what keeps a curve replayed under
+    one tuning from ever being served for another.
+    """
+    strategy, period, account_id = key.split("|", 2)
+    payload = _compute_backtest(strategy, period, account_id)
+    payload["cached"] = False
+    with _BACKTEST_LOCK:
+        cache = _load_backtest_cache()
+        cache["items"][_cache_key(strategy, period, account_id)] = payload
+        _save_backtest_cache(cache)
+    return payload
+
+
+BACKTESTS = LazyField("backtest", _compute_and_store_backtest, ttl_seconds=BACKTEST_TTL_SECONDS)
+
+
+def _stored_backtest(strategy: str, period: str, account_id: str) -> dict[str, Any] | None:
+    with _BACKTEST_LOCK:
+        return _load_backtest_cache()["items"].get(_cache_key(strategy, period, account_id))
+
+
 def backtest_payload(body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """One replayed window: the curve last computed, and a newer one on its way.
+
+    Visiting is what runs it. A read answers instantly with the stored curve and replays behind
+    it when that curve is older than :data:`BACKTEST_TTL_SECONDS`, so the chart is never blank
+    while a replay is in flight. ``refresh`` is an explicit reload: the stored curve is dropped
+    so the chart clears to its skeleton, and the replay runs in the background rather than
+    holding the request open for the minutes a long window takes.
+    """
     body = body or {}
     period = str(body.get("period") or _default_backtest_period()).lower()
     strategy = canonical_algorithm_id(str(body.get("strategy") or DEFAULT_STRATEGY_ID))[:80]
     refresh = bool(body.get("refresh"))
-    cache_only = bool(body.get("cache_only") or body.get("cacheOnly"))
     account_id = str(body.get("account_id") or body.get("accountId") or "")[:80]
+    shape = {"strategy": strategy, "period": period, "period_label": _period_label(period)}
 
     # Asked before the cache and before any work, so an unreplayable algorithm says so
     # consistently rather than surfacing a NotImplementedError as a 500.
     unsupported = _unsupported_reason(strategy)
     if unsupported:
-        return {
-            "strategy": strategy,
-            "period": period,
-            "period_label": _period_label(period),
-            "cached": False,
-            "supported": False,
-            "error": unsupported,
-        }
+        return {**shape, "cached": False, "supported": False, "error": unsupported}
 
-    key = _cache_key(strategy, period, account_id)
-    cache = _load_backtest_cache()
+    key = f"{strategy}|{period}|{account_id}"
 
-    if key in cache["items"] and not refresh:
-        cached_payload = dict(cache["items"][key])
-        cached_payload["cached"] = True
-        return cached_payload
+    if refresh:
+        with _BACKTEST_LOCK:
+            cache = _load_backtest_cache()
+            if cache["items"].pop(_cache_key(strategy, period, account_id), None) is not None:
+                _save_backtest_cache(cache)
+        BACKTESTS.recompute(key)
+        return {**shape, "cached": False, "state": "computing", "refreshing": True, "error": ""}
 
-    if not refresh or cache_only:
-        return {
-            "strategy": strategy,
-            "period": period,
-            "period_label": _period_label(period),
-            "cached": False,
-            "error": f"No cached {_period_label(period)} backtest is available.",
-        }
-
-    payload = _compute_backtest(strategy, period, account_id)
-    payload["cached"] = False
-    cache["items"][key] = payload
-    _save_backtest_cache(cache)
-    return payload
+    snapshot = BACKTESTS.get(key)
+    stored = snapshot["value"] or _stored_backtest(strategy, period, account_id)
+    if stored:
+        return {**stored, "cached": True, "state": "ready",
+                "refreshing": snapshot["refreshing"], "error": snapshot["error"]}
+    return {**shape, "cached": False, "state": snapshot["state"],
+            "refreshing": snapshot["refreshing"], "error": snapshot["error"]}

@@ -66,3 +66,39 @@ def _isolate_state_database(tmp_path_factory):
             os.environ.pop("STATE_DUCKDB_PATH", None)
         else:
             os.environ["STATE_DUCKDB_PATH"] = previous
+
+
+@pytest.fixture(autouse=True)
+def _no_background_recomputes():
+    """Keep a plain read from starting real work on a background thread.
+
+    Reading a lazy payload now schedules a recompute -- an algorithm run, or a replay of months
+    of bars -- and a test that merely asks what is cached would otherwise launch one. That gives
+    a suite which quietly backtests in the background, races the state store it is asserting on,
+    and is slow for a reason nothing in the test mentions.
+
+    Spawning is disabled instead, and the caches are cleared either side so one test's snapshot
+    is never another's starting state. A test that wants the value computed opts in with
+    ``run_lazy_inline``.
+    """
+    from src.api.payloads import algorithms, backtest
+
+    fields = (algorithms.SIGNALS, backtest.BACKTESTS)
+    originals = [field._spawn for field in fields]
+    for field in fields:
+        field.reset()
+        field._spawn = lambda work: None
+    try:
+        yield
+    finally:
+        for field, original in zip(fields, originals):
+            field._spawn = original
+            field.reset()
+
+
+@pytest.fixture
+def run_lazy_inline():
+    """Opt one lazy field into computing on the calling thread, for a test that wants the value."""
+    def enable(field):
+        field._spawn = lambda work: work()
+    return enable

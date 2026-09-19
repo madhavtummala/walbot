@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from dataclasses import asdict
 from hashlib import sha256
 from typing import Any
@@ -28,6 +29,7 @@ from ...algorithms.registry import LEGACY_ALGORITHM_IDS, canonical_algorithm_id,
 from ...core.runner import run_algorithm
 from ...data.order_journal import clear_order_journal, load_order_journal
 from ...data.state_store import load_state, save_state
+from ...common.lazy_field import LazyField
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,18 @@ def _load_signals_cache() -> dict[str, Any]:
 
 def _save_signals_cache(cache: dict[str, Any]) -> None:
     save_state(SIGNALS_CACHE_STATE_KEY, cache)
+
+
+#: A live signal view is one algorithm run against the market as it is now, so it ages with the
+#: session rather than with the tuning -- the fingerprint in the cache key already invalidates on
+#: a config change. Five minutes: long enough that clicking between tabs does not queue a run per
+#: click, short enough that a view opened after lunch is not still this morning's.
+SIGNALS_TTL_SECONDS = 300.0
+
+#: The store is a read-modify-write of one row, and recomputes now land on background threads.
+#: Without this, two algorithms finishing together would each write back the copy they read and
+#: whichever landed second would silently drop the other's snapshot.
+_SIGNALS_LOCK = threading.Lock()
 
 
 def _signals_cache_key(strategy: str, account_id: str = "") -> str:
@@ -213,52 +227,15 @@ def clear_algorithm_activity_payload(strategy: str = "") -> dict[str, Any]:
     return {"strategy": strategy_id, "rows": [], "cleared": cleared}
 
 
-def strategy_signals_payload(
-    strategy: str = DEFAULT_STRATEGY_ID,
-    account_id: str = "",
-    body: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Dashboard signal payload: run the algorithm, then let it render its own plan.
+def _compute_signals(key: str) -> dict[str, Any]:
+    """Run the algorithm and store the view. The slow half of the signal tab, off the request.
 
-    Deliberately the same ``run_algorithm`` call the scheduler makes, so the deck shows the
-    plan that would actually trade. Nothing is placed and nothing is written -- state is
-    committed on the execution path alone -- so opening this page cannot move an account's
-    ledger or shift what the next scheduled run does.
-
-    ``none`` used to fall back to the DCA plan's view, because DCA was not selectable in the
-    deck and would otherwise have had nowhere to render. DCA is an ordinary algorithm now, so
-    a saved ``none`` simply resolves to it.
-
-    The plan is computed for the account this strategy is deployed on, not for the default
-    account: a DCA plan is per account, so reading the default one showed the wrong plan.
-
-    Caching mirrors the backtest: a finished snapshot is stored per (strategy, config,
-    account) and served until ``refresh`` asks for a recompute, and ``cache_only`` probes
-    without ever computing -- which is what lets the dashboard open on a cached view instead
-    of recomputing every time it renders.
+    Deliberately the same ``run_algorithm`` call the scheduler makes, so the deck shows the plan
+    that would actually trade. Nothing is placed and nothing is written -- state is committed on
+    the execution path alone -- so running this on a background thread beside a scheduled run
+    cannot move an account's ledger or shift what the next scheduled run does.
     """
-    body = body or {}
-    refresh = bool(body.get("refresh"))
-    cache_only = bool(body.get("cache_only") or body.get("cacheOnly"))
-
-    strategy = canonical_algorithm_id(strategy or DEFAULT_STRATEGY_ID)[:80]
-    key = _signals_cache_key(strategy, account_id)
-    cache = _load_signals_cache()
-
-    if key in cache["items"] and not refresh:
-        cached_payload = dict(cache["items"][key])
-        cached_payload["cached"] = True
-        return cached_payload
-
-    # A probe reports the miss rather than paying for a compute; the dashboard treats this the
-    # same way it treats "no cached backtest yet" -- a state the next explicit Refresh changes.
-    if not refresh or cache_only:
-        return {
-            "strategy": strategy,
-            "cached": False,
-            "error": "No cached live signals are available.",
-        }
-
+    strategy, _, account_id = key.partition("|")
     config = config_for_strategy_view(strategy, account_id)
     algorithm = get_algorithm_class(strategy).from_config(config)
     view = algorithm.signal_view(run_algorithm(strategy, config, algorithm=algorithm))
@@ -273,7 +250,64 @@ def strategy_signals_payload(
         # quietly grow a field the contract in ``core.interfaces`` does not describe.
         "rows": [asdict(row) for row in view.rows],
     }
-    payload["cached"] = False
-    cache["items"][key] = payload
-    _save_signals_cache(cache)
+    with _SIGNALS_LOCK:
+        cache = _load_signals_cache()
+        cache["items"][_signals_cache_key(strategy, account_id)] = payload
+        _save_signals_cache(cache)
     return payload
+
+
+#: Keyed on the request's identity -- strategy and account -- rather than on the fingerprinted
+#: cache key, because this key has to be readable back into the arguments the compute needs.
+#: Config changes are still caught: the *stored* key carries the fingerprint, so a snapshot
+#: computed under one tuning is never served for another.
+SIGNALS = LazyField("live signals", _compute_signals, ttl_seconds=SIGNALS_TTL_SECONDS)
+
+
+def _stored_signals(strategy: str, account_id: str) -> dict[str, Any] | None:
+    with _SIGNALS_LOCK:
+        return _load_signals_cache()["items"].get(_signals_cache_key(strategy, account_id))
+
+
+def strategy_signals_payload(
+    strategy: str = DEFAULT_STRATEGY_ID,
+    account_id: str = "",
+    body: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The signal view for one algorithm: the last one computed, and a newer one on its way.
+
+    Visiting is what refreshes it. A read answers instantly with the stored snapshot and starts
+    a recompute behind it when that snapshot is older than :data:`SIGNALS_TTL_SECONDS`, so the
+    tab is never blank while a run is in flight and nobody has to press anything. This replaces
+    a ``cache_only`` probe that could only ever report a miss: the tab opened on a cached view
+    and then said "hit Refresh to compute them", which made a button the only way to get a
+    number the page could perfectly well have fetched itself.
+
+    ``refresh`` is an explicit reload. The stored snapshot is dropped so the page has nothing to
+    paint and draws its skeleton, and the run happens in the background -- forcing it
+    synchronously would hold the request open for the length of an algorithm run.
+    """
+    body = body or {}
+    refresh = bool(body.get("refresh"))
+    strategy = canonical_algorithm_id(strategy or DEFAULT_STRATEGY_ID)[:80]
+    key = f"{strategy}|{account_id}"
+
+    if refresh:
+        with _SIGNALS_LOCK:
+            cache = _load_signals_cache()
+            if cache["items"].pop(_signals_cache_key(strategy, account_id), None) is not None:
+                _save_signals_cache(cache)
+        SIGNALS.recompute(key)
+        return {"strategy": strategy, "cached": False, "state": "computing",
+                "refreshing": True, "error": ""}
+
+    snapshot = SIGNALS.get(key)
+    # The in-memory copy when this process has computed one, the stored copy otherwise -- which
+    # is what carries a snapshot across a restart, and is why replacing the container does not
+    # leave every signal tab blank.
+    stored = snapshot["value"] or _stored_signals(strategy, account_id)
+    if stored:
+        return {**stored, "cached": True, "state": "ready",
+                "refreshing": snapshot["refreshing"], "error": snapshot["error"]}
+    return {"strategy": strategy, "cached": False, "state": snapshot["state"],
+            "refreshing": snapshot["refreshing"], "error": snapshot["error"]}
