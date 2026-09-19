@@ -1,16 +1,27 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import replace
 from typing import Any, Dict, List
 
 import pandas as pd
 
 from ..base import BaseBrokerage
-from .client import TRADER_BASE, SchwabSession, account_hash
+from .client import TRADER_BASE, SchwabSession, account_hash, shared_session
 from ...core.interfaces import OrderRequest
 
 logger = logging.getLogger(__name__)
+
+#: Long enough to collapse the two or three account reads one request makes, short enough that
+#: nothing acting on the result is deciding from a stale book.
+_PAYLOAD_TTL_SECONDS = 5.0
+
+#: Market hours move at most twice a day; this was re-fetched on every account read.
+_MARKET_HOURS_TTL_SECONDS = 60.0
+
+#: How far back to read orders when the caller names no bound of its own.
+_MAX_ORDER_WINDOW_DAYS = 60
 
 _INSTRUCTIONS = {
     ("buy", False): "BUY",
@@ -175,16 +186,55 @@ def _first_number(payload: Dict[str, Any], *names: str) -> float | None:
     return None
 
 
-def _day_pl_percent(position: Dict[str, Any], market_value: float) -> float:
+def _opening_basis(position: Dict[str, Any], market_value: float) -> float:
+    """What the shares held overnight were worth at the previous close.
+
+    Schwab sends no previous close on a position, but its day figure is built as
+    ``marketValue - previousSessionQty * previousClose - currentDayCost``, so rearranging
+    recovers the opening leg without a quote call. Checked live against ``/marketdata/v1/quotes``.
+    """
+    day_pl = float(position.get("currentDayProfitLoss", 0.0) or 0.0)
+    day_cost = float(position.get("currentDayCost", 0.0) or 0.0)
+    return market_value - day_cost - day_pl
+
+
+def _day_pl(position: Dict[str, Any], market_value: float, qty: float, current_price: float,
+            multiplier: float) -> float:
+    """Today's move on this position, which is *not* what ``currentDayProfitLoss`` reports.
+
+    **``currentDayCost`` is stale, and Schwab's day figure is net of it.** Documented as the
+    session's purchases, it still carries the previous session's -- shares already inside
+    ``previousSessionLongQuantity`` and so already priced into the opening leg. Subtracting them
+    twice turned SCHD, 270 shares up ten cents, into ``-647.90`` against the platform's $27.00.
+
+    So the cost is added back, less whatever genuinely traded today: those shares were never in
+    the opening leg. They are priced at the current mark, the payload carrying the quantity that
+    moved but not what it paid. A sale is left alone -- the proceeds term has no counterpart here
+    and no live case to check it against.
+    """
+    day_pl = float(position.get("currentDayProfitLoss", 0.0) or 0.0)
+    day_cost = float(position.get("currentDayCost", 0.0) or 0.0)
+    if not day_cost:
+        return day_pl
+
+    opening_qty = position.get("previousSessionLongQuantity")
+    if opening_qty is None:
+        # Nothing says how much of the position is new, so only the stale cost can be restored.
+        return day_pl + day_cost
+    traded_today = qty - float(opening_qty or 0.0)
+    if traded_today < 0:
+        return day_pl
+    return day_pl + day_cost - traded_today * current_price * multiplier
+
+
+def _day_pl_percent(day_pl: float, opening_basis: float) -> float:
     """Today's move as a fraction of where the position started the session.
 
     Derived rather than read from ``currentDayProfitLossPercentage``, whose units Schwab
-    documents as a percentage while every other figure on this row is a fraction -- deriving it
-    from two numbers already trusted here avoids reporting a 1.2% move as 120%.
+    documents as a percentage while every other figure on this row is a fraction. That field is
+    also wrong the same way the dollar one is: ``-6.6`` for the SCHD day that was really +0.30%.
     """
-    day_pl = float(position.get("currentDayProfitLoss", 0.0) or 0.0)
-    opening_value = market_value - day_pl
-    return (day_pl / opening_value) if opening_value else 0.0
+    return (day_pl / opening_basis) if opening_basis else 0.0
 
 
 class SchwabBrokerage(BaseBrokerage):
@@ -204,9 +254,10 @@ class SchwabBrokerage(BaseBrokerage):
 
     def __init__(self, config: Dict[str, Any], session: SchwabSession | None = None):
         super().__init__(config)
-        self.session = session or SchwabSession(config)
+        self.session = session or shared_session(config)
         self._account_hash = ""
         self._account_number = str(getattr(config, "schwab_account_number", "") or "")
+        self._payload_cache: tuple[float, Dict[str, Any]] | None = None
 
     @property
     def account_hash(self) -> str:
@@ -215,12 +266,28 @@ class SchwabBrokerage(BaseBrokerage):
         return self._account_hash
 
     def _account_payload(self, fields: str = "") -> Dict[str, Any]:
-        params = {"fields": fields} if fields else None
-        payload = self.session.get(f"{TRADER_BASE}/accounts/{self.account_hash}", params=params)
+        """The account, positions included, from at most one request per :data:`_PAYLOAD_TTL_SECONDS`.
+
+        ``fields`` is accepted but no longer varies the request: ``fields=positions`` returns a
+        strict superset of the bare body, so asking for both was two round trips for one answer.
+
+        Per instance and short-lived on purpose. ``resolve_brokerage`` builds a new brokerage per
+        request, so this collapses the duplicate reads within one unit of work -- balances then
+        positions on a page load -- without serving a later request from an earlier snapshot.
+        """
+        now = time.monotonic()
+        if self._payload_cache and now - self._payload_cache[0] < _PAYLOAD_TTL_SECONDS:
+            return self._payload_cache[1]
+
+        payload = self.session.get(
+            f"{TRADER_BASE}/accounts/{self.account_hash}", params={"fields": "positions"}
+        )
         # Schwab wraps the account in ``securitiesAccount``; tolerate a bare body as well.
         if isinstance(payload, list):
             payload = payload[0] if payload else {}
-        return payload.get("securitiesAccount", payload) if isinstance(payload, dict) else {}
+        account = payload.get("securitiesAccount", payload) if isinstance(payload, dict) else {}
+        self._payload_cache = (now, account)
+        return account
 
     def get_account_state(self) -> Dict[str, Any]:
         account = self._account_payload()
@@ -300,6 +367,7 @@ class SchwabBrokerage(BaseBrokerage):
                 # quietly override a broker-reported number.
                 open_pl = (market_value - cost_basis) if qty > 0 else (cost_basis - abs(market_value))
             open_pl = float(open_pl or 0.0)
+            day_pl = _day_pl(pos, market_value, qty, current_price, multiplier)
             rows.append({
                 "symbol": symbol,
                 "qty": qty,
@@ -308,8 +376,8 @@ class SchwabBrokerage(BaseBrokerage):
                 "market_value": market_value,
                 "unrealized_pl": open_pl,
                 "unrealized_plpc": (open_pl / cost_basis) if cost_basis else 0.0,
-                "day_pl": float(pos.get("currentDayProfitLoss", 0.0) or 0.0),
-                "day_pl_percent": _day_pl_percent(pos, market_value),
+                "day_pl": day_pl,
+                "day_pl_percent": _day_pl_percent(day_pl, _opening_basis(pos, market_value)),
             })
         rows.sort(key=lambda row: abs(row["market_value"]), reverse=True)
         return rows
@@ -463,7 +531,9 @@ class SchwabBrokerage(BaseBrokerage):
         )
         return status.lower()
 
-    def get_orders(self, status: str = "WORKING") -> List[Dict[str, Any]]:
+    def get_orders(
+        self, status: str = "WORKING", *, days: int | None = None
+    ) -> List[Dict[str, Any]]:
         """Orders in ``status``, flattened so a bracket's legs are listed alongside plain orders.
 
         Flattened because a reconciler asks "is the stop still working", and under a trigger
@@ -476,13 +546,15 @@ class SchwabBrokerage(BaseBrokerage):
         which would have a reconciler conclude nothing is resting and submit the whole book again.
         """
         # ``fromEnteredTime``/``toEnteredTime`` are mandatory -- Schwab answers 400 without them,
-        # rather than defaulting to a recent window. Sixty days back covers any GTC bracket this
-        # algorithm could still have resting, since nothing it opens is held past a few sessions.
+        # rather than defaulting to a recent window. A caller that knows what bounds its orders
+        # says so; _MAX_ORDER_WINDOW_DAYS covers the rest, and is worth narrowing where it can
+        # be: the account page was reading 483 orders to find the one that was working.
         now = pd.Timestamp.now(tz="UTC")
+        window = max(int(days or _MAX_ORDER_WINDOW_DAYS), 1)
         orders = self.session.get(
             f"{TRADER_BASE}/accounts/{self.account_hash}/orders",
             params={
-                "fromEnteredTime": _schwab_time(now - pd.Timedelta(days=60)),
+                "fromEnteredTime": _schwab_time(now - pd.Timedelta(days=window)),
                 "toEnteredTime": _schwab_time(now),
             },
         ) or []
@@ -550,16 +622,25 @@ class SchwabBrokerage(BaseBrokerage):
                 self.cancel_order(str(order["order_id"]))
 
     def is_market_open(self) -> bool:
-        """Whether the equity market is open, per ``/marketdata/v1/markets``."""
+        """Whether the equity market is open, per ``/marketdata/v1/markets``.
+
+        Cached: ``get_account_state`` calls this, so every account read carried a second request.
+        """
         from .client import MARKETDATA_BASE
+
+        checked_at = time.monotonic()
+        cached = getattr(self.session, "market_hours", None)
+        if cached and checked_at - cached[0] < _MARKET_HOURS_TTL_SECONDS:
+            return cached[1]
 
         try:
             payload = self.session.get(f"{MARKETDATA_BASE}/markets", params={"markets": "equity"}) or {}
         except Exception as exc:  # A failed lookup must not read as "open".
             logger.warning("Could not read Schwab market hours: %s", exc)
-            return False
+            return False  # Not cached: a transient outage must not pin the answer shut.
 
         now = pd.Timestamp.now(tz="UTC")
+        is_open = False
         for product in (payload.get("equity") or {}).values():
             if not product.get("isOpen", False):
                 continue
@@ -567,8 +648,13 @@ class SchwabBrokerage(BaseBrokerage):
                 start = pd.to_datetime(window.get("start"), utc=True, errors="coerce")
                 end = pd.to_datetime(window.get("end"), utc=True, errors="coerce")
                 if pd.notna(start) and pd.notna(end) and start <= now <= end:
-                    return True
-        return False
+                    is_open = True
+                    break
+            if is_open:
+                break
+        if hasattr(self.session, "market_hours"):
+            self.session.market_hours = (checked_at, is_open)
+        return is_open
 
     def validate_short_sale_feasibility(
         self, symbol: str, quantity: float, target_shares: float, latest_price: float

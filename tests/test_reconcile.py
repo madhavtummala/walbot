@@ -30,7 +30,7 @@ class FakeBrokerage:
         self.replaced: list[tuple[str, OrderRequest]] = []
         self._next_id = 100
 
-    def get_orders(self, status: str = "WORKING") -> list[dict[str, Any]]:
+    def get_orders(self, status: str = "WORKING", *, days: int = 60) -> list[dict[str, Any]]:
         return list(self.working)
 
     def submit_order(self, request: OrderRequest) -> dict[str, Any]:
@@ -301,7 +301,7 @@ def test_state_is_persisted_even_when_nothing_was_placed() -> None:
 
 def test_a_brokerage_that_cannot_list_orders_is_refused_loudly() -> None:
     class Blind:
-        def get_orders(self, status="WORKING"):
+        def get_orders(self, status="WORKING", *, days=60):
             raise NotImplementedError("no order listing")
 
     # Proceeding would re-submit the whole book every run, since nothing would look present.

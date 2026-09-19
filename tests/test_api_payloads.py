@@ -9,6 +9,7 @@ from src.algorithms.bursty_dca import algorithm as dca_algorithm
 from src.algorithms.bursty_dca.algorithm import MAX_SIGMA
 from src.algorithms.bursty_dca.config import BurstyConfig
 from src.core.config import Config
+from src.api.payloads import algorithms as algorithms_module
 from src.api.payloads import backtest as backtest_module
 from src.execution import replay as replay_module
 from src.algorithms.registry import canonical_algorithm_id
@@ -271,7 +272,7 @@ def test_non_refresh_backtest_does_not_compute_without_cached_rows(monkeypatch) 
     assert "error" in payload
 
 
-def test_refresh_backtest_computes_with_market_data_refresh(monkeypatch) -> None:
+def test_refresh_backtest_computes_with_market_data_refresh(monkeypatch, run_lazy_inline) -> None:
     calls = []
 
     def fake_compute(strategy, period, account_id=""):
@@ -289,9 +290,14 @@ def test_refresh_backtest_computes_with_market_data_refresh(monkeypatch) -> None
     _patch_payloads(monkeypatch, "_save_backtest_cache", lambda cache: None)
     _patch_payloads(monkeypatch, "_compute_backtest", fake_compute)
 
+    # Inline, because ``refresh`` now schedules the replay instead of running it here: the
+    # request answers "computing" at once so the chart can clear to its skeleton, and a
+    # minutes-long replay never holds an HTTP request open.
+    run_lazy_inline(backtest_module.BACKTESTS)
     payload = backtest_payload({"strategy": "trend_following", "period": "6m", "refresh": True})
 
     assert payload["strategy"] == "trend_following"
+    assert payload["state"] == "computing"
     assert calls == [("trend_following", "6m", "")]
 
 
@@ -396,7 +402,7 @@ def test_none_strategy_resolves_to_dca(monkeypatch) -> None:
     assert canonical_algorithm_id("none") == "bursty_dca"
 
 
-def test_dca_view_states_its_planned_total(monkeypatch) -> None:
+def test_dca_view_states_its_planned_total(monkeypatch, run_lazy_inline) -> None:
     """What the plan commits to per month, not what happens to be deployable this minute.
 
     There is no Schedule row: cadence is set per deployment on the dashboard and every algorithm
@@ -422,7 +428,12 @@ def test_dca_view_states_its_planned_total(monkeypatch) -> None:
     # Reading the live store made the headline depend on whatever this machine's account
     # happened to have accrued, which is a different answer on every developer's laptop.
     with ephemeral_state():
-        payload = strategy_signals_payload("bursty_dca", body={"refresh": True})
+        # Two calls, because that is the contract: ``refresh`` drops the snapshot and schedules
+        # the run, and the view is read back once it has landed. Inline so "once it has landed"
+        # is deterministic here rather than a sleep.
+        run_lazy_inline(algorithms_module.SIGNALS)
+        strategy_signals_payload("bursty_dca", body={"refresh": True})
+        payload = strategy_signals_payload("bursty_dca")
 
     rows = {row["symbol"]: row for row in payload["rows"]}
     # Asserted only as "the bucket says something": what it says with real bars is covered by
@@ -660,9 +671,12 @@ def test_a_replayable_algorithm_is_unaffected(monkeypatch) -> None:
 
     payload = backtest_payload({"strategy": "rally_rotation", "period": "3m"})
 
-    # Falls through to the ordinary "no cached run" answer rather than the refusal.
+    # Falls through to the ordinary "nothing replayed yet" answer rather than the refusal.
+    # There is no "No cached ..." message any more: a visit *starts* the replay, so having
+    # nothing to show is a state that is already resolving rather than an error to report.
     assert payload.get("supported") is not False
-    assert "No cached" in payload["error"]
+    assert payload["state"] == "computing"
+    assert not payload["error"]
 
 
 def test_every_broker_that_knows_its_opening_value_reports_a_day_pl() -> None:

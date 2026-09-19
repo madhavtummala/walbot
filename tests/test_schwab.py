@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pandas as pd
 import pytest
 
 from src.brokerages.schwab.brokerage import SchwabBrokerage
@@ -562,6 +563,206 @@ def test_a_position_reports_the_day_and_the_life_of_the_trade_separately() -> No
     assert row["day_pl"] == 20.0
     # Against where the position started the session -- 1500 now, 20 of it earned today.
     assert round(row["day_pl_percent"], 6) == round(20.0 / 1_480.0, 6)
+
+
+def _one_position(position: dict) -> SchwabBrokerage:
+    return SchwabBrokerage(
+        _config(),
+        session=_session(
+            {
+                "/accounts/accountNumbers": FakeResponse(
+                    [{"accountNumber": "123", "hashValue": "HASH"}]
+                ),
+                "/accounts/HASH": FakeResponse(
+                    {"securitiesAccount": {"positions": [position]}}
+                ),
+            }
+        ),
+    )
+
+
+def test_a_stale_current_day_cost_is_not_charged_against_the_day() -> None:
+    """The live SCHD row, which read ``-647.90`` against the platform's ``$27.00``.
+
+    ``currentDayCost`` is documented as the session's purchases but still carried the previous
+    session's -- ``674.90`` here is exactly the prior day's two fills, 10 @ 33.74 and 10 @ 33.75.
+    Those shares are inside ``previousSessionLongQuantity``, so they are already priced into the
+    opening leg, and Schwab's day figure subtracts them a second time. The position did not
+    trade today, so the whole of that cost is spurious.
+    """
+    brokerage = _one_position(
+        {
+            "instrument": {"symbol": "SCHD", "assetType": "COLLECTIVE_INVESTMENT"},
+            "longQuantity": 270.0,
+            "shortQuantity": 0.0,
+            "previousSessionLongQuantity": 270.0,
+            "averagePrice": 34.290556,
+            "marketValue": 9_166.5,
+            "longOpenProfitLoss": -91.95012,
+            "currentDayProfitLoss": -647.9,
+            "currentDayCost": 674.9,
+        }
+    )
+
+    row = brokerage.get_position_details()[0]
+
+    assert round(row["day_pl"], 2) == 27.0
+    # 0.30% on the platform, against the -6.6% Schwab reports in its own percentage field.
+    assert round(row["day_pl_percent"], 4) == round(27.0 / 9_139.5, 4)
+    # The life of the trade is a separate reading and stays the broker's own.
+    assert round(row["unrealized_pl"], 2) == -91.95
+
+
+def test_shares_bought_today_are_not_counted_as_the_days_move() -> None:
+    """The live GS row: 1.875 shares held overnight, 0.125 bought this session.
+
+    Only the stale part of ``currentDayCost`` may be added back. The shares bought today were
+    never in the opening leg, so their cost belongs out of the figure -- otherwise a purchase
+    reads as a gain of its own size. The payload carries the quantity that moved but not what
+    it paid, so the current mark prices it, leaving "what the overnight shares did today".
+    """
+    brokerage = _one_position(
+        {
+            "instrument": {"symbol": "GS", "assetType": "EQUITY"},
+            "longQuantity": 2.0,
+            "shortQuantity": 0.0,
+            "previousSessionLongQuantity": 1.875,
+            "averagePrice": 1_014.6452375,
+            "marketValue": 1_903.52,
+            "longOpenProfitLoss": -125.770475,
+            "currentDayProfitLoss": -211.5275,
+            "currentDayCost": 354.16,
+        }
+    )
+
+    row = brokerage.get_position_details()[0]
+
+    # 142.6325 once the stale cost is restored, less 0.125 shares at the 951.76 mark.
+    assert round(row["day_pl"], 2) == 23.66
+
+
+def test_a_position_that_did_not_trade_today_keeps_the_brokers_own_figure() -> None:
+    """No ``currentDayCost`` means nothing to correct, and the broker's number stands."""
+    brokerage = _one_position(
+        {
+            "instrument": {"symbol": "XBI", "assetType": "COLLECTIVE_INVESTMENT"},
+            "longQuantity": 3.0,
+            "shortQuantity": 0.0,
+            "previousSessionLongQuantity": 3.0,
+            "averagePrice": 150.0,
+            "marketValue": 514.48,
+            "longOpenProfitLoss": 64.48,
+            "currentDayProfitLoss": 12.38,
+            "currentDayCost": 0.0,
+        }
+    )
+
+    assert brokerage.get_position_details()[0]["day_pl"] == 12.38
+
+
+def test_a_position_sold_into_today_is_left_to_the_broker() -> None:
+    """A proceeds term has no counterpart in this payload, so a sale invents nothing.
+
+    Reducing a position is the one shape the live account could not exercise, and guessing at
+    it would be worse than reporting what Schwab says.
+    """
+    brokerage = _one_position(
+        {
+            "instrument": {"symbol": "AIQ", "assetType": "EQUITY"},
+            "longQuantity": 5.0,
+            "shortQuantity": 0.0,
+            "previousSessionLongQuantity": 8.0,
+            "averagePrice": 60.0,
+            "marketValue": 320.0,
+            "longOpenProfitLoss": 20.0,
+            "currentDayProfitLoss": 20.0,
+            "currentDayCost": 100.0,
+        }
+    )
+
+    assert brokerage.get_position_details()[0]["day_pl"] == 20.0
+
+
+def test_one_account_read_serves_balances_and_positions_together() -> None:
+    """``fields=positions`` is a superset of the bare body, so asking for both was two calls.
+
+    The account page reads state then positions. That was five round trips per account, of which
+    one carried data -- and the sidebar does it for every account on the page.
+    """
+    session = _session(
+        {
+            "/accounts/accountNumbers": FakeResponse([{"accountNumber": "123", "hashValue": "HASH"}]),
+            "/accounts/HASH": FakeResponse(
+                {
+                    "securitiesAccount": {
+                        "currentBalances": {"liquidationValue": 5_000.0, "cashBalance": 1_200.0},
+                        "initialBalances": {"liquidationValue": 4_900.0},
+                        "positions": [
+                            {
+                                "instrument": {"symbol": "XSD", "assetType": "EQUITY"},
+                                "longQuantity": 10,
+                                "shortQuantity": 0,
+                                "averagePrice": 100.0,
+                                "marketValue": 1_500.0,
+                                "currentDayProfitLoss": 20.0,
+                            }
+                        ],
+                    }
+                }
+            ),
+            "/marketdata/v1/markets": FakeResponse({"equity": {}}),
+        }
+    )
+    brokerage = SchwabBrokerage(_config(), session=session)
+
+    state = brokerage.get_account_state()
+    rows = brokerage.get_position_details()
+
+    assert state["equity"] == 5_000.0
+    assert state["last_equity"] == 4_900.0
+    assert rows[0]["symbol"] == "XSD"
+    account_reads = [call for call in session._session.calls if call[1].endswith("/accounts/HASH")]
+    assert len(account_reads) == 1, "balances and positions must come from one read"
+    # The hash is resolved once and the token fetched once, however many reads follow.
+    assert sum(1 for _, url, _ in session._session.calls if url.endswith("accountNumbers")) == 1
+    assert sum(1 for _, url, _ in session._session.calls if "oauth/token" in url) == 1
+
+
+def test_market_hours_are_not_re_read_for_every_account_call() -> None:
+    session = _session(
+        {
+            "/accounts/accountNumbers": FakeResponse([{"accountNumber": "123", "hashValue": "HASH"}]),
+            "/accounts/HASH": FakeResponse({"securitiesAccount": {"currentBalances": {}}}),
+            "/marketdata/v1/markets": FakeResponse({"equity": {}}),
+        }
+    )
+    brokerage = SchwabBrokerage(_config(), session=session)
+
+    brokerage.is_market_open()
+    brokerage.is_market_open()
+
+    assert sum(1 for _, url, _ in session._session.calls if "markets" in url) == 1
+
+
+def test_the_order_window_is_the_callers_to_narrow() -> None:
+    """A caller that knows what bounds its orders says so; the rest get the wide default."""
+    routes = {
+        "/accounts/accountNumbers": FakeResponse([{"accountNumber": "123", "hashValue": "HASH"}]),
+        "/orders": FakeResponse([]),
+    }
+    session = _session(routes)
+    brokerage = SchwabBrokerage(_config(), session=session)
+
+    brokerage.get_orders("WORKING", days=21)
+    brokerage.get_orders("WORKING")
+
+    windows = [
+        pd.Timestamp(call[2]["params"]["toEnteredTime"])
+        - pd.Timestamp(call[2]["params"]["fromEnteredTime"])
+        for call in session._session.calls if call[1].endswith("/orders")
+    ]
+    assert round(windows[0].total_seconds() / 86_400) == 21
+    assert round(windows[1].total_seconds() / 86_400) == 60
 
 
 def test_an_option_position_is_measured_against_the_contract_multiplier() -> None:

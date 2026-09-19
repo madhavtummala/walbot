@@ -130,12 +130,18 @@ def strategy_signals(
     strategy: str = Query(default=DEFAULT_STRATEGY_ID, max_length=80),
     account_id: str = Query(default="", max_length=80),
     refresh: bool = Query(default=False),
-    cache_only: bool = Query(default=False),
 ) -> dict[str, Any]:
+    """The last computed signal view, with a newer one started behind it when it is stale.
+
+    ``cache_only`` is gone. It existed so the tab could open without computing, back when a
+    plain read would otherwise have run the algorithm synchronously; now a plain read never
+    computes on the request thread, so the probe has nothing left to protect against.
+    ``refresh=true`` is an explicit reload: drop the snapshot, recompute in the background.
+    """
     return strategy_signals_payload(
         strategy=strategy,
         account_id=account_id,
-        body={"refresh": refresh, "cache_only": cache_only},
+        body={"refresh": refresh},
     )
 
 
