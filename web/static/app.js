@@ -2216,7 +2216,7 @@ function renderSidebar() {
   const route = currentRoute();
   const algorithmNav = $("#algorithmNav");
   if (algorithmNav) {
-    algorithmNav.innerHTML = algorithmChoices().map((strategy) => {
+    setHtml(algorithmNav, algorithmChoices().map((strategy) => {
       const deployment = deploymentFor(strategy.key);
       const active = route.page === "algo" && route.id === strategy.key;
       const status = deploymentStatus(deployment ? [deployment] : []);
@@ -2228,7 +2228,7 @@ function renderSidebar() {
             <span class="navItemLabel">${escapeHtml(strategy.name)}</span>
           </a>
         </li>`;
-    }).join("");
+    }).join(""));
   }
 
   renderAccountNav();
@@ -2245,16 +2245,21 @@ function whenIdle(fn) {
   else setTimeout(fn, 200);
 }
 
+//: Which account set the sidebar prefetch has already been armed for. Accounts are
+//: user-editable at runtime, so this is keyed on the ids rather than on a plain "done" flag:
+//: adding an account has to start a walk that covers it.
+let prefetchedAccounts = "";
+
 function renderAccountNav() {
   const host = $("#accountNav");
   if (!host) return;
   const rows = accountRows();
   if (!rows.length) {
-    host.innerHTML = `<li><span class="navEmpty">No accounts yet</span></li>`;
+    setHtml(host, `<li><span class="navEmpty">No accounts yet</span></li>`);
     return;
   }
   const route = currentRoute();
-  host.innerHTML = rows.map((account) => {
+  setHtml(host, rows.map((account) => {
     const deployed = deployments().filter((deployment) => deployment.account_id === account.id);
     // An account is only as live as the algorithms pointed at it, and it cannot be live at
     // all without credentials.
@@ -2276,7 +2281,7 @@ function renderAccountNav() {
       <li>
         <a class="navItem navItem--stat${active ? " is-active" : ""}" href="#/account/${escapeHtml(account.id)}" title="${escapeHtml(title)}">${inner}</a>
       </li>`;
-  }).join("");
+  }).join(""));
   // The sidebar is the only place an idle account's P/L shows, so it pulls its own numbers --
   // but last, and only once the page the user actually opened has had its turn. Five broker
   // reads fired eagerly here raced the current page's own fetches and made both slower, on an
@@ -2288,10 +2293,25 @@ function renderAccountNav() {
   // about a second -- half the page holding and half tearing down, which reads worse than a
   // whole page would. They go one at a time, after the positions pass: nothing on screen is
   // waiting for them, and firing fifteen reads at once would race the foreground this defers to.
+  //
+  // Armed once per account set, not once per paint. ``ensurePositions`` and its siblings do
+  // treat "already present" as nothing to do -- so re-arming never re-fetched -- but it queued
+  // a fresh idle callback on every render, and the walk it starts is fifteen broker reads deep
+  // and several seconds long. Running one of those at a time is the point; running a new one
+  // behind every paint meant the tail of one overlapped the head of the next for as long as
+  // anything on screen was still settling.
+  const ready = rows.filter((account) => account.credentials_ready);
+  const token = ready.map((account) => account.id).join(",");
+  if (!token || token === prefetchedAccounts) return;
+  prefetchedAccounts = token;
   whenIdle(async () => {
-    const ready = rows.filter((account) => account.credentials_ready);
-    await Promise.all(ready.map((account) => ensurePositions(account.id)));
-    for (const account of ready) {
+    // The open account first. The prefetch exists so that *switching* is instant, but the
+    // account you are already looking at is the one with cards on screen waiting on these
+    // reads, and it was previously served in whatever order the config happened to list it.
+    const open = currentRoute().page === "account" ? currentRoute().id : "";
+    const ordered = [...ready].sort((a, b) => (b.id === open) - (a.id === open));
+    await Promise.all(ordered.map((account) => ensurePositions(account.id)));
+    for (const account of ordered) {
       await ensureActivity(account.id);
       await ensureAnalytics(account.id);
     }
@@ -2313,11 +2333,11 @@ function renderNavFooter() {
        </button>`
     : "";
   const runtime = runtimeSummary();
-  footer.innerHTML = `${authRow}
+  setHtml(footer, `${authRow}
     <span class="navHealth is-muted" title="${escapeHtml(runtime.detail)}">
       <span class="statusDot is-${runtime.status}" aria-hidden="true"></span>
       <span class="navHealthLabel">Bot</span>
-    </span>`;
+    </span>`);
 }
 
 //: Every deployment gets its own scheduler loop, so the runtime has one state *per algorithm*.
@@ -2397,7 +2417,34 @@ function tabBar(strategyKey, activeTab) {
 //: nothing: the cached payload arrived, went into state, and no paint ever followed.
 let renderDeferred = false;
 
+//: A paint asked for but not yet performed. Every loader calls ``render`` when it settles, and
+//: opening a page fans out to a dozen of them -- five accounts' positions, then their orders and
+//: dividends one at a time -- so the screen was rebuilt a dozen times over a few seconds for
+//: payloads most of which the open page does not read. One frame is the smallest interval a
+//: person can perceive, so collapsing a burst into one paint per frame loses nothing and is the
+//: difference between a page that flickers through a navigation and one that does not.
+let renderScheduled = 0;
+
 function render(options = {}) {
+  // ``force`` comes from a control's own change handler, which needs the new DOM in place
+  // before the event finishes -- and is never part of a burst. It paints now, and cancels any
+  // frame already owed so the same paint does not happen twice.
+  if (options.force) {
+    if (renderScheduled) {
+      window.cancelAnimationFrame(renderScheduled);
+      renderScheduled = 0;
+    }
+    renderNow(options);
+    return;
+  }
+  if (renderScheduled) return;
+  renderScheduled = window.requestAnimationFrame(() => {
+    renderScheduled = 0;
+    renderNow();
+  });
+}
+
+function renderNow(options = {}) {
   const route = currentRoute();
   renderSidebar();
   const content = $("#content");
@@ -2501,14 +2548,27 @@ function renderAlgorithmPage(content, strategyKey, tab) {
        </div>`
     : `<span class="pill is-idle">No account available</span>`;
 
+  const header = pageHeader({ title: strategy.name, subtitle: strategy.blurb, actions });
+  const tabs = tabBar(strategy.key, tab);
+
   // Marks whose shell is in the DOM. The account page patches its regions in place when
   // the marker already says "account", so leaving a stale one here would have it patch
   // into a tree this page just replaced.
-  content.dataset.shell = "algo";
-  content.innerHTML = `
-    ${pageHeader({ title: strategy.name, subtitle: strategy.blurb, actions })}
-    ${tabBar(strategy.key, tab)}
-    <div class="tabBody" id="tabBody"></div>`;
+  //
+  // This page now keeps the same contract. It used to rebuild unconditionally, which was
+  // invisible when a paint meant a navigation -- but a paint is mostly *not* a navigation: it
+  // is a background read settling somewhere else in the app, and every one of them tore down
+  // and rebuilt a page whose header and tab bar had not changed a character.
+  if (content.dataset.shell === "algo") {
+    setRegion("algoHeader", header);
+    setRegion("algoTabs", tabs);
+  } else {
+    content.dataset.shell = "algo";
+    content.innerHTML = `
+      <div id="algoHeader">${header}</div>
+      <div id="algoTabs">${tabs}</div>
+      <div class="tabBody" id="tabBody"></div>`;
+  }
 
   const body = $("#tabBody");
   if (tab === "overview") renderOverviewTab(body, strategy, deployment);
@@ -2575,9 +2635,27 @@ function accountNotesHtml(account, analytics, busy, deployed) {
       <a class="chip is-link" href="#/algo/${escapeHtml(deployment.algorithm)}/${DEFAULT_TAB}">${escapeHtml(strategyByKey(deployment.algorithm).name)}</a>`).join("")}</div>` : ""}`;
 }
 
+//: What was last *written* to an element, which is not the same question as what it currently
+//: contains. Several regions are a shell that something else then fills -- ``renderDca`` draws
+//: into the board's ``<svg>``, ``renderBacktestChart`` into the chart's -- so reading ``innerHTML``
+//: back compares a populated tree against an empty shell, never matches, and rebuilds every
+//: time, which is the whole cost this is meant to avoid. Keyed on the element, so replacing a
+//: parent correctly forgets its children: the new child is a different object with no entry.
+const lastHtml = new WeakMap();
+
+//: Write only what changed. Every paint re-derives the whole page as a string, and most paints
+//: are provoked by a loader whose payload this particular region does not read -- five accounts'
+//: positions settling while an algorithm page is open, say. Comparing before assigning turns
+//: those into a string compare instead of a subtree rebuild, which is also what keeps an open
+//: <select>, a scroll offset and a half-finished drag alive across them.
+function setHtml(host, html) {
+  if (!host || lastHtml.get(host) === html) return;
+  host.innerHTML = html;
+  lastHtml.set(host, html);
+}
+
 function setRegion(id, html) {
-  const host = document.getElementById(id);
-  if (host && host.innerHTML !== html) host.innerHTML = html;
+  setHtml(document.getElementById(id), html);
 }
 
 function renderAccountPage(content, accountId) {
@@ -2852,7 +2930,7 @@ function renderTuneTab(body, strategy) {
   // The editor comes first and the explanation second. Tune is the page you open to *change*
   // something, and the explainer runs to a screenful on an algorithm with a long formula --
   // which put the control the reader came for below the fold on every visit.
-  body.innerHTML = `
+  setHtml(body, `
     ${hasBudgets ? `
     <section class="card tuneCard">
       <div class="cardHead">
@@ -2869,7 +2947,7 @@ function renderTuneTab(body, strategy) {
       <div class="tuneBody" id="tuneBody"></div>
       <div class="cardActions" id="configActions" hidden><button class="ctl" type="button" id="saveConfigButton">Save changes</button></div>
     </section>
-    ${explainerCard(strategy)}`;
+    ${explainerCard(strategy)}`);
   if (hasBudgets) renderBudgetBoard($("#dcaBoard"), strategy);
   renderConfigForm($("#tuneBody"), strategy);
 }
@@ -2889,17 +2967,17 @@ function renderBudgetBoard(host, strategy) {
   }
   state.planStrategy = strategy.key;
   if (!entry) {
-    host.innerHTML = `<p class="emptyState">Loading budgets.</p>`;
+    setHtml(host, `<p class="emptyState">Loading budgets.</p>`);
     return;
   }
   // The algorithm says what a bubble's number means -- a month of budget for DCA, a position's
   // risk for Options Flip -- so the board does not have to assume one reading.
   const unitHint = entry.tune_budget_hint || "Dollars per month, per symbol";
   if (hint) hint.textContent = `${unitHint} · algorithms.${entry.config_key || strategy.key}.plan`;
-  host.innerHTML = `<svg class="bubbleBoard" id="bubbleBoard" role="img"
+  setHtml(host, `<svg class="bubbleBoard" id="bubbleBoard" role="img"
     aria-label="Interactive buy and sell budget bubbles"></svg>
     <p class="cardHint">${escapeHtml(plan?.effect || "")} Scroll a bubble to change its budget, or select one and type the amount. Drag between buckets, drag one off the buckets to remove it, double-click to add.
-      <span id="planSaveStatus" class="saveStatus">${escapeHtml(planSaveStatusText())}</span></p>`;
+      <span id="planSaveStatus" class="saveStatus">${escapeHtml(planSaveStatusText())}</span></p>`);
   renderDca();
 }
 
@@ -2907,7 +2985,7 @@ function renderConfigForm(host, strategy) {
   const entry = state.algorithmConfigs[strategy.key];
   const hint = $("#configHint");
   if (!entry) {
-    host.innerHTML = `<p class="emptyState">Loading configuration.</p>`;
+    setHtml(host, `<p class="emptyState">Loading configuration.</p>`);
     ensureAlgorithmConfig(strategy.key);
     return;
   }
@@ -2922,9 +3000,9 @@ function renderConfigForm(host, strategy) {
   // is deliberate: the knobs you actually reach for first, and related ones adjacent.
   const fields = orderedConfigFields(entry.config || {}, docs)
     .filter(([key]) => !isPlanField(strategy.key, key));
-  host.innerHTML = fields.length
+  setHtml(host, fields.length
     ? `<div class="configForm">${fields.map(([key, value]) => renderConfigField(key, value, docs[key])).join("")}</div>`
-    : `<p class="emptyState">This algorithm has no tunable parameters.</p>`;
+    : `<p class="emptyState">This algorithm has no tunable parameters.</p>`);
   // Plain DCA has no parameters of its own -- its config is the plan on the board above -- so
   // it would otherwise offer a button that saves an empty object over its config section.
   const actions = $("#configActions");
@@ -2950,14 +3028,14 @@ function renderBacktestTab(body, strategy) {
   // The backend says whether a replay is meaningful for this algorithm. Offering the controls
   // anyway would present an action that cannot succeed, and the reason only after it failed.
   if (backtest && backtest.supported === false) {
-    body.innerHTML = `
+    setHtml(body, `
       <section class="card">
         <div class="cardHead"><h2>Backtest</h2></div>
         <p class="emptyState">${escapeHtml(backtest.error || "This algorithm cannot be backtested.")}</p>
-      </section>`;
+      </section>`);
     return;
   }
-  body.innerHTML = `
+  setHtml(body, `
     <section class="card">
       <div class="cardHead">
         <h2>Backtest</h2>
@@ -2983,14 +3061,14 @@ function renderBacktestTab(body, strategy) {
         .filter(Boolean)
         .map((line) => `<p class="cardHint">${escapeHtml(line)}</p>`)
         .join("")}
-    </section>`;
+    </section>`);
   renderBacktestChart(backtest, $("#backtestChart"));
   if (!backtest && !loading) loadBacktest(strategy.key, false, { cacheOnly: true });
 }
 
 function renderOverviewTab(body, strategy, deployment) {
   const backtest = state.backtests[strategy.key];
-  body.innerHTML = `
+  setHtml(body, `
     <div class="overviewGrid">
       <section class="card overviewHow">
         <h2>How it works</h2>
@@ -3021,7 +3099,7 @@ function renderOverviewTab(body, strategy, deployment) {
         </div>
         ${algorithmOrdersTable(state.algorithmActivity[strategy.key])}
       </section>
-    </div>`;
+    </div>`);
   ensureAlgorithmActivity(strategy.key);
 }
 
@@ -3035,7 +3113,7 @@ function renderSignalsTab(body, strategy) {
   const asOf = payload && !payload.error && payload.updated_at
     ? `<span class="cardHint">as of ${escapeHtml(formatActivityTime(payload.updated_at))}</span>`
     : "";
-  body.innerHTML = `
+  setHtml(body, `
     <section class="card">
       <div class="cardHead">
         <h2>Live signals</h2>
@@ -3061,7 +3139,7 @@ function renderSignalsTab(body, strategy) {
                   ? renderSignalFallbackRows(strategy, payload, (strategy.signals || []).slice(0, 5))
                   : `<p class="emptyState">No live signals cached yet. Hit Refresh to compute them.</p>`}
       </div>
-    </section>`;
+    </section>`);
   // Cache-first, like the Backtest tab: probe for a stored snapshot without ever computing.
   if (!payload && !loading) loadSignals(strategy.key, false, { cacheOnly: true });
 }
