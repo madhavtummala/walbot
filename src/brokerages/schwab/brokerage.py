@@ -3,13 +3,14 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import replace
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 import pandas as pd
 
 from ..base import BaseBrokerage
 from .client import TRADER_BASE, SchwabSession, account_hash, shared_session
-from ...core.interfaces import OrderRequest
+from ...core.interfaces import MARKET_TZ, OrderRequest
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +238,65 @@ def _day_pl_percent(day_pl: float, opening_basis: float) -> float:
     return (day_pl / opening_basis) if opening_basis else 0.0
 
 
+#: Transaction types that move cash across the account boundary rather than earn it. Trades net
+#: to zero here by construction, and ``DIVIDEND_OR_INTEREST`` is deliberately absent: a dividend
+#: is money the account genuinely made and belongs in the day. ``JOURNAL`` is included because a
+#: transfer between two of your own Schwab accounts arrives as one, and a five-figure journal
+#: read as profit is a far worse error than a waived wire fee read as funding.
+_FUNDING_TYPES = frozenset(
+    {
+        "ACH_RECEIPT", "ACH_DISBURSEMENT", "CASH_RECEIPT", "CASH_DISBURSEMENT",
+        "WIRE_IN", "WIRE_OUT", "ELECTRONIC_FUND", "JOURNAL",
+    }
+)
+
+
+def _funded_since(transactions: List[Dict[str, Any]], opened_at: datetime) -> float:
+    """Net cash moved across the account boundary since the session opened, which is not P/L.
+
+    The day's move is ``liquidationValue`` now less ``liquidationValue`` at the open, and
+    funding moves the first without touching the second. Both directions were seen live on one
+    account: a $4,000 deposit read as a +$4,435 day, and wiring the same $4,000 back out read
+    as -$3,956, where the market had supplied +$435 and +$44. Putting the transfer into the
+    opening basis lands it on both sides, where it cancels.
+
+    Read from transactions rather than from balances because **no balance field reports a
+    withdrawal**. ``cashReceipts`` looks like the answer and is not: it still read 4000 the
+    morning after the deposit, on both snapshots, so it is a running total rather than the
+    session's, and it has no disbursement counterpart at all.
+
+    Filtered on ``time``, the moment the money actually moved, because ``tradeDate`` and
+    ``settlementDate`` cannot separate these: the deposit that landed on the 21st and the wire
+    that left on the 22nd were stamped with the same ``tradeDate`` of the 22nd, and counting
+    the deposit twice would have swung the day by $4,000 in the other direction.
+    """
+    total = 0.0
+    for item in transactions:
+        if str(item.get("type", "")) not in _FUNDING_TYPES:
+            continue
+        if str(item.get("status", "VALID")) != "VALID":
+            continue
+        moved = _parse_transaction_time(item.get("time"))
+        if moved is None or moved < opened_at:
+            continue
+        total += float(item.get("netAmount", 0.0) or 0.0)
+    return total
+
+
+def _parse_transaction_time(raw: Any) -> datetime | None:
+    """Schwab stamps ``time`` as ``2026-09-22T08:22:29+0000``, which is ISO bar the colon."""
+    if not raw:
+        return None
+    text = str(raw).replace("Z", "+00:00")
+    if len(text) > 5 and text[-5] in "+-" and ":" not in text[-5:]:
+        text = f"{text[:-2]}:{text[-2:]}"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 class SchwabBrokerage(BaseBrokerage):
     """Charles Schwab Trader API.
 
@@ -258,6 +318,7 @@ class SchwabBrokerage(BaseBrokerage):
         self._account_hash = ""
         self._account_number = str(getattr(config, "schwab_account_number", "") or "")
         self._payload_cache: tuple[float, Dict[str, Any]] | None = None
+        self._funding_cache: tuple[float, float] | None = None
 
     @property
     def account_hash(self) -> str:
@@ -297,6 +358,8 @@ class SchwabBrokerage(BaseBrokerage):
         # blank where Alpaca showed a number.
         opening = account.get("initialBalances", {}) or {}
         last_equity = opening.get("liquidationValue", opening.get("accountValue"))
+        if last_equity is not None:
+            last_equity = float(last_equity) + self._funded_today()
         # Schwab reports total account value as liquidationValue; equity is margin-only.
         equity = balances.get("liquidationValue", balances.get("equity", 0.0))
         cash = balances.get("cashBalance", balances.get("cashAvailableForTrading", 0.0))
@@ -308,6 +371,28 @@ class SchwabBrokerage(BaseBrokerage):
             "is_market_open": self.is_market_open(),
             **({"last_equity": float(last_equity)} if last_equity is not None else {}),
         }
+
+    def _funded_today(self) -> float:
+        """Deposits less withdrawals since this session opened, cached like the account read.
+
+        One unfiltered transaction call rather than one per funding type: the day's activity is
+        a handful of rows, and this sits behind every account tile on the dashboard. A failure
+        here must not blank the page -- an unreadable transaction feed leaves the day's P/L as
+        the balances alone report it, which is the figure that was shown before this existed.
+        """
+        now = time.monotonic()
+        if self._funding_cache and now - self._funding_cache[0] < _PAYLOAD_TTL_SECONDS:
+            return self._funding_cache[1]
+
+        session_open = datetime.now(MARKET_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+        try:
+            rows = self._transactions("", session_open.date(), session_open.date())
+            funded = _funded_since(rows, session_open)
+        except Exception as error:  # noqa: BLE001 - a day's P/L is worth less than the page
+            logger.warning("Could not read Schwab transfers for %s: %s", self._account_number, error)
+            funded = 0.0
+        self._funding_cache = (now, funded)
+        return funded
 
     def get_positions(self) -> Dict[str, float]:
         account = self._account_payload(fields="positions")
@@ -412,7 +497,7 @@ class SchwabBrokerage(BaseBrokerage):
                 })
         return rows
 
-    def _transactions(self, types: str, start=None, end=None) -> List[Dict[str, Any]]:
+    def _transactions(self, types: str = "", start=None, end=None) -> List[Dict[str, Any]]:
         """Raw transactions of one ``types`` over a window, defaulting to the trailing year.
 
         Shared by the dividend and fill feeds, which differ only in the type they ask for and
@@ -433,7 +518,7 @@ class SchwabBrokerage(BaseBrokerage):
             params={
                 "startDate": start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
                 "endDate": end_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-                "types": types,
+                **({"types": types} if types else {}),
             },
         )
         return [item for item in (payload or []) if isinstance(item, dict)]
