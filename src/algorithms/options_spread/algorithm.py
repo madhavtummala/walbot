@@ -1,4 +1,4 @@
-"""Options Flip: buy a predicted intraday low, sell into strength, let the exchange hold the stop.
+"""Options Spread: buy a predicted intraday low, sell into strength, let the exchange hold the stop.
 
 The strategy in one paragraph. Read a multi-day trend per symbol and require this morning's
 pre-market to confirm it -- if it does not, that symbol does not trade today. Pick the nearest
@@ -50,7 +50,7 @@ from ..base import BaseAlgorithm
 from ..rally_rotation.memory import market_day, sessions_since
 from ..reconcile import ORDER_IDS_KEY, reconcile_orders
 from ...common.config_utils import raw_plan
-from .config import BUCKETS, MAX_ITEM_AMOUNT, OptionsFlipConfig, sanitize_plan, symbol_budget
+from .config import BUCKETS, MAX_ITEM_AMOUNT, OptionsSpreadConfig, sanitize_plan, symbol_budget
 from .contracts import affordable_contracts, fill_missing_deltas, select_contract
 from .candidates import scoring_parameters, trend_strength
 from .indicators import average_true_range, quote_age_seconds
@@ -75,11 +75,11 @@ REGULAR_OPEN = time(9, 30)
 REGULAR_CLOSE = time(16, 0)
 
 
-class OptionsFlipAlgorithm(BaseAlgorithm):
+class OptionsSpreadAlgorithm(BaseAlgorithm):
     """One option contract per symbol, bought at a predicted low and bracketed at the exchange."""
 
-    algorithm_id = "options_flip"
-    tuning_class = OptionsFlipConfig
+    algorithm_id = "options_spread"
+    tuning_class = OptionsSpreadConfig
 
     #: Per-symbol dollar budgets are a nested structure rather than a list of scalars, so the
     #: Tune screen renders them through the same bubble board Bursty DCA uses. The buckets differ
@@ -102,7 +102,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
     #: every bid at the mark would report an edge that came entirely from the simulation.
     backtestable = False
     not_backtestable_reason = (
-        "Options Flip works by leaving orders resting at the broker -- a limit waiting for a "
+        "Options Spread works by leaving orders resting at the broker -- a limit waiting for a "
         "price, and a stop the exchange watches between runs. The backtester fills at the mark "
         "and keeps no resting orders, so it cannot represent either. Simulating it would report "
         "an edge that came from the simulation rather than the strategy."
@@ -144,7 +144,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
         ]
         if seeded:
             logger.info(
-                "Options Flip seeded its board from the retired symbols key: %s. Save the Tune "
+                "Options Spread seeded its board from the retired symbols key: %s. Save the Tune "
                 "board to make this explicit; the key is not read once the board exists.",
                 ", ".join(item["symbol"] for item in seeded),
             )
@@ -449,7 +449,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
         # comes from here when the contract has spoken for itself: the band's own entry, in
         # dollars, feeds ``plan_symbol`` as ``entry_premium`` below, the same input the held
         # branch already trusts on the sell side. Measured on real Sep-18 option history
-        # (``tools/options_flip_contract_backtest.py --band``), the option band's sell logic beat
+        # (``tools/options_spread_contract_backtest.py --band``), the option band's sell logic beat
         # the static delta translation +5.8pp mean return on the same 21 fills -- the entry side
         # gets the same treatment now rather than staying on the cruder translation alone. An
         # absurd band (thin-sample artifact) falls back to the translation automatically, inside
@@ -570,7 +570,7 @@ class OptionsFlipAlgorithm(BaseAlgorithm):
         return signal_view(plan)
 
 
-def _session_facts(now: datetime, cfg: OptionsFlipConfig) -> dict[str, Any]:
+def _session_facts(now: datetime, cfg: OptionsSpreadConfig) -> dict[str, Any]:
     """The run's market-time facts, so nothing downstream needs a clock."""
     moment = now.astimezone(MARKET_TZ) if now.tzinfo else now.replace(tzinfo=MARKET_TZ)
     today = moment.date()
@@ -643,11 +643,11 @@ def _held_contracts(positions: dict[str, Any]) -> dict[str, str]:
         try:
             held[parse_osi(symbol)["underlying"]] = str(symbol).upper()
         except ValueError:
-            logger.warning("Options Flip ignoring unparseable position symbol %r", symbol)
+            logger.warning("Options Spread ignoring unparseable position symbol %r", symbol)
     return held
 
 
-def _volatility_gate(daily: pd.DataFrame, cfg: OptionsFlipConfig) -> tuple[bool, Check, float]:
+def _volatility_gate(daily: pd.DataFrame, cfg: OptionsSpreadConfig) -> tuple[bool, Check, float]:
     """This strategy needs movement, and not too much of it.
 
     Below the floor there is no excursion to predict and the premium is pure theta. Above the
@@ -680,7 +680,7 @@ def _premarket(context: AlgorithmContext, symbol: str) -> dict[str, Any] | None:
     try:
         return reader(symbol)
     except Exception as exc:
-        logger.warning("Options Flip could not read pre-market for %s: %s", symbol, exc)
+        logger.warning("Options Spread could not read pre-market for %s: %s", symbol, exc)
         return None
 
 
@@ -697,7 +697,7 @@ def _pick_contract(context, symbol, direction, session, cfg, spot=0.0, annual_vo
     try:
         chain = reader(symbol, option_type=direction, min_dte=cfg.min_dte, max_dte=cfg.max_dte)
     except Exception as exc:
-        logger.warning("Options Flip could not read the chain for %s: %s", symbol, exc)
+        logger.warning("Options Spread could not read the chain for %s: %s", symbol, exc)
         return None, None, [Check(
             label="Option chain available",
             ok=False, value=str(exc)[:80], limit="a chain the provider could return", blocking=True,
@@ -991,7 +991,7 @@ def _option_band_for(
             raw = reader(str(osi).upper())
             option_bars = prepare_option_bars(raw) if raw is not None and not raw.empty else None
         except Exception as exc:  # noqa: BLE001 - band prediction must never break the plan
-            logger.warning("Options Flip could not read option history for %s: %s", osi, exc)
+            logger.warning("Options Spread could not read option history for %s: %s", osi, exc)
     if option_bars is not None and not option_bars.empty:
         option_bars["tmp_day"] = pd.to_datetime(option_bars["ts"]).dt.date
         session_open = mark
@@ -1058,7 +1058,7 @@ def _refresh_held(memory, held_contract, context, session, cfg) -> dict[str, Any
         memory["fill_price"] = mark
         memory.setdefault("filled_day", session["market_day"])
         logger.warning(
-            "Options Flip found %s held with no cost basis from the broker and no recorded "
+            "Options Spread found %s held with no cost basis from the broker and no recorded "
             "fill; anchoring the stop to the mark instead",
             held_contract,
         )
@@ -1085,12 +1085,12 @@ def _refresh_held(memory, held_contract, context, session, cfg) -> dict[str, Any
         memory["delta"] = current
         if previous and abs(current - previous) > 0.05:
             logger.info(
-                "Options Flip re-priced %s delta %.3f -> %.3f as the underlying moved",
+                "Options Spread re-priced %s delta %.3f -> %.3f as the underlying moved",
                 held_contract, previous, current,
             )
     elif not previous:
         logger.warning(
-            "Options Flip has no delta for %s and could not derive one; its exit target will "
+            "Options Spread has no delta for %s and could not derive one; its exit target will "
             "sit at the mark until the underlying can be priced",
             held_contract,
         )

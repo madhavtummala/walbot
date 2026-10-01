@@ -1,4 +1,4 @@
-"""Options Flip: regime gating, level probabilities, greeks pricing and the state machine.
+"""Options Spread: regime gating, level probabilities, greeks pricing and the state machine.
 
 The bar fixtures are built rather than recorded, so each one states the fact it is testing --
 "thirty sessions that each dipped 2% and closed up" is a distribution with a known quantile, and
@@ -12,9 +12,9 @@ from datetime import date
 import pandas as pd
 import pytest
 
-from src.algorithms.options_flip.config import ENTRY_MAX_REPRICE_PCT, OptionsFlipConfig
-from src.algorithms.options_flip.contracts import affordable_contracts, select_contract
-from src.algorithms.options_flip.indicators import (
+from src.algorithms.options_spread.config import ENTRY_MAX_REPRICE_PCT, OptionsSpreadConfig
+from src.algorithms.options_spread.contracts import affordable_contracts, select_contract
+from src.algorithms.options_spread.indicators import (
     average_true_range,
     directional_volume,
     ma_slope,
@@ -22,16 +22,16 @@ from src.algorithms.options_flip.indicators import (
     opening_range,
     session_vwap,
 )
-from src.algorithms.options_flip.levels import conditional_levels, excursion_samples
-from src.algorithms.options_flip.pricing import Scenario, max_debit, option_change, scenarios
-from src.algorithms.options_flip.regime import bull_regime
-from src.algorithms.options_flip.excursion import (
+from src.algorithms.options_spread.levels import conditional_levels, excursion_samples
+from src.algorithms.options_spread.pricing import Scenario, max_debit, option_change, scenarios
+from src.algorithms.options_spread.regime import bull_regime
+from src.algorithms.options_spread.excursion import (
     option_price_for,
     session_fraction_remaining,
     target_price,
 )
-from src.algorithms.options_flip.lifecycle import BIDDING, FLAT, HELD, plan_symbol
-from src.algorithms.options_flip.option_band import choose_band, option_daily_atr, prepare_option_bars
+from src.algorithms.options_spread.lifecycle import BIDDING, FLAT, HELD, plan_symbol
+from src.algorithms.options_spread.option_band import choose_band, option_daily_atr, prepare_option_bars
 from src.core.interfaces import MARKET_TZ
 from src.core.options import CALL, PUT, OptionContract, is_osi_symbol, osi_symbol, parse_osi
 
@@ -61,7 +61,7 @@ def contract(**kwargs) -> OptionContract:
     return OptionContract(**{**defaults, **kwargs})
 
 
-def cfg(**kwargs) -> OptionsFlipConfig:
+def cfg(**kwargs) -> OptionsSpreadConfig:
     # Most lifecycle fixtures were written against a live stop; the deployed default is now off.
     kwargs.setdefault("stop_loss_pct", 0.10)
     # The contract fixtures below are built at delta 0.45, so the tests state the target that
@@ -69,7 +69,7 @@ def cfg(**kwargs) -> OptionsFlipConfig:
     # what any of these assertions are about.
     kwargs.setdefault("target_delta", 0.45)
     # No ``symbols`` argument: which symbols trade is the board's statement now, not a knob.
-    return OptionsFlipConfig(**kwargs)
+    return OptionsSpreadConfig(**kwargs)
 
 
 def session(**kwargs) -> dict:
@@ -393,7 +393,7 @@ class TestLifecycle:
 
     def test_the_deadline_is_reported_as_blocking(self) -> None:
         # The deadline is the session after max_hold_sessions have elapsed.
-        outcome = self.held(memory={"sessions_held": OptionsFlipConfig().max_hold_sessions})
+        outcome = self.held(memory={"sessions_held": OptionsSpreadConfig().max_hold_sessions})
         assert any(check.blocking for check in outcome.checks)
 
     def test_at_the_deadline_the_ask_converges_on_the_market(self) -> None:
@@ -458,7 +458,7 @@ class TestSessionOpen:
         return frame
 
     def test_yesterdays_bars_are_not_todays_open(self) -> None:
-        from src.algorithms.options_flip.algorithm import _session_open
+        from src.algorithms.options_spread.algorithm import _session_open
 
         # A 390-minute lookback at 09:35 spans yesterday afternoon; iloc[0] is yesterday's open.
         frame = self.intraday(["2026-02-09", "2026-02-10"])
@@ -466,7 +466,7 @@ class TestSessionOpen:
         assert _session_open(frame, "2026-02-10", fallback=0.0) == pytest.approx(101.0)
 
     def test_no_bars_today_falls_back_to_the_current_price(self) -> None:
-        from src.algorithms.options_flip.algorithm import _session_open
+        from src.algorithms.options_spread.algorithm import _session_open
 
         # Right at the bell the first print of the session *is* the open.
         frame = self.intraday(["2026-02-09"])
@@ -474,7 +474,7 @@ class TestSessionOpen:
         assert _session_open(frame, "2026-02-10", fallback=123.0) == pytest.approx(123.0)
 
     def test_no_bars_at_all_falls_back(self) -> None:
-        from src.algorithms.options_flip.algorithm import _session_open
+        from src.algorithms.options_spread.algorithm import _session_open
 
         assert _session_open(None, "2026-02-10", fallback=55.0) == pytest.approx(55.0)
 
@@ -534,7 +534,7 @@ class TestRepriceTolerance:
     """Anti-churn has to scale with the spread, not just the price."""
 
     def tolerance(self, bid: float, ask: float, price: float) -> float:
-        from src.algorithms.options_flip.lifecycle import _reprice_tolerance
+        from src.algorithms.options_spread.lifecycle import _reprice_tolerance
 
         return _reprice_tolerance(contract(bid=bid, ask=ask), price, cfg())
 
@@ -604,7 +604,7 @@ class TestWorthTrading:
     """A predicted move of a few dollars is not a trade, however right the setup looks."""
 
     def estimate(self, low: float, high: float, config, contracts: int = 1) -> dict:
-        from src.algorithms.options_flip.algorithm import _estimate
+        from src.algorithms.options_spread.algorithm import _estimate
 
         # delta 1.0 makes the underlying move translate one-for-one, so the band is exactly
         # (high - low) and the arithmetic under test is the sizing, not the translation.
@@ -863,9 +863,9 @@ class TestEveryConfiguredSymbolGetsARow:
         symbols collapsed all three into absence -- which reads as a broken deck.
         """
         import inspect
-        from src.algorithms.options_flip.algorithm import OptionsFlipAlgorithm
+        from src.algorithms.options_spread.algorithm import OptionsSpreadAlgorithm
 
-        source = inspect.getsource(OptionsFlipAlgorithm._plan_one)
+        source = inspect.getsource(OptionsSpreadAlgorithm._plan_one)
         # the gate zeroes the size; it does not short-circuit the analysis below it
         assert "trending" in source and "contracts = 0" in source
 
@@ -873,13 +873,13 @@ class TestEveryConfiguredSymbolGetsARow:
         """Every symbol clearing its own threshold trades. There is no top-N."""
         from dataclasses import fields
 
-        assert "max_candidates" not in {f.name for f in fields(OptionsFlipConfig())}
+        assert "max_candidates" not in {f.name for f in fields(OptionsSpreadConfig())}
 
 
 class TestOptionBandFeedsTheEntry:
     """The band computed for the deck must actually reach the resting bid, not just the sell side.
 
-    Measured on real Sep-18 option history (``tools/options_flip_contract_backtest.py --band``),
+    Measured on real Sep-18 option history (``tools/options_spread_contract_backtest.py --band``),
     the option band beat the static delta translation by +5.8pp mean return on the sell side --
     the reason to wire it into the entry too. A prior version computed ``band`` purely as a deck
     diagnostic and never passed it into ``plan_symbol``, so the entry silently stayed on the
@@ -888,9 +888,9 @@ class TestOptionBandFeedsTheEntry:
 
     def test_plan_one_passes_the_bands_entry_as_entry_premium(self) -> None:
         import inspect
-        from src.algorithms.options_flip.algorithm import OptionsFlipAlgorithm
+        from src.algorithms.options_spread.algorithm import OptionsSpreadAlgorithm
 
-        source = inspect.getsource(OptionsFlipAlgorithm._plan_one)
+        source = inspect.getsource(OptionsSpreadAlgorithm._plan_one)
         assert "entry_premium=" in source
 
 
@@ -921,13 +921,13 @@ class TestAsymmetricPatience:
     def test_the_two_sides_are_configured_independently(self) -> None:
         # Was ``entry_patience > 1.0 > exit_patience`` -- exit deliberately impatient, entry
         # deliberately patient. A combo sweep over August (see
-        # ``tools/options_flip_config_combo_sweep.py``) found holding the exit firmer, not
+        # ``tools/options_spread_config_combo_sweep.py``) found holding the exit firmer, not
         # conceding it faster, was the single most reliable lever measured ($230 vs $89 solo,
         # $484 across a real 17-trade sample when combined with a longer hold): both sides are
         # patient now, by tuning rather than by original design. What this test still pins is
         # only that they are set apart, not which one is larger -- if a future month's data
         # argues the old asymmetry back, that assumption is the one to revisit.
-        c = OptionsFlipConfig()
+        c = OptionsSpreadConfig()
         assert c.entry_patience != c.exit_patience
 
 
@@ -972,7 +972,7 @@ class TestAbsoluteTrendScore:
 
         There is now no batch call to get this wrong -- the function takes one symbol's bars.
         """
-        from src.algorithms.options_flip.candidates import scoring_parameters, trend_strength
+        from src.algorithms.options_spread.candidates import scoring_parameters, trend_strength
 
         params = scoring_parameters()
         strong = self._rising(0.004, 0.004)
@@ -982,7 +982,7 @@ class TestAbsoluteTrendScore:
 
     def test_both_names_can_be_positive_at_once(self) -> None:
         """A cross-sectional score cannot express "everything is rallying"; this can."""
-        from src.algorithms.options_flip.candidates import scoring_parameters, trend_strength
+        from src.algorithms.options_spread.candidates import scoring_parameters, trend_strength
 
         params = scoring_parameters()
         scores = [trend_strength(self._rising(d, 0.003), params) for d in (0.004, 0.003)]
@@ -990,7 +990,7 @@ class TestAbsoluteTrendScore:
 
     def test_and_both_can_be_negative(self) -> None:
         """Nothing trending means nothing to trade -- which a ranking could never say."""
-        from src.algorithms.options_flip.candidates import scoring_parameters, trend_strength
+        from src.algorithms.options_spread.candidates import scoring_parameters, trend_strength
 
         params = scoring_parameters()
         scores = [trend_strength(self._rising(d, 0.003), params) for d in (-0.004, -0.003)]
@@ -998,7 +998,7 @@ class TestAbsoluteTrendScore:
 
     def test_the_threshold_is_in_sigma_not_rank(self) -> None:
         """Volatility-scaled, so one number works on a quiet ETF and a violent one alike."""
-        from src.algorithms.options_flip.candidates import scoring_parameters, trend_strength
+        from src.algorithms.options_spread.candidates import scoring_parameters, trend_strength
 
         params = scoring_parameters()
         quiet = trend_strength(self._rising(0.002, 0.001), params)
@@ -1049,9 +1049,9 @@ def test_the_tune_page_order_matches_the_config_dataclass() -> None:
     from dataclasses import fields as _fields
     from src.algorithms.explainers import EXPLAINERS
 
-    documented = list(EXPLAINERS["options_flip"]["parameters"])
+    documented = list(EXPLAINERS["options_spread"]["parameters"])
     assert documented[0] == "plan"
-    declared = [f.name for f in _fields(OptionsFlipConfig())]
+    declared = [f.name for f in _fields(OptionsSpreadConfig())]
     assert documented[1:] == declared
 
 
@@ -1108,7 +1108,7 @@ class TestOptionBand:
         frame = _option_bars(_dip_then_run_sessions(30, dip=0.06, run=0.08, base=10.0))
         bars = prepare_option_bars(frame)
         mark = 10.0
-        from src.algorithms.options_flip.option_band import _sane
+        from src.algorithms.options_spread.option_band import _sane
         band = choose_band(
             bars, minute=600, option_mark=mark, session_open=mark, config=cfg(),
             max_hold=1,
@@ -1228,8 +1228,8 @@ def test_a_held_position_prices_against_what_it_actually_cost() -> None:
     be on the first poll after the fill -- so the deck reported an unrealised P&L against a
     price the account never paid, and the stop was struck off it too.
     """
-    from src.algorithms.options_flip.algorithm import _refresh_held
-    from src.algorithms.options_flip.config import OptionsFlipConfig
+    from src.algorithms.options_spread.algorithm import _refresh_held
+    from src.algorithms.options_spread.config import OptionsSpreadConfig
 
     osi = "GLD   260918C00400000"
     bidding_memory = {
@@ -1242,7 +1242,7 @@ def test_a_held_position_prices_against_what_it_actually_cost() -> None:
         cost_basis = {osi: 14.80}      # what the broker says we actually paid
 
     memory = _refresh_held(
-        dict(bidding_memory), osi, Context(), {"market_day": "2026-09-10"}, OptionsFlipConfig()
+        dict(bidding_memory), osi, Context(), {"market_day": "2026-09-10"}, OptionsSpreadConfig()
     )
 
     assert memory["fill_price"] == 14.80
@@ -1251,8 +1251,8 @@ def test_a_held_position_prices_against_what_it_actually_cost() -> None:
 def test_a_held_position_falls_back_when_the_broker_reports_no_cost() -> None:
     """A brokerage that cannot report a cost basis must still be tradable -- the position is
     anchored to the mark, and that is worth a warning rather than silence."""
-    from src.algorithms.options_flip.algorithm import _refresh_held
-    from src.algorithms.options_flip.config import OptionsFlipConfig
+    from src.algorithms.options_spread.algorithm import _refresh_held
+    from src.algorithms.options_spread.config import OptionsSpreadConfig
 
     osi = "GLD   260918C00400000"
 
@@ -1262,7 +1262,7 @@ def test_a_held_position_falls_back_when_the_broker_reports_no_cost() -> None:
 
     memory = _refresh_held(
         {"contract": osi, "bid": 15.00}, osi, Context(),
-        {"market_day": "2026-09-10"}, OptionsFlipConfig(),
+        {"market_day": "2026-09-10"}, OptionsSpreadConfig(),
     )
 
     assert memory["fill_price"] == 15.40
@@ -1271,8 +1271,8 @@ def test_a_held_position_falls_back_when_the_broker_reports_no_cost() -> None:
 def test_the_cost_basis_is_refreshed_rather_than_frozen() -> None:
     """A partial fill or a second lot moves the average, so it is re-read every run instead of
     being recorded once and kept."""
-    from src.algorithms.options_flip.algorithm import _refresh_held
-    from src.algorithms.options_flip.config import OptionsFlipConfig
+    from src.algorithms.options_spread.algorithm import _refresh_held
+    from src.algorithms.options_spread.config import OptionsSpreadConfig
 
     osi = "GLD   260918C00400000"
 
@@ -1282,7 +1282,7 @@ def test_the_cost_basis_is_refreshed_rather_than_frozen() -> None:
 
     memory = _refresh_held(
         {"contract": osi, "fill_price": 14.80}, osi, Context(),
-        {"market_day": "2026-09-10"}, OptionsFlipConfig(),
+        {"market_day": "2026-09-10"}, OptionsSpreadConfig(),
     )
 
     assert memory["fill_price"] == 15.10
@@ -1303,10 +1303,10 @@ class _Quote:
 def test_the_board_sizes_a_position_in_dollars() -> None:
     """The budget is the loss cap -- a long option cannot lose more than its premium -- so the
     same dollar figure means the same risk on a $17 premium and a $2.50 one."""
-    from src.algorithms.options_flip.config import OptionsFlipConfig
-    from src.algorithms.options_flip.contracts import affordable_contracts
+    from src.algorithms.options_spread.config import OptionsSpreadConfig
+    from src.algorithms.options_spread.contracts import affordable_contracts
 
-    config = OptionsFlipConfig()
+    config = OptionsSpreadConfig()
 
     assert affordable_contracts(_Quote(17.50), config, budget=3_500.0) == 2    # $3,500
     assert affordable_contracts(_Quote(2.50), config, budget=3_500.0) == 14    # $3,500
@@ -1314,32 +1314,32 @@ def test_the_board_sizes_a_position_in_dollars() -> None:
 
 def test_a_budget_below_one_contract_opens_nothing() -> None:
     """Rounded down, never up: a budget that cannot cover one contract is not a position."""
-    from src.algorithms.options_flip.config import OptionsFlipConfig
-    from src.algorithms.options_flip.contracts import affordable_contracts
+    from src.algorithms.options_spread.config import OptionsSpreadConfig
+    from src.algorithms.options_spread.contracts import affordable_contracts
 
-    assert affordable_contracts(_Quote(17.50), OptionsFlipConfig(), budget=1_000.0) == 0
+    assert affordable_contracts(_Quote(17.50), OptionsSpreadConfig(), budget=1_000.0) == 0
 
 
 def test_a_symbol_absent_from_the_board_opens_nothing() -> None:
     """No bubble, no position. The board is the whole statement of what may be traded, so
     there is no global unit left for an unfunded symbol to fall back to."""
-    from src.algorithms.options_flip.config import OptionsFlipConfig, sanitize_plan, symbol_budget
-    from src.algorithms.options_flip.contracts import affordable_contracts
+    from src.algorithms.options_spread.config import OptionsSpreadConfig, sanitize_plan, symbol_budget
+    from src.algorithms.options_spread.contracts import affordable_contracts
 
     plan = sanitize_plan({"call": {"items": [{"symbol": "GLD", "amount": 3_500}]}}, {"GLD", "USO"})
 
     assert symbol_budget(plan, "GLD", "call") == 3_500.0
     assert symbol_budget(plan, "USO", "call") == 0.0
-    assert affordable_contracts(_Quote(8.00), OptionsFlipConfig(), budget=0.0) == 0
+    assert affordable_contracts(_Quote(8.00), OptionsSpreadConfig(), budget=0.0) == 0
 
 
 def test_the_board_declares_call_and_put_buckets() -> None:
     """The put bucket exists so adding puts is config rather than a new code path -- nothing
     reads it until the level model and the regime gate are mirrored."""
-    from src.algorithms.options_flip.algorithm import OptionsFlipAlgorithm
-    from src.algorithms.options_flip.config import sanitize_plan
+    from src.algorithms.options_spread.algorithm import OptionsSpreadAlgorithm
+    from src.algorithms.options_spread.config import sanitize_plan
 
-    assert OptionsFlipAlgorithm.tune_buckets == ("call", "put")
+    assert OptionsSpreadAlgorithm.tune_buckets == ("call", "put")
     assert set(sanitize_plan({}, {"GLD"})) == {"call", "put"}
 
 
@@ -1348,17 +1348,17 @@ def test_editing_a_budget_invalidates_the_cached_signal_view() -> None:
     served for the new ones."""
     from dataclasses import replace
 
-    from src.algorithms.options_flip.algorithm import OptionsFlipAlgorithm
+    from src.algorithms.options_spread.algorithm import OptionsSpreadAlgorithm
     from src.core.config import get_config
 
-    algorithm = OptionsFlipAlgorithm({})
+    algorithm = OptionsSpreadAlgorithm({})
     base = get_config()
     symbol = sorted(base.symbols)[0]
 
     def with_budget(amount: float):
         return replace(base, algorithm_configs={
             **(base.algorithm_configs or {}),
-            "options_flip": {"plan": {"call": {"items": [{"symbol": symbol, "amount": amount}]}}},
+            "options_spread": {"plan": {"call": {"items": [{"symbol": symbol, "amount": amount}]}}},
         })
 
     assert algorithm.config_fingerprint(with_budget(3_500)) != algorithm.config_fingerprint(with_budget(1_000))
@@ -1374,8 +1374,8 @@ def test_a_held_position_reprices_its_delta_as_the_underlying_moves() -> None:
     """
     import pandas as pd
 
-    from src.algorithms.options_flip.algorithm import _refresh_held
-    from src.algorithms.options_flip.config import OptionsFlipConfig
+    from src.algorithms.options_spread.algorithm import _refresh_held
+    from src.algorithms.options_spread.config import OptionsSpreadConfig
 
     osi = "USO   260916C00142000"
 
@@ -1394,7 +1394,7 @@ def test_a_held_position_reprices_its_delta_as_the_underlying_moves() -> None:
         return Context()
 
     session = {"market_day": "2026-09-10"}
-    config = OptionsFlipConfig()
+    config = OptionsSpreadConfig()
 
     deep = _refresh_held({"contract": osi, "fill_price": 8.85}, osi, context_at(150.0), session, config)
     # Same stored memory, now well below the strike.
@@ -1414,14 +1414,14 @@ _SESSION = {"market_day": "2026-09-10", "fraction_remaining": 0.5}
 
 
 def _held_plan(memory: dict, contracts: int = 2, **kwargs):
-    from src.algorithms.options_flip.config import OptionsFlipConfig
-    from src.algorithms.options_flip.lifecycle import plan_symbol
+    from src.algorithms.options_spread.config import OptionsSpreadConfig
+    from src.algorithms.options_spread.lifecycle import plan_symbol
 
     return plan_symbol(
         "USO", memory=dict(memory), held_contract=_OSI, direction="call", contract=None,
         contracts=contracts, underlying_now=150.0, entry_target=0.0,
         exit_target=kwargs.pop("exit_target", 160.0), checks=[],
-        config=OptionsFlipConfig(), session=_SESSION, **kwargs,
+        config=OptionsSpreadConfig(), session=_SESSION, **kwargs,
     )
 
 
@@ -1432,7 +1432,7 @@ def test_the_exit_is_sized_from_the_broker_not_from_remembered_intent() -> None:
     An exit sized above the position is rejected outright, which leaves an open position with
     no protection resting against it at all -- the worst of the available outcomes.
     """
-    from src.algorithms.options_flip.algorithm import _held_quantities
+    from src.algorithms.options_spread.algorithm import _held_quantities
 
     assert _held_quantities({_OSI: 2.0}) == {"USO": 2}
 
@@ -1487,7 +1487,7 @@ def test_every_gate_that_can_refuse_a_trade_is_in_the_formula() -> None:
     """
     from src.algorithms.explainers import EXPLAINERS
 
-    formula = " ".join(EXPLAINERS["options_flip"]["formula"])
+    formula = " ".join(EXPLAINERS["options_spread"]["formula"])
     for knob in (
         "min_trend_strength", "regime_fast_ma_days", "VWAP", "gap_atr",
         "entry_reach", "exit_reach", "entry_cutoff_fraction", "min_profit_per_contract",
@@ -1508,7 +1508,7 @@ def test_only_a_real_requirement_goes_in_a_checks_limit() -> None:
     import pathlib
 
     offenders = []
-    for path in pathlib.Path("src/algorithms/options_flip").glob("*.py"):
+    for path in pathlib.Path("src/algorithms/options_spread").glob("*.py"):
         for node in ast.walk(ast.parse(path.read_text())):
             if not (isinstance(node, ast.Call) and getattr(node.func, "id", "") == "Check"):
                 continue
@@ -1545,7 +1545,7 @@ def test_a_check_that_can_refuse_nothing_is_not_a_gate() -> None:
     import pathlib
 
     wrong = []
-    for path in pathlib.Path("src/algorithms/options_flip").glob("*.py"):
+    for path in pathlib.Path("src/algorithms/options_spread").glob("*.py"):
         for node in ast.walk(ast.parse(path.read_text())):
             if not (isinstance(node, ast.Call) and getattr(node.func, "id", "") == "Check"):
                 continue
@@ -1587,7 +1587,7 @@ def test_the_contract_reads_the_same_whether_held_or_a_candidate() -> None:
     """
     from datetime import date
 
-    from src.algorithms.options_flip.algorithm import _contract_label, _held_contract_label
+    from src.algorithms.options_spread.algorithm import _contract_label, _held_contract_label
 
     candidate = _contract_label(385.0, "call", date(2026, 9, 25), 0.77)
     held = _held_contract_label({"contract": "GLD   260925C00385000", "delta": 0.77})

@@ -79,7 +79,7 @@ NEWS_SENTIMENT_CACHE_TTL_SECONDS = 1800
 ALGORITHM_IDS = {
     "bursty_dca",
     "rally_rotation",
-    "options_flip",
+    "options_spread",
 }
 
 #: Used wherever no strategy was selected, and as the fallback for a retired id.

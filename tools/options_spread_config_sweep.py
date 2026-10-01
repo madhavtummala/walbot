@@ -1,15 +1,15 @@
-"""Sweep Options Flip config knobs through the real walk-forward harness.
+"""Sweep Options Spread config knobs through the real walk-forward harness.
 
 Before cutting a tunable knob, this asks the same question ``bull_regime.py``'s own docstring
 already answers for the two gates it removed: does changing this value change anything real on
 the data we have, or is it dead weight the strategy carries for no measured reason? Each variant
-here re-runs :func:`tools.options_flip_walk_forward.walk_forward` with one field changed via
-``dataclasses.replace`` on the real ``OptionsFlipConfig`` -- the actual production code path,
+here re-runs :func:`tools.options_spread_walk_forward.walk_forward` with one field changed via
+``dataclasses.replace`` on the real ``OptionsSpreadConfig`` -- the actual production code path,
 not a re-implementation -- and reports trade count and realized dollar P/L against the baseline.
 
 Run (needs the same cache as its sibling tools):
 
-    STATE_DUCKDB_PATH=data/walbot.duckdb python -m tools.options_flip_config_sweep
+    STATE_DUCKDB_PATH=data/walbot.duckdb python -m tools.options_spread_config_sweep
 """
 
 from __future__ import annotations
@@ -21,9 +21,9 @@ from unittest import mock
 
 import pandas as pd
 
-from src.algorithms.options_flip.algorithm import OptionsFlipAlgorithm
+from src.algorithms.options_spread.algorithm import OptionsSpreadAlgorithm
 
-from .options_flip_walk_forward import walk_forward
+from .options_spread_walk_forward import walk_forward
 
 logger = logging.getLogger("optflip_sweep")
 
@@ -79,10 +79,10 @@ def _summarize(symbol: str, log: pd.DataFrame, daily: pd.DataFrame) -> dict[str,
 
 def run_variant(config: Any, label: str, **overrides: Any) -> pd.DataFrame:
     """One config variant, across every symbol, via the real ``plan()`` walk-forward."""
-    base_cfg = OptionsFlipAlgorithm(config).tuning(config)
+    base_cfg = OptionsSpreadAlgorithm(config).tuning(config)
     varied = dataclasses.replace(base_cfg, **overrides)
     rows = []
-    with mock.patch.object(OptionsFlipAlgorithm, "tuning", lambda self, cfg: varied):
+    with mock.patch.object(OptionsSpreadAlgorithm, "tuning", lambda self, cfg: varied):
         for symbol in SYMBOLS:
             log, daily, _ticks = walk_forward(symbol, config)
             row = _summarize(symbol, log, daily)

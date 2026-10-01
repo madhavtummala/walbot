@@ -118,14 +118,14 @@ def _plan_payload(plan: AlgorithmPlan) -> dict[str, Any]:
 
     ``signals`` is passed through whole rather than through a fixed key list. It used to
     whitelist Rally Rotation's own shape (``score``/``reason``/``signal``/...), which silently
-    dropped everything an order-book algorithm like Options Flip actually reports -- its signal
+    dropped everything an order-book algorithm like Options Spread actually reports -- its signal
     carries ``checks``, ``estimate`` and ``contract`` instead, none of which that whitelist
-    named, so an agent reviewing an Options Flip plan saw five empty fields and nothing real.
-    Every algorithm's signal row is already plain JSON-able data (see ``options_flip.algorithm.
+    named, so an agent reviewing an Options Spread plan saw five empty fields and nothing real.
+    Every algorithm's signal row is already plain JSON-able data (see ``options_spread.algorithm.
     _signal``, ``rally_rotation``'s own row builder), so there is nothing left to filter.
 
     ``desired_orders`` carries an order-book algorithm's actual proposal -- the resting
-    buy/sell/stop legs Options Flip's ``plan()`` builds instead of ``intents``. It is here so
+    buy/sell/stop legs Options Spread's ``plan()`` builds instead of ``intents``. It is here so
     the agent can see what would rest at the broker; reconciliation reads the held plan.
     """
     return {
@@ -238,7 +238,7 @@ def create_mcp_server(host: str = "0.0.0.0", port: int = 8001):
         - Allocation strategies (Bursty DCA, Rally Rotation) propose a *portfolio*: read
           ``intents`` (what to hold) and ``mode`` (whether the list is the complete target or
           only the symbols to touch). ``signals`` explains the reasoning per symbol.
-        - Options Flip proposes an *order book* instead: ``intents`` is always empty for it.
+        - Options Spread proposes an *order book* instead: ``intents`` is always empty for it.
           Read ``desired_orders`` for what should be resting at the broker right now (entry bid,
           or a held position's target/stop), and ``signals[symbol]`` for the reasoning --
           ``checks`` (each gate, pass/fail and why), ``estimate`` (the band prediction and
@@ -517,7 +517,7 @@ Every figure is current, ``realized_pl`` included. The answer is small -- each f
         - ``skip`` -- leave the symbol exactly as it is, neither bought nor sold today.
         - ``exit`` -- close the position in that symbol.
 
-        Editing is refused for an order-book plan (Options Flip): a leg removed there cancels a
+        Editing is refused for an order-book plan (Options Spread): a leg removed there cancels a
         resting order rather than declining it, so that shape is submit-whole or decline-whole.
         An edit naming a symbol the plan neither proposes nor holds is refused rather than
         ignored -- that is nearly always a mistyped ticker.
@@ -539,7 +539,7 @@ Every figure is current, ``realized_pl`` included. The answer is small -- each f
         ``funding`` explains how the batch was paid for -- buying power, the reserve held
         back, sale proceeds, and any cash-equivalent holdings liquidated to cover a shortfall.
 
-        **Options Flip** proposes an order book instead. The response carries no
+        **Options Spread** proposes an order book instead. The response carries no
         ``funding``/``diff``: read ``order_results`` (each entry ``submitted``/``replaced``/
         ``cancelled``/``unchanged``/``rejected``, with the order id and reason where relevant)
         and ``working_orders`` (what is now actually resting).

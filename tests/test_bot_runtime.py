@@ -226,7 +226,7 @@ def test_each_algorithm_states_a_runnable_default() -> None:
     """A default nobody can parse would be worse than none: it reaches deployments silently."""
     from src.algorithms.registry import get_algorithm_class
 
-    for algorithm_id in ("bursty_dca", "rally_rotation", "options_flip"):
+    for algorithm_id in ("bursty_dca", "rally_rotation", "options_spread"):
         assert parse_cron(get_algorithm_class(algorithm_id).cron).expression, algorithm_id
 
 

@@ -343,7 +343,7 @@ def _fetch_backtest_history(strategy: str, period: str, config) -> dict[str, pd.
 def _fetch_intraday_backtest_history(
     strategy: str, period: str, config, daily_history: dict[str, pd.DataFrame]
 ) -> dict[str, pd.DataFrame]:
-    """Fetch intraday bars for algorithms that need them (e.g. options_flip).
+    """Fetch intraday bars for algorithms that need them (e.g. options_spread).
 
     Returns a dict keyed by symbol, indexed by intraday timestamps. Each frame has
     OHLCV columns. Falls back to an empty dict if no intraday data is available.

@@ -933,7 +933,7 @@ def test_in_session_the_cache_is_current_only_up_to_the_last_completed_bar() -> 
 
 
 def test_a_live_option_contract_survives_a_prune() -> None:
-    """Options Flip predicts its exit band from the contract's *own* price history, so pruning
+    """Options Spread predicts its exit band from the contract's *own* price history, so pruning
     a live contract silently drops it back to the underlying-delta translation.
 
     No OSI symbol is in the tradable universe, so the universe filter alone deleted every

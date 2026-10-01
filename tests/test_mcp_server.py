@@ -127,7 +127,7 @@ def test_desired_orders_reach_the_agent_for_review() -> None:
     """An order-book algorithm's proposal lives entirely in ``desired_orders`` -- ``intents``
     is empty for this shape -- so omitting it showed the agent an empty plan."""
     plan = AlgorithmPlan(
-        strategy="options_flip",
+        strategy="options_spread",
         desired_orders=[
             DesiredOrder(
                 key="GLD:target",
@@ -151,10 +151,10 @@ def test_desired_orders_reach_the_agent_for_review() -> None:
 
 def test_signals_pass_through_whole_for_a_non_rally_shape() -> None:
     """Was a fixed whitelist of Rally Rotation's own fields (score/reason/...), which silently
-    emptied an Options Flip signal -- its row carries ``checks``/``estimate``/``contract``
+    emptied an Options Spread signal -- its row carries ``checks``/``estimate``/``contract``
     instead, none of which that list named."""
     plan = AlgorithmPlan(
-        strategy="options_flip",
+        strategy="options_spread",
         signals={"GLD": {"state": "held", "headline": "Holding GLD 380 call", "checks": [
             {"label": "Holding VWAP", "ok": True, "value": "above", "blocking": False},
         ], "estimate": {"direction": "call", "contract": "GLD   260918C00380000"}}},
@@ -314,10 +314,10 @@ def test_an_edit_cannot_change_a_size(monkeypatch) -> None:
 def test_edits_are_refused_for_an_order_book_plan(monkeypatch) -> None:
     """Reconciliation cancels whatever is not in ``desired_orders``, so removing a leg there
     cancels a resting stop rather than declining an action. No safe partial edit exists."""
-    fake_server = _build(monkeypatch, [_deployment(strategy="options_flip")])
+    fake_server = _build(monkeypatch, [_deployment(strategy="options_spread")])
     _placing(monkeypatch)
     plan = AlgorithmPlan(
-        strategy="options_flip",
+        strategy="options_spread",
         desired_orders=[
             DesiredOrder(key="GLD:stop", request=OrderRequest(symbol="GLD", action="sell", quantity=1)),
         ],
@@ -447,7 +447,7 @@ def test_list_algorithms_reports_what_the_agent_may_drive(monkeypatch) -> None:
         [
             _deployment(algorithm="rally_rotation"),
             _deployment(algorithm="bursty_dca", cron="30 9 * * 1-5"),
-            _deployment(algorithm="options_flip", enabled=False),
+            _deployment(algorithm="options_spread", enabled=False),
         ],
     )
 
@@ -457,7 +457,7 @@ def test_list_algorithms_reports_what_the_agent_may_drive(monkeypatch) -> None:
     assert rows["rally_rotation"]["driven_by"] == "mcp"
     assert rows["bursty_dca"]["can_place_orders"] is False
     assert rows["bursty_dca"]["driven_by"] == "schedule"
-    assert rows["options_flip"]["can_place_orders"] is False
+    assert rows["options_spread"]["can_place_orders"] is False
 
 
 def test_list_algorithms_reports_undeployed_ones_too(monkeypatch) -> None:
@@ -470,7 +470,7 @@ def test_list_algorithms_reports_undeployed_ones_too(monkeypatch) -> None:
 
     rows = {row["algorithm"]: row for row in fake_server.list_algorithms()["algorithms"]}
 
-    assert {"bursty_dca", "rally_rotation", "options_flip"} <= set(rows)
+    assert {"bursty_dca", "rally_rotation", "options_spread"} <= set(rows)
     assert rows["bursty_dca"]["deployed"] is False
     assert rows["bursty_dca"]["account_id"] == ""
     assert rows["bursty_dca"]["can_place_orders"] is False
@@ -845,7 +845,7 @@ def test_list_accounts_carries_a_headline_per_account(monkeypatch) -> None:
     tool, _ = _listing(
         monkeypatch,
         rows=[{"id": "alpaca1", "label": "Alpaca Paper", "broker": "alpaca",
-               "deployments": ["options_flip"], "credentials_ready": True}],
+               "deployments": ["options_spread"], "credentials_ready": True}],
         headline={"equity": 10525.339999, "cash": 1.0, "day_pl": 560.12345,
                   "day_pl_percent": 0.0013012345, "total_pl": 1200.0,
                   "realized_pl": 41.2, "positions": 3, "orders_today": 4, "error": ""},

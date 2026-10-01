@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from src.algorithms.options_flip.algorithm import OptionsFlipAlgorithm
+from src.algorithms.options_spread.algorithm import OptionsSpreadAlgorithm
 from src.algorithms.reconcile import ORDER_IDS_KEY
 from src.core.interfaces import AlgorithmPlan, DesiredOrder, OrderRequest
 from src.data.state_store import ephemeral_state
@@ -69,9 +69,9 @@ def working_bid(order_id: str = "100", price: float = 1.15, quantity: int = 1) -
 
 def run(brokerage: FakeBrokerage, orders, state=None) -> dict[str, Any]:
     """Drive reconciliation the way the algorithm does, so the tests exercise the real path."""
-    plan = AlgorithmPlan(strategy="options_flip", desired_orders=list(orders), state=dict(state or {}))
+    plan = AlgorithmPlan(strategy="options_spread", desired_orders=list(orders), state=dict(state or {}))
     with ephemeral_state():
-        return OptionsFlipAlgorithm({}).execute(plan, Config(), brokerage)
+        return OptionsSpreadAlgorithm({}).execute(plan, Config(), brokerage)
 
 
 def test_a_wanted_order_that_does_not_exist_is_submitted() -> None:
@@ -291,12 +291,12 @@ def test_when_both_replace_and_resubmit_fail_no_dead_id_is_recorded() -> None:
 def test_state_is_persisted_even_when_nothing_was_placed() -> None:
     """The trap this class exists to avoid: memory that only survives a run that traded."""
     brokerage = FakeBrokerage()
-    plan = AlgorithmPlan(strategy="options_flip", desired_orders=[], state={"symbols": {"QQQM": {"x": 1}}})
+    plan = AlgorithmPlan(strategy="options_spread", desired_orders=[], state={"symbols": {"QQQM": {"x": 1}}})
 
     with ephemeral_state() as store:
-        OptionsFlipAlgorithm({}).execute(plan, Config(), brokerage)
+        OptionsSpreadAlgorithm({}).execute(plan, Config(), brokerage)
 
-    assert store["algorithm_state:options_flip:test"]["symbols"] == {"QQQM": {"x": 1}}
+    assert store["algorithm_state:options_spread:test"]["symbols"] == {"QQQM": {"x": 1}}
 
 
 def test_a_brokerage_that_cannot_list_orders_is_refused_loudly() -> None:

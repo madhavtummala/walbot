@@ -1,6 +1,6 @@
-"""Sweep the bear/put side of Options Flip through the real walk-forward harness.
+"""Sweep the bear/put side of Options Spread through the real walk-forward harness.
 
-The sibling ``options_flip_config_sweep`` answers "is this knob dead weight" on the long side,
+The sibling ``options_spread_config_sweep`` answers "is this knob dead weight" on the long side,
 against defaults that a year of walk-forward work already tuned. This one answers a different and
 earlier question: **does the short side have an edge at all, and at what threshold does it start
 to exist?** The long side's defaults are not a prior here -- they were fitted to a
@@ -12,13 +12,13 @@ to be decisively broken before a put is proposed, and on most windows that arms 
 a sweep that only varied delta and the reach quantiles would report zeros in every row and look
 like a broken harness rather than a working gate.
 
-Every variant re-runs :func:`tools.options_flip_walk_forward.walk_forward` with one field changed
-via ``dataclasses.replace`` on the real ``OptionsFlipConfig`` -- the production code path, not a
+Every variant re-runs :func:`tools.options_spread_walk_forward.walk_forward` with one field changed
+via ``dataclasses.replace`` on the real ``OptionsSpreadConfig`` -- the production code path, not a
 re-implementation.
 
 Run (needs the put-side cache; see ``tools/_optcache/fetch.py --type put``):
 
-    STATE_DUCKDB_PATH=data/walbot.duckdb python -m tools.options_flip_bear_sweep \\
+    STATE_DUCKDB_PATH=data/walbot.duckdb python -m tools.options_spread_bear_sweep \\
         --symbols SMH --start 2026-08-15 --end 2026-08-31
 """
 
@@ -36,11 +36,11 @@ from unittest import mock
 
 import pandas as pd
 
-from src.algorithms.options_flip.algorithm import OptionsFlipAlgorithm
+from src.algorithms.options_spread.algorithm import OptionsSpreadAlgorithm
 from src.core.options import PUT
 
-from .options_flip_config_sweep import MULTIPLIER, _summarize
-from .options_flip_walk_forward import walk_forward
+from .options_spread_config_sweep import MULTIPLIER, _summarize
+from .options_spread_walk_forward import walk_forward
 
 logger = logging.getLogger("optflip_bear_sweep")
 
@@ -86,10 +86,10 @@ def run_variant(
     start: date | None, end: date | None, **overrides: Any,
 ) -> pd.DataFrame:
     """One config variant, across every symbol, on the put side of the real ``plan()``."""
-    base_cfg = OptionsFlipAlgorithm(config).tuning(config)
+    base_cfg = OptionsSpreadAlgorithm(config).tuning(config)
     varied = dataclasses.replace(base_cfg, **overrides)
     rows = []
-    with mock.patch.object(OptionsFlipAlgorithm, "tuning", lambda self, cfg: varied):
+    with mock.patch.object(OptionsSpreadAlgorithm, "tuning", lambda self, cfg: varied):
         for symbol in symbols:
             log, daily, _ticks = walk_forward(
                 symbol, config, option_type=PUT, budget=budget, start=start, end=end,
