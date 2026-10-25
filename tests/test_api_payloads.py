@@ -644,7 +644,7 @@ def test_an_algorithm_that_cannot_be_replayed_refuses_before_computing(monkeypat
         lambda *args, **kwargs: computed.append(args) or {},
     )
 
-    payload = backtest_payload({"strategy": "options_flip", "period": "3m", "refresh": True})
+    payload = backtest_payload({"strategy": "options_spread", "period": "3m", "refresh": True})
 
     assert computed == []
     assert payload["supported"] is False
@@ -655,12 +655,12 @@ def test_the_refusal_is_not_served_from_a_stale_cache(monkeypatch) -> None:
     """Asked before the cache, so a curve written before the flag existed cannot outlive it."""
     monkeypatch.setattr(
         backtest_module, "_load_backtest_cache",
-        lambda: {"items": {backtest_module._cache_key("options_flip", "3m", ""): {
-            "strategy": "options_flip", "total_return": 0.42,
+        lambda: {"items": {backtest_module._cache_key("options_spread", "3m", ""): {
+            "strategy": "options_spread", "total_return": 0.42,
         }}},
     )
 
-    payload = backtest_payload({"strategy": "options_flip", "period": "3m"})
+    payload = backtest_payload({"strategy": "options_spread", "period": "3m"})
 
     assert payload["supported"] is False
     assert "total_return" not in payload

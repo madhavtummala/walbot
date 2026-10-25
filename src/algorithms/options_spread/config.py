@@ -1,4 +1,4 @@
-"""Tuning for Options Flip.
+"""Tuning for Options Spread.
 
 A bull-regime, pullback-entry, rebound-exit long-call strategy. Three gates decide whether a
 candidate trades: is the bull thesis intact, are the entry and target levels ones comparable
@@ -6,7 +6,7 @@ sessions actually reached, and does the base case pay through the full greeks.
 
 Everything not here is a constant below -- window lengths, tolerances, the ATR period -- because
 none of those is a decision anyone would make differently. The measurements behind these defaults
-are in ``docs/options-flip.md``; the reasoning is on each field.
+are in ``docs/options-spread.md``; the reasoning is on each field.
 
 Two pairs read together and should be set together. ``entry_reach`` and ``exit_reach`` are both
 "the share of comparable sessions that reached this level", so they are probabilities you can
@@ -88,7 +88,7 @@ IV_FIRM_BAD = 1.0
 
 
 @dataclass(frozen=True)
-class OptionsFlipConfig:
+class OptionsSpreadConfig:
     # Ordered by how much each one moves the outcome, most consequential first. Related knobs
     # stay adjacent where their importance is comparable.
 
@@ -299,7 +299,7 @@ class OptionsFlipConfig:
 # =========================================================================================
 
 #: Where the budget board lives inside this algorithm's config section --
-#: ``algorithms.options_flip.plan``, read and written through ``/api/algorithm-config`` like
+#: ``algorithms.options_spread.plan``, read and written through ``/api/algorithm-config`` like
 #: every other knob. Same key Bursty DCA uses for the same reason: a nested structure needs its
 #: own reader, and the Tune screen renders it through a purpose-built editor.
 

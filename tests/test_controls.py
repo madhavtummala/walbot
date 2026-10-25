@@ -182,8 +182,8 @@ def test_primary_algorithm_falls_back_when_nothing_is_deployed() -> None:
 
     assert primary_algorithm({"deployments": []}) == DEFAULT_STRATEGY_ID
     assert primary_algorithm(
-        {"deployments": [{"algorithm": "options_flip", "account_id": "a"}]}
-    ) == "options_flip"
+        {"deployments": [{"algorithm": "options_spread", "account_id": "a"}]}
+    ) == "options_spread"
 
 
 def test_saving_tuning_does_not_undeploy_the_algorithm(tmp_path, monkeypatch) -> None:

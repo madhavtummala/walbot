@@ -19,7 +19,7 @@ instruction — the parent does not repeat it.
 5. `can_place_orders: false` → report the `reason` and stop.
 6. Never override the algorithm's own gates. Veto facts it could not see, not
    its arithmetic.
-7. Options Flip refuses edits — submit it whole or decline it whole.
+7. Options Spread refuses edits — submit it whole or decline it whole.
 
 ## Do
 

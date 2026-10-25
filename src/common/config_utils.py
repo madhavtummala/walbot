@@ -173,7 +173,7 @@ def raw_plan(config: Any, algorithm_id: str, key: str = PLAN_KEY) -> dict[str, A
 
     Read off the config object rather than carried on a tuning dataclass, which is a flat set of
     scalars coerced by declared type -- a nested structure does not survive that path. Both
-    algorithms that configure a nested plan (Bursty DCA's monthly budgets, Options Flip's board)
+    algorithms that configure a nested plan (Bursty DCA's monthly budgets, Options Spread's board)
     need it for the same reason, which is why it lives here rather than twice in their configs.
 
     Unsanitized because two callers want different things from it: sanitizing for the universe

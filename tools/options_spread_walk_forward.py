@@ -1,21 +1,21 @@
-"""Walk Options Flip forward through real history by calling the *actual* ``plan()``.
+"""Walk Options Spread forward through real history by calling the *actual* ``plan()``.
 
-``options_flip_contract_backtest.py`` re-implements pieces of the lifecycle -- a static or
+``options_spread_contract_backtest.py`` re-implements pieces of the lifecycle -- a static or
 ratcheted fill check, a hand-rolled target/deadline resolver -- against levels computed by calling
 the real
-``conditional_levels``/``choose_band``, but never through ``OptionsFlipAlgorithm.plan()`` itself.
+``conditional_levels``/``choose_band``, but never through ``OptionsSpreadAlgorithm.plan()`` itself.
 That leaves two things no re-implementation can get right: whether a held position correctly
 blocks a new entry into the same symbol (this algorithm holds *one* contract at a time), and
 whether the entry and exit ratchets, band prediction, and gates all agree with each other the way
 they do in production, because they are one function there and several approximations here.
 
-This tool removes the approximation. It drives ``OptionsFlipAlgorithm.plan()`` at the same 5-minute
+This tool removes the approximation. It drives ``OptionsSpreadAlgorithm.plan()`` at the same 5-minute
 cadence the live cron uses, across real Sep-18 2026 option history, with:
 
 * a synthetic option chain per tick, priced off the contract's own real close (bid/ask collapsed
   to that price -- no historical spread exists to read), delta from Black-Scholes on the
   underlying's realised vol, IV backed out of the contract's own real price for the rest of the
-  greeks -- the same proxy ``options_flip_contract_backtest.py`` already uses, just re-derived
+  greeks -- the same proxy ``options_spread_contract_backtest.py`` already uses, just re-derived
   every tick instead of once at 10:00;
 * real option and underlying bars for the band and the ratchets, at the resolution the algorithm
   itself asks for;
@@ -31,7 +31,7 @@ gates, band prediction, both ratchets, one-contract-per-symbol state -- is the r
 
 Run (needs the same cache ``tools/_optcache/fetch.py`` + ``fetch_options.py`` build):
 
-    STATE_DUCKDB_PATH=data/walbot.duckdb python -m tools.options_flip_walk_forward
+    STATE_DUCKDB_PATH=data/walbot.duckdb python -m tools.options_spread_walk_forward
 """
 
 from __future__ import annotations
@@ -45,11 +45,11 @@ from unittest import mock
 import numpy as np
 import pandas as pd
 
-from src.algorithms.options_flip.algorithm import OptionsFlipAlgorithm
+from src.algorithms.options_spread.algorithm import OptionsSpreadAlgorithm
 from src.core.interfaces import AlgorithmContext
 from src.core.options import CALL, PUT, OptionContract, osi_symbol, parse_osi
 
-from .options_flip_contract_backtest import (
+from .options_spread_contract_backtest import (
     EXPIRY,
     SYMBOLS,
     _bs_delta,
@@ -64,7 +64,7 @@ from .options_flip_contract_backtest import (
 
 logger = logging.getLogger("optflip_walk_forward")
 
-#: Every 5 minutes from the first fire to the close, matching ``OptionsFlipAlgorithm.cron``.
+#: Every 5 minutes from the first fire to the close, matching ``OptionsSpreadAlgorithm.cron``.
 TICKS = list(range(10 * 60, 16 * 60 + 1, 5))
 
 
@@ -213,7 +213,7 @@ def _bar_at(strikes: dict[float, dict[str, Any]], strike: float, day: date, minu
 #: (label/ok/value/limit/blocking), the estimate (band prediction, direction, greeks-priced
 #: profit), the desired orders, and what was held coming in. This is the actual output of the
 #: production ``plan()`` call, not a re-derivation -- kept in memory and handed to the caller
-#: (``options_flip_day_narrative.py`` reads it directly) rather than round-tripped through a
+#: (``options_spread_day_narrative.py`` reads it directly) rather than round-tripped through a
 #: database: nothing here needs a fact from a run that already finished, and duckdb persistence
 #: was cut once that stopped being true -- see the day-narrative tool for the reader this fed.
 def _order_to_dict(order) -> dict[str, Any]:
@@ -251,7 +251,7 @@ def walk_forward(
     symbol: str, config: Any, *, option_type: str = CALL, budget: float = 5000.0,
     start: date | None = None, end: date | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[dict[str, Any]]]:
-    """Replay ``OptionsFlipAlgorithm.plan()`` itself, tick by tick, one contract at a time.
+    """Replay ``OptionsSpreadAlgorithm.plan()`` itself, tick by tick, one contract at a time.
 
     ``option_type`` selects which cached side to replay and which bucket of the budget board to
     fund. The board is patched rather than read from the live config for the same reason
@@ -265,7 +265,7 @@ def walk_forward(
     The order resting at tick T was priced off what was known at T; whether the market reached
     it is only knowable from the bar spanning T to T+5, i.e. the *next* tick's bar.
     """
-    algorithm = OptionsFlipAlgorithm(config)
+    algorithm = OptionsSpreadAlgorithm(config)
     # ``_symbols()`` resolves the universe from the *real* account's configured symbol list
     # first, independent of what bars this harness fed in -- a symbol this backtest wants to
     # replay but the live account never configured (or a stale universe) would otherwise never
@@ -277,7 +277,7 @@ def walk_forward(
         # One argument now: ``_symbols`` became an instance method reading the board when the
         # separate ``symbols`` knob was retired. The old two-argument static signature made this
         # harness raise on every run.
-        OptionsFlipAlgorithm, "_symbols", lambda self, config: [symbol]
+        OptionsSpreadAlgorithm, "_symbols", lambda self, config: [symbol]
     )
     board = {
         side: ({"amount": budget, "items": [{"symbol": symbol, "amount": budget}]}
@@ -285,7 +285,7 @@ def walk_forward(
         for side in (CALL, PUT)
     }
     board_patch = mock.patch.object(
-        OptionsFlipAlgorithm, "budget_plan", lambda self, config: board
+        OptionsSpreadAlgorithm, "budget_plan", lambda self, config: board
     )
     daily = _load_daily(symbol)
     intraday = _load_intraday(symbol)
@@ -330,7 +330,7 @@ def walk_forward(
 
 
 def _walk_days(
-    symbol: str, algorithm: OptionsFlipAlgorithm, config: Any, sessions: list[date],
+    symbol: str, algorithm: OptionsSpreadAlgorithm, config: Any, sessions: list[date],
     sf: pd.DataFrame, daily: pd.DataFrame, strikes: dict[float, dict[str, Any]],
     option_type: str = CALL,
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[dict[str, Any]]]:
@@ -583,7 +583,7 @@ def report(symbol: str, log: pd.DataFrame, daily: pd.DataFrame) -> None:
 def main() -> int:
     import argparse
 
-    parser = argparse.ArgumentParser(description="Walk Options Flip forward through real history")
+    parser = argparse.ArgumentParser(description="Walk Options Spread forward through real history")
     parser.add_argument("--symbols", nargs="+", default=SYMBOLS)
     parser.add_argument("--type", dest="option_type", choices=[CALL, PUT], default=CALL)
     parser.add_argument("--budget", type=float, default=5000.0)

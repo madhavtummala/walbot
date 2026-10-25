@@ -141,7 +141,7 @@ class BaseAlgorithm:
 
     #: The buckets a ``budgets`` board splits its symbols across, and what each amount means.
     #: Declared by the algorithm because only it knows: DCA divides a monthly budget into buy
-    #: and sell, Options Flip divides a per-position dollar cap into call and put. The dashboard
+    #: and sell, Options Spread divides a per-position dollar cap into call and put. The dashboard
     #: used to hardcode ``["buy", "sell"]``, which made the board unusable for any algorithm
     #: whose buckets were named anything else.
     tune_buckets: tuple[str, ...] = ("buy", "sell")

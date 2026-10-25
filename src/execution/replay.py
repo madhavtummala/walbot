@@ -351,7 +351,7 @@ def replay(
     When ``intraday_minutes > 0`` and ``intraday_history`` is provided, the replay generates
     intraday timestamps within each trading session (every ``intraday_minutes`` from 09:30 to
     16:00 ET) and uses them as trade dates instead of daily timestamps. This lets algorithms
-    like options_flip that declare ``intraday_lookback_minutes > 0`` be backtested at their
+    like options_spread that declare ``intraday_lookback_minutes > 0`` be backtested at their
     actual execution cadence.
 
     ``daily_history`` is keyed by symbol and indexed by timestamp. ``should_run(date)`` gates

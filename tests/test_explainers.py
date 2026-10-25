@@ -162,7 +162,7 @@ def test_every_knob_says_which_way_to_turn_it() -> None:
 
 
 def test_a_knob_shared_by_two_algorithms_describes_each_one() -> None:
-    """``plan`` exists in both Bursty DCA and Options Flip and means different things -- a
+    """``plan`` exists in both Bursty DCA and Options Spread and means different things -- a
     monthly budget in one, a per-position budget in the other.
 
     A bulk edit keyed on the knob name alone rewrote the first match twice, so DCA's monthly
@@ -173,7 +173,7 @@ def test_a_knob_shared_by_two_algorithms_describes_each_one() -> None:
 
     vocabulary = {
         "bursty_dca": ("contract", "premium", "delta", "expiry"),
-        "options_flip": ("monthly", "accrue", "backlog"),
+        "options_spread": ("monthly", "accrue", "backlog"),
     }
     for algorithm, foreign in vocabulary.items():
         for knob, doc in EXPLAINERS[algorithm]["parameters"].items():

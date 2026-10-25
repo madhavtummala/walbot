@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pandas as pd
@@ -10,7 +11,7 @@ from src.brokerages.schwab.brokerage import SchwabBrokerage
 from src.brokerages.schwab.client import SchwabAuthError, SchwabSession
 from src.connectors.market.schwab import Schwab
 from src.core.config import Config
-from src.core.interfaces import OrderRequest
+from src.core.interfaces import MARKET_TZ, OrderRequest
 
 
 class FakeResponse:
@@ -909,3 +910,122 @@ def test_an_option_fill_carries_the_hundred_share_multiplier() -> None:
     brokerage = SchwabBrokerage(_config(), session=session)
 
     assert brokerage.get_fills()[0]["multiplier"] == 100.0
+
+
+def _funding_session(transactions: list[dict[str, Any]], *, opening: float, current: float) -> SchwabSession:
+    return _session(
+        {
+            # Before the bare account route, which FakeHTTP would otherwise match first: the
+            # transactions URL has "/accounts/HASH" inside it.
+            "/transactions": FakeResponse(transactions),
+            "/accounts/accountNumbers": FakeResponse([{"accountNumber": "123", "hashValue": "HASH"}]),
+            "/accounts/HASH": FakeResponse(
+                {
+                    "securitiesAccount": {
+                        "currentBalances": {"liquidationValue": current, "cashBalance": 1_000.0},
+                        "initialBalances": {"liquidationValue": opening},
+                    }
+                }
+            ),
+            "/marketdata/v1/markets": FakeResponse({"equity": {}}),
+        }
+    )
+
+
+def _moved(kind: str, amount: float, *, days_ago: int = 0) -> dict[str, Any]:
+    """One transfer, stamped the way Schwab stamps them."""
+    when = datetime.now(MARKET_TZ).replace(hour=8, minute=22) - timedelta(days=days_ago)
+    return {
+        "type": kind,
+        "status": "VALID",
+        "netAmount": amount,
+        "time": when.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+0000"),
+    }
+
+
+def test_a_deposit_is_not_a_days_gain() -> None:
+    """Money moved in raises today's equity without being profit, so it raises the basis too.
+
+    Live case: $4,000 landed in an $82,467.99 account that finished at $86,903.19, and the day
+    read as +$4,435.20 (+5.4%) where the market had supplied $435.20 of it.
+    """
+    session = _funding_session(
+        [_moved("CASH_RECEIPT", 4_000.0)], opening=82_467.99, current=86_903.19
+    )
+
+    state = SchwabBrokerage(_config(), session=session).get_account_state()
+
+    assert state["last_equity"] == 86_467.99
+    assert round(state["equity"] - state["last_equity"], 2) == 435.20
+
+
+def test_a_withdrawal_is_not_a_days_loss() -> None:
+    """The other direction, and the one no balance field reports.
+
+    Wiring the same $4,000 back out read as -$3,955.57 against a real +$44.43. ``cashReceipts``
+    cannot see this: it still read 4000 on both snapshots the morning after the deposit.
+    """
+    session = _funding_session(
+        [_moved("WIRE_OUT", -4_000.0)], opening=86_883.07, current=82_927.50
+    )
+
+    state = SchwabBrokerage(_config(), session=session).get_account_state()
+
+    assert state["last_equity"] == 82_883.07
+    assert round(state["equity"] - state["last_equity"], 2) == 44.43
+
+
+def test_yesterdays_transfer_is_already_in_the_opening_basis() -> None:
+    """Counted again, it would swing the day by the transfer twice over.
+
+    Schwab stamps the deposit that landed on the 21st and the wire that left on the 22nd with
+    the same ``tradeDate``, so only ``time`` separates them.
+    """
+    session = _funding_session(
+        [_moved("CASH_RECEIPT", 4_000.0, days_ago=1), _moved("WIRE_OUT", -4_000.0)],
+        opening=86_883.07,
+        current=82_927.50,
+    )
+
+    state = SchwabBrokerage(_config(), session=session).get_account_state()
+
+    assert state["last_equity"] == 82_883.07
+
+
+def test_earned_cash_stays_in_the_day() -> None:
+    """A dividend is money the account made, not money someone put in it.
+
+    Trades are excluded for the same reason from the other side: the cash a fill consumes comes
+    straight back as market value, so it nets to zero without any help here.
+    """
+    session = _funding_session(
+        [_moved("DIVIDEND_OR_INTEREST", 120.0), _moved("TRADE", -500.0)],
+        opening=10_000.0,
+        current=10_120.0,
+    )
+
+    state = SchwabBrokerage(_config(), session=session).get_account_state()
+
+    assert state["last_equity"] == 10_000.0
+    assert round(state["equity"] - state["last_equity"], 2) == 120.0
+
+
+def test_an_unreadable_transfer_feed_leaves_the_day_alone() -> None:
+    """A broken transaction read must not blank the account page it sits behind."""
+    session = _session(
+        {
+            "/transactions": FakeResponse({"error": "boom"}, status_code=500),
+            "/accounts/accountNumbers": FakeResponse([{"accountNumber": "123", "hashValue": "HASH"}]),
+            "/accounts/HASH": FakeResponse(
+                {
+                    "securitiesAccount": {
+                        "currentBalances": {"liquidationValue": 5_000.0, "cashBalance": 1_200.0},
+                        "initialBalances": {"liquidationValue": 4_900.0},
+                    }
+                }
+            ),
+            "/marketdata/v1/markets": FakeResponse({"equity": {}}),
+        }
+    )
+
+    assert SchwabBrokerage(_config(), session=session).get_account_state()["last_equity"] == 4_900.0

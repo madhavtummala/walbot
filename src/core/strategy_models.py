@@ -21,7 +21,7 @@ from src.data.signals.social import compute_social_trend_score
 STRATEGY_LABELS = {
     "bursty_dca": "Bursty DCA",
     "rally_rotation": "Rally Rotation",
-    "options_flip": "Options Flip",
+    "options_spread": "Options Spread",
 }
 
 

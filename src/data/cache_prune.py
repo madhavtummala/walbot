@@ -44,7 +44,7 @@ def _universe() -> set[str]:
 def _contract_is_live(symbol: str, as_of: date) -> bool:
     """Whether an OSI symbol names a contract that has not expired yet.
 
-    Option-contract bars are kept while the contract trades: Options Flip predicts its exit
+    Option-contract bars are kept while the contract trades: Options Spread predicts its exit
     band from the contract's *own* price history, so deleting it would silently drop that
     algorithm back to the underlying-delta translation. Once the contract expires the rows can
     never be relevant again -- nobody can trade it, and no future run will ask for it -- so

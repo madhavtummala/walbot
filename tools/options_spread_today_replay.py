@@ -1,6 +1,6 @@
-"""Replay today's Options Flip decisions for one held symbol, from real Schwab data.
+"""Replay today's Options Spread decisions for one held symbol, from real Schwab data.
 
-The walk-forward harness (``options_flip_walk_forward.py``) replays a whole month from cached
+The walk-forward harness (``options_spread_walk_forward.py``) replays a whole month from cached
 history because Schwab serves no historical option chains -- but *today* is not history yet.
 Every fetch this tool makes is the same one production makes, at the same 5-minute cadence, and
 because the day it is asking about is still in progress, ``fetch_option_price_history`` returns
@@ -13,7 +13,7 @@ the chain, only the underlying's bars and the contract's own price history, both
 
 Run, from the fill onward for a position opened today:
 
-    STATE_DUCKDB_PATH=data/walbot.duckdb python -m tools.options_flip_today_replay \
+    STATE_DUCKDB_PATH=data/walbot.duckdb python -m tools.options_spread_today_replay \
         --symbol USO --osi "USO   260916C00142000" --fill-price 8.85 --fill-time "11:23"
 """
 
@@ -25,9 +25,9 @@ from datetime import date, datetime
 
 import pandas as pd
 
-from src.algorithms.options_flip import algorithm as alg
-from src.algorithms.options_flip import lifecycle as lc
-from src.algorithms.options_flip.excursion import option_price_for
+from src.algorithms.options_spread import algorithm as alg
+from src.algorithms.options_spread import lifecycle as lc
+from src.algorithms.options_spread.excursion import option_price_for
 from src.core.config import get_config
 from src.core.options import CALL
 
@@ -59,7 +59,7 @@ def main() -> int:
     args = parser.parse_args()
 
     config = get_config()
-    cfg = alg.OptionsFlipAlgorithm(config).tuning(config)
+    cfg = alg.OptionsSpreadAlgorithm(config).tuning(config)
     symbol = args.symbol.upper()
     osi = args.osi.upper()
 

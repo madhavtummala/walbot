@@ -11,7 +11,8 @@ from src.connectors.market import alpaca as market_alpaca
 from src.connectors.market import finnhub as market_finnhub
 from src.connectors.market import schwab as market_schwab
 from src.connectors.news import stocktwits as news_stocktwits
-from src.connectors.cache import cache_is_current
+from src.connectors.cache import cache_is_current, last_complete_bar_end
+from src.connectors.frames import _empty_bars
 from src.connectors.frames import normalize_intraday_frame
 from src.connectors.grid import bars_for_minutes, resolve_bar_minutes
 from src.core.config import Config
@@ -31,6 +32,17 @@ def no_bar_cache(monkeypatch, stored=None):
 
     monkeypatch.setattr(base, "_read_duckdb_bars", lambda *_a, **_kw: stored if stored is not None else pd.DataFrame())
     monkeypatch.setattr(base, "_write_duckdb_bars", lambda *_a, **_kw: None)
+
+
+def cached_bars_frontier_for_daily() -> pd.Timestamp:
+    """The newest daily bar that can exist right now -- what "current" is measured against."""
+    return last_complete_bar_end(1440)
+
+
+def _daily_frame(last: pd.Timestamp, close: float) -> pd.DataFrame:
+    """Three daily bars ending at ``last``, so a frame can be given an explicit frontier."""
+    stamps = pd.date_range(end=last, periods=3, freq="D", tz="UTC")
+    return pd.DataFrame({"timestamp": stamps, "close": [close - 2, close - 1, close]})
 
 
 def use_provider(monkeypatch, name, *, bars=None, price=None):
@@ -933,7 +945,7 @@ def test_in_session_the_cache_is_current_only_up_to_the_last_completed_bar() -> 
 
 
 def test_a_live_option_contract_survives_a_prune() -> None:
-    """Options Flip predicts its exit band from the contract's *own* price history, so pruning
+    """Options Spread predicts its exit band from the contract's *own* price history, so pruning
     a live contract silently drops it back to the underlying-delta translation.
 
     No OSI symbol is in the tradable universe, so the universe filter alone deleted every
@@ -1122,3 +1134,77 @@ def test_an_option_quote_is_keyed_back_to_the_symbol_that_was_asked_for(monkeypa
 
     assert asked["symbols"] == "USO   260916C00142000", "asked in Schwab's spelling"
     assert quotes["USO260916C00142000"]["price"] == 13.0, "answered in the caller's"
+
+
+def test_a_stale_frame_does_not_block_a_fresher_provider(monkeypatch, caplog) -> None:
+    """A non-empty answer is not necessarily a current one.
+
+    ``BaseConnector.bars`` serves from the bar store and fetches only the gap, so a provider
+    whose gap fetch comes back empty still returns whatever the store holds. Judged on
+    emptiness alone that won the symbol outright and returned before the fallback was asked,
+    which is how a symbol could sit weeks behind while a working provider went unconsulted.
+    """
+    calls = []
+    config = Config(eod_market_data_provider_order=["finnhub", "yfinance"])
+    frontier = cached_bars_frontier_for_daily()
+
+    def stale_finnhub(symbols, _config, **_kwargs):
+        calls.append("finnhub")
+        return {"SPY": _daily_frame(frontier - pd.Timedelta(days=30), 90.0)}
+
+    def current_yfinance(symbols, _config, **_kwargs):
+        calls.append("yfinance")
+        return {"SPY": _daily_frame(frontier, 101.0)}
+
+    use_provider(monkeypatch, "finnhub", bars=stale_finnhub)
+    use_provider(monkeypatch, "yfinance", bars=current_yfinance)
+
+    with caplog.at_level(logging.INFO):
+        bars = connectors.fetch_eod_market_bars(["SPY"], config, lookback_bars=3, force_refresh=True)
+
+    assert calls == ["finnhub", "yfinance"], "the stale answer ended the walk"
+    assert bars["SPY"]["close"].iloc[-1] == 101.0, "the stale frame won the symbol"
+    assert "is behind for SPY" in caplog.text
+
+
+def test_a_stale_frame_is_kept_when_no_provider_can_better_it() -> None:
+    """Preferring fresh must not mean returning nothing: old bars beat no bars."""
+    config = Config(eod_market_data_provider_order=["finnhub", "yfinance"])
+    frontier = cached_bars_frontier_for_daily()
+    stale = _daily_frame(frontier - pd.Timedelta(days=30), 90.0)
+
+    resolved = connectors._run_provider_fallback(
+        ["SPY"],
+        ["finnhub", "yfinance"],
+        {
+            "finnhub": lambda: {"SPY": stale},
+            "yfinance": lambda: {"SPY": _empty_bars()},
+        },
+        config,
+        category=connectors.EOD_MARKET_CATEGORY,
+        label="EOD",
+        interval_minutes=1440,
+    )
+
+    assert resolved["SPY"]["close"].iloc[-1] == 90.0
+
+
+def test_an_older_frame_never_supersedes_a_newer_one() -> None:
+    """The walk is in preference order, so a later provider only wins by reaching further."""
+    config = Config(eod_market_data_provider_order=["finnhub", "yfinance"])
+    frontier = cached_bars_frontier_for_daily()
+
+    resolved = connectors._run_provider_fallback(
+        ["SPY"],
+        ["finnhub", "yfinance"],
+        {
+            "finnhub": lambda: {"SPY": _daily_frame(frontier - pd.Timedelta(days=10), 95.0)},
+            "yfinance": lambda: {"SPY": _daily_frame(frontier - pd.Timedelta(days=40), 80.0)},
+        },
+        config,
+        category=connectors.EOD_MARKET_CATEGORY,
+        label="EOD",
+        interval_minutes=1440,
+    )
+
+    assert resolved["SPY"]["close"].iloc[-1] == 95.0

@@ -107,7 +107,7 @@ lives on the algorithm's own section in `walbot.yaml`, beside its tuning:
 
 ```yaml
 algorithms:
-  options_flip:
+  options_spread:
     account_id: local_paper   # omit to leave it undeployed
     enabled: false
     cron: 2/10 10-15 * * 1-5  # empty means an agent drives it

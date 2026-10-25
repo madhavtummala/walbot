@@ -52,13 +52,13 @@ def test_an_unchanged_order_is_not_journalled() -> None:
     poll would fill the capped journal with no-op noise and push real actions out early.
     """
     with ephemeral_state():
-        written = record_orders("options_flip", "paper", [
+        written = record_orders("options_spread", "paper", [
             {"symbol": "GLD", "action": "sell", "quantity": 1, "reconciled": "unchanged"},
             {"symbol": "GLD", "action": "sell", "quantity": 1, "reconciled": "rejected", "status": "rejected"},
         ])
 
         assert len(written) == 1  # only the rejected row was journalled
-        rows = load_order_journal(strategy="options_flip")
+        rows = load_order_journal(strategy="options_spread")
         assert len(rows) == 1
         assert rows[0]["status"] == "rejected"
         assert record_orders("dca", "paper", ["not-a-dict"]) == []  # type: ignore[list-item]
@@ -94,13 +94,13 @@ def test_the_journal_records_the_price_the_order_names() -> None:
     """
     from src.data.order_journal import _entry
 
-    resting = _entry("options_flip", "alpaca1", {
+    resting = _entry("options_spread", "alpaca1", {
         "symbol": "USO   260916C00142000", "action": "sell", "quantity": 1.0,
         "status": "submitted", "order_type": "limit", "limit_price": 17.30,
     }, "now")
     assert resting["limit_price"] == 17.30 and resting["order_type"] == "limit"
 
-    stop = _entry("options_flip", "alpaca1", {
+    stop = _entry("options_spread", "alpaca1", {
         "symbol": "USO   260916C00142000", "action": "sell", "quantity": 1.0,
         "status": "submitted", "order_type": "stop", "stop_price": 4.42,
     }, "now")

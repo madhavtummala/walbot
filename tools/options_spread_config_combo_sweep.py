@@ -1,6 +1,6 @@
-"""Combinations of Options Flip config knobs, not one knob at a time.
+"""Combinations of Options Spread config knobs, not one knob at a time.
 
-``options_flip_config_sweep.py`` isolates each knob against the baseline, which is the right way
+``options_spread_config_sweep.py`` isolates each knob against the baseline, which is the right way
 to find which single lever matters most -- but it can't say whether two individually-good changes
 still add up once combined, since patience, delta and hold-length interact (a longer hold only
 pays if the target has room to wait for it; a deeper delta only pays if the exit patience does not
@@ -19,7 +19,7 @@ month rather than one that is probably still good next month.
 
 Run:
 
-    STATE_DUCKDB_PATH=data/walbot.duckdb python -m tools.options_flip_config_combo_sweep
+    STATE_DUCKDB_PATH=data/walbot.duckdb python -m tools.options_spread_config_combo_sweep
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ import logging
 
 import pandas as pd
 
-from .options_flip_config_sweep import run_variant
+from .options_spread_config_sweep import run_variant
 
 logger = logging.getLogger("optflip_combo_sweep")
 

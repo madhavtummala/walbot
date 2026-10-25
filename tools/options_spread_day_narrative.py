@@ -11,8 +11,8 @@ reading every five minutes.
 
 Run:
 
-    STATE_DUCKDB_PATH=data/walbot.duckdb python -m tools.options_flip_day_narrative
-    STATE_DUCKDB_PATH=data/walbot.duckdb python -m tools.options_flip_day_narrative --symbol GLD
+    STATE_DUCKDB_PATH=data/walbot.duckdb python -m tools.options_spread_day_narrative
+    STATE_DUCKDB_PATH=data/walbot.duckdb python -m tools.options_spread_day_narrative --symbol GLD
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ from typing import Any
 
 import pandas as pd
 
-from .options_flip_contract_backtest import SYMBOLS
-from .options_flip_walk_forward import walk_forward
+from .options_spread_contract_backtest import SYMBOLS
+from .options_spread_walk_forward import walk_forward
 
 logger = logging.getLogger("optflip_narrative")
 

@@ -155,7 +155,7 @@ EXPLAINERS: dict[str, dict[str, Any]] = {
             "defensive_max_positions": {"what": "How many defensive names to hold in risk-off.", "effect": "One is a pure cash-equivalent stance; two or more splits risk-off across, say, bills and gold."},
         },
     },
-    "options_flip": {
+    "options_spread": {
         "headline": (
             "Buys calls on trending symbols at a pullback limit and sells into the rebound. Every price is a limit, never a market order."
         ),

@@ -20,7 +20,7 @@ ALGORITHMS: Registry[BaseAlgorithm] = Registry(
     {
         "bursty_dca": "src.algorithms.bursty_dca.algorithm:BurstyDCAAlgorithm",
         "rally_rotation": "src.algorithms.rally_rotation.algorithm:RallyRotationAlgorithm",
-        "options_flip": "src.algorithms.options_flip.algorithm:OptionsFlipAlgorithm",
+        "options_spread": "src.algorithms.options_spread.algorithm:OptionsSpreadAlgorithm",
     },
 )
 

@@ -1,4 +1,4 @@
-"""What an Options Flip run decided, per symbol.
+"""What an Options Spread run decided, per symbol.
 
 Every configured symbol gets a row every run, including the ones doing nothing -- "no direction",
 "direction but gates disagreed" and "confirmed but nothing tradable" are different silences a

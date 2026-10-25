@@ -1,8 +1,8 @@
-"""Backtest the Options Flip *contract* gates on real Sep-18 option price history.
+"""Backtest the Options Spread *contract* gates on real Sep-18 option price history.
 
 This is the contract half of the gate-strictness work. The underlying half was a one-off
 gate-necessity study (regime/level/trend gates, independently, across 1,872 opportunities) whose
-findings are now in ``docs/options-flip.md``'s "Gate strictness" table rather than in a script
+findings are now in ``docs/options-spread.md``'s "Gate strictness" table rather than in a script
 still carried here. This one answers the question those gates could not: of the
 contract-selection and economics gates the signal view shows, which actually earn their place,
 measured against **real option prices** rather than a live chain.
@@ -29,7 +29,7 @@ methodology is:
 
 Run (data must be cached first by ``tools/_optcache/fetch.py`` + ``fetch_options.py``):
 
-    STATE_DUCKDB_PATH=data/walbot.duckdb python -m tools.options_flip_contract_backtest
+    STATE_DUCKDB_PATH=data/walbot.duckdb python -m tools.options_spread_contract_backtest
 """
 
 from __future__ import annotations
@@ -41,17 +41,17 @@ from datetime import date
 
 import pandas as pd
 
-from src.algorithms.options_flip.algorithm import (
-    OptionsFlipAlgorithm,
+from src.algorithms.options_spread.algorithm import (
+    OptionsSpreadAlgorithm,
 )
-from src.algorithms.options_flip.candidates import scoring_parameters, trend_strength
-from src.algorithms.options_flip.config import DELTA_TOLERANCE
-from src.algorithms.options_flip.excursion import option_price_for
-from src.algorithms.options_flip.indicators import average_true_range, directional_volume
-from src.algorithms.options_flip.levels import conditional_levels
-from src.algorithms.options_flip.lifecycle import HELD, plan_symbol
-from src.algorithms.options_flip.option_band import choose_band, prepare_option_bars
-from src.algorithms.options_flip.regime import bull_regime
+from src.algorithms.options_spread.candidates import scoring_parameters, trend_strength
+from src.algorithms.options_spread.config import DELTA_TOLERANCE
+from src.algorithms.options_spread.excursion import option_price_for
+from src.algorithms.options_spread.indicators import average_true_range, directional_volume
+from src.algorithms.options_spread.levels import conditional_levels
+from src.algorithms.options_spread.lifecycle import HELD, plan_symbol
+from src.algorithms.options_spread.option_band import choose_band, prepare_option_bars
+from src.algorithms.options_spread.regime import bull_regime
 from src.core.options import CALL, PUT, black_scholes_delta
 from src.data.bars import read_history
 
@@ -234,7 +234,7 @@ def _worth_trading_gate(
     entry_underlying: float, target_underlying: float, cfg, option_type: str = CALL,
 ) -> tuple[bool, float]:
     """Run the production worth-trading logic and return (passes, per_contract_profit)."""
-    from src.algorithms.options_flip.pricing import expected_profit, scenarios
+    from src.algorithms.options_spread.pricing import expected_profit, scenarios
     from types import SimpleNamespace
     if opt_mark <= 0 or spot <= 0:
         return False, 0.0
@@ -828,7 +828,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.WARNING)
     from src.core.config import get_config
     config = get_config()
-    cfg = OptionsFlipAlgorithm(config).tuning(config)
+    cfg = OptionsSpreadAlgorithm(config).tuning(config)
     if not os.path.exists(os.path.join(CACHE, "IBIT_intraday5.csv")):
         print("Cache missing. Run tools/_optcache/fetch.py then tools/_optcache/fetch_options.py first.")
         return 1

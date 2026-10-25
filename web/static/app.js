@@ -1,6 +1,6 @@
 const SVG_NS = "http://www.w3.org/2000/svg";
 //: Fallback only. Which buckets a budget board splits its symbols across is the algorithm's
-//: own declaration -- DCA divides a month into buy and sell, Options Flip divides a
+//: own declaration -- DCA divides a month into buy and sell, Options Spread divides a
 //: per-position cap into call and put -- and it arrives on the config payload as
 //: ``tune_buckets``. This is what the board uses before that payload has loaded.
 const DEFAULT_BUCKET_NAMES = ["buy", "sell"];
@@ -22,7 +22,7 @@ const DEFAULT_BACKTEST_PERIOD = "3m";
 const BACKTEST_PERIOD_CHOICES = ["1m", "3m", "6m", "12m", "24m"];
 
 //: Two bucket colours, by position rather than by name. The board serves any algorithm's
-//: buckets -- buy/sell for DCA, call/put for Options Flip -- so keying these on "buy" and
+//: buckets -- buy/sell for DCA, call/put for Options Spread -- so keying these on "buy" and
 //: "sell" made the second board render undefined fills.
 const ENABLED_COLORS = ["#024c4a", "#7a3800"];
 const DISABLED_COLORS = ["#668f8b", "#a36d3c"];
@@ -49,9 +49,9 @@ const STRATEGIES = [
     signals: ["Cross-sectional rank", "Absolute eligibility", "Volatility ceiling", "Replacement margin", "Crash stop"],
   },
   {
-    key: "options_flip",
+    key: "options_spread",
     blurb: "Buys a predicted intraday low, one contract per symbol, bracketed at the exchange",
-    name: "Options Flip",
+    name: "Options Spread",
     status: "Live",
     horizon: "1-2 sessions",
     risk: "High",
@@ -254,7 +254,7 @@ function planStrategyKey() {
 
 //: Everything the board needs that differs between algorithms: which buckets to draw, what a
 //: bubble's number means, and how far it can be pushed. One component, declared per algorithm,
-//: so DCA's dollars-per-month and Options Flip's contracts-per-position share every pixel of
+//: so DCA's dollars-per-month and Options Spread's contracts-per-position share every pixel of
 //: rendering and gesture handling rather than being two boards that look alike.
 function boardSpec(strategyKey) {
   const entry = state.algorithmConfigs[strategyKey || planStrategyKey()] || {};
@@ -361,7 +361,7 @@ function calculateLayout() {
 
   // Built from the declared buckets rather than from the literal keys buy/sell. Those keys
   // were the reason a call/put board rendered nothing at all: every lookup below is
-  // ``buckets[name]``, and on Options Flip that resolved to undefined and threw.
+  // ``buckets[name]``, and on Options Spread that resolved to undefined and threw.
   const names = bucketNames();
   const buckets = {};
   names.forEach((name, index) => {
@@ -2019,7 +2019,7 @@ function backtestTrades(row) {
   const bought = entries.some(([, value]) => value > 0);
   const sold = entries.some(([, value]) => value < 0);
   // "It traded, but the row does not say which way" is a real state, not an error: it is every
-  // row written before ``trades`` existed, and every Options Flip row, whose orders currently
+  // row written before ``trades`` existed, and every Options Spread row, whose orders currently
   // record no notional at all. A neutral mark says something happened here, which is strictly
   // better than the silence of treating the row as a quiet day.
   const side = bought && sold ? "both" : bought ? "buy" : sold ? "sell" : count > 0 ? "flat" : "";
@@ -2980,7 +2980,7 @@ function renderBudgetBoard(host, strategy) {
     return;
   }
   // The algorithm says what a bubble's number means -- a month of budget for DCA, a position's
-  // risk for Options Flip -- so the board does not have to assume one reading.
+  // risk for Options Spread -- so the board does not have to assume one reading.
   const unitHint = entry.tune_budget_hint || "Dollars per month, per symbol";
   if (hint) hint.textContent = `${unitHint} · algorithms.${entry.config_key || strategy.key}.plan`;
   setHtml(host, `<svg class="bubbleBoard" id="bubbleBoard" role="img"

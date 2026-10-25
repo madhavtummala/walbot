@@ -102,7 +102,7 @@ def plan_symbol(
     if memory.get("state") == BIDDING and not held_contract and session.get("day_changed"):
         # A bid that survived the night is not re-priced, it is abandoned: the excursion budget
         # it was built from described a session that has ended.
-        logger.info("[%s] Options Flip abandoning yesterday's unfilled bid", symbol)
+        logger.info("[%s] Options Spread abandoning yesterday's unfilled bid", symbol)
         memory = {}
     return _flat_or_bidding(
         symbol, memory, direction, contract, contracts, underlying_now, entry_target, checks, config, session,

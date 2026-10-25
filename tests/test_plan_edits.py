@@ -100,7 +100,7 @@ def test_an_edit_keeps_whatever_the_algorithm_attached_to_the_intent() -> None:
 
 def test_editing_an_order_book_plan_is_refused() -> None:
     plan = AlgorithmPlan(
-        strategy="options_flip",
+        strategy="options_spread",
         desired_orders=[DesiredOrder(key="GLD:stop", request=OrderRequest(symbol="GLD", action="sell", quantity=1))],
     )
 

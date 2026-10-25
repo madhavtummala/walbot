@@ -72,7 +72,7 @@ A verdict is `all(check.ok for check in checks)` — the test and the message ab
 
 Two module-level functions in `src/core/runner.py` drive it: `run_algorithm(strategy, config)` builds the context and returns the plan; `execute_algorithm(plan, config, brokerage)` acts on it. The scheduler chains them; the MCP flow pauses in between so an agent can review the plan first (see *Agent/MCP Direction*).
 
-`src/core/pipeline.py` is the order-placing layer underneath allocation strategies, and knows nothing about algorithms — it takes intents, prices and two sizing knobs, and reports what the broker did. That ignorance is load-bearing: it is why `BaseAlgorithm` can import it outright without closing an import cycle back through the registry. A lifecycle algorithm whose output is a book of resting orders rather than a target portfolio -- Options Flip is the one deployed example -- bypasses this layer entirely: its `plan()` fills `AlgorithmPlan.desired_orders` instead of `intents`, and its own `execute()` override goes straight to `src/algorithms/reconcile.py`'s `reconcile_orders`, which diffs the wanted set against the broker's actual working orders (cancel what dropped out, submit or re-price the rest) rather than sizing a portfolio at all.
+`src/core/pipeline.py` is the order-placing layer underneath allocation strategies, and knows nothing about algorithms — it takes intents, prices and two sizing knobs, and reports what the broker did. That ignorance is load-bearing: it is why `BaseAlgorithm` can import it outright without closing an import cycle back through the registry. A lifecycle algorithm whose output is a book of resting orders rather than a target portfolio -- Options Spread is the one deployed example -- bypasses this layer entirely: its `plan()` fills `AlgorithmPlan.desired_orders` instead of `intents`, and its own `execute()` override goes straight to `src/algorithms/reconcile.py`'s `reconcile_orders`, which diffs the wanted set against the broker's actual working orders (cancel what dropped out, submit or re-price the rest) rather than sizing a portfolio at all.
 
 Algorithms are registered in `src/algorithms/registry.py`. The live runner resolves the selected strategy through that registry instead of branching on individual strategy ids.
 
@@ -82,7 +82,7 @@ What more than one algorithm needs lives outside them, so a rule cannot be fixed
 - `src/algorithms/reconcile.py`: `reconcile_orders`, for algorithms whose output is a book of resting orders.
 - `src/algorithms/risk.py`: the session drawdown breaker. **Currently wired to nothing**, and deliberately so -- it measures the drop from the equity it first saw *this session*, so at a daily cadence every run rebases the reference and the drawdown it reports is identically zero. `test_a_session_breaker_cannot_fire_at_this_algorithms_cadence` is the record of why the knob was removed rather than switched off, and the module is kept for an intraday algorithm that could use it honestly.
 
-DCA and options strategies live in the same hierarchy as equity algorithms -- `src/algorithms/bursty_dca/` and `src/algorithms/options_flip/`. They can be rendered on separate frontend pages, but backend-wise they are algorithms producing an `AlgorithmPlan` from an `AlgorithmContext` like any other.
+DCA and options strategies live in the same hierarchy as equity algorithms -- `src/algorithms/bursty_dca/` and `src/algorithms/options_spread/`. They can be rendered on separate frontend pages, but backend-wise they are algorithms producing an `AlgorithmPlan` from an `AlgorithmContext` like any other.
 
 ## Brokerages
 
@@ -139,7 +139,7 @@ server-side by `src/core/plan_edits.py`. An edit names an action, never an amoun
 judges whether a plan survives contact with today's news, and sizing stays the algorithm's.
 `skip` is spelled per mode because absence means opposite things in the two — under
 `MODE_TARGET` the intent list *is* the portfolio, so a row dropped as a "veto" would sell the
-position, and skip therefore pins to the shares currently held. Order-book plans (Options Flip)
+position, and skip therefore pins to the shares currently held. Order-book plans (Options Spread)
 refuse edits outright: reconciliation cancels whatever is not in `desired_orders`, so removing
 a leg cancels a resting stop rather than declining an action.
 

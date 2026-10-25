@@ -497,7 +497,7 @@ def test_the_tooltip_reports_holdings_and_what_moved_on_one_line() -> None:
 def test_backtest_rows_keep_their_time_of_day() -> None:
     """Truncating to a date collapsed every bar in a session onto one x-position.
 
-    Options Flip's ~14,000 rows plotted at 179 of them, roughly 78 points deep, so the line was
+    Options Spread's ~14,000 rows plotted at 179 of them, roughly 78 points deep, so the line was
     drawn through whichever arrived last and no mark could ever address a single bar.
     """
     from src.api.payloads.backtest import BACKTEST_CACHE_VERSION, _json_backtest_rows
@@ -597,11 +597,11 @@ def test_a_board_ceiling_is_a_value_the_board_actually_reaches() -> None:
     Both boards should put an ordinary entry in the middle of their scale, not the bottom.
     """
     from src.algorithms.bursty_dca.algorithm import BurstyDCAAlgorithm
-    from src.algorithms.options_flip.algorithm import OptionsFlipAlgorithm
+    from src.algorithms.options_spread.algorithm import OptionsSpreadAlgorithm
 
     # A typical entry on each board, as a fraction of that board's ceiling.
     dca = 400 / BurstyDCAAlgorithm.tune_max_amount
-    flip = 1_000 / OptionsFlipAlgorithm.tune_max_amount
+    flip = 1_000 / OptionsSpreadAlgorithm.tune_max_amount
     assert 0.1 <= dca <= 0.6 and 0.1 <= flip <= 0.6
     assert flip == pytest.approx(dca, rel=0.01), "the same relative size on both boards"
 

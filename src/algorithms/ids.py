@@ -11,7 +11,8 @@ DEFAULT_STRATEGY_ID = "bursty_dca"
 #: Retired ids that still appear in saved controls, tuning sections, and cached backtests.
 ALGORITHM_ALIASES = {
     "none": "bursty_dca",
-    "intraday_pick": "options_flip",
+    "intraday_pick": "options_spread",
+    "options_flip": "options_spread",
 }
 
 #: Reverse of ``ALGORITHM_ALIASES``, for reading tuning saved under a retired id. A list per
