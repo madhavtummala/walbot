@@ -77,15 +77,41 @@ class SchwabSession:
                 "flow once and store the resulting refresh token."
             )
 
-    def _refresh_access_token(self) -> None:
-        self._require_credentials()
-        response = self._session.post(
+    def _post_refresh(self) -> Any:
+        return self._session.post(
             TOKEN_URL,
             data={"grant_type": "refresh_token", "refresh_token": self._refresh_token},
             auth=(self.app_key, self.app_secret),
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             timeout=30,
         )
+
+    def _reload_refresh_token(self) -> bool:
+        """Adopt a refresh token the store has but this session does not. True if it changed.
+
+        ``reset_shared_sessions`` handles a re-auth inside one process, but the consent is
+        completed by whichever process serves the OAuth callback -- and the bot runs in
+        another one. That process cannot be signalled, so it has to notice for itself: the
+        store is the shared record, and a rejection is the cue to go back and read it.
+        """
+        stored = load_state(TOKEN_STATE_KEY, {}) or {}
+        fresh = str(stored.get("refresh_token") or "") if isinstance(stored, dict) else ""
+        if not fresh or fresh == self._refresh_token:
+            return False
+        self._refresh_token = fresh
+        return True
+
+    def _refresh_access_token(self) -> None:
+        self._require_credentials()
+        response = self._post_refresh()
+        # A rejected refresh token is not necessarily a dead consent -- it is also what a
+        # re-auth in another process looks like from in here, because the token we hold was
+        # superseded while we were holding it. Re-read the store once and retry before
+        # reporting failure; only if the stored token is the same one, or is rejected too,
+        # has the consent genuinely expired and a trip through the browser is needed.
+        if response.status_code >= 400 and self._reload_refresh_token():
+            logger.info("Schwab refresh token was rejected; retrying with the stored token")
+            response = self._post_refresh()
         if response.status_code >= 400:
             raise SchwabAuthError(f"Token refresh failed ({response.status_code}): {response.text}")
 

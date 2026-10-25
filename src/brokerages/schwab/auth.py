@@ -9,7 +9,13 @@ from urllib.parse import urlencode
 import requests
 
 from ...data.state_store import load_state, save_state
-from .client import BASE_URL, TOKEN_STATE_KEY, TOKEN_URL, SchwabAuthError
+from .client import (
+    BASE_URL,
+    TOKEN_STATE_KEY,
+    TOKEN_URL,
+    SchwabAuthError,
+    reset_shared_sessions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -183,5 +189,13 @@ def complete_authorization(config: Any, code: str, returned_state: str, session:
 
     issued_at = _now()
     save_state(TOKEN_STATE_KEY, {"refresh_token": refresh_token, "issued_at": issued_at})
+    # ``shared_session`` caches a session per app key for the life of the process, and a
+    # session reads the refresh token from the state store exactly once, in its constructor.
+    # Writing the new token above is therefore not enough: every cached session still holds
+    # the token that was just replaced, and keeps presenting it until the process dies. That
+    # is why a weekly re-auth appeared to do nothing until the container was restarted --
+    # the dashboard went on reporting ``invalid_grant`` against a token the store no longer
+    # had. Dropping the sessions makes the next caller build one that reads what we saved.
+    reset_shared_sessions()
     logger.info("Schwab authorization completed; refresh token valid for 7 days")
     return {"refresh_token": refresh_token, "issued_at": issued_at}

@@ -14,9 +14,15 @@ from src.brokerages.schwab.auth import (
     begin_authorization,
     complete_authorization,
 )
-from src.brokerages.schwab.client import TOKEN_STATE_KEY, SchwabAuthError, SchwabSession
+from src.brokerages.schwab.client import (
+    TOKEN_STATE_KEY,
+    SchwabAuthError,
+    SchwabSession,
+    reset_shared_sessions,
+    shared_session,
+)
 from src.core.config import Config
-from src.data.state_store import ephemeral_state
+from src.data.state_store import ephemeral_state, save_state
 
 
 class FakeResponse:
@@ -152,3 +158,66 @@ def test_rotation_preserves_original_issue_time():
 
     assert stored["refresh_token"] == "rotated"
     assert stored["issued_at"] == issued_at
+
+
+def test_reauth_drops_cached_sessions_so_the_new_token_is_used():
+    """A re-auth must take effect without a restart.
+
+    ``shared_session`` caches a session per app key and a session reads the refresh token
+    once, in its constructor -- so before this, every weekly re-auth left the dashboard
+    presenting the revoked token until the container was restarted.
+    """
+    config = make_config()
+    with ephemeral_state({TOKEN_STATE_KEY: {"refresh_token": "old-refresh"}}):
+        stale = shared_session(config)
+        assert stale is shared_session(config), "sessions are cached per app key"
+        assert stale._refresh_token == "old-refresh"
+
+        http = FakeHTTP(FakeResponse({"refresh_token": "new-refresh", "access_token": "a"}))
+        nonce = begin_authorization(config)["state"]
+        complete_authorization(config, code="c", returned_state=nonce, session=http)
+
+        rebuilt = shared_session(config)
+        assert rebuilt is not stale, "the cached session survived the re-auth"
+        assert rebuilt._refresh_token == "new-refresh"
+    reset_shared_sessions()
+
+
+def test_a_rejected_token_is_retried_with_the_one_the_store_now_holds():
+    """The consent is completed by whichever process serves the callback -- not this one.
+
+    ``reset_shared_sessions`` cannot reach another process, so a session whose token has
+    been superseded has to notice for itself: a rejection is the cue to re-read the store.
+    """
+    rejected = FakeResponse({"error": "unsupported_token_type"}, status_code=400)
+    accepted = FakeResponse({"access_token": "fresh", "expires_in": 1800})
+
+    class Sequence(FakeHTTP):
+        def post(self, url, **kwargs):
+            self.calls.append((url, kwargs))
+            return rejected if len(self.calls) == 1 else accepted
+
+    http = Sequence(accepted)
+    config = make_config(schwab_refresh_token="")
+    with ephemeral_state({TOKEN_STATE_KEY: {"refresh_token": "superseded"}}):
+        session = SchwabSession(config, session=http)
+        # Another process re-authorized in the meantime and wrote the new token.
+        save_state(TOKEN_STATE_KEY, {"refresh_token": "written-elsewhere"})
+        assert session.access_token() == "fresh"
+
+    assert [kwargs["data"]["refresh_token"] for _, kwargs in http.calls] == [
+        "superseded",
+        "written-elsewhere",
+    ]
+
+
+def test_a_genuinely_dead_consent_still_raises():
+    """The retry must not turn an expired consent into an infinite loop or a silent pass."""
+    http = FakeHTTP(FakeResponse({"error": "invalid_grant"}, status_code=400))
+    config = make_config(schwab_refresh_token="")
+    with ephemeral_state({TOKEN_STATE_KEY: {"refresh_token": "dead"}}):
+        session = SchwabSession(config, session=http)
+        with pytest.raises(SchwabAuthError, match="Token refresh failed"):
+            session.access_token()
+    # One attempt only: the store held the same token, so there was nothing new to try.
+    assert len(http.calls) == 1
