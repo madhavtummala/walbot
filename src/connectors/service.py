@@ -27,6 +27,8 @@ from .cache import (  # noqa: E402
     _news_cache_key,
     _read_duckdb_sentiment,
     _write_duckdb_sentiment,
+    cache_is_current,
+    cached_bars_frontier,
 )
 from .frames import _empty_bars  # noqa: E402
 from .grid import default_bar_minutes  # noqa: E402
@@ -54,15 +56,33 @@ def _run_provider_fallback(
     *,
     category: str,
     label: str,
+    interval_minutes: int | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Walk the provider order, keeping the best result *per symbol*.
 
     Per symbol rather than per batch, so a provider that answers for only some symbols doesn't
     win the whole request and leave the rest empty; later providers fill only what is still
     missing, and the walk stops once every symbol is covered.
+
+    "Covered" means *current*, not merely non-empty. ``BaseConnector.bars`` answers from the
+    bar store and only fetches the gap, so a provider whose gap fetch comes back empty still
+    returns whatever the store holds -- possibly weeks old. Judged on emptiness alone that
+    counts as an answer, wins the symbol, and returns before the next provider is ever asked:
+    a stale frame from the preferred provider silently beats a complete one from the fallback,
+    which is the opposite of what a provider order is for. So a stale frame is held only as a
+    provisional answer, a strictly fresher frame from a later provider supersedes it, and the
+    walk ends early only when every symbol is actually up to date.
+
+    ``interval_minutes`` is what "up to date" is measured against. Without it there is no
+    frontier to compare to and the old emptiness test is all that is left.
     """
     resolved: dict[str, pd.DataFrame] = {}
     wanted = [symbol.upper() for symbol in symbols]
+
+    def current(frame: pd.DataFrame) -> bool:
+        if interval_minutes is None:
+            return True
+        return cache_is_current(frame, int(interval_minutes))
 
     for index, provider_name in enumerate(providers):
         if provider_name not in fetchers:
@@ -82,14 +102,29 @@ def _run_provider_fallback(
         supplied = 0
         for symbol, frame in (bars or {}).items():
             key = str(symbol).upper()
-            if key in resolved or frame is None or frame.empty:
+            if frame is None or frame.empty:
                 continue
+            held = resolved.get(key)
+            if held is not None:
+                # Already answered. Only a frame that reaches *further* is an improvement;
+                # equal or older is the same information from a less-preferred source.
+                held_edge, new_edge = cached_bars_frontier(held), cached_bars_frontier(frame)
+                if current(held) or new_edge is None or (held_edge is not None and new_edge <= held_edge):
+                    continue
             resolved[key] = frame
             supplied += 1
 
         missing = [symbol for symbol in wanted if symbol not in resolved]
-        if not missing:
+        stale = [symbol for symbol in wanted if symbol in resolved and not current(resolved[symbol])]
+        if not missing and not stale:
             return {symbol: resolved[symbol] for symbol in wanted}
+        if stale and not missing:
+            logger.info(
+                "%s market data provider %s answered but is behind for %s; %s",
+                label, provider_name,
+                ", ".join(stale[:8]) + ("..." if len(stale) > 8 else ""),
+                f"trying {next_provider}" if next_provider else "no provider left to try",
+            )
         if supplied:
             logger.info(
                 "%s market data provider %s covered %s of %s symbols; %s for %s",
@@ -166,7 +201,8 @@ def fetch_market_history(
         **range_kwargs,
     )
     fine = _run_provider_fallback(
-        symbols, providers, fetchers, config, category=INTRADAY_MARKET_CATEGORY, label="History"
+        symbols, providers, fetchers, config, category=INTRADAY_MARKET_CATEGORY, label="History",
+        interval_minutes=requested_minutes,
     )
     # Returned at the resolution that was asked for, short if that is all there is.
     #
@@ -217,7 +253,8 @@ def fetch_eod_market_bars(
         **range_kwargs,
     )
     return _run_provider_fallback(
-        symbols, providers, fetchers, config, category=EOD_MARKET_CATEGORY, label="EOD"
+        symbols, providers, fetchers, config, category=EOD_MARKET_CATEGORY, label="EOD",
+        interval_minutes=DAILY_INTERVAL_MINUTES,
     )
 
 
